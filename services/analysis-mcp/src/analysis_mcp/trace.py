@@ -109,7 +109,7 @@ class AppliedPolicy(BaseModel):
     scalar `realised_coverage_fraction` -- `compare`'s per-side coverages,
     `growth`'s per-entity coverage breakdown and window bounds, `rank`'s
     coverage of each entity it keeps and the entity count and coverage range
-    of its whole ranked population, and every one of the seven verbs' own
+    of its whole ranked population, and every one of the eight verbs' own
     `detail["derived"]` marker (see `frame_ref_resolution.DerivedMarker`).
     Every verb documents its own `detail` shape in its own tool module
     rather than this schema growing a field per verb.
@@ -155,11 +155,11 @@ class Trace(BaseModel):
             "Every input frame's own `cv_` content_version this result was minted from -- "
             "exactly the values `identity.mint_toolkit_content_version`'s own "
             "`input_content_versions` argument was called with (one for a single-frame "
-            "verb, more than one for `join`/`compare`/`share_of` when their two sides "
+            "verb, more than one for `join`/`compare`/`share_of`/`sum_of` when their two sides "
             "differ). `content_version` above names the mint's own output; this names its "
             "inputs, so a stored result can be traced back to what it was computed from "
             "without re-deriving `input_content_version` from `upstream_trace` by hand. "
-            "Every one of this toolkit's seven verbs populates it; `()` only ever appears "
+            "Every one of this toolkit's eight verbs populates it; `()` only ever appears "
             "on a `Trace` predating this field (e.g. a frozen test fixture)."
         ),
     )

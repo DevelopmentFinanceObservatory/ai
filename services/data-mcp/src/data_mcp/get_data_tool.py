@@ -8,9 +8,10 @@ names in the caller's `scope` are resolved to dcids through
 `data_mcp.resolution` before the mint call; the mint call itself and the
 resulting manifest never carry a name, only dcids and, later, a spec_id.
 
-A caller passes back the StatVars the `search` digest listed for the spec_id as
-`resolved_stat_var_dcids`, and the mint posts them unchanged. dfo-apis refuses
-the mint `member_not_resolvable` when any of them is not a member of the family
+Code that reads a `search` result passes the StatVars its spec block lists
+(`resolved.stat_vars.items`) as `resolved_stat_var_dcids`, and the mint posts
+them unchanged. The search digest names none, so a model leaves them out.
+dfo-apis refuses the mint `member_not_resolvable` when any of them is not a member of the family
 the identity resolves to, and otherwise serves the family under the requested
 spec_id; the posted StatVars also join the candidates its member walk confirms,
 so a family whose reverse-arc page never reaches a posted member still
@@ -59,6 +60,7 @@ from data_mcp.definition_store import (
 from data_mcp.errors import UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import materialise_and_register
 from data_mcp.get_data_digest import (
+    BreakdownLevel,
     OperationPollNote,
     UnheldRegionSummary,
     render_get_data_digest,
@@ -91,6 +93,7 @@ from data_mcp.series_statistics import (
     find_statistics_artifact,
 )
 from data_mcp.settings import Settings
+from data_mcp.stat_var_list import without_long_stat_var_list
 from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS
 from data_mcp.tool_errors import (
     EntityCandidate,
@@ -157,6 +160,11 @@ _DCID_PATTERN = re.compile(r"^[a-z][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_.\-]+)+$")
 _SUM_STAT_VARS_GROUPBY: dict[str, Any] = {"by": ["time_period"], "op": "sum"}
 
 StatVarsReading = Literal["sum", "separate"]
+
+# The `GET /api/datasets/capabilities` field that lists the code systems
+# `options.groupby.levels` rolls up. A deployment without it serves no `breakdown`.
+_GROUPBY_LEVEL_AXES_FIELD = "groupby_level_axes"
+_CAPABILITIES_PATH = "/api/datasets/capabilities"
 
 # What `get_data(place_types=True)` asks dfo-apis for in `options.columns`. A list that names
 # only enrichment columns adds them to every default column, so the decoded
@@ -246,6 +254,96 @@ class GetDataScope(BaseModel):
                         f"got {len(name)} for {name!r}"
                     )
         return self
+
+
+class Breakdown(BaseModel):
+    """One hierarchical code axis to keep, rolled up to one level of its hierarchy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code_system: str = Field(
+        min_length=1,
+        description=(
+            'The code system to break the total down by, e.g. "crsPurpose" for CRS sectors.'
+        ),
+    )
+    level: int = Field(
+        ge=0,
+        description=(
+            "The hierarchy depth to roll every code up to: 0 is the top level (for "
+            "crsPurpose, the ten OECD sector groups), 1 the level below it, and so on."
+        ),
+    )
+
+    def groupby(self) -> dict[str, Any]:
+        """The `options.groupby` dfo-apis sums this breakdown with: keep the year and the
+        code axis, roll each code up to its ancestor at `level`, and sum away every other
+        summable code axis and `stat_var`."""
+        return {
+            "by": ["time_period", self.code_system],
+            "op": "sum",
+            "levels": {self.code_system: self.level},
+        }
+
+
+async def _breakdown_refusal(
+    client: UpstreamClient, breakdown: Breakdown, *, deadline: CallDeadline
+) -> ToolResult | None:
+    """Refuse `breakdown` unless the deployed dfo-apis advertises a level roll-up of its
+    code system, or `None` to proceed.
+
+    The capabilities document lists the code systems `groupby.levels` accepts under
+    `_GROUPBY_LEVEL_AXES_FIELD`. A deployment whose document lacks the field refuses
+    `capability_unavailable` naming the option, and one that lists other code systems
+    refuses `request_invalid` at `/breakdown/code_system`. The read must finish while
+    the current `CallBudget.pre_mint_reserve_s` of `deadline` remains.
+    """
+    reserve_s = current_call_budget().pre_mint_reserve_s
+    try:
+        response = await client.request(
+            "GET",
+            _CAPABILITIES_PATH,
+            route=_CAPABILITIES_PATH,
+            deadline=deadline.reserving(reserve_s),
+        )
+        document = response.json()
+    except UpstreamError as exc:
+        return to_tool_result(from_upstream_error(exc))
+    except ValueError as exc:
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail=f"the capabilities response body could not be parsed as JSON: {exc}"
+            )
+        )
+    if not isinstance(document, dict):
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail="the capabilities response is not a JSON object"
+            )
+        )
+    capability_version = document.get("capability_version")
+    capability_version = capability_version if isinstance(capability_version, str) else None
+    axes = document.get(_GROUPBY_LEVEL_AXES_FIELD)
+    if not isinstance(axes, list):
+        return to_tool_result(
+            ToolRefusal.capability_unavailable(
+                option="breakdown",
+                detail="this dfo-apis deployment does not advertise groupby.levels, "
+                "so no total can be broken down by a code level",
+                capability_version=capability_version,
+            )
+        )
+    if breakdown.code_system not in axes:
+        listed = ", ".join(sorted(str(axis) for axis in axes)) or "none"
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                pointer="/breakdown/code_system",
+                detail=f"{breakdown.code_system!r} cannot be rolled up to a level; "
+                f"this deployment rolls up {listed}",
+                capability_version=capability_version,
+            )
+        )
+    return None
 
 
 def _refusal_for_unresolved_outcome(
@@ -389,7 +487,7 @@ def _prefixed_stat_var_refusal(resolved_stat_var_dcids: Sequence[str]) -> ToolRe
     """Refuse the first `resolved_stat_var_dcids` entry dfo-apis' mint would reject, if any.
 
     Mirrors `SpecIdInput._dcids_are_not_dcid_prefixed` (`datasets_api/mint_models.py`):
-    each entry is a bare dcid, as the search digest lists it, never `dcid:`-prefixed.
+    each entry is a bare dcid, as a search result lists it, never `dcid:`-prefixed.
     Checked here so the caller reads this tool's own pointer and message, not the mint
     route's validation error.
     """
@@ -399,7 +497,7 @@ def _prefixed_stat_var_refusal(resolved_stat_var_dcids: Sequence[str]) -> ToolRe
                 ToolRefusal.request_invalid(
                     pointer=f"/resolved_stat_var_dcids/{index}",
                     detail=f"{dcid!r} must be a bare dcid, without the dcid: prefix, "
-                    "as the search digest lists it",
+                    "as a search result lists it",
                 )
             )
     return None
@@ -596,9 +694,8 @@ def _artifact_resource_links(manifest: Manifest) -> list[ResourceLink]:
     A model reads the link to pull a freshly signed download URL at fetch
     time. A URL embedded in this tool's result would go stale, so neither
     the result nor the manifest in structured content carries one. One link
-    per artifact: a single Parquet pull has one, and a manifest carrying two
-    renderings of the same spec gets one each. A collection manifest's own
-    plural is pinned in `test_manifest.py`.
+    per artifact on the narrowed manifest (`_narrowed_to_rendering`): the
+    requested rendering and its statistics.
     """
     links = []
     for artifact in manifest.artifacts:
@@ -759,13 +856,14 @@ async def _finish_mint_response(
     payload: Mapping[str, Any],
     *,
     requested_spec_id: str,
-    columns: tuple[str, ...],
+    options: Mapping[str, Any],
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
     unheld_regions: Sequence[UnheldRegionSummary],
     settings: Settings,
     deadline: CallDeadline,
     operation_poll: OperationPollNote | None = None,
+    breakdown: BreakdownLevel | None = None,
 ) -> ToolResult:
     """Turn a mint route's manifest payload into the tool's result, or a refusal.
 
@@ -782,11 +880,12 @@ async def _finish_mint_response(
     under a new identity; see `_persist_reminted_definition` for why that new definition gets
     written to the store here, and what happens when the write itself fails.
 
-    Once the manifest itself validates, `materialise_and_register` fetches the manifest's
-    artifact bytes, parses them into a `Frame`, and registers it in the shared
-    materialisation store under the frame reference this digest hands the model
-    (`frame_materialisation.frame_ref_for`). A frame minted with `columns` has a
-    `content_version` of its own, and the manifest keeps dfo-apis' pair, which its
+    Once the manifest itself validates, it is narrowed to the requested rendering
+    (`_narrowed_to_rendering`), and `materialise_and_register` fetches the bytes of
+    the artifact whose rendering equals `options`, parses them into a `Frame`, and
+    registers it in the shared materialisation store under the frame reference this
+    digest hands the model (`frame_materialisation.frame_ref_for`). A frame minted with
+    `options.columns` has a `content_version` of its own, and the manifest keeps dfo-apis' pair, which its
     artifacts are read under. A failed fetch or an unconfirmed store write degrades this
     call's own digest rather than refusing it (see `render_get_data_digest`'s
     `degraded_frame`); a genuinely unusable artifact or manifest still refuses.
@@ -796,7 +895,8 @@ async def _finish_mint_response(
             response's body, or the manifest `_mint_payload_or_refusal` polled out of
             a 202 operation.
         requested_spec_id: The `spec_id` this call's own request carried, to detect a re-mint.
-        columns: The mint request's `options.columns`, empty for the default columns.
+        options: The mint request's `options`, which name the artifact the frame is
+            read from and, through `options.columns`, its frame reference.
         entity_labels: dcid -> name, forwarded to the digest renderer.
         dropped_roles: Roles silently left unbound, forwarded to the digest
             renderer.
@@ -808,6 +908,8 @@ async def _finish_mint_response(
             frame fetch's, and the statistics fetch's budgets.
         operation_poll: Set when `payload` was resolved from a 202 operation rather
             than an ordinary 200 mint. Forwarded to the digest renderer.
+        breakdown: The code system and level this mint summed within, forwarded to
+            the digest renderer.
 
     Returns:
         A successful `ToolResult` carrying the digest and stripped manifest,
@@ -827,6 +929,7 @@ async def _finish_mint_response(
                 f"expects: {render_validation_errors(exc)}"
             )
         )
+    manifest = _narrowed_to_rendering(manifest, options=options)
 
     remint_persist_failed = False
     if manifest.definition is not None and manifest.definition.spec_id != requested_spec_id:
@@ -840,7 +943,7 @@ async def _finish_mint_response(
         manifest=manifest,
         settings=settings,
         writer=current_writer(),
-        columns=columns,
+        options=options,
         deadline=deadline,
     )
     if outcome.status == "refused":
@@ -865,13 +968,16 @@ async def _finish_mint_response(
             series_stats=series_stats,
             statistics_fetch_failed=statistics_fetch_failed,
             operation_poll=operation_poll,
+            breakdown=breakdown,
         )
     except ValueError as exc:
         return to_tool_result(ToolRefusal.upstream_response_unusable(detail=str(exc)))
     # The harness reads the stripped manifest and the frame's role keys and StatVar
     # count from structured content. The combined server drops structured content from
     # a successful result, so the digest must stand alone for an outside model.
-    structured_content = manifest.model_dump(mode="json")
+    # A long `trace.resolved_stat_vars` is left out, so the result's size does not
+    # grow with the family's (`data_mcp.stat_var_list`).
+    structured_content = without_long_stat_var_list(manifest.model_dump(mode="json"))
     # The frame's reference sits beside the manifest: the manifest's own pair names
     # dfo-apis' materialisation, which the statistics artifact is read under, and
     # this one names the frame the store holds for this rendering.
@@ -895,6 +1001,22 @@ async def _finish_mint_response(
         structured_content=structured_content,
         is_error=False,
     )
+
+
+def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) -> Manifest:
+    """`manifest` listing only the artifact whose `rendering` equals `options`, and the
+    statistics artifact.
+
+    A manifest lists every rendering dfo-apis stores under its pair, so other callers'
+    groupby sums and column selections sit beside the requested one, in no set order.
+    The frame fetch, the resource links, and the harness's freshness date
+    (`harness.provenance.data_artifact`) all read the narrowed list. A manifest without
+    the requested rendering keeps only its statistics, and `materialise_and_register`
+    refuses it unless the store already holds the frame.
+    """
+    statistics = find_statistics_artifact(manifest)
+    artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
+    return manifest.model_copy(update={"artifacts": artifacts})
 
 
 # The manifest warning dfo-apis attaches to a frame that sums more than one StatVar.
@@ -998,6 +1120,7 @@ async def _attempt_mint(
     resolved_stat_var_dcids: Sequence[str] | None,
     wire_scope: Mapping[str, Any],
     stat_vars: StatVarsReading,
+    breakdown: Breakdown | None,
     place_types: bool,
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
@@ -1015,6 +1138,8 @@ async def _attempt_mint(
     the summed frame its own `content_version` whenever more than one StatVar
     contributed rows, so the summed and separate frames never share a frame reference.
     With one contributor the two frames are the same bytes under one `content_version`.
+    A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
+    within each code at the breakdown's level.
     `resolved_stat_var_dcids` is posted unchanged, and left out when empty.
     `place_types` sets `options.columns` to `_PLACE_TYPE_COLUMNS`, which adds
     `observationAbout_type` to the default columns, and gives the frame a
@@ -1041,7 +1166,9 @@ async def _attempt_mint(
         mint_input["resolved_stat_var_dcids"] = list(resolved_stat_var_dcids)
 
     options: dict[str, Any] = {"format": "parquet", "bundle": False}
-    if stat_vars == "sum":
+    if breakdown is not None:
+        options["groupby"] = breakdown.groupby()
+    elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
     if place_types:
         options["columns"] = list(_PLACE_TYPE_COLUMNS)
@@ -1076,13 +1203,18 @@ async def _attempt_mint(
     return await _finish_mint_response(
         payload,
         requested_spec_id=spec_id,
-        columns=_PLACE_TYPE_COLUMNS if place_types else (),
+        options=options,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,
         unheld_regions=unheld_regions,
         settings=settings,
         deadline=deadline,
         operation_poll=operation_poll,
+        breakdown=(
+            None
+            if breakdown is None
+            else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
+        ),
     )
 
 
@@ -1155,8 +1287,8 @@ async def get_data(
             default=None,
             max_length=MAX_RESOLVED_STAT_VAR_DCIDS,
             description=(
-                "The StatVar dcids the search digest listed for this spec_id, passed back "
-                "unchanged. Omit when the digest listed none."
+                "StatVar dcids for this spec_id that code read from a search result, passed "
+                "back unchanged. The search digest names none: omit this when calling from it."
             ),
         ),
     ] = None,
@@ -1173,6 +1305,21 @@ async def get_data(
             )
         ),
     ] = False,
+    breakdown: Annotated[
+        Breakdown | None,
+        Field(
+            default=None,
+            description=(
+                "Break the family down by one hierarchical code system, rolled up to one "
+                'level, e.g. {"code_system": "crsPurpose", "level": 0} for aid by sector '
+                "group. Every StatVar is summed into its code's ancestor at that level, "
+                "per year and entity, and the frame's stat_var_<code_system> column names "
+                'that ancestor. Use it with stat_vars "separate"; "sum" totals the '
+                "whole family and refuses beside it. A deployment that cannot roll codes "
+                "up refuses capability_unavailable; do not retry with breakdown then."
+            ),
+        ),
+    ] = None,
     *,
     ctx: Context,
 ) -> ToolResult:
@@ -1213,18 +1360,22 @@ async def get_data(
     deployment's graph and can take longer than usual when that graph is
     degraded.
 
-    `resolved_stat_var_dcids` is the StatVar dcids the search digest listed
-    for this spec_id, passed back unchanged. They confirm that the variables
-    you saw still belong to the dataset, and let the mint prove a large family
-    complete. Leaving them out serves the same StatVars, but a large family
-    may then refuse with over_ceiling. Omit them only when the digest listed
-    none, and never compose them from anywhere else.
+    `resolved_stat_var_dcids` is for code that reads a search result's own
+    StatVar listing, passed back unchanged. The search digest names no
+    StatVar, so leave it out when calling from the digest: the dataset served
+    is the same either way. Never compose these dcids.
 
     A spec that names no place covers every place with data, at every
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds each place's types as
     `observationAbout_type`, so a `filter` can keep one level before a rank
     or a total sets a place beside the places inside it.
+
+    `breakdown` sums the family within each code of one hierarchical code
+    system rolled up to one level, so a question such as "which sectors got
+    the most aid" reads one series per sector group and entity. The frame's
+    `stat_var` column holds `dcid:<spec_id>` and `stat_var_<code_system>`
+    names each row's code at that level.
 
     Args:
         spec_id: The spec_id from a prior `search` digest, or from this
@@ -1234,10 +1385,12 @@ async def get_data(
             Omit entirely to retrieve the stored definition unchanged.
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
-        resolved_stat_var_dcids: The StatVar dcids the search digest listed
-            for this spec_id, as described above.
+        resolved_stat_var_dcids: StatVar dcids code read from a search
+            result, as described above.
         place_types: Whether to add each place's types as
             `observationAbout_type`, for a spec that names no place.
+        breakdown: The code system and hierarchy level to sum the family
+            within, as described above.
 
     Returns:
         A digest: an acknowledgement of what was retrieved, its coverage,
@@ -1254,6 +1407,18 @@ async def get_data(
     prefixed = _prefixed_stat_var_refusal(resolved_stat_var_dcids or ())
     if prefixed is not None:
         return prefixed
+    if breakdown is not None and stat_vars == "sum":
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                pointer="/stat_vars",
+                detail='"sum" totals the whole family into one series, which leaves no '
+                'code to break it down by; use "separate" with breakdown',
+            )
+        )
+    if breakdown is not None:
+        refused = await _breakdown_refusal(get_client(), breakdown, deadline=deadline)
+        if refused is not None:
+            return refused
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
         return identity
@@ -1295,6 +1460,7 @@ async def get_data(
         resolved_stat_var_dcids=resolved_stat_var_dcids,
         wire_scope=wire_scope,
         stat_vars=stat_vars,
+        breakdown=breakdown,
         place_types=place_types,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,

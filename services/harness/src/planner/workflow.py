@@ -126,11 +126,15 @@ class SelectedSource(StrictModel):
     empty one -- drift detection compares an approved identity against a
     manifest's and cannot report drift from a value it never held.
 
+    `measure_label` is `resolved.shape.label`, the name `search` gives what
+    the definition measures; `None` when the envelope states none.
+
     `stat_vars` are the dcids `resolved.stat_vars.items` named: members of
     the definition's binding that `search` confirmed at the resolve's place,
     capped upstream at `SEARCH_RESOLVED_STAT_VARS_MAX`.
     `stat_var_member_count` counts those confirmed members, which upstream
-    states even when `items` is capped, and `stat_var_truncated` says
+    states even when `items` is capped, `stat_var_member_count_exact` says
+    whether that count is exact or a floor (`False`), and `stat_var_truncated` says
     whether `items` still carries every member it counts. Both are `None`
     when the envelope did not state them. `pinned` is whether a described
     identity mints as one StatVar, the family's root that `search` elected
@@ -155,6 +159,18 @@ class SelectedSource(StrictModel):
     source binding one StatVar, and
     `stat_var_reading_set_by` who set it; the compiler states both
     (`compiler.sources.stat_var_reading`).
+
+    `slot_codes` holds, for each constraint property the binding bounds,
+    every code it admits: a value with the descendants the code index widened
+    it to (the slot's `expansion` in `resolved.slots`; Search states one
+    only when the walk added a code), or each value of a set with the codes
+    its expansion added. A member StatVar carries one of those codes on that
+    property. A set with no expansion maps to `None`: nothing states whether
+    its values widen, so the codes it admits are unknown. An unbound
+    property is absent. The whole field is `None` when the block states no
+    slots or a binding this reader does not know
+    (`compiler.sources.family_overlap` then cannot decide what two families
+    share).
 
     `open_entity_axes` are the entity axes the source left open, one per column and
     sorted by column: the axis `search` defaulted for a part that named no
@@ -181,8 +197,10 @@ class SelectedSource(StrictModel):
     searched_as: str | None = None
     confidence: str | None = None
     has_data: bool | None
+    measure_label: Annotated[str | None, HASHED_WHEN_SET] = None
     stat_vars: tuple[str, ...] = ()
     stat_var_member_count: int | None = None
+    stat_var_member_count_exact: Annotated[bool | None, HASHED_WHEN_SET] = None
     stat_var_truncated: bool | None = None
     pinned: Annotated[bool | None, HASHED_WHEN_SET] = None
     shape_member_count: int | None = None
@@ -198,6 +216,7 @@ class SelectedSource(StrictModel):
     identity: dict[str, JsonValue] | None = None
     definition: str | None = None
     open_axes: tuple[OpenAxis, ...] = ()
+    slot_codes: Annotated[dict[str, tuple[str, ...] | None] | None, HASHED_WHEN_SET] = None
     stat_var_reading: StatVarReading | None = None
     stat_var_reading_set_by: ReadingSetBy | None = None
 

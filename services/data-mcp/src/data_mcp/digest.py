@@ -23,11 +23,6 @@ from common.skills import ordered_skill_ids
 # matching the engine's own cap on how many it returns.
 _NEAREST_REAL_CAP = 2
 
-# Up to three elected statvars are ever named on a no_data part, or beside a
-# spec_id. A longer list collapses to a trailing count so the digest stays
-# bounded.
-_ELECTED_STAT_VAR_CAP = 3
-
 # Up to six candidates are ever rendered on a candidates part, matching the
 # door's own ceiling on how many it returns. The full list stays in the
 # result's `_meta` envelope; only the model-facing surface is bounded.
@@ -87,10 +82,9 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     `unsupported` each get their own rendering. A definite block also names
     each facet axis's other observed values, capped and counted, when the
     request asked for option coverage. Every spec_id the digest offers is
-    followed by the StatVars Search elected for it, capped and counted, which
-    a caller passes back as `get_data`'s `resolved_stat_var_dcids`. A part
-    with an unrecognised status renders too, naming itself, rather than
-    discarding it behind a refusal. A single-part envelope renders that one
+    followed by what it measures (`_measure_line`), which names no member
+    StatVar. A part with an unrecognised status renders too, naming itself,
+    rather than discarding it behind a refusal. A single-part envelope renders that one
     block bare; an envelope of two or more parts labels each block by its
     `variable_text`.
     `envelope["status"] == "mixed"` (the parts disagree) is stated as a
@@ -133,9 +127,8 @@ def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:
     caps them), and the part's own `warnings` when it has any. The envelope's
     `status`, the ids of the skills the digest lists (under its cap), and
     its diagnostics warnings sit beside `parts`. A spec is its
-    `spec_id`, its rendered sentence as `label`, and, when the digest names
-    any, the StatVar dcids it names as `resolved_stat_var_dcids`, the
-    `get_data` argument they are passed back as. A `no_data` part's flagged
+    `spec_id`, its rendered sentence as `label`, and the facts the digest's
+    measure line states (`_measure`). A `no_data` part's flagged
     match is left out, since the digest names it as a reason for the refusal
     and it is no spec to retrieve.
     """
@@ -192,14 +185,11 @@ def _answer_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
 
 def _answer_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
-    entry: dict[str, Any] = {
+    return {
         "spec_id": spec.get("spec_id"),
         "label": (spec.get("resolved") or {}).get("rendered_sentence"),
+        **_measure(spec),
     }
-    dcids = [dcid for dcid, _ in _spec_stat_vars(spec)[:_ELECTED_STAT_VAR_CAP]]
-    if dcids:
-        entry["resolved_stat_var_dcids"] = dcids
-    return entry
 
 
 def _answer_warning(warning: Mapping[str, Any]) -> dict[str, Any]:
@@ -255,11 +245,11 @@ def _render_no_data_part(part: Mapping[str, Any]) -> str:
     else:
         header = f"Resolved, but no data is available (reason: {reason})."
     sections = [header]
-    elected_stat_vars = no_data.get("elected_stat_vars") or []
-    if elected_stat_vars:
-        elected_line = _elected_stat_vars_line(elected_stat_vars)
-        if elected_line is not None:
-            sections.append(elected_line)
+    if message := no_data.get("message"):
+        sections.append(message)
+    checked = _checked_count(no_data)
+    if checked:
+        sections.append(f"Checked {checked:,} StatVar{'' if checked == 1 else 's'}.")
     nearest_real = (no_data.get("nearest_real") or [])[:_NEAREST_REAL_CAP]
     sections.extend(_nearest_real_line(spec) for spec in nearest_real)
     flagged_match = no_data.get("flagged_match")
@@ -344,12 +334,12 @@ def _spec_lines(spec: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _spec_block(spec: Mapping[str, Any]) -> str:
-    """A definite part's full block: sentence, spec_id, confidence, coverage, StatVars, entities, facets, facet options."""
+    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, entities, facets, facet options."""
     headline, confidence_line = _spec_lines(spec)
     lines = [headline, confidence_line]
-    stat_vars = _stat_vars_line(spec)
-    if stat_vars:
-        lines.append(stat_vars)
+    measure = _measure_line(spec)
+    if measure:
+        lines.append(measure)
     resolved = spec.get("resolved") or {}
     entities = resolved.get("entities") or []
     if entities:
@@ -362,46 +352,86 @@ def _spec_block(spec: Mapping[str, Any]) -> str:
 
 
 def _spec_summary(number: int, spec: Mapping[str, Any]) -> str:
-    """A candidate's numbered block: sentence, spec_id, confidence, coverage, StatVars. Omits grounding refs."""
+    """A candidate's numbered block: sentence, spec_id, confidence, coverage, measure. Omits grounding refs."""
     headline, confidence_line = _spec_lines(spec)
     lines = [f"{number}. {headline}", f"   {confidence_line}"]
-    stat_vars = _stat_vars_line(spec)
-    if stat_vars:
-        lines.append(f"   {stat_vars}")
+    measure = _measure_line(spec)
+    if measure:
+        lines.append(f"   {measure}")
     return "\n".join(lines)
 
 
-def _spec_stat_vars(spec: Mapping[str, Any]) -> list[tuple[str, str | None]]:
-    """`(dcid, label)` for each StatVar Search elected for `spec`, from `resolved.stat_vars.items`.
+def _measure(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """What `spec` measures, as data: Search's `measure` label, the family's `member_count`, whether that count is exact, and the axes its members vary along.
 
-    An item whose `ref` is not a non-empty string names no dcid a caller could
-    pass back, so it is skipped.
+    The count is `resolved.stat_vars.member_count`, exact unless
+    `member_count_exact` is false. Without one it is the number of StatVars
+    listed, exact unless the list is `truncated`. A count of zero is left
+    out. An axis is a slot with a constraint property that
+    `inapplicable_slots` does not list, unbound or bound to a set or an
+    expanded value, named by its label. No member StatVar is named, since a
+    partial list reads to a model as the whole family, or as a pattern to
+    guess other names from. A fact Search does not state is left out.
     """
-    items = ((spec.get("resolved") or {}).get("stat_vars") or {}).get("items") or []
-    return [
-        (item["ref"], item.get("label") if isinstance(item.get("label"), str) else None)
-        for item in items
-        if isinstance(item, Mapping) and isinstance(item.get("ref"), str) and item["ref"]
-    ]
+    resolved = spec.get("resolved") or {}
+    stat_vars = resolved.get("stat_vars") or {}
+    facts: dict[str, Any] = {}
+    label = (resolved.get("shape") or {}).get("label")
+    if isinstance(label, str) and label:
+        facts["measure"] = label
+    count = stat_vars.get("member_count")
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        facts["member_count"] = count
+        facts["member_count_exact"] = stat_vars.get("member_count_exact") is not False
+    elif stat_vars.get("items"):
+        facts["member_count"] = len(stat_vars["items"])
+        facts["member_count_exact"] = stat_vars.get("truncated") is not True
+    axes = _varying_axes(resolved)
+    if axes:
+        facts["varies_by"] = axes
+    return facts
 
 
-def _stat_vars_line(spec: Mapping[str, Any]) -> str | None:
-    """One line naming the StatVars Search elected for `spec`, for `get_data`'s `resolved_stat_var_dcids`.
+def _varying_axes(resolved: Mapping[str, Any]) -> list[str]:
+    """The label of each slot `resolved` leaves open along a constraint property, in slot order."""
+    inapplicable = set(resolved.get("inapplicable_slots") or [])
+    axes: list[str] = []
+    for slot in resolved.get("slots") or []:
+        if not isinstance(slot, Mapping):
+            continue
+        key = slot.get("key") or {}
+        prop = (key.get("property") or {}).get("dcid")
+        if not isinstance(prop, str) or prop in inapplicable:
+            continue
+        binding = slot.get("binding") or {}
+        if binding.get("kind") == "value" and not (slot.get("expansion") or {}).get("added"):
+            continue
+        axes.append(key.get("label") or (key.get("property") or {}).get("label") or prop)
+    return axes
 
-    Up to `_ELECTED_STAT_VAR_CAP` dcids, each with its label, then a trailing
-    count for the rest. A shortened list is safe to pass back: dfo-apis checks
-    each posted StatVar is a member of the family and serves the whole family
-    either way. No line when Search elected none.
+
+def _measure_line(spec: Mapping[str, Any]) -> str | None:
+    """One line saying what `spec` measures (`_measure`), naming no member StatVar.
+
+    For example "Measure: gross disbursements · 3,687 StatVars varying by
+    sector, instrument." A count Search states as a floor reads "at least".
+    No line when Search states neither a label nor a count.
     """
-    stat_vars = _spec_stat_vars(spec)
-    if not stat_vars:
+    facts = _measure(spec)
+    pieces: list[str] = []
+    if "measure" in facts:
+        pieces.append(f"Measure: {facts['measure']}")
+    if "member_count" in facts:
+        count = facts["member_count"]
+        floor = "" if facts["member_count_exact"] else "at least "
+        noun = "StatVar" if count == 1 and not floor else "StatVars"
+        counted = f"{floor}{count:,} {noun}"
+        if "varies_by" in facts:
+            counted += f" varying by {', '.join(facts['varies_by'])}"
+        pieces.append(counted)
+    if not pieces:
         return None
-    shown = [
-        f"{dcid} ({label})" if label else dcid for dcid, label in stat_vars[:_ELECTED_STAT_VAR_CAP]
-    ]
-    remaining = len(stat_vars) - len(shown)
-    tail = f", and {remaining} more" if remaining > 0 else ""
-    return f"StatVars for get_data's resolved_stat_var_dcids: {', '.join(shown)}{tail}."
+    return f"{' · '.join(pieces)}."
 
 
 def _entities_line(entities: Sequence[Mapping[str, Any]]) -> str:
@@ -517,23 +547,17 @@ def _window_text(window: Mapping[str, Any] | None) -> str:
     return ""
 
 
-def _elected_stat_vars_line(elected_stat_vars: Sequence[Mapping[str, Any]]) -> str | None:
-    """One line naming the statvar family a no_data check confirmed and found empty.
+def _checked_count(no_data: Mapping[str, Any]) -> int:
+    """How many StatVars a no_data check confirmed and found empty, naming none.
 
-    Up to three names, then a trailing count for the rest, matching the cap on
-    every other bounded list in this module. An entry with neither `label`
-    nor `dcid` is skipped, since it names nothing. If none survive, no line
-    is rendered.
+    `elected_stat_var_count` where search replaced the list of a family with
+    a member digest by its count, and the StatVars `elected_stat_vars` lists
+    otherwise.
     """
-    names_all = [ref.get("label") or ref.get("dcid") for ref in elected_stat_vars]
-    names_all = [name for name in names_all if name]
-    if not names_all:
-        return None
-    shown = names_all[:_ELECTED_STAT_VAR_CAP]
-    names = ", ".join(shown)
-    remaining = len(names_all) - len(shown)
-    tail = f", and {remaining} more" if remaining > 0 else ""
-    return f"Checked: {names}{tail}."
+    count = no_data.get("elected_stat_var_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return len(no_data.get("elected_stat_vars") or [])
 
 
 def _nearest_real_line(spec: Mapping[str, Any]) -> str:
@@ -544,8 +568,8 @@ def _nearest_real_line(spec: Mapping[str, Any]) -> str:
     relaxation = spec.get("relaxation") or {}
     axis = relaxation.get("axis")
     line = f"{line} — relaxed {axis}" if axis else line
-    stat_vars = _stat_vars_line(spec)
-    return f"{line}\n{stat_vars}" if stat_vars else line
+    measure = _measure_line(spec)
+    return f"{line}\n{measure}" if measure else line
 
 
 def _flagged_match_line(spec: Mapping[str, Any], *, reason: Any, gate: Any) -> str:

@@ -97,6 +97,14 @@
       "digest_chars": 720
     },
     {
+      "id": "sum_of_capped_25_periods_25_left_only",
+      "digest_chars": 1245
+    },
+    {
+      "id": "sum_of_single_period",
+      "digest_chars": 712
+    },
+    {
       "id": "wide_band_100000_groups",
       "digest_chars": 1283
     },

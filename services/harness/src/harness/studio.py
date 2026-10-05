@@ -49,17 +49,25 @@ from google.adk.agents.run_config import RunConfig
 from google.adk.apps import App
 from google.adk.errors import StaleSessionError
 from google.adk.errors.already_exists_error import AlreadyExistsError
+from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from planner.plan import SEEDS_STATE_KEY
+from planner.plan import SEEDS_STATE_KEY, current_earlier_block
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph import AGENT_NAME, Executor
+from harness.graph import (
+    AGENT_NAME,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    Executor,
+)
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
 from harness.settings import Settings
@@ -406,6 +414,21 @@ async def _sse_stream(
             await flush_telemetry()
 
 
+def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
+    """Keep the plan records, search readings and spec blocks `event` writes
+    to the turn's session state, for `ConversationState.close_turn` to store
+    with the turn. Each key holds the turn's whole value, so the latest
+    write replaces. The blocks stay in process (`turn_specs`) until the turn
+    closes."""
+    delta = event.actions.state_delta
+    if ORCHESTRATOR_PLAN_RECORDS_KEY in delta:
+        conversation.turn_plans = list(delta[ORCHESTRATOR_PLAN_RECORDS_KEY])
+    if ORCHESTRATOR_SEARCHES_KEY in delta:
+        conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
+    if ORCHESTRATOR_SPECS_KEY in delta:
+        conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+
+
 async def _unwind(pending: asyncio.Future[Any]) -> None:
     """Cancel `pending` once and WAIT for it: a bare `.cancel()` leaves the
     generator mid-frame and `aclosing` then raises "asynchronous generator
@@ -505,6 +528,7 @@ class StudioRunner:
     ) -> None:
         self.edit_model = edit_model
         self.translator = translator
+        self.orchestrated = settings is not None and settings.studio_engine == "orchestrator"
         self.run_config = run_config
         # Resolved before the workflow exists (`AGENT_NAME` is the fixed
         # name every `create_root_workflow` call gives its `Workflow`, so
@@ -528,12 +552,15 @@ class StudioRunner:
             else None
         )
         workflow = create_workflow(self.recorder, self.surface_recorder)
-        # One `App` for the whole graph: the planner and the translator run
-        # as sub-agents of the same `workflow` through the same session
-        # (`ctx.run_node`), so one `ContextCacheConfig` here covers both. A
-        # caller giving no `settings` gets caching on with ADK's own default
-        # interval, matching `Settings`' own field defaults.
-        cache_enabled = settings.studio_context_cache if settings is not None else True
+        # One `App` for the whole graph: every agent the graph runs (the
+        # planner, and the orchestrator on its engine) runs as a sub-agent of
+        # the same `workflow` through the same session (`ctx.run_node`), so one
+        # `ContextCacheConfig` here covers them all. Explicit caching is opt-in
+        # (`STUDIO_CONTEXT_CACHE=true`): Gemini's implicit caching is the
+        # default because it needs no create call and matches a prefix across
+        # sessions, while ADK's explicit cache is per session and per agent.
+        # A caller giving no `settings` gets `Settings`' own field defaults.
+        cache_enabled = settings.studio_context_cache if settings is not None else False
         cache_intervals = settings.studio_cache_intervals if settings is not None else 10
         context_cache_config = (
             ContextCacheConfig(cache_intervals=cache_intervals) if cache_enabled else None
@@ -600,6 +627,7 @@ class StudioRunner:
                 )
             ) as events:
                 async for event in events:
+                    _keep_turn_records(conversation, event)
                     for frame in translator.translate(event):
                         yield frame
             for frame in translator.finish():
@@ -905,6 +933,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            current_earlier_block.set(conversation.earlier_block)
             # The segment lease: claimed on the live state before the claim
             # save below persists it, so the save's own compare-and-swap
             # covers both in one write. `SegmentBusy` means a live segment,
@@ -994,6 +1023,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             history = conversation.conversation_digest_state()
             if history:
                 state["conversation_digest"] = json.dumps(history)
+            # The orchestrator's planner renders the earlier turns' readings;
+            # their blocks stay in the conversation (`current_earlier_block`).
+            ledger = conversation.prior_ledger_state() if studio.orchestrated else None
+            if ledger:
+                state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
             if isinstance(body.seed_spec, list):
                 # Each seed as the `seed` node takes it, or the refusal its
                 # step fails with: no posted Spec block enters the session.
@@ -1285,6 +1319,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation.turn_user_message += f"\n(then: {body.payload})"
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
+        current_earlier_block.set(conversation.earlier_block)
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])

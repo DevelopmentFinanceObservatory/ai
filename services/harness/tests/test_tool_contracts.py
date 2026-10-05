@@ -6,9 +6,10 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from compiler.sources import elected_stat_vars, source_from_spec_block
+from compiler.sources import posted_stat_vars, source_from_spec_block
 from harness.planner_seam import _render_envelope
 from harness.tool_contracts import graph_envelope
 
@@ -24,6 +25,7 @@ def _definite(
     truncated: bool = False,
     member_count: int | None = None,
     slots: list | None = None,
+    member_count_exact: bool | None = None,
 ) -> dict:
     # `resolved.stat_vars` is always the real wire object -- `{items,
     # member_count, truncated}` -- never a bare list. A hand-built helper
@@ -31,6 +33,8 @@ def _definite(
     stat_vars: dict = {"items": items or [], "truncated": truncated}
     if member_count is not None:
         stat_vars["member_count"] = member_count
+    if member_count_exact is not None:
+        stat_vars["member_count_exact"] = member_count_exact
     resolved: dict = {
         "rendered_sentence": "life expectancy in Kenya",
         "facets": facets or {},
@@ -195,6 +199,7 @@ _NO_IDENTITY_FACTS = {
     "wide": False,
     "stat_var_shape_kind": None,
     "stat_var_item_count": 0,
+    "stat_var_member_count_exact": True,
     "entity_roles": [],
     "stat_var_truncated": False,
     "open_entity_axes": [],
@@ -233,7 +238,8 @@ def test_each_candidate_carries_the_statvars_search_elected_for_it() -> None:
     """A `get_data` call for the chosen candidate posts them as
     `resolved_stat_var_dcids`, and a clarify re-entry holds no spec block to
     read them from. A list the source reader refuses offers none of its
-    entries, as a searched block's does."""
+    entries, as a searched block's does. A block whose retrieval posts none
+    (`compiler.sources.block_posts_stat_vars`) offers none."""
     envelope = {
         "status": "candidates",
         "parts": [
@@ -259,6 +265,21 @@ def test_each_candidate_carries_the_statvars_search_elected_for_it() -> None:
                             "spec_id": "spec_prefixed",
                             "resolved": {"stat_vars": {"items": [{"ref": "dcid:Count_Person"}]}},
                         },
+                        {
+                            "spec_id": "spec_digest",
+                            "resolved": {
+                                "stat_vars": {"items": _ELECTED_TWO_CONSTRAINED_ITEMS},
+                                "shape": {"member_digest": "d"},
+                            },
+                        },
+                        {
+                            "spec_id": "spec_digest_root",
+                            "definition": {"identity": _STANDARD_IDENTITY},
+                            "resolved": {
+                                "stat_vars": {"items": _ELECTED_UNBOUND_ITEM},
+                                "shape": {"member_digest": "d"},
+                            },
+                        },
                     ]
                 },
             }
@@ -272,15 +293,36 @@ def test_each_candidate_carries_the_statvars_search_elected_for_it() -> None:
         "spec_one": ["Count_Person"],
         "spec_malformed": [],
         "spec_prefixed": [],
+        # A family with a member digest is elected again by the mint, so it
+        # posts none of its StatVars; a pinned root posts itself.
+        "spec_digest": [],
+        "spec_digest_root": ["Count_Person"],
     }
 
 
-def test_a_candidate_and_a_definite_block_state_the_same_statvars() -> None:
-    """One reader for both: the list a chosen candidate posts is the list the
+@pytest.mark.parametrize(
+    ("block", "posted"),
+    [
+        (
+            json.loads((_DATA_MCP_FIXTURES / "resolve_population_guatemala.json").read_text())[
+                "parts"
+            ][0]["spec"],
+            ["Count_Person"],
+        ),
+        (
+            json.loads(
+                (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
+            )["france_education_grants"]["parts"][0]["spec"],
+            [],
+        ),
+    ],
+    ids=["listed-membership", "digest-family"],
+)
+def test_a_candidate_and_a_definite_block_state_the_same_statvars(
+    block: dict, posted: list[str]
+) -> None:
+    """One rule for both: the list a chosen candidate posts is the list the
     same block posts when `search` returns it as the `definite` reading."""
-    block = json.loads((_DATA_MCP_FIXTURES / "resolve_population_guatemala.json").read_text())[
-        "parts"
-    ][0]["spec"]
     envelope = {
         "status": "candidates",
         "parts": [{"status": "candidates", "candidates": {"specs": [block]}}],
@@ -288,9 +330,8 @@ def test_a_candidate_and_a_definite_block_state_the_same_statvars() -> None:
 
     (candidate,) = graph_envelope(envelope)["candidates"]
 
-    assert candidate["stat_vars"] == list(source_from_spec_block(block).stat_vars)
-    assert candidate["stat_vars"] == list(elected_stat_vars(block["resolved"]))
-    assert candidate["stat_vars"] == ["Count_Person"]
+    assert candidate["stat_vars"] == list(posted_stat_vars(source_from_spec_block(block)))
+    assert candidate["stat_vars"] == posted
 
 
 def test_candidates_carry_the_same_wide_verdict_a_definite_reading_would() -> None:
@@ -367,6 +408,50 @@ def test_absent_no_data_maps_to_unsupported_with_the_reason_as_a_warning() -> No
     assert {"code": "no_data", "severity": "warn", "message": "no observations"} in digest[
         "warnings"
     ]
+
+
+@pytest.mark.parametrize(
+    "no_data",
+    [
+        {"category": "unresolved", "reason": "role_not_resolved"},
+        {"category": "absent", "reason": "no_observations"},
+        {
+            "category": "unresolved",
+            "reason": "variable_not_resolved",
+            "nearest_real": [{"spec_id": "spec_n", "resolved": {"rendered_sentence": "near"}}],
+        },
+    ],
+)
+def test_a_no_data_part_summary_carries_the_reason_code(no_data: dict[str, Any]) -> None:
+    digest = graph_envelope({"parts": [{"status": "no_data", "no_data": no_data}]})
+
+    assert digest["part_digests"][0]["reason"] == no_data["reason"]
+
+
+def test_a_no_data_part_summary_carries_the_message_when_search_gave_one() -> None:
+    no_data = {"category": "absent", "reason": "no_observations"}
+    message = "No observations exist for Kenya in 1850."
+
+    plain = graph_envelope({"parts": [{"status": "no_data", "no_data": no_data}]})
+    stated = graph_envelope(
+        {
+            "parts": [
+                {
+                    "status": "no_data",
+                    "no_data": {**no_data, "message": message, "a_member_added_later": 1},
+                }
+            ]
+        }
+    )
+
+    assert "message" not in plain["part_digests"][0]
+    assert stated["part_digests"][0]["message"] == message
+
+
+def test_a_part_that_is_not_no_data_summarises_without_a_reason() -> None:
+    digest = graph_envelope({"parts": [_definite("spec_a")]})
+
+    assert "reason" not in digest["part_digests"][0]
 
 
 def test_unsupported_part_carries_its_detail_as_a_warning() -> None:
@@ -685,7 +770,19 @@ def test_truncated_false_never_narrows_a_role_bearing_identity() -> None:
     assert digest["wide"] is True
 
 
-def test_the_raw_facts_ride_alongside_the_derived_verdict() -> None:
+@pytest.mark.parametrize(
+    ("member_count", "member_count_exact", "item_count", "exact"),
+    [
+        (None, None, 1, True),
+        # A family listed in part counts its members, not the items listed.
+        (1_454, None, 1_454, True),
+        # Search counted at least this many.
+        (3_687, False, 3_687, False),
+    ],
+)
+def test_the_raw_facts_ride_alongside_the_derived_verdict(
+    member_count: int | None, member_count_exact: bool | None, item_count: int, exact: bool
+) -> None:
     """A later change to the predicate must not need another trip into
     `mcp_client.py`'s raw envelope: the facts it was computed from are
     already in the digest."""
@@ -693,12 +790,19 @@ def test_the_raw_facts_ride_alongside_the_derived_verdict() -> None:
         {
             "status": "definite",
             "parts": [
-                _definite("spec_1", identity=_STANDARD_IDENTITY, items=_ELECTED_UNBOUND_ITEM)
+                _definite(
+                    "spec_1",
+                    identity=_STANDARD_IDENTITY,
+                    items=_ELECTED_UNBOUND_ITEM,
+                    member_count=member_count,
+                    member_count_exact=member_count_exact,
+                )
             ],
         }
     )
     assert digest["stat_var_shape_kind"] == "statvar_schema"
-    assert digest["stat_var_item_count"] == 1
+    assert digest["stat_var_item_count"] == item_count
+    assert digest["stat_var_member_count_exact"] is exact
     assert digest["entity_roles"] == ["observationAbout"]
     assert digest["stat_var_truncated"] is False
 
@@ -800,6 +904,21 @@ def test_the_kind_is_all_falls_back_to_the_items_own_coverage() -> None:
         }
     )
     assert digest["window"] == {"start": 1960, "end": 2023, "source": "coverage"}
+
+
+def test_a_listing_cut_short_of_the_earliest_year_keeps_the_download_window() -> None:
+    """A family `search` lists in part: the listed item starts in 1990, the
+    family's points in 1973, which `resolved.download.window` states."""
+    identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "all"}}
+    later_item = [{**_ITEM_WITH_COVERAGE[0], "data_date_range": {"start": "1990", "end": "2024"}}]
+    spec = _definite(
+        "spec_1", identity=identity, items=later_item, truncated=True, member_count=1_454
+    )
+    spec["spec"]["resolved"]["download"] = {"window": {"start_year": 1973, "end_year": 2024}}
+
+    digest = graph_envelope({"status": "definite", "parts": [spec]})
+
+    assert digest["window"] == {"start": 1973, "end": 2024, "source": "coverage"}
 
 
 def test_the_kind_is_all_and_no_item_covers_leaves_window_out() -> None:

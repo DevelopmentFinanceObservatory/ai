@@ -137,8 +137,9 @@ def build_runner(settings: Settings | None = None) -> StudioRunner:
 # once.
 _studio = build_runner()
 
-# The `App` `adk web` serves: the graph with the studio's `ContextCacheConfig`,
-# plus the identity plugin. A loader that finds `app` uses it as-is; one that
+# The `App` `adk web` serves: the graph with the studio's context-cache setting
+# (implicit caching by default; `ContextCacheConfig` only when
+# `STUDIO_CONTEXT_CACHE=true`), plus the identity plugin. A loader that finds `app` uses it as-is; one that
 # finds only `root_agent` wraps the graph in an `App` of its own and loses both.
 app = _studio.runner.app.model_copy(
     update={"plugins": [ConversationIdentity(), *_studio.runner.app.plugins]}

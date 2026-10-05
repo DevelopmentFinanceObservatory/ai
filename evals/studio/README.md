@@ -50,6 +50,81 @@ runs only the contract layer against the live agent. Results land in
 `.results/<mode>-<timestamp>.json` (gitignored), one record per case with
 its violations and rubric scores.
 
+## The orchestrator engine
+
+`just eval-studio-contract` and `just eval-studio` exercise the classic graph.
+The orchestrator engine (`STUDIO_ENGINE=orchestrator`) has its own case file,
+`harness-studio-orchestrator-v1.cases.json`, and two modes of `run.py`:
+
+```
+just eval-studio-orchestrator        # --mode orchestrator: scripted, in-process, no key
+just eval-studio-orchestrator-live   # --mode orchestrator-live: live agent + judge
+```
+
+Scripted mode (`orchestrator_scripted.py`) serves the studio routes over the real
+graph, the real orchestrator tools and the real `PlannerSeam`, and scripts what a
+model or an upstream would answer. A case's `scenario` (inline, or the name of an
+entry in the file's `scenarios`) holds:
+
+- `orchestrator`: the orchestrator model's replies, one per model call across every
+  turn, each `{"call": tool, "args": {...}}` or `{"text": ...}`. A script that runs out
+  fails the case as a contract violation.
+- `search`: the canned results `search` returns, in order, each a list of `parts`
+  (`variable`, `status`, and for a definite part `spec_id`, `sentence`, `coverage`,
+  `warnings`), run through the same digest the served resolver builds.
+- `plan_spec_id`: the source the canned plan retrieves. The planner's model submits
+  the plan `harness.scripted_plan` builds, so the seam renders its real first message
+  and the approval, execution and hand-back nodes run as served; `translate` and
+  `propose_plan` are not exercised.
+- `planner`: the planner model's replies instead, in the orchestrator script's shape.
+  The planner then calls the real `propose_plan` and `translate`, which discovers
+  through `translator_search`, the canned results of each translation `search`, in the
+  `search` entries' shape, and compiles against the real servers' tool schemas.
+- `get_data_refusals`: spec id to the refusal (`code`, `retry_mode`) a plan step's
+  `get_data` returns for it.
+
+Every model request (system instruction and contents, as the model received them) and
+every tool call, a scripted planner's own included, is recorded in order. A case's `checks` list names properties from
+`checks.py`'s `CASE_CHECKS` that read that record:
+
+- `approval_payload_absent_after_approval`: no request made after the plan's first
+  step ran holds the approval pause (the plan and the user's answer).
+- `no_relay_marker`, `planner_sees_no_relay_marker`: no request, or no planner
+  request, holds ADK's fence around another agent's quoted turn, which is how a
+  graph node's output reaches a model when it is authored by the node.
+- `planner_first_message_carries_search_evidence`: the planner's first request names
+  every spec id, warning code and window year the turn's searches returned.
+- `previous_final_message_in_view`: each turn's first orchestrator request shows the
+  previous turn's closing message whole, so a later "yes" has its offer in view.
+- `earlier_plan_in_view`: each turn's first orchestrator request names every source
+  an earlier turn's plan retrieved, by spec id, so a question about that plan can be
+  answered.
+- `translation_stops_on_a_repeated_failure`: once a translation fails the way it
+  failed before, nothing is translated again in that planner entry.
+- `blocked_reading_is_searched_again`: a source whose search reading carries a
+  blocking warning is searched again by `translate` before a plan step retrieves it.
+- `every_ask_accounted_for`: each output the orchestrator listed as an ask when it
+  called `plan` is on the plan card, answered by steps the card shows or declined with
+  a reason, and comes back in the plan's hand-back with each answering step's status
+  or its decline.
+- `no_repeated_failed_step` reads frames only, so it also runs live: a failed plan
+  step does not fail again with the same tool, label and outcome text.
+
+A case that lists a request check and runs without the log, or runs no plan step
+where the check needs one, fails rather than passing on nothing.
+
+The cases that hold a known gap carry an `xfail` marker naming it; `XPASS` means the
+gap closed. Each of those fails on the unmarked case for the reason its marker
+gives, and the matching `a-short-closing-message` and `an-answered-turn` cases pass,
+so a check is shown to separate the two.
+
+The live cases (`orchestrator-live-*`) hold the properties only a model's behaviour
+settles, with rubrics for the judge: a period outside the data's coverage is a
+recorded decision, every requested output is planned, declined or put to the user, a
+later "yes" resolves the previous turn's offer, a blocking search warning is not
+reused as an answer, and an unchanged failed step is not repeated. They run against a
+server started with `STUDIO_ENGINE=orchestrator`.
+
 ## Reading a run
 
 - `PASS` / `FAIL` — the case's mechanical expectations, the stream
@@ -58,7 +133,7 @@ its violations and rubric scores.
   (over-resolution where an elicitation is due, thin analytical depth, a
   two-series card the platform refuses).
   The marker text says which gap and when to retire it.
-  An xfail marker excuses missed *expectations* only — wire-contract
+  An xfail marker excuses missed _expectations_ only — wire-contract
   violations (invalid frames, broken stream discipline) fail the case
   regardless, because the contract layer has no known gaps.
 - `XPASS` — an xfail case passed. The gap closed; retire the marker so the

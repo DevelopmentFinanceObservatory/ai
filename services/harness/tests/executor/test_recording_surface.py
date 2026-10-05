@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx2
 import pytest
 from compiler.compile import compile_plan
 from compiler.surface import (
@@ -31,7 +32,11 @@ from compiler.surface import (
     ToolSchema,
     ToolSurfaceUnavailableError,
 )
+from data_mcp import stat_var_list
+from data_mcp.client import UpstreamClient
 from data_mcp.frame_materialisation import frame_ref_for
+from data_mcp.settings import Settings as DataMcpSettings
+from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
 from harness import graph
@@ -172,6 +177,44 @@ async def test_a_retrieval_held_under_its_own_content_version_still_carries_its_
     assert surface.retrieval_manifest(frame_ref=typed) == stated
     assert component is not None
     assert component["provenance"]["citation"] == "World Bank, International Debt Statistics"
+
+
+async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_with_it(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recorder reads the list back once, and the run's evidence check reads
+    the result it returns rather than reading the list again."""
+    whole = manifest()
+    left_out = {
+        **whole,
+        "trace": {},
+        STAT_VARS_OMITTED_KEY: len(whole["trace"]["resolved_stat_vars"]),
+    }
+    reads: list[str] = []
+
+    def snapshot(request: httpx2.Request) -> httpx2.Response:
+        reads.append(request.url.path)
+        return httpx2.Response(200, json={"trace": whole["trace"]})
+
+    upstream = UpstreamClient(
+        settings=DataMcpSettings(upstream_max_attempts=1),
+        transport=httpx2.MockTransport(snapshot),
+    )
+    monkeypatch.setattr(stat_var_list, "get_client", lambda: upstream)
+    scripted = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(left_out)], "aggregate": [ok(RESULT_FRAME)]},
+    )
+    surface = _RecordingSurface(scripted, provenance=ProvenanceStore())
+
+    _finished, outcome = await execute_approved_plan(approved_plan(), surface=surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert surface.retrieval_manifest(frame_ref=whole["frame_ref"]) == whole
+    assert reads == [f"/api/datasets/{SPEC_KENYA}/{CONTENT_VERSION}"]
 
 
 def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder() -> None:
@@ -899,6 +942,8 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             "evidence_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
             "stat_var_count": _TERMINAL_FRAMES["join"]["stat_var_count"],
             "carried_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
+            "summed_frame_refs": [],
+            "sum_of_sides": {},
         }
     ]
 

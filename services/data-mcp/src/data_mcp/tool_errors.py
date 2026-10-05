@@ -297,16 +297,7 @@ class ToolRefusal:
         # place it in the turn's closing text by code, not by asking a
         # narrator model to restate it.
         remedy = _CEILING_REMEDIES.get(ceiling_kind) if ceiling_kind is not None else None
-        if ceiling_kind == "candidate_window":
-            # dfo-apis' own detail names a mint kind `get_data` does not post, so the
-            # caller's next step is stated here: the StatVars `search` elected are what
-            # let the mint prove a broad family complete.
-            message = (
-                f"Over the coverage ceiling: {detail}{detail_sep} Through get_data, pass the "
-                "StatVars the search digest listed for this spec_id as "
-                f"resolved_stat_var_dcids. If they were passed already: {remedy}"
-            )
-        elif remedy is not None:
+        if remedy is not None:
             message = f"Over the coverage ceiling: {detail}{detail_sep} {remedy}"
         elif ceiling_kind is None:
             message = f"Over the coverage ceiling: {detail}{detail_sep}"
@@ -340,19 +331,31 @@ class ToolRefusal:
         cls,
         *,
         detail: str | None,
+        option: str | None = None,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # This factory surfaces the prose pointer upstream gives to a
-        # separate capabilities call; it does not fetch-and-merge live
-        # capability data.
+        # Without `option`, this surfaces the prose pointer upstream gives to a
+        # separate capabilities call. With it, the refusal names the one tool
+        # argument this deployment cannot serve, and the call succeeds without it.
+        if option is None:
+            return cls(
+                code=ToolErrorCode.CAPABILITY_UNAVAILABLE,
+                message=(
+                    f"This capability isn't live: {detail}. Check capabilities "
+                    "before calling this tool again."
+                ),
+                fix={"detail": detail},
+                trace_id=trace_id,
+                capability_version=capability_version,
+            )
         return cls(
             code=ToolErrorCode.CAPABILITY_UNAVAILABLE,
             message=(
-                f"This capability isn't live: {detail}. Check capabilities "
-                "before calling this tool again."
+                f"The {option!r} option isn't live: {detail}. Do not retry with "
+                f"{option!r}; the call without it is still served."
             ),
-            fix={"detail": detail},
+            fix={"detail": detail, "option": option},
             trace_id=trace_id,
             capability_version=capability_version,
         )
@@ -1350,17 +1353,21 @@ _SELECTION_ARGUMENT_POINTER_PREFIX = "/resolved_stat_var_dcids/"
 _SPEC_ID_PREFIX = "spec_"
 
 
+def _stat_var_count(count: int) -> str:
+    return f"{count:,} StatVar{'' if count == 1 else 's'}"
+
+
 def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
-    """`member_not_resolvable` as a `spec_not_exportable` refusal naming its StatVars.
+    """`member_not_resolvable` as a `spec_not_exportable` refusal listing its StatVars in `fix`.
 
     Each issue names one StatVar in `member`. An issue whose pointer is into
     `resolved_stat_var_dcids` is a StatVar the caller passed to `get_data` that the
     identity no longer resolves to; its pointer is rebased onto `get_data`'s own
     `resolved_stat_var_dcids` argument. Any other issue names a StatVar or spec_id whose
     graph arcs could not be resolved: `fix.members` lists them all, and the message
-    names the StatVars alone, since a spec_id is the dataset and no StatVar of it. A
-    failed operation with no stored refusal carries no issues, so its refusal names no
-    StatVar.
+    counts the StatVars alone, since a spec_id is the dataset and no StatVar of it. The
+    message names no StatVar, since a model reads it. A failed operation with no stored
+    refusal carries no issues, so its refusal counts no StatVar.
     """
     issues = [
         issue
@@ -1389,18 +1396,17 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
         ]
         fix["remedy"] = remedy
         message = (
-            "resolved_stat_var_dcids names StatVars that are no longer members of this "
-            f"dataset: {', '.join(not_members)}. Run search for this question again, then "
-            "call get_data with the spec_id it returns and the StatVars its digest lists. "
-            f"{remedy}"
+            f"resolved_stat_var_dcids names {_stat_var_count(len(not_members))} that are no "
+            "longer members of this dataset (fix.not_members). Run search for this question "
+            f"again, then call get_data with the spec_id it returns. {remedy}"
         )
     else:
         members = [issue["member"] for issue in issues]
         fix["members"] = members
         stat_vars = [member for member in members if not member.startswith(_SPEC_ID_PREFIX)]
-        named = f" ({', '.join(stat_vars)})" if stat_vars else ""
+        counted = f" ({_stat_var_count(len(stat_vars))})" if stat_vars else ""
         message = (
-            f"This spec can't be minted: the graph could not resolve its StatVars{named}. "
+            f"This spec can't be minted: the graph could not resolve its StatVars{counted}. "
             "Retrying it refuses the same way -- search again for a different ask."
         )
     return ToolRefusal(

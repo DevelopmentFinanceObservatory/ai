@@ -25,15 +25,14 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 | `reject_plan`       | Marks the current plan `REJECTED`, which blocks `submit_plan` until a new version            |
 | `submit_plan`       | Declares the current plan's compiled workflow ready for the user's answer                    |
 
-The planner reaches the translator directly. `create_planner_agent` takes it as a
-sub-agent and `harness.agents` builds the pair, attaching it with
-`mode="single_turn"` so ADK wraps it as one more tool on the planner,
-`dfo_translator`, alongside the four above and, when the planner is built
-with a surface, the two skill tools below. The planner calls it
-inside its own turn and the plan travels between them through session state.
-Omit the sub-agent and `create_planner_agent` returns the standalone planner,
-which is what the planner's own eval set scores and why that set needs no
-reachable tool surface.
+The planner reaches the translator directly. `create_planner_agent` takes
+`translator.tool`'s `translate` function tool, which `harness.agents` builds,
+alongside the four above and, when the planner is built with a surface, the
+two skill tools below. The planner calls it with no arguments inside its own
+turn, and the plan travels through session state. Omit it and
+`create_planner_agent` returns the standalone planner, which is what the
+planner's own eval set scores and why that set needs no reachable tool
+surface.
 
 ## Skills
 
@@ -42,15 +41,15 @@ reachable tool surface.
 `get_skill` and `get_skill_file` from `planner.skills`, each calling data-mcp's
 tool of the same name through that surface, and its instruction gains the
 paragraph that names them. `harness.agents.create_planner_with_translator`
-passes the same surface the translator discovers on. Without a surface, as the
+passes the same surface `translate` discovers on. Without a surface, as the
 standalone eval agents build it, the planner has neither tool and the
 instruction says nothing about skills.
 
 The resolve envelope's `skills` field names the skills that apply to its
 results, by id and description, and the planner loads one when its
-description bears on the question. The instruction names one skill no search
-result carries: a question about DFO itself starts with
-`get_skill("dfo-faq")`. Both tools answer with data-mcp's text, a refusal
+description bears on the question. A question about DFO itself starts with
+`get_skill`, whose `skill_id` description names the one skill no search result
+carries, `dfo-faq`. Both tools answer with data-mcp's text, a refusal
 included, so a deployment with no Skills API answers `capability_unavailable`
 and the planner drafts without the skill.
 
@@ -60,12 +59,10 @@ Every tool in the table above answers with one of `planner.tool_results`' typed 
 (`ok`, `problem`, `referred`) rather than an unstructured `{"error": ...}` a
 caller has to parse back into a decision. A `problem` carries a stable `code`
 from the shared `ProblemCode` vocabulary and, where the next step is known, an
-`action` naming which tool to call next. The translator answers the same way;
-one vocabulary for both agents means a code never has to be renamed when a
-tool moves from one to the other. `dfo_translator` is a sub-agent wrapped as a
-tool, and it carries an `output_schema`, so its own function response is the
-parsed closing turn: either the compiled outcome or the `Referral`'s own
-fields, read straight off the tool result.
+`action` naming which tool to call next. The translator's core functions
+answer the same way, from one vocabulary. `translate` answers `ok` once the
+plan compiled, or the `Referral`'s own fields, with its `outcome` from the
+closed set, read straight off the tool result.
 
 ## The plan record
 
@@ -84,12 +81,16 @@ retrieved frame against: the `measure`, the `entities` and optional `source` in
 the words of the question; a closed `period` of calendar years, an `annual`
 frequency, an optional `unit` keyed the way the frame grammar states one
 (`currency`, `prices`, `base_year`), and what to do about missing years
-(`coverage.on_missing`). Every other calculation the plan needs is a derived
-requirement stated in plan vocabulary: `AggregateRequirement` reduces an
-input's rows by `group_by` (period and/or entity); `GrowthRequirement` states a
+(`coverage.on_missing`), and an optional `breakdown` that splits the total by a
+classification's codes at one level, such as sector groups. Every other
+calculation the plan needs is a derived requirement stated in plan vocabulary:
+`AggregateRequirement` reduces an input's rows by `group_by` (period, entity,
+or a breakdown's codes alone); `GrowthRequirement` states a
 window analysis-mcp computes `(value_end - value_start) / value_start` over;
 `ComparisonRequirement` takes the difference between two requirements' results
-at each common period and answers the question outright; `RankRequirement`
+at each common period and answers the question outright; `SumOfRequirement`
+adds two single-series results at each period both report, leaving out a
+period only one reports; `RankRequirement`
 orders every entity, and keeps the top or bottom N when it states `limit`,
 reducing an input that spans several years to one value each first; `ShareOfRequirement` divides one
 requirement's result by another's, period by period; `JoinRequirement` joins
@@ -100,7 +101,7 @@ level of place. A dataset
 requirement may pin `source_spec_id` to the exact dataset definition
 discovery is to use when it found several, after which discovery has to find
 that definition and nothing else; a requirement carrying the pin has to cite
-a decision whose own `fixes.source_spec_id` names that same pin.
+a decision whose `fixes` names `source_spec_id`.
 A referral still names the candidates' `spec_id`s, since pinning one is
 how a `source_ambiguous` referral is settled: what holds the pin to a
 decision is the plan's own rule, not withholding the id. Who resolved that
@@ -170,10 +171,9 @@ mutating one, and each refuses the statuses it does not apply to: a plan is
 translated only as a draft, approved only while pending, rejected only before a
 run starts, completed or failed only while running.
 
-`planner.settings.AgentSettings` holds the models the planner and translator
-agents run on, `PLANNER_MODEL_NAME` and `TRANSLATOR_MODEL_NAME`, each pinned to a
-concrete version rather than a floating alias so an eval score stays
-attributable to one model. It sits here rather than in `harness.settings`, which
+`planner.settings.AgentSettings` holds the model the planner runs on,
+`PLANNER_MODEL_NAME`, pinned to a concrete version rather than a floating alias
+so an eval score stays attributable to one model. It sits here rather than in `harness.settings`, which
 configures the service around the agents, so that reading a model string costs a
 caller none of that surface.
 
@@ -184,7 +184,7 @@ consistent.
 
 **Submission requires a compiled plan.** `submit_plan` refuses a plan that is
 still a `DRAFT` or carries no workflow, as `workflow_missing` with
-`action.call == "dfo_translator"`. A draft states what to do rather than what
+`action.call == "translate"`. A draft states what to do rather than what
 to run, so declaring one ready would put nothing real in front of the user. A
 pending referral is checked first and refused the same way, as
 `referral_pending`, with the referral itself in `detail`. Its `action.call` is
@@ -234,7 +234,7 @@ plan.
 
 **`question_fixed` holds the turn's question against a restart.**
 `create_planner_agent(..., question_fixed=True)` -- the harness graph's own
-seam builds the pair this way, since the graph derives and narrates a turn's
+seam builds the planner this way, since the graph derives and narrates a turn's
 `resolve_envelope`, `depth` and `question` before the planner ever runs, and a
 restart would silently swap the question out from under that state. Under it,
 `starts_new_plan` with a plan already recorded is refused with
@@ -297,7 +297,12 @@ the very decision it rests on and both would validate. `Decision.fixes` states
 the same choice in the requirement's own vocabulary (period, unit, entities,
 measure, source), and every field it sets is compared with the citing dataset
 requirement's own. A field it leaves unset is not compared, so a decision says
-only as much as it means to.
+only as much as it means to. The model writes a decision to `propose_plan` as a
+`DecisionDraft`, whose `fixes` lists field names only.
+`settle_decisions` reads each value off the requirements citing the decision,
+and refuses a named field no citing requirement states (`fix_unstated`) or one
+they state differently (`fix_disagrees`). The decision `propose_plan` writes
+for a pin a search settled on is dropped once no requirement cites it.
 
 **A plan is a value.** No part of a plan can be assigned to after construction,
 and none accepts a field it does not declare. `plan_revision()` is therefore

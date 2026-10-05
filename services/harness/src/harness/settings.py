@@ -96,19 +96,15 @@ class Settings(BaseServiceSettings):
 
     `studio_context_cache` and `studio_cache_intervals` feed the
     `ContextCacheConfig` that `harness.studio.StudioRunner` attaches to the
-    one `App` behind the whole graph: the planner and the translator run
-    through the same session (`ctx.run_node`), so caching the shared prefix
-    once covers both. `studio_context_cache` defaults on. A default of off
-    means it never reaches the deployed service, and the setting exists to
-    switch caching off. Across the 44 Langfuse traces recorded since the
-    planner and translator began sharing one session (2026-09-19, model
-    `gemini-3.8-flash`, project `cmqpekjoj046iad0e8b3r8psp`), 46.5% of the
-    planner's input tokens were served from cache, and 234 of 237 planner
-    calls after a turn's first hit it. ADK caches the system instruction,
-    the tool declarations and every content before the last run of user
-    contents (`GeminiContextCacheManager._find_count_of_contents_to_cache`),
-    so the cache a turn creates on its second planner call also holds the
-    seam brief and the first model turn, and later calls reuse it.
+    one `App` behind the whole graph. `studio_context_cache` defaults off:
+    Gemini's implicit caching serves the studio. It needs no create call and
+    matches a prefix across sessions, while ADK's explicit cache is built from
+    one session's own events and so is per session and per agent. Setting
+    `STUDIO_CONTEXT_CACHE=true` switches the explicit cache on; the planner and
+    the translator run through the same session (`ctx.run_node`), so one
+    config covers both. ADK caches the system instruction, the tool
+    declarations and every content before the last run of user contents
+    (`GeminiContextCacheManager._find_count_of_contents_to_cache`).
     `studio_cache_intervals` is bounded 1..100 to match ADK's own bound on
     `ContextCacheConfig.cache_intervals`. ADK counts it in invocations, not
     model calls (`context_cache_processor` advances it only when an event's
@@ -179,9 +175,10 @@ class Settings(BaseServiceSettings):
     # real agent on another port). Empty sends no CORS headers: the deployed
     # service is reached same-origin through the website's proxy.
     studio_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    # Turns ADK's explicit context caching on for the graph's one `App`
-    # (`harness.studio.StudioRunner`). Default on -- see the class docstring.
-    studio_context_cache: bool = True
+    # Opts the graph's one `App` (`harness.studio.StudioRunner`) into ADK's
+    # explicit context caching. Default off: implicit caching is the default
+    # -- see the class docstring.
+    studio_context_cache: bool = False
     # How many turns ADK waits before refreshing the cached prefix
     # (`ContextCacheConfig.cache_intervals`).
     studio_cache_intervals: int = 10

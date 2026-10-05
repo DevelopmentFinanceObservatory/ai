@@ -165,7 +165,7 @@ async def _call_through_the_harness_clients(app: FastAPI) -> None:
         await surface.aclose()
 
 
-async def test_a_turns_mcp_server_spans_carry_the_session_its_turn_span_does(
+async def test_a_turns_mcp_server_spans_carry_the_session_and_trace_name_its_turn_span_does(
     composed_app: FastAPI, fake_langfuse: FakeLangfuse
 ) -> None:
     handle = start_turn_span(TURN, session_id=CONVERSATION)
@@ -177,12 +177,14 @@ async def test_a_turns_mcp_server_spans_carry_the_session_its_turn_span_does(
     (turn,) = [span for span in fake_langfuse.spans() if span.name == "turn"]
     turn_session = _attribute(turn, "session.id")
     assert turn_session is not None
+    assert _attribute(turn, "langfuse.trace.name") == "turn"
     for tool in CALLED_TOOLS:
         # Control: the call's server span exists, once, in the turn's trace.
         (span,) = _tool_call_spans(fake_langfuse, tool)
         assert span.trace_id == turn.trace_id, tool
         span_session = _attribute(span, "session.id")
         assert span_session == turn_session, tool
+        assert _attribute(span, "langfuse.trace.name") == _attribute(turn, "langfuse.trace.name")
 
 
 async def test_an_mcp_call_outside_a_turn_has_no_session_on_its_server_span(

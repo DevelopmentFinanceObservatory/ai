@@ -4,25 +4,21 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 209093,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 202787,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -33,17 +29,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 147023,
+        "total_chars": 148701,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 147018
+            "chars": 148696
           },
           {
             "bucket": "text",
@@ -57,25 +57,21 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 242665,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 236359,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -86,17 +82,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 179749,
+        "total_chars": 181427,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 147018
+            "chars": 148696
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -120,25 +120,21 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 243694,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 237538,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -149,17 +145,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 179932,
+        "total_chars": 181760,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 147018
+            "chars": 148696
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -167,19 +167,19 @@
             "chars": 32676
           },
           {
-            "bucket": "functionResponse:dfo_translator",
+            "bucket": "functionResponse:translate",
             "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 303
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
+          },
+          {
+            "bucket": "functionCall:translate",
+            "count": 1,
+            "chars": 30
           },
           {
             "bucket": "text",
@@ -193,25 +193,21 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 3,
-      "total_chars": 244640,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 238479,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -222,17 +218,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 180139,
+        "total_chars": 181962,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 147018
+            "chars": 148696
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -240,24 +240,24 @@
             "chars": 32676
           },
           {
+            "bucket": "functionResponse:translate",
+            "count": 1,
+            "chars": 303
+          },
+          {
             "bucket": "text",
             "count": 3,
-            "chars": 212
-          },
-          {
-            "bucket": "functionResponse:dfo_translator",
-            "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 207
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
+          },
+          {
+            "bucket": "functionCall:translate",
+            "count": 1,
+            "chars": 30
           }
         ]
       }
@@ -266,25 +266,21 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 4,
-      "total_chars": 245586,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 239420,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -295,17 +291,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 180346,
+        "total_chars": 182164,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 147018
+            "chars": 148696
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -315,60 +315,22 @@
           {
             "bucket": "text",
             "count": 5,
-            "chars": 419
+            "chars": 409
           },
           {
-            "bucket": "functionResponse:dfo_translator",
+            "bucket": "functionResponse:translate",
             "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 303
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
-          }
-        ]
-      }
-    },
-    {
-      "agent": "translator",
-      "scenario": "bounded-context",
-      "call_index": 0,
-      "total_chars": 11812,
-      "system_instruction_chars": 2245,
-      "declaration_total_chars": 5664,
-      "declarations": [
-        {
-          "name": "set_model_response",
-          "chars": 3666
-        },
-        {
-          "name": "translate",
-          "chars": 1998
-        }
-      ],
-      "contents": {
-        "total_chars": 343,
-        "buckets": [
-          {
-            "bucket": "functionResponse:translate",
-            "count": 1,
-            "chars": 286
           },
           {
             "bucket": "functionCall:translate",
             "count": 1,
             "chars": 30
-          },
-          {
-            "bucket": "text",
-            "count": 1,
-            "chars": 27
           }
         ]
       }
@@ -377,25 +339,21 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 59395,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 51275,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -406,17 +364,21 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 1202,
+        "total_chars": 1252,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 1197
+            "chars": 1247
           },
           {
             "bucket": "text",
@@ -430,25 +392,21 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 92967,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 84847,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -459,12 +417,16 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 33928,
+        "total_chars": 33978,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -474,7 +436,7 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 1197
+            "chars": 1247
           },
           {
             "bucket": "functionCall:get_skill",
@@ -493,25 +455,21 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 93996,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 86026,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -522,12 +480,16 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 34111,
+        "total_chars": 34311,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -537,22 +499,22 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 1197
+            "chars": 1247
           },
           {
-            "bucket": "functionResponse:dfo_translator",
+            "bucket": "functionResponse:translate",
             "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 303
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
+          },
+          {
+            "bucket": "functionCall:translate",
+            "count": 1,
+            "chars": 30
           },
           {
             "bucket": "text",
@@ -566,25 +528,21 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 3,
-      "total_chars": 94942,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 86967,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -595,12 +553,16 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 34318,
+        "total_chars": 34513,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -610,27 +572,27 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 1197
+            "chars": 1247
+          },
+          {
+            "bucket": "functionResponse:translate",
+            "count": 1,
+            "chars": 303
           },
           {
             "bucket": "text",
             "count": 3,
-            "chars": 212
-          },
-          {
-            "bucket": "functionResponse:dfo_translator",
-            "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 207
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
+          },
+          {
+            "bucket": "functionCall:translate",
+            "count": 1,
+            "chars": 30
           }
         ]
       }
@@ -639,25 +601,21 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 4,
-      "total_chars": 95888,
-      "system_instruction_chars": 14161,
-      "declaration_total_chars": 42002,
+      "total_chars": 87908,
+      "system_instruction_chars": 13217,
+      "declaration_total_chars": 34483,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 35883
+          "chars": 29599
         },
         {
           "name": "adk_request_input",
-          "chars": 2370
+          "chars": 1713
         },
         {
           "name": "get_skill_file",
           "chars": 1084
-        },
-        {
-          "name": "dfo_translator",
-          "chars": 916
         },
         {
           "name": "submit_plan",
@@ -668,12 +626,16 @@
           "chars": 651
         },
         {
+          "name": "translate",
+          "chars": 338
+        },
+        {
           "name": "reject_plan",
           "chars": 258
         }
       ],
       "contents": {
-        "total_chars": 34525,
+        "total_chars": 34715,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -683,65 +645,27 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 1197
+            "chars": 1247
           },
           {
             "bucket": "text",
             "count": 5,
-            "chars": 419
+            "chars": 409
           },
           {
-            "bucket": "functionResponse:dfo_translator",
+            "bucket": "functionResponse:translate",
             "count": 1,
-            "chars": 109
-          },
-          {
-            "bucket": "functionCall:dfo_translator",
-            "count": 1,
-            "chars": 74
+            "chars": 303
           },
           {
             "bucket": "functionCall:get_skill",
             "count": 1,
             "chars": 50
-          }
-        ]
-      }
-    },
-    {
-      "agent": "translator",
-      "scenario": "realistic",
-      "call_index": 0,
-      "total_chars": 11812,
-      "system_instruction_chars": 2245,
-      "declaration_total_chars": 5664,
-      "declarations": [
-        {
-          "name": "set_model_response",
-          "chars": 3666
-        },
-        {
-          "name": "translate",
-          "chars": 1998
-        }
-      ],
-      "contents": {
-        "total_chars": 343,
-        "buckets": [
-          {
-            "bucket": "functionResponse:translate",
-            "count": 1,
-            "chars": 286
           },
           {
             "bucket": "functionCall:translate",
             "count": 1,
             "chars": 30
-          },
-          {
-            "bucket": "text",
-            "count": 1,
-            "chars": 27
           }
         ]
       }

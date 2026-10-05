@@ -54,6 +54,7 @@ from analysis_mcp.op_spec import (
     JoinOpSpec,
     RankOpSpec,
     ShareOfOpSpec,
+    SumOfOpSpec,
 )
 
 OpSpecVariant = (
@@ -64,6 +65,7 @@ OpSpecVariant = (
     | ShareOfOpSpec
     | JoinOpSpec
     | FilterOpSpec
+    | SumOfOpSpec
 )
 
 OP_SPEC_IDENTITY_VERSION = "ops1"
@@ -167,8 +169,8 @@ def _normalise_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     columns (like `group_by`/`rank_by`), so sorting it is right; its own
     pairing with `denominator_by` is carried by column *name*, not by
     either field's position, so sorting `numerator_by` here changes no
-    pairing (see `ShareOfOpSpec`'s own docstring). `CompareOpSpec.
-    left_entity`/`right_entity` and `ShareOfOpSpec.numerator_entity`/
+    pairing (see `ShareOfOpSpec`'s own docstring). `CompareOpSpec`'s and
+    `SumOfOpSpec`'s `left_entity`/`right_entity` and `ShareOfOpSpec.numerator_entity`/
     `denominator_entity`/`denominator_by` need no entry here: all five are
     JSON objects, not arrays, and JCS already sorts object members on its
     own.

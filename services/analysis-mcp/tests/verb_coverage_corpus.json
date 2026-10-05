@@ -178,6 +178,13 @@
         "filter",
         "growth"
       ]
+    },
+    {
+      "question": "Give me the total (bilateral and imputed multilateral) aid France gave Guatemala between 2010 and the latest",
+      "source": "invented",
+      "verb_chain": [
+        "sum_of"
+      ]
     }
   ]
 }

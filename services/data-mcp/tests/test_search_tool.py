@@ -11,8 +11,16 @@ import httpx2
 import pytest
 from data_mcp import client_holder
 from data_mcp.digest import render_answer, render_digest
+from data_mcp.result_bound import MAX_RESULT_BYTES
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from data_mcp.search_tool import SearchEntity, SearchPart, search, to_wire_request
+from data_mcp.search_tool import (
+    MAX_STAT_VAR_ITEMS,
+    TIME_FORMS,
+    SearchEntity,
+    SearchPart,
+    search,
+    to_wire_request,
+)
 from data_mcp.server import mcp
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
@@ -92,6 +100,19 @@ def test_to_wire_request_renames_fields_and_nests_correctly() -> None:
             "include_skills": True,
         },
     }
+
+
+def test_the_time_description_lists_exactly_the_forms_the_door_binds() -> None:
+    description = SearchPart.model_json_schema()["properties"]["time"]["description"]
+
+    assert TIME_FORMS == (
+        "YYYY",
+        "YYYY to YYYY",
+        "since YYYY",
+        "between YYYY and the latest",
+        "latest",
+    )
+    assert all(f"'{form}'" in description for form in TIME_FORMS)
 
 
 def test_to_wire_request_drops_none_fields() -> None:
@@ -218,6 +239,127 @@ async def test_skills_the_envelope_attaches_reach_the_digest() -> None:
     assert sent[0]["response_options"]["include_skills"] is True
     assert result.is_error is False
     assert "- health-financing: Health aid purpose codes and deflation choices." in text_of(result)
+
+
+@pytest.mark.parametrize(
+    ("served", "listed"),
+    [
+        # A family Search states a member digest for keeps no items, and a
+        # recall sample beside it keeps every member it lists.
+        ([(1_454, True)], [0]),
+        ([(1_454, True), (40, False)], [0, 40]),
+        ([(1_454, True)] * 6, [0] * 6),
+        # Listing exactly one, a digest family keeps it: it is the whole list.
+        ([(1, True), (3, False)], [1, 3]),
+        # Past the transport bound, the recall samples share it.
+        ([(40, False)] * 6, [33, 33, 33, 33, 34, 34]),
+        ([(MAX_STAT_VAR_ITEMS, False)], [MAX_STAT_VAR_ITEMS]),
+    ],
+)
+async def test_each_spec_block_keeps_stat_var_items_by_whether_search_states_its_member_digest(
+    served: list[tuple[int, bool]], listed: list[int]
+) -> None:
+    specs = []
+    for block, (count, digested) in enumerate(served):
+        spec = _spec(
+            spec_id=f"spec_{block}",
+            stat_vars=[
+                {"ref": f"Amount_{block}_{index:05d}", "slot_values": []} for index in range(count)
+            ],
+        )
+        spec["resolved"]["shape"] = {"member_count": count}
+        if digested:
+            spec["resolved"]["shape"]["member_digest"] = f"digest_{block}"
+        spec["resolved"]["trace"] = {
+            "resolved_stat_vars": [
+                {"dcid": f"Amount_{block}_{index:05d}"} for index in range(min(count, 200))
+            ],
+            "resolved_stat_vars_truncated": count > 200,
+        }
+        specs.append(spec)
+    candidates = {
+        "ordering": "intent_rank",
+        "max_candidates": 6,
+        "specs": specs,
+        "truncated": False,
+    }
+    handler = _json_handler(200, _envelope("candidates", candidates=candidates))
+
+    result = await _call_search(handler, [{"variable": "aid"}])
+
+    assert result.is_error is False
+    assert result.meta is not None
+    returned = result.meta[SEARCH_ENVELOPE_META_KEY]["parts"][0]["candidates"]["specs"]
+    for block, (spec, (count, _), kept) in enumerate(zip(returned, served, listed, strict=True)):
+        stat_vars = spec["resolved"]["stat_vars"]
+        assert [item["ref"] for item in stat_vars["items"]] == [
+            f"Amount_{block}_{index:05d}" for index in range(kept)
+        ]
+        assert stat_vars["member_count"] == count
+        assert stat_vars["truncated"] is (kept < count)
+        trace = spec["resolved"]["trace"]
+        assert [entry["dcid"] for entry in trace["resolved_stat_vars"]] == [
+            f"Amount_{block}_{index:05d}" for index in range(min(kept, 200))
+        ]
+        assert trace["resolved_stat_vars_truncated"] is (kept < count)
+
+
+# A CRS StatVar dcid as Search names one, which `elected_stat_vars` repeats as its label.
+_CRS_DCID = (
+    "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_"
+    "CRSPurposeCode{index:05d}_Nominal"
+)
+
+
+@pytest.mark.parametrize(
+    ("digested", "elected"),
+    [(True, 6_310), (False, 40)],
+    ids=["digest-family", "recall-sample"],
+)
+async def test_a_no_data_part_counts_the_stat_vars_of_a_digest_family_it_checked(
+    digested: bool, elected: int
+) -> None:
+    """`elected_stat_vars` names the flagged match's family. For "top donors to
+    guatemala since 2020" Search lists all 6,310 members of a family with a member
+    digest, 1.75 MB that would push the result past the 1 MiB bound; such a list
+    becomes `elected_stat_var_count`. A recall sample, at most 40, keeps its list."""
+    flagged = _spec(
+        spec_id="spec_flagged",
+        stat_vars=[{"ref": _CRS_DCID.format(index=index), "slot_values": []} for index in range(3)],
+    )
+    flagged["resolved"]["stat_vars"]["member_count"] = elected
+    flagged["resolved"]["shape"] = {"member_count": elected}
+    if digested:
+        flagged["resolved"]["shape"]["member_digest"] = "d"
+    listed = [
+        {"dcid": _CRS_DCID.format(index=index), "label": _CRS_DCID.format(index=index)}
+        for index in range(elected)
+    ]
+    envelope = _envelope(
+        "no_data",
+        no_data={
+            "reason": "qualifier_not_bound",
+            "category": "absent",
+            "elected_stat_vars": listed,
+            "flagged_match": flagged,
+        },
+    )
+
+    result = await _call_search(_json_handler(200, envelope), [{"variable": "top donors"}])
+
+    assert result.is_error is False
+    assert result.meta is not None
+    no_data = result.meta[SEARCH_ENVELOPE_META_KEY]["parts"][0]["no_data"]
+    if digested:
+        assert "elected_stat_vars" not in no_data
+        assert no_data["elected_stat_var_count"] == elected
+    else:
+        assert no_data["elected_stat_vars"] == listed
+        assert "elected_stat_var_count" not in no_data
+    served = {"content": text_of(result), "meta": result.meta, "sc": result.structured_content}
+    assert len(json.dumps(served).encode()) < MAX_RESULT_BYTES
+    assert f"Checked {elected:,} StatVars." in text_of(result)
+    assert "Amount_" not in text_of(result)
 
 
 # Refusal paths

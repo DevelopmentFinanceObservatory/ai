@@ -6,13 +6,16 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from compiler.compile import CompileIssueCode
+from planner.plan import UnsupportedOperation
+from planner.tool_results import Outcome
 from planner.workflow import SelectedSource
 from pydantic import ValidationError
 from translator.referral import (
+    OUTCOME_OF,
     REFERRAL_STATE_KEY,
     Referral,
     ReferralKind,
-    SourceRecommendation,
     clear_referral,
     load_referral,
     save_referral,
@@ -31,6 +34,7 @@ SourceFactory = Callable[..., SelectedSource]
         ReferralKind.ASK_NOT_UNDERSTOOD,
         ReferralKind.DISCOVERY_UNAVAILABLE,
         ReferralKind.SEED_DROPPED,
+        ReferralKind.NO_OPERATION_COVERS,
     ],
 )
 def test_a_referral_about_a_requirement_names_it(kind: ReferralKind) -> None:
@@ -39,12 +43,38 @@ def test_a_referral_about_a_requirement_names_it(kind: ReferralKind) -> None:
         Referral(kind=kind, reason="r")
 
 
-def test_a_referral_about_a_decision_names_it() -> None:
-    assert Referral(kind=ReferralKind.NO_OPERATION_COVERS, reason="r", decision_id="normalisation")
-    with pytest.raises(ValidationError, match="names the decision it is about"):
-        Referral(kind=ReferralKind.NO_OPERATION_COVERS, reason="r")
-    with pytest.raises(ValidationError, match="names no decision"):
-        Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", decision_id="b")
+def test_every_kind_lands_on_one_outcome() -> None:
+    assert set(OUTCOME_OF) == set(ReferralKind)
+
+
+def test_every_unsupported_kind_is_a_code_a_plan_can_decline() -> None:
+    unsupported = {kind for kind, outcome in OUTCOME_OF.items() if outcome is Outcome.UNSUPPORTED}
+
+    assert {kind.value for kind in unsupported} <= {code.value for code in UnsupportedOperation}
+
+
+def test_a_repair_names_its_constraint_and_permitted_change() -> None:
+    repair = Referral(
+        kind=ReferralKind.REQUIREMENT_NEEDS_REPAIR,
+        reason="r",
+        requirement_id="a",
+        constraint=CompileIssueCode.ENTITY_REQUIRED,
+        repair="name the entity",
+    )
+    assert repair.outcome is Outcome.INVALID_INPUT
+    with pytest.raises(ValidationError, match="names the constraint and the permitted repair"):
+        Referral(kind=ReferralKind.REQUIREMENT_NEEDS_REPAIR, reason="r", requirement_id="a")
+    with pytest.raises(ValidationError, match="names no constraint or repair"):
+        Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", repair="x")
+
+
+def test_an_internal_failure_carries_its_reference() -> None:
+    internal = Referral(kind=ReferralKind.INTERNAL_FAILURE, reason="r", reference="0123456789ab")
+    assert internal.outcome is Outcome.INTERNAL
+    with pytest.raises(ValidationError, match="carries its diagnostic reference"):
+        Referral(kind=ReferralKind.INTERNAL_FAILURE, reason="r")
+    with pytest.raises(ValidationError, match="carries no diagnostic reference"):
+        Referral(kind=ReferralKind.SURFACE_UNAVAILABLE, reason="r", reference="0123456789ab")
 
 
 def test_a_spent_budget_names_nothing() -> None:
@@ -119,48 +149,6 @@ def test_a_pinned_source_not_found_may_carry_candidates_but_need_not(
         ).candidates
         == ()
     )
-
-
-def test_an_ambiguous_source_may_carry_a_recommendation_naming_one_of_its_candidates(
-    source: SourceFactory,
-) -> None:
-    two = (source(), source(spec_id="spec_" + "b" * 32))
-
-    referral = Referral(
-        kind=ReferralKind.SOURCE_AMBIGUOUS,
-        reason="r",
-        requirement_id="a",
-        candidates=two,
-        recommendation=SourceRecommendation(spec_id=two[0].spec_id, rationale="closer match"),
-    )
-
-    assert referral.recommendation is not None
-    assert referral.recommendation.spec_id == two[0].spec_id
-    assert referral.recommendation.rationale == "closer match"
-    with pytest.raises(ValidationError, match="must name one of the referral's own candidates"):
-        Referral(
-            kind=ReferralKind.SOURCE_AMBIGUOUS,
-            reason="r",
-            requirement_id="a",
-            candidates=two,
-            recommendation=SourceRecommendation(spec_id="spec_" + "c" * 32, rationale="r"),
-        )
-
-
-def test_only_an_ambiguous_source_carries_a_recommendation(source: SourceFactory) -> None:
-    with pytest.raises(ValidationError, match="carries no recommendation"):
-        Referral(
-            kind=ReferralKind.NO_DATA,
-            reason="r",
-            requirement_id="a",
-            candidates=(source(),),
-            recommendation=SourceRecommendation(spec_id=source().spec_id, rationale="r"),
-        )
-
-
-def test_a_recommendation_needs_a_rationale(source: SourceFactory) -> None:
-    with pytest.raises(ValidationError, match="at least 1 character"):
-        SourceRecommendation(spec_id=source().spec_id, rationale="")
 
 
 def test_a_referral_gives_a_reason() -> None:

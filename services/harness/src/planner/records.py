@@ -176,6 +176,26 @@ class GroupBy(TitlelessEnum):
 
     PERIOD = "period"
     ENTITY = "entity"
+    BREAKDOWN = "breakdown"
+
+
+class BreakdownDimension(TitlelessEnum):
+    """A hierarchical classification a retrieval can break its total down by.
+
+    `sector` is the OECD CRS purpose codes.
+    """
+
+    SECTOR = "sector"
+
+
+class Breakdown(StrictModel):
+    """One classification a retrieval keeps, its codes rolled up to one level."""
+
+    dimension: BreakdownDimension = Field(description="The classification.")
+    level: int = Field(
+        ge=0,
+        description="The level codes roll up to: 0 is the top (the ten sector groups).",
+    )
 
 
 class StatVarReading(TitlelessEnum):

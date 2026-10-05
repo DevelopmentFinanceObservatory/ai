@@ -19,7 +19,9 @@ edited block that elects a root.
 The compile-level tests state the plans that whole questions call for and
 check the retrieval's `stat_vars` argument, the aggregate by period that
 totals a summed flow across the recipients it leaves open, and the
-compile-time refusal of a single-measure verb over a family read separately.
+compile-time refusal of a single-measure verb over a family read separately,
+and a breakdown by sector: the retrieval's `breakdown`, and the aggregate and
+rank that read its `stat_var_crsPurpose` column.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from compiler.sources import (
     is_family,
     member_digest,
     outcome_from_envelope,
+    posted_stat_vars,
     source_from_spec_block,
     stat_var_reading,
 )
@@ -49,6 +52,7 @@ from planner.operations import (
     FilterOperation,
     GroupBy,
     Operation,
+    RankOperation,
     Reduction,
     RetrieveOperation,
     Side,
@@ -66,10 +70,21 @@ from planner.plan import (
     FilterRequirement,
     Plan,
     PlanStatus,
+    RankRequirement,
     RequirementSide,
     ResolvedBy,
 )
-from planner.records import Period, PeriodThreshold, PlaceLevel, PlaceType, StatVarReading
+from planner.records import (
+    Breakdown,
+    BreakdownDimension,
+    Period,
+    PeriodThreshold,
+    PlaceLevel,
+    PlaceType,
+    RankAmong,
+    RankDirection,
+    StatVarReading,
+)
 from planner.workflow import OpenAxis, ReadingSetBy, SelectedSource
 
 _BLOCKS: dict[str, Any] = json.loads(
@@ -105,11 +120,13 @@ def _block(name: str) -> dict[str, Any]:
 
 def _retrieval(source: SelectedSource, stat_vars: str | None = None) -> dict[str, Any]:
     """The `get_data` arguments a retrieval of `source` writes: its spec_id, the reading
-    when it states one, and the StatVars `search` elected."""
+    when it states one, and the StatVars it posts (`posted_stat_vars`)."""
     args: dict[str, Any] = {"spec_id": source.spec_id}
     if stat_vars is not None:
         args["stat_vars"] = stat_vars
-    return args | {"resolved_stat_var_dcids": list(source.stat_vars)}
+    if posted := posted_stat_vars(source):
+        args["resolved_stat_var_dcids"] = list(posted)
+    return args
 
 
 def _source(name: str) -> SelectedSource:
@@ -323,6 +340,12 @@ def test_a_source_carrying_no_identity_is_a_family_by_the_stat_vars_it_lists() -
 
     assert listed.identity is None and listed.pinned is None and is_family(listed)
     assert one.identity is None and one.pinned is None and not is_family(one)
+    # data-mcp lists none of a family Search states a member digest for; the
+    # binding's own count says whether it is a family.
+    unlisted = listed.model_copy(update={"stat_vars": ()})
+    assert unlisted.shape_member_digest is not None and unlisted.shape_member_count == 183
+    assert is_family(unlisted)
+    assert not is_family(unlisted.model_copy(update={"shape_member_count": 1}))
 
 
 @pytest.mark.parametrize("name", ["population_kenya", "life_expectancy_ghana"])
@@ -1004,7 +1027,9 @@ def test_a_total_over_a_family_the_rule_leaves_separate_is_refused_at_compile_ti
     (issue,) = result.issues
     assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "yearly_total"
-    assert "aggregate reads a single measure; got 200" in issue.reason
+    # Search lists 200 of the 474 StatVars it confirmed; the count is the 474.
+    assert source.stat_var_member_count == 474
+    assert "aggregate reads a single measure; got 474" in issue.reason
     # Summing would refuse `rollup_not_summable`, so the reason omits that advice.
     assert "cannot be summed over nettingBasis" in issue.reason
     assert "stat_vars='sum'" not in issue.reason
@@ -1088,10 +1113,13 @@ def test_a_fully_bound_flow_search_confirmed_one_member_of_feeds_a_single_measur
 def test_a_family_listing_one_member_of_a_capped_list_read_separately_is_refused_at_compile_time(
     compile_question: Callable[..., CompileResult],
 ) -> None:
-    """One member listed of a list `search` capped: more members may hold
-    data, so the aggregate is refused as it is for 200 listed, and the reason
-    states no count the list cannot support."""
-    source = _gross_and_net_kenya_listing(1, truncated=True)
+    """One member listed of a list `search` capped, with no count of the
+    members it confirmed: more members may hold data, so the aggregate is
+    refused as it is for a family counted whole, and the reason states no
+    count the listing cannot support."""
+    source = _gross_and_net_kenya_listing(1, truncated=True).model_copy(
+        update={"stat_var_member_count": None}
+    )
 
     result = _compile_yearly_oda_to_kenya(compile_question, source)
 
@@ -1363,3 +1391,97 @@ def test_a_single_stat_var_source_writes_no_reading(
     )
 
     assert _step_args(result, "life_op") == _retrieval(source)
+
+
+# --- A breakdown by sector ------------------------------------------------------
+
+_TOP_SECTORS = Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
+
+_EVERY_SECTOR = Decision(
+    slot="every_sector",
+    description="Whether to rank every sector or named ones.",
+    options=["every sector", "named sectors"],
+    chosen="every sector",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The question asks which sectors received the most.",
+    fixes=DecisionFixes(among=RankAmong.POPULATION),
+)
+
+
+def _compile_top_sectors(
+    compile_question: Callable[..., CompileResult], source: SelectedSource
+) -> CompileResult:
+    """ "Which sectors received the most of Germany's ODA to Kenya in 2024?"."""
+    oda = _dataset(
+        "oda",
+        [Entity(name="Germany", role="donor"), Entity(name="Kenya", role="recipient")],
+        Period(start=2024, end=2024),
+        stat_vars=StatVarReading.SEPARATE,
+        breakdown=_TOP_SECTORS,
+    )
+    by_sector: dict[str, Any] = {
+        "reduction": Reduction.SUM,
+        "group_by": (GroupBy.PERIOD, GroupBy.BREAKDOWN),
+    }
+    rank: dict[str, Any] = {
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "sector",
+        "limit": 10,
+    }
+    return compile_question(
+        [
+            oda,
+            AggregateRequirement(
+                id="by_sector", decision_ids=["measure"], input_id="oda", **by_sector
+            ),
+            RankRequirement(
+                id="top", decision_ids=["measure", "every_sector"], input_id="by_sector", **rank
+            ),
+        ],
+        [
+            RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id),
+            AggregateOperation(
+                id="by_sector_op", requirement_id="by_sector", input="oda_op", **by_sector
+            ),
+            RankOperation(id="top_op", requirement_id="top", input="by_sector_op", **rank),
+        ],
+        terminal=["top_op"],
+        sources={"oda": source},
+        decisions=(_WHAT, _EVERY_SECTOR),
+    )
+
+
+def test_a_breakdown_by_sector_retrieves_sector_totals_and_ranks_them_by_their_column(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """The retrieval asks for the family summed within each top-level purpose code,
+    and the aggregate and the rank name the `stat_var_crsPurpose` column it lands in."""
+    source = _source("germany_oda_to_kenya")
+
+    result = _compile_top_sectors(compile_question, source)
+
+    assert _step_args(result, "oda_op") == _retrieval(source, "separate") | {
+        "breakdown": {"code_system": "crsPurpose", "level": 0}
+    }
+    assert _step_args(result, "by_sector_op")["group_by"] == ["time_period", "stat_var_crsPurpose"]
+    assert _step_args(result, "top_op")["rank_by"] == ["stat_var_crsPurpose"]
+    assert result.workflow is not None
+    keys = {step.id: step.expected_role_keys for step in result.workflow.steps}
+    assert keys["by_sector_op"] == keys["top_op"] == ("stat_var_crsPurpose",)
+
+
+def test_a_breakdown_over_a_source_that_does_not_vary_by_sector_is_unusable(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """Germany's ODA to Kenya with its purpose slot cut from the recorded block: its
+    StatVars state no purpose code, so it has no sector to break down by."""
+    block = _block("germany_oda_to_kenya")
+    block["resolved"]["slots"].remove(_slot(block, "crsPurpose"))
+    source = source_from_spec_block(block)
+
+    result = _compile_top_sectors(compile_question, source)
+
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (CompileIssueCode.SOURCE_UNUSABLE, "oda")
+    ]

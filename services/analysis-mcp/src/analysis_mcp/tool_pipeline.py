@@ -4,7 +4,7 @@ result's identity, and storing the computed frame under its own pair before
 rendering its digest.
 
 `frame_ref_resolution.py` already owns the frame_ref/array-parameter/
-derived-marker half of the seven verbs' shared shape -- the half with a
+derived-marker half of the eight verbs' shared shape -- the half with a
 `frame_ref` to resolve. This module owns the rest: constructing an op-spec,
 and the mint-identity/store/render/return sequence every verb's own body
 ends with, once its own engine call (and any coverage-floor check) has
@@ -184,7 +184,7 @@ async def store_result_and_render(
 def dedupe_input_content_versions(first: str, second: str) -> list[str]:
     """`[first]` when `second` names the identical content_version,
     otherwise `[first, second]` -- the two-sided verbs' own (`compare`,
-    `join`, `share_of`) rule for listing each distinct input
+    `join`, `share_of`, `sum_of`) rule for listing each distinct input
     content_version once in `Trace.input_content_versions`, whether or not
     their own second side turned out to share the first side's
     content_version.

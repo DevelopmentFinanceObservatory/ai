@@ -148,8 +148,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     """Read one spec block of a `search` envelope into a `SelectedSource`.
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
-    coverage, measures, the size and digest of the binding its `shape`
-    states, entities, the entity axes it leaves open, unit, provenance, the
+    coverage, measures, the label, size and digest of the binding its
+    `shape` states, entities, the entity axes it leaves open, unit, provenance, the
     axes its family varies along -- and the identity document of its
     `definition` sidecar when the envelope carries one, with whether a
     described identity mints as one StatVar (`pinned_stat_var`).
@@ -178,8 +178,12 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             sentence=_text(resolved.get("rendered_sentence")) or "",
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
+            measure_label=_text(shape.get("label")),
             stat_vars=stat_vars,
             stat_var_member_count=stat_var_member_count,
+            stat_var_member_count_exact=_flag(
+                _mapping(resolved.get("stat_vars")).get("member_count_exact")
+            ),
             stat_var_truncated=stat_var_truncated,
             pinned=_pinned(identity, items, slots=resolved.get("slots")),
             shape_member_count=_count(shape.get("member_count")),
@@ -198,6 +202,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             ),
             identity=identity,
             open_axes=_open_axes(resolved),
+            slot_codes=_slot_codes(resolved),
         )
     except ValueError as exc:
         # pydantic's ValidationError is a ValueError too, so one clause covers
@@ -215,9 +220,9 @@ def _stat_vars(value: object) -> tuple[tuple[str, ...], int | None, bool | None]
     rather than complete, and `items` comes back empty.
 
     Every item the Search API serves is an object whose `ref` is a dcid, and
-    a retrieval posts these dcids to `get_data` as `resolved_stat_var_dcids`,
-    so an item of any other form raises, and so does a list `get_data` would
-    refuse: one past `MAX_RESOLVED_STAT_VAR_DCIDS`, or a `ref` with the `dcid:` prefix.
+    a retrieval posts these dcids to `get_data` as `resolved_stat_var_dcids`
+    (`posted_stat_vars`), so an item of any other form raises, and so does a
+    list `get_data` would refuse: one past `MAX_RESOLVED_STAT_VAR_DCIDS`, or a `ref` with the `dcid:` prefix.
 
     Raises:
         ValueError: If `items` is not a list, holds more than `MAX_RESOLVED_STAT_VAR_DCIDS`
@@ -309,6 +314,140 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     return tuple(axes)
 
 
+def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | None] | None:
+    """The codes each slot of `resolved.slots` admits, by constraint property.
+
+    A `value` binding admits its ref and every code its `expansion` added;
+    Search states an expansion only when the walk added a code
+    (`data_mcp.substitution._widens`), so a value without one admits its ref
+    alone. A `set` binding admits each of its values' refs and the codes its
+    expansion added, and maps to `None` when it states no expansion, since
+    nothing says its values admit no descendants and its codes are unknown. An
+    unbound slot, and one with no constraint property (the place, time
+    window or source), is left out. `None` when `resolved` lists no slots, or
+    a slot carries a binding kind this reader does not know or a value
+    without a ref.
+    """
+    slots = _sequence(resolved.get("slots"))
+    if not slots:
+        return None
+    codes: dict[str, tuple[str, ...] | None] = {}
+    for slot in slots:
+        prop = _text(_mapping(_mapping(slot.get("key")).get("property")).get("dcid"))
+        binding = _mapping(slot.get("binding"))
+        if prop is None or binding.get("kind") == "unbound":
+            continue
+        match binding.get("kind"):
+            case "value":
+                values = [binding.get("value")]
+            case "set":
+                values = _sequence_of_any(binding.get("values"))
+            case _:
+                return None
+        added = _sequence_of_any(_mapping(slot.get("expansion")).get("added"))
+        refs = [_text(_mapping(_mapping(value).get("ref")).get("dcid")) for value in values]
+        refs += [_text(_mapping(code).get("dcid")) for code in added]
+        if not values or None in refs:
+            return None
+        if binding.get("kind") == "set" and not added:
+            codes[prop] = None
+            continue
+        codes[prop] = tuple(sorted({ref for ref in refs if ref is not None}))
+    return codes
+
+
+# The dcid prefix of a country. A country holds no other country, so two
+# country refs that differ name rows that never meet.
+_COUNTRY_PREFIX = "country/"
+
+
+def entity_scopes_disjoint(left: SelectedSource, right: SelectedSource) -> bool:
+    """Whether the entities two sources bind keep their rows apart.
+
+    They do when a role both sources bind names only countries on each side,
+    with no country in common: ODA to Kenya and ODA to Uganda bind
+    `destination` to two countries, so no row of one is a row of the other,
+    whatever StatVars they share. A role only one side binds, one a side
+    leaves open, and one bound to anything but countries (a region holds
+    countries) proves nothing.
+    """
+    for role in {entity.role for entity in left.entities} & {
+        entity.role for entity in right.entities
+    }:
+        refs = [
+            {entity.ref for entity in source.entities if entity.role == role}
+            for source in (left, right)
+        ]
+        countries = all(ref.startswith(_COUNTRY_PREFIX) for ref in refs[0] | refs[1])
+        if countries and refs[0].isdisjoint(refs[1]):
+            return True
+    return False
+
+
+class FamilyOverlap(StrEnum):
+    """What two described StatVar families share, as their identities show it."""
+
+    DISJOINT = "disjoint"
+    NESTED = "nested"
+    UNDECIDED = "undecided"
+
+
+def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap:
+    """Whether two sources' described identities can bind a StatVar in common.
+
+    A StatVar has one population type, measured property, stat type,
+    measurement qualifier and denominator, which a described identity's
+    `shape` pins, and one code on each constraint property, which a member
+    carries from the codes its family's slot admits (`slot_codes`). So two
+    families are `DISJOINT` when their shapes differ, or when a property
+    both bind to stated codes admits no code in common. Health and education
+    aid bind `crsPurpose` to two subtrees of the code index that share no
+    code. They are `NESTED` when one binds every property the other binds, each to
+    codes the other admits: a family holds every member of a family
+    narrower than it, as all sectors holds health. Anything else is
+    `UNDECIDED`: a side with no described shape or no `slot_codes`, a
+    property bound to codes not stated (a `None` entry) where the verdict
+    would rest on it, and two families that each bind a property the other
+    leaves open.
+    """
+    shapes = [_described_shape(source) for source in (left, right)]
+    if shapes[0] is None or shapes[1] is None:
+        return FamilyOverlap.UNDECIDED
+    if shapes[0] != shapes[1]:
+        return FamilyOverlap.DISJOINT
+    if left.slot_codes is None or right.slot_codes is None:
+        return FamilyOverlap.UNDECIDED
+    if any(
+        codes is not None
+        and (other := right.slot_codes.get(prop)) is not None
+        and set(codes).isdisjoint(other)
+        for prop, codes in left.slot_codes.items()
+    ):
+        return FamilyOverlap.DISJOINT
+    if _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes):
+        return FamilyOverlap.NESTED
+    return FamilyOverlap.UNDECIDED
+
+
+def _described_shape(source: SelectedSource) -> Mapping[str, object] | None:
+    """`source`'s identity `shape` when it describes a family by schema; `None` otherwise."""
+    shape = _mapping((source.identity or {}).get("shape"))
+    return shape if shape.get("kind") == DESCRIBED_SHAPE_KIND else None
+
+
+def _holds(
+    wider: Mapping[str, tuple[str, ...] | None], narrower: Mapping[str, tuple[str, ...] | None]
+) -> bool:
+    """Whether every property `wider` binds is bound in `narrower` to codes `wider` admits.
+
+    A property either side binds to codes not stated proves nothing.
+    """
+    return all(
+        codes is not None and (inner := narrower.get(prop)) is not None and set(inner) <= set(codes)
+        for prop, codes in wider.items()
+    )
+
+
 def pinned_stat_var(
     identity: Mapping[str, Any], items: Sequence[Mapping[str, Any]], *, slots: object
 ) -> str | None:
@@ -351,12 +490,57 @@ def is_family(source: SelectedSource) -> bool:
     (`_states_one_member`): minted unpinned, it still holds that one StatVar.
     A source that states no pin verdict (one whose identity names its
     StatVars, one carrying no identity, and a record that does not state the
-    field) binds the StatVars `stat_vars` lists, capped upstream well above
-    one, so two or more is a family.
+    field) binds the StatVars `stat_vars` lists, so two or more is a family.
+    One that lists none of a binding `search` states a member digest for is
+    a family when the binding counts two or more members.
     """
     if source.pinned is None:
-        return len(source.stat_vars) > 1
+        if source.stat_vars or source.shape_member_digest is None:
+            return len(source.stat_vars) > 1
+        return (source.shape_member_count or 0) > 1
     return not source.pinned and not _states_one_member(source)
+
+
+def stat_var_count(source: SelectedSource) -> int:
+    """How many StatVars `search` confirmed for `source`.
+
+    `stat_var_member_count` where the envelope states it, and at least as
+    many as `stat_vars` lists. A family `search` states a member digest for
+    lists none of its members.
+    """
+    return max(len(source.stat_vars), source.stat_var_member_count or 0)
+
+
+def posted_stat_vars(source: SelectedSource) -> tuple[str, ...]:
+    """The StatVars a retrieval of `source` posts as `get_data`'s `resolved_stat_var_dcids`.
+
+    A source without `shape_member_digest` lists a recall sample of the
+    binding's confirmed members, and that list is the membership a
+    retrieval asserts, so it posts whole. A pinned source posts its root,
+    which proves a truncated member walk complete. Any other source with a
+    digest is a family the packaged code index elects, which the mint
+    elects again from the same index, so its list is exemplars and it posts
+    none. The membership check compares the family's digest instead
+    (`compiler.evidence._membership_issues`).
+    """
+    if source.shape_member_digest is None or source.pinned:
+        return source.stat_vars
+    return ()
+
+
+def block_posts_stat_vars(block: Mapping[str, object]) -> bool:
+    """Whether a retrieval of a spec block posts the StatVars it lists.
+
+    It applies `posted_stat_vars`'s rule to a raw block, for a caller that
+    builds no source from it (`harness.tool_contracts`, for each clarify
+    candidate): a block without a member digest posts, and a digest block
+    posts only its pinned root."""
+    resolved = _mapping(block.get("resolved"))
+    if _text(_mapping(resolved.get("shape")).get("member_digest")) is None:
+        return True
+    identity = _identity(_mapping(block.get("definition")).get("identity"))
+    items = _sequence(_mapping(resolved.get("stat_vars")).get("items"))
+    return bool(_pinned(identity, items, slots=resolved.get("slots")))
 
 
 def member_digest(dcids: Iterable[str]) -> str:

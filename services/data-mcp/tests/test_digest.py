@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from data_mcp.digest import render_answer, render_digest
 
 # Envelope factories. `spec_id`/`sentence`/`confidence`/`coverage`/`stat_vars`/
@@ -418,51 +419,65 @@ def test_unknown_part_status_renders_a_minimal_block() -> None:
     assert "something_new" in digest
 
 
-def test_definite_digest_names_the_elected_stat_vars_for_get_data() -> None:
-    envelope = _envelope(
-        "definite",
-        spec=_spec(
-            stat_vars=[
-                {"ref": "Count_Person_Female", "label": "Female population"},
-                {"ref": "Count_Person_Male"},
-            ]
+@pytest.mark.parametrize(
+    ("stat_vars", "counted"),
+    [
+        # A family Search states a member digest for, listed without items.
+        (
+            {"items": [], "member_count": 1_454, "member_count_exact": True, "truncated": True},
+            "1,454 StatVars",
         ),
-    )
+        # A recall sample: the members Search confirmed, a floor on the family.
+        (
+            {
+                "items": [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)],
+                "member_count": 5,
+                "member_count_exact": False,
+                "truncated": False,
+            },
+            "at least 5 StatVars",
+        ),
+        # A list with no count is counted, exact unless it is truncated.
+        ({"items": [{"ref": "Count_Person_0"}] * 2, "truncated": True}, "at least 2 StatVars"),
+        ({"items": [{"ref": "Count_Person_0"}], "truncated": False}, "1 StatVar"),
+    ],
+    ids=["digest-family", "recall-sample", "listed-truncated", "listed-one"],
+)
+def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
+    stat_vars: dict[str, Any], counted: str
+) -> None:
+    """A partial list reads to a model as the whole family, or as a pattern to
+    guess other names from, so the digest counts the members and names none."""
+    spec = _spec()
+    spec["resolved"]["stat_vars"] = stat_vars
+    spec["resolved"]["shape"] = {"label": "population"}
+    spec["resolved"]["slots"] = [
+        {
+            "key": {"property": {"dcid": "gender", "label": "gender"}, "label": "sex"},
+            "binding": {"kind": "unbound"},
+        },
+        {
+            "key": {"property": {"dcid": "age", "label": "age"}, "label": "age"},
+            "binding": {"kind": "value", "value": {"ref": {"dcid": "Years15Onwards"}}},
+        },
+        {
+            "key": {"property": {"dcid": "religion", "label": "religion"}},
+            "binding": {"kind": "unbound"},
+        },
+        {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}},
+    ]
+    spec["resolved"]["inapplicable_slots"] = ["religion"]
+    envelope = _envelope("definite", spec=spec)
 
     digest = render_digest(envelope)
 
-    assert (
-        "StatVars for get_data's resolved_stat_var_dcids: "
-        "Count_Person_Female (Female population), Count_Person_Male."
-    ) in digest
+    assert f"Measure: population · {counted} varying by sex." in digest
+    assert "Count_Person" not in digest
+    assert "group" not in digest
 
 
-def test_the_stat_vars_line_caps_at_three_and_counts_the_rest() -> None:
-    """A shortened list is safe to pass back: dfo-apis serves the whole family either way."""
-    items = [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)]
-    envelope = _envelope("definite", spec=_spec(stat_vars=items))
-
-    digest = render_digest(envelope)
-
-    assert (
-        "StatVars for get_data's resolved_stat_var_dcids: Count_Person_0 (group 0), "
-        "Count_Person_1 (group 1), Count_Person_2 (group 2), and 2 more."
-    ) in digest
-    assert "Count_Person_3" not in digest
-
-
-def test_a_stat_var_with_no_string_ref_is_not_named() -> None:
-    """It names no dcid a caller could pass back to `get_data`."""
-    envelope = _envelope(
-        "definite",
-        spec=_spec(stat_vars=[{"ref": 7, "label": "seven"}, {"label": "no ref"}, {"ref": ""}]),
-    )
-
-    assert "StatVars for get_data" not in render_digest(envelope)
-
-
-def test_a_spec_with_no_elected_stat_vars_renders_no_stat_vars_line() -> None:
-    assert "StatVars for get_data" not in render_digest(_envelope("definite", spec=_spec()))
+def test_a_spec_with_no_elected_stat_vars_renders_no_measure_line() -> None:
+    assert "StatVar" not in render_digest(_envelope("definite", spec=_spec()))
 
 
 # Digest rendering, candidates status
@@ -488,7 +503,7 @@ def test_candidates_digest_lists_each_spec_and_notes_truncation() -> None:
     assert "truncated" in digest.lower() or "more candidates" in digest.lower()
 
 
-def test_each_candidate_names_its_own_elected_stat_vars() -> None:
+def test_each_candidate_counts_its_own_stat_vars_naming_none() -> None:
     envelope = _envelope(
         "candidates",
         candidates={
@@ -507,10 +522,12 @@ def test_each_candidate_names_its_own_elected_stat_vars() -> None:
     assert (
         '1. "malaria grants from France to Togo, 2015 to 2024"  [spec_a]\n'
         "   confidence high · has data\n"
-        "   StatVars for get_data's resolved_stat_var_dcids: Count_Person (People).\n\n"
+        "   1 StatVar.\n\n"
         "2. "
     ) in digest
-    assert digest.count("StatVars for get_data") == 1
+    assert digest.count("StatVar") == 1
+    assert "Count_Person" not in digest
+    assert "People" not in digest
 
 
 def test_candidates_digest_renders_bare_coverage() -> None:
@@ -614,6 +631,19 @@ def test_no_data_absent_category_reads_as_no_data_available() -> None:
     assert "no_observations" in digest
 
 
+def test_no_data_message_renders_after_the_header_and_its_absence_changes_nothing() -> None:
+    no_data = {"reason": "no_observations", "category": "absent"}
+    message = "No observations exist for Kenya in 1850."
+
+    plain = render_digest(_envelope("no_data", no_data=no_data))
+    stated = render_digest(
+        _envelope("no_data", no_data={**no_data, "message": message, "added_later": 1})
+    )
+
+    assert message not in plain
+    assert stated.split("\n\n") == [*plain.split("\n\n")[:1], message, *plain.split("\n\n")[1:]]
+
+
 def test_no_data_with_nearest_real_renders_up_to_two() -> None:
     envelope = _envelope(
         "no_data",
@@ -641,7 +671,7 @@ def test_no_data_with_nearest_real_renders_up_to_two() -> None:
     assert "relaxed when" in digest
 
 
-def test_a_nearest_real_spec_names_its_elected_stat_vars() -> None:
+def test_a_nearest_real_spec_counts_its_stat_vars_naming_none() -> None:
     envelope = _envelope(
         "no_data",
         no_data={
@@ -658,10 +688,8 @@ def test_a_nearest_real_spec_names_its_elected_stat_vars() -> None:
 
     digest = render_digest(envelope)
 
-    assert (
-        "[spec_near] — relaxed where\n"
-        "StatVars for get_data's resolved_stat_var_dcids: Count_Person."
-    ) in digest
+    assert "[spec_near] — relaxed where\n1 StatVar." in digest
+    assert "Count_Person" not in digest
 
 
 def test_no_data_without_nearest_real_omits_the_section() -> None:
@@ -672,42 +700,26 @@ def test_no_data_without_nearest_real_omits_the_section() -> None:
     assert "Nearby" not in digest
 
 
-def test_no_data_with_elected_stat_vars_names_the_family_checked() -> None:
+@pytest.mark.parametrize(
+    ("checked", "line"), [(1, "Checked 1 StatVar."), (5, "Checked 5 StatVars.")]
+)
+def test_no_data_counts_the_stat_vars_it_checked_naming_none(checked: int, line: str) -> None:
     envelope = _envelope(
         "no_data",
         no_data={
             "reason": "no_observations",
             "category": "absent",
             "elected_stat_vars": [
-                {"dcid": "MalariaGrantDisbursements", "label": "Malaria grant disbursements"}
+                {"dcid": f"StatVar{i}", "label": f"indicator {i}"} for i in range(checked)
             ],
         },
     )
 
     digest = render_digest(envelope)
 
-    assert "Malaria grant disbursements" in digest
-
-
-def test_no_data_elected_stat_vars_caps_at_three_and_counts_the_rest() -> None:
-    envelope = _envelope(
-        "no_data",
-        no_data={
-            "reason": "no_observations",
-            "category": "absent",
-            "elected_stat_vars": [
-                {"dcid": f"StatVar{i}", "label": f"indicator {i}"} for i in range(5)
-            ],
-        },
-    )
-
-    digest = render_digest(envelope)
-
-    assert "indicator 0" in digest
-    assert "indicator 1" in digest
-    assert "indicator 2" in digest
-    assert "indicator 3" not in digest
-    assert "and 2 more" in digest
+    assert line in digest
+    assert "indicator" not in digest
+    assert "StatVar0" not in digest
 
 
 def test_no_data_without_elected_stat_vars_omits_the_line() -> None:
@@ -715,22 +727,7 @@ def test_no_data_without_elected_stat_vars_omits_the_line() -> None:
 
     digest = render_digest(envelope)
 
-    assert "Checked:" not in digest
-
-
-def test_no_data_elected_stat_vars_with_no_name_omits_the_line() -> None:
-    envelope = _envelope(
-        "no_data",
-        no_data={
-            "reason": "no_observations",
-            "category": "absent",
-            "elected_stat_vars": [{}],
-        },
-    )
-
-    digest = render_digest(envelope)
-
-    assert "Checked:" not in digest
+    assert "Checked" not in digest
 
 
 def test_no_data_flagged_match_with_gate_renders_the_gate_sentence() -> None:

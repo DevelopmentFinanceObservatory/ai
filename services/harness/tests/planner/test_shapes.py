@@ -30,6 +30,7 @@ from planner.shapes import (
     rejects,
     retrieved,
     shared,
+    summed_sides,
     year_filter,
 )
 
@@ -321,6 +322,45 @@ def test_compared_shape_for_completeness():
     assert out.roots == ("req_a", "req_b")
 
 
+# --- summed_sides -------------------------------------------------------------
+
+
+def test_summed_sides_is_one_series_with_no_role_over_the_years_both_cover():
+    left = _shape(roles=(_role(),), roots=("req_a",), period=Period(start=2010, end=2024))
+    right = _shape(roots=("req_b",), period=Period(start=2011, end=2023))
+    out = summed_sides(left, right)
+    assert out.roles == ()
+    assert out.measures == 1
+    assert out.value is ValueKind.MEASURED
+    assert out.one_row_per_entity is True
+    assert out.period == Period(start=2011, end=2023)
+    assert out.roots == ("req_a", "req_b")
+
+
+@pytest.mark.parametrize(
+    ("shape", "other", "refused"),
+    [
+        pytest.param(_shape(), _shape(), False, id="two-measured-series"),
+        pytest.param(
+            _shape(value=ValueKind.DIFFERENCE),
+            _shape(value=ValueKind.DIFFERENCE),
+            False,
+            id="two-absolute-changes",
+        ),
+        pytest.param(_shape(value=ValueKind.RATIO), _shape(), True, id="a-ratio"),
+        pytest.param(_shape(value=ValueKind.ORDINAL), _shape(), True, id="a-rank-position"),
+        pytest.param(
+            _shape(value=ValueKind.DIFFERENCE), _shape(), True, id="a-change-beside-a-level"
+        ),
+        pytest.param(_shape(measures=2), _shape(), True, id="several-measures"),
+    ],
+)
+def test_sum_of_adds_only_two_values_of_one_additive_kind(
+    shape: FrameShape, other: FrameShape, refused: bool
+):
+    assert (rejects(ShapeVerb.SUM_OF, shape, other=other) is not None) is refused
+
+
 # --- joined ------------------------------------------------------------------
 
 
@@ -567,7 +607,7 @@ _POINTS = _shape(roles=(_role(),))
 _ONE_YEAR_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=Period(start=2020, end=2020))
 _UNKNOWN_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=None)
 _PICKED_TOTAL = aggregated(_PICKED, reduction=Reduction.SUM, by_entity=True, by_period=False)
-_ALL_PAIRED = frozenset({ShapeVerb.SHARE_OF, ShapeVerb.COMPARE, ShapeVerb.JOIN})
+_ALL_PAIRED = frozenset({ShapeVerb.SHARE_OF, ShapeVerb.COMPARE, ShapeVerb.SUM_OF, ShapeVerb.JOIN})
 
 
 @pytest.mark.parametrize(
@@ -575,6 +615,7 @@ _ALL_PAIRED = frozenset({ShapeVerb.SHARE_OF, ShapeVerb.COMPARE, ShapeVerb.JOIN})
     [
         pytest.param(ShapeVerb.SHARE_OF, {"axis": None}, id="share_of"),
         pytest.param(ShapeVerb.COMPARE, {}, id="compare"),
+        pytest.param(ShapeVerb.SUM_OF, {}, id="sum_of"),
         pytest.param(ShapeVerb.JOIN, {}, id="join"),
     ],
 )
@@ -829,6 +870,7 @@ _MINIMAL_OPTIONS: dict[ShapeVerb, dict[str, object]] = {
     ShapeVerb.FILTER: {},
     ShapeVerb.SHARE_OF: {"axis": None},
     ShapeVerb.COMPARE: {},
+    ShapeVerb.SUM_OF: {},
     ShapeVerb.JOIN: {},
 }
 

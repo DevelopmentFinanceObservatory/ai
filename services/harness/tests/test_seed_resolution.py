@@ -203,12 +203,16 @@ async def _run(
 
 
 def _kenya_evidence(approved: Any) -> RetrievalEvidence:
-    """What a retrieval of the seed returns: Kenya's one series, as the manifest names it."""
+    """What a retrieval of the seed returns: Kenya's one series, as the manifest names it.
+
+    The members are the ones the seed's block lists: Search states a member
+    digest for the family, so the source read from its answer lists none."""
+    served = tuple(item["ref"] for item in _KENYA["resolved"]["stat_vars"]["items"])
     stats = series_statistics_table(
         [
             SeriesStatisticsModel.model_validate(
                 {
-                    "stat_var": f"dcid:{approved.stat_vars[0]}",
+                    "stat_var": f"dcid:{served[0]}",
                     "entities": [{"role": "destination", "ref": "country/KEN"}],
                     "facet": {"unit": "USD"},
                     "observations": 1,
@@ -224,8 +228,8 @@ def _kenya_evidence(approved: Any) -> RetrievalEvidence:
         origin="manifest",
         spec_id=approved.spec_id,
         has_data=True,
-        stat_vars=(approved.stat_vars[0],),
-        resolved_stat_vars=approved.stat_vars,
+        stat_vars=(served[0],),
+        resolved_stat_vars=served,
         family_member_digest=approved.shape_member_digest,
         family_member_count=approved.shape_member_count,
         entities=(ResolvedEntity(role="destination", ref="country/KEN", label="country/KEN"),),
@@ -267,9 +271,10 @@ async def test_a_label_the_browser_changed_is_never_read_and_search_names_the_en
     (entry,) = posted["input"]["entries"]
     assert entry["identity"] == entry["base_identity"] == _KENYA["definition"]["identity"]
     assert entry["base_spec_id"] == _KENYA["spec_id"]
-    assert entry["resolved_stat_var_dcids"] == [
-        item["ref"] for item in _KENYA["resolved"]["stat_vars"]["items"]
-    ]
+    # A family with a member digest is elected again by Search, so the resubmit
+    # posts none of its StatVars.
+    assert _KENYA["resolved"]["shape"]["member_digest"]
+    assert "resolved_stat_var_dcids" not in entry
 
     uganda = DatasetRequirement(
         id="aid",

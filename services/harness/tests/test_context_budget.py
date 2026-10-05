@@ -1,6 +1,6 @@
-"""Ceilings on what the planner and the translator are handed, and their baseline.
+"""Ceilings on what the planner is handed, and their baseline.
 
-This file measures what the planner and the translator are handed and holds
+This file measures what the planner is handed and holds
 each part of it to a ceiling. The bounds themselves live in production code:
 `planner.plan` limits the plan and cuts user text (`MAX_PLAN_RECORD_CHARS`,
 `cut_user_text`), `harness.studio_state` limits the two digests, and
@@ -10,25 +10,19 @@ from a recorded scenario, and each control test shows its ceiling can fail.
 
 What is bounded is a segment of a request `context_probe.compose` already
 measures: the system instruction, the tool declarations together, each named
-declaration on its own, and the text the planner's or translator's `contents`
-carries. Each realistic-input ceiling is a named constant at the top of this
+declaration on its own, and the text the planner's `contents` carries. Each realistic-input ceiling is a named constant at the top of this
 file with the reason it sits where it does.
 
-`RELAY_BY_AUTHOR_CEILINGS` is the exception to every other ceiling's rounding:
-its values are exact, and zero. The bucket it bounds is the fenced
-foreign-agent relay, ADK relaying the translator's own turn into the planner's
-request (`google.adk.flows.llm_flows._fencing._present_other_agent_message`).
-`harness.planner_seam._PLANNER_BRANCH` stamps the planner's own run with a
-branch, which keeps that relay out, so the bucket measures zero and this
-constant holds it there: a change that lets a fenced part reach the planner
-again fails this test. A run whose events lack the stamp stops earlier,
-because `harness.planner_seam._check_branches` raises when a planner event the
-run appended carries a branch other than that stamp.
+The fenced foreign-agent relay is the exception to every other ceiling's
+rounding: no relayed text may reach the planner at all. ADK relays another
+agent's turn into a request as fenced user text
+(`google.adk.flows.llm_flows._fencing._present_other_agent_message`), and no
+other agent runs inside a planner run, so any relayed part is a regression.
 
 Every realistic-input ceiling is proved live by `test_every_ceiling_fails_when_its_segment_grows`.
-The relay ceiling's own proof is `test_no_relayed_foreign_agent_text_reaches_the_planner`
+The relay guard's own proof is `test_no_relayed_foreign_agent_text_reaches_the_planner`
 paired with `test_the_relay_check_measures_a_relay_that_is_there`, since a
-zero ceiling that cannot go non-zero would pass whatever the code did. A guard
+check for zero that cannot go non-zero would pass whatever the code did. A guard
 test needs a fixture that can fail, or it proves nothing. The proof mutates a
 captured request past the ceiling and re-checks it, leaving production code
 untouched.
@@ -56,11 +50,10 @@ state a property, not a number. The mechanism assertions are what survives
 someone running `just context-baseline` carelessly.
 
 One of those mechanism assertions is about stability, not size, and it is
-the one this whole budget is least able to feel. The planner's prefix is cached
-in production: across the 44 Langfuse traces recorded since the planner and
-translator began sharing one session, 234 of 237 planner calls after a turn's
-first hit the cache, and 46.5% of the planner's input tokens were served from it.
-That saving depends on the prefix being byte-identical from call to call, which is exactly what
+the one this whole budget is least able to feel. The planner's prefix is cached:
+Gemini's implicit caching matches it across requests, and ADK's explicit cache
+(`STUDIO_CONTEXT_CACHE=true`) is built from it. Either saving depends on the prefix
+being byte-identical from call to call. For the explicit cache that is exactly what
 `google.adk.models.gemini_context_cache_manager._generate_cache_fingerprint`
 hashes, and a mismatch there is logged at DEBUG level and silently recreates the
 cache. A change that made the instruction or the tool list vary per request would
@@ -70,8 +63,7 @@ cost the cached share with nothing in the log to say so, which is why
 The scenario is one plan-then-translate round. The seam is handed an already
 drafted plan as `prior_plan`, the way `harness.graph`'s own planner node hands
 it one. The planner's model loads a skill with `get_skill`, answered with one
-full page, then hands that plan to `dfo_translator`. The
-translator's own model calls `translate`, which runs the real mechanical loop
+full page, then calls `translate`, which runs the real mechanical loop
 against a canned `no_data` search and refers the plan back. The planner then has
 no `submit_plan` to reach, so the seam raises `PlannerSeamError` after its
 correction rounds: an unfinished turn, which is what leaves the largest
@@ -86,13 +78,12 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
-from google.adk.agents import LlmAgent
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 from harness import planner_seam, studio_state
@@ -132,7 +123,6 @@ from harness.wire import (
     MAX_SEED_ROLES,
     MAX_SEED_SENTENCE_CHARS,
     MAX_SEED_SOURCE_CHARS,
-    MAX_SEED_STAT_VARS,
     MAX_SEED_TEXT_CHARS,
     MAX_SEEDS,
     MAX_TARGET_YEAR,
@@ -204,6 +194,7 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
+from .decision_drafts import drafts
 from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _gdp_plan, _SeamHarness
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
@@ -217,37 +208,32 @@ _REGENERATE = "just context-baseline"
 # Chars, 25% above today's measurement unless the comment says otherwise.
 
 # The planner's system instruction: the role, the tool protocol, the closing
-# rules, the skills paragraph and the translator paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 14,161 with the skill tools and
-# the translator attached. The margin is 8.5% and covers a hand edit of
+# rules, the skills paragraph and the translating paragraph, assembled by
+# `planner.agent.planner_instruction`. Measured 12,699 with the skill tools and
+# `translate` attached. The margin is 8.5% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 15_400
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 13_780
 
-# Every planner tool declaration together: 42,002 (`propose_plan` 35,883,
-# `dfo_translator` 916, and 5,203 across the smaller ones). The margin is 10%.
-PLANNER_DECLARATIONS_TOTAL_CEILING = 46_300
+# Every planner tool declaration together: 34,130 (`propose_plan` 29,246,
+# `translate` 338, and 4,546 across the smaller ones). The margin is 10%.
+PLANNER_DECLARATIONS_TOTAL_CEILING = 37_550
 
-# `propose_plan`'s own declaration: the `Decision` and `EvidenceRequirement`
-# schemas with their `$defs` tree, and the patch and intent arguments. Measured
-# 29,578, of which the plan's limits (`maxLength` and `maxItems` on 31 fields)
-# are about 520. It sits in the static prefix ADK caches, so it is billed once
-# per cache creation. Its field descriptions are what the planner writes a plan
-# from. The margin is 23%.
-PROPOSE_PLAN_DECLARATION_CEILING = 36_300
+# `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
+# schemas with their `$defs` tree, and the patch, decline, answer and intent
+# arguments. Measured 29,246. It sits in the static prefix every planner call
+# repeats, which Gemini's implicit cache can serve. Its field descriptions are what
+# the planner writes a plan from. The margin is 2%.
+PROPOSE_PLAN_DECLARATION_CEILING = 29_840
 
-# `dfo_translator`'s declaration, built by ADK from the sub-agent's name,
-# description and wrapped `request` argument. Measured 916.
-TRANSLATOR_DECLARATION_CEILING = 1_200
+# `translate`'s declaration, built by ADK from the function's name and
+# docstring. Measured 338.
+TRANSLATE_DECLARATION_CEILING = 420
 
-# The smaller planner declarations at once: `adk_request_input` 2,370,
+# The smaller planner declarations at once: `adk_request_input` 1,713,
 # `get_skill_file` 1,084, `submit_plan` 840, `get_skill` 651 and `reject_plan`
 # 258.
-MINOR_DECLARATIONS_TOTAL_CEILING = 6_400
-
-# The translator's own request: its single `translate` declaration (1,998) plus
-# ADK's closing `set_model_response` (3,666).
-TRANSLATOR_OWN_DECLARATIONS_CEILING = 7_100
+MINOR_DECLARATIONS_TOTAL_CEILING = 5_690
 
 # The planner's `contents` history on its largest captured generation, less
 # the skill text `SKILL_PAGE_CEILING` bounds on its own (1,849 chars, the
@@ -267,7 +253,7 @@ SKILL_PAGE_CEILING = 40_800
 # (`harness.planner_seam._ENVELOPE_CONTEXT`): the resolve envelope, the two
 # digests, the plan being changed and the question. A session sends it on its
 # first planner call and only the ask thereafter, so this bounds what that one
-# call is billed in full before ADK's cache covers it.
+# call is billed in full before a cache can serve it.
 # `harness.planner_seam._render_envelope` and `_plan_context` render the
 # envelope and the prior plan as line-rendered digests, which is what this
 # bounds.
@@ -284,39 +270,6 @@ SKILL_PAGE_CEILING = 40_800
 # compiled case, as this file's own convention says, not above the fixture's
 # two-requirement number.
 SEAM_BRIEF_CEILING = 14_300
-
-# The translator's `contents` history on its largest captured generation
-# (343 chars). The translator starts fresh on every `dfo_translator` call, so
-# this stays near one turn's own tool exchange.
-TRANSLATOR_CONTENTS_CEILING = 500
-
-# The fenced foreign-agent relay in the planner's `contents`, ceiling per author,
-# not one for the bucket. `dfo_translator`'s payload was 509 chars here
-# and 17,243 on the reference trace. ADK's own preamble is on its own row.
-RELAY_BY_AUTHOR_CEILINGS: dict[str, int] = {
-    # `harness.planner_seam._PLANNER_BRANCH` stamps the planner's own run with
-    # a branch, which removes the translator's relay. Zero is the guarantee
-    # itself, not a rounded measurement: any non-zero reading means ADK is
-    # relaying another agent's turn into the planner again. Without that
-    # branch stamp it measured 509 chars of payload here.
-    "dfo_translator": 0,
-    # ADK's own preamble, about 409 chars emitted once per relayed event, so it
-    # scales with the count of relays, not with what they said. It measured
-    # 818 here (2 events) without the branch stamp. Kept on its own row and
-    # not merged into the translator's, because a fix that moved the payloads
-    # while leaving the framing would otherwise report a partial win against a
-    # number the preamble kept up.
-    "untagged": 0,
-}
-
-# Authors this scenario is expected to see at all. A new author is a new row and
-# must be added deliberately, with a ceiling: `_by_author_type` is what keeps an
-# unexpected one from appearing as an unceilinged number.
-RELAY_AUTHORS = frozenset(RELAY_BY_AUTHOR_CEILINGS)
-
-# The agent name `context_probe` gives ADK's own relay preamble, which carries the
-# markers without an `[author]` tag.
-_UNTAGGED_RELAY = "untagged"
 
 
 # The measured scenario ----------------------------------------------------------
@@ -368,23 +321,18 @@ def _skill_page() -> ToolCallResult:
     return ToolCallResult(is_error=False, text=with_closing_line(page.text, closing))
 
 
-def _scripts() -> tuple[list[Any], list[Any]]:
-    """The planner's script and the translator's, for one round.
+def _script() -> list[Any]:
+    """The planner's script for one round.
 
-    The planner loads a skill, hands the plan to the translator, and then
-    produces text, which the seam corrects twice before raising. The translator calls `translate` once per its own generation. The
-    later entries only exist to close a turn the seam's own stall guard may
-    already have ended.
+    The planner loads a skill, calls `translate`, and then produces text,
+    which the seam corrects twice before raising. The later entries only exist
+    to close a turn the seam's own stall guard may already have ended.
     """
-    planner_script: list[Any] = [
+    return [
         [("get_skill", {"skill_id": "dfo-faq"})],
-        [("dfo_translator", {"request": "find debt service for kenya"})],
+        [("translate", {})],
+        *["nothing to submit"] * 4,
     ]
-    planner_script.extend(["nothing to submit"] * 4)
-    # `translator.agent._before_translator_model` opens each translator turn on
-    # `translate` itself, so the model is asked only to close it.
-    translator_script: list[Any] = ["no data", "no data"]
-    return planner_script, translator_script
 
 
 async def _recorded_round(
@@ -395,26 +343,21 @@ async def _recorded_round(
     derived_requirement: Callable[..., Any],
     context: dict[str, Any] | None = None,
 ) -> dict[str, tuple[list[dict[str, Any]], list[Any]]]:
-    """One plan-then-translate round, with every request both models were handed.
+    """One plan-then-translate round, with every request the planner's model was handed.
 
     `context` is what the seam's brief carries besides the plan: the resolve
     `envelope` and the `canvas_digest` and `conversation_digest`. Left out, the
     envelope is empty and there are no digests, the smallest brief the seam
     renders.
 
-    Returns `{"planner": (records, requests), "translator": (records, requests)}`:
-    each agent's `context_probe.compose` records in call order, and the raw
-    `LlmRequest` objects the stability assertions compare byte for byte.
+    Returns `{"planner": (records, requests)}`: the `context_probe.compose`
+    records in call order, and the raw `LlmRequest` objects the stability
+    assertions compare byte for byte.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     seam = _seam()
-    planner_script, translator_script = _scripts()
-    planner_llm = RecordingLlm(script=planner_script, agent_name="planner", scenario=scenario)
-    translator_llm = RecordingLlm(
-        script=translator_script, agent_name="translator", scenario=scenario
-    )
+    planner_llm = RecordingLlm(script=_script(), agent_name="planner", scenario=scenario)
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _SeamHarness().run(
@@ -424,10 +367,7 @@ async def _recorded_round(
             **({"envelope": {}} if context is None else context),
         )
 
-    return {
-        "planner": (planner_llm.record, planner_llm.captured),
-        "translator": (translator_llm.record, translator_llm.captured),
-    }
+    return {"planner": (planner_llm.record, planner_llm.captured)}
 
 
 async def _all_records(
@@ -443,7 +383,7 @@ async def _all_records(
         requirement=requirement,
         derived_requirement=derived_requirement,
     )
-    return [record for agent in ("planner", "translator") for record in measured[agent][0]]
+    return list(measured["planner"][0])
 
 
 # Baseline -----------------------------------------------------------------------
@@ -501,8 +441,7 @@ async def measured(
             derived_requirement=derived_requirement,
             context=context,
         )
-        for agent in ("planner", "translator"):
-            measured[(scenario, agent)] = round_measured[agent]
+        measured[(scenario, "planner")] = round_measured["planner"]
 
     if os.environ.get("CONTEXT_BASELINE_UPDATE") == "1":
         _write_baseline([record for records, _requests in measured.values() for record in records])
@@ -612,9 +551,9 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
             PROPOSE_PLAN_DECLARATION_CEILING,
         ),
         (
-            "dfo_translator declaration",
-            _declaration(record, "dfo_translator"),
-            TRANSLATOR_DECLARATION_CEILING,
+            "translate declaration",
+            _declaration(record, "translate"),
+            TRANSLATE_DECLARATION_CEILING,
         ),
         (
             "minor planner declarations",
@@ -631,26 +570,14 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
     ]
 
 
-def _declare_for_translator(record: dict[str, Any]) -> list[tuple[str, int, int]]:
-    """The same, for the translator's own request."""
-    return [
-        (
-            "translator declarations",
-            record["declaration_total_chars"],
-            TRANSLATOR_OWN_DECLARATIONS_CEILING,
-        ),
-        ("translator contents", record["contents"]["total_chars"], TRANSLATOR_CONTENTS_CEILING),
-    ]
-
-
 # The bucket `context_probe` files a `get_skill` answer under.
 SKILL_BUCKET = "functionResponse:get_skill"
 
 
 # Everything a planner request declares other than `propose_plan` and
-# `dfo_translator`: the two declarations bounded individually above, not
-# lumped into this total.
-_NAMED_DECLARATIONS = ("propose_plan", "dfo_translator")
+# `translate`: the two declarations bounded individually above, not lumped
+# into this total.
+_NAMED_DECLARATIONS = ("propose_plan", "translate")
 
 
 def _minor_declarations(record: dict[str, Any]) -> int:
@@ -660,7 +587,7 @@ def _minor_declarations(record: dict[str, Any]) -> int:
 
 
 def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> None:
-    """Every bound holds on the largest request each agent was handed.
+    """Every bound holds on the largest request the planner was handed.
 
     The planner's request has to carry the full skill page the scenario serves,
     so a round that stopped calling `get_skill` cannot clear the skill ceiling
@@ -672,8 +599,6 @@ def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> Non
         f"{_baseline_key(planner)} carries no full `get_skill` page: the round did not load one"
     )
     checked.extend(_declare(planner))
-    translator = _largest(records, scenario="realistic", agent="translator")
-    checked.extend(_declare_for_translator(translator))
 
     over = [
         f"{label}: {measured} chars > ceiling {ceiling}"
@@ -681,7 +606,7 @@ def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> Non
         if measured > ceiling
     ]
     assert not over, (
-        "a segment of the planner or translator request outgrew its stated bound:\n  "
+        "a segment of the planner request outgrew its stated bound:\n  "
         + "\n  ".join(over)
         + f"\nA deliberate change means {_REGENERATE}, then this file's ceiling constant."
     )
@@ -690,17 +615,11 @@ def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> Non
 def test_no_relayed_foreign_agent_text_reaches_the_planner(
     records: list[dict[str, Any]],
 ) -> None:
-    """No author's relayed text reaches the planner, each author checked on its own.
+    """No relayed text reaches the planner, tagged with an author or not.
 
-    `harness.planner_seam._PLANNER_BRANCH` stamps the planner's own run with a
-    branch, which keeps ADK from relaying the translator's turn in. This is
-    the guard on that mechanism.
-
-    Per author, not per bucket: the translator's payloads and ADK's own preamble
-    are separate numbers, so a change that silenced one while leaving the other
-    cannot report as progress. The preamble is the one to watch, since it only
-    exists to introduce a relay and scales with the number of them, not
-    with what any said.
+    `translate` runs inside the planner's own tool call, and
+    `harness.planner_seam._PLANNER_BRANCH` keeps another agent's turns off the
+    planner's branch, so no fenced relay belongs in a planner request.
     """
     planner_records = [
         record
@@ -710,53 +629,31 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
     assert planner_records, "no realistic planner request captured (the round did not run)"
     for record in planner_records:
         found = relay_buckets(record)
-        unexpected = sorted(set(found) - RELAY_AUTHORS)
-        assert not unexpected, (
-            f"{_baseline_key(record)}: relayed text authored by {unexpected}, which "
-            "has no ceiling here. The guarantee covers `dfo_translator` and the "
-            "`untagged` preamble. A third author is a new surface and needs its own "
-            "entry in `RELAY_BY_AUTHOR_CEILINGS`."
-        )
-        over = [
-            f"{author}: {chars} chars > ceiling {RELAY_BY_AUTHOR_CEILINGS[author]}"
-            for author, chars in sorted(found.items())
-            if chars > RELAY_BY_AUTHOR_CEILINGS[author]
-        ]
-        assert not over, (
+        assert not found, (
             f"{_baseline_key(record)}: the planner is carrying relayed foreign-agent "
-            "text again:\n  "
-            + "\n  ".join(over)
-            + "\nADK is relaying another agent's turn into this request. The fix that "
-            "removed it is the branch stamp in `harness.planner_seam`. Reverting that "
-            "stamp reproduces exactly this failure."
+            f"text: {found}. ADK is relaying another agent's turn into this request."
         )
 
 
 def test_the_relay_check_measures_a_relay_that_is_there() -> None:
-    """The zero ceilings are only meaningful if the bucket can be non-zero.
+    """The relay guard is only meaningful if the bucket can be non-empty.
 
-    The control for `RELAY_BY_AUTHOR_CEILINGS`: a bucket that always read zero,
-    or a marker match that had drifted from what `_fencing` emits, would pass
-    `test_no_relayed_foreign_agent_text_reaches_the_planner` for the wrong reason
-    and would pass most convincingly on the day the relay came back. The relay
-    built here is ADK's own framing: one tagged part naming the author, then
-    the fenced payload, and every author's bound must reject it.
+    The control for `test_no_relayed_foreign_agent_text_reaches_the_planner`: a
+    bucket that always read empty, or a marker match that had drifted from
+    what `_fencing` emits, would pass that test for the wrong reason. The
+    relay built here is ADK's own framing: one tagged part naming the author,
+    then the fenced payload.
     """
     request = _request(
         tool_names=["propose_plan"],
         texts=[],
-        relay=("dfo_translator", 4_000),
+        relay=("dfo_orchestrator", 4_000),
     )
     record = compose(request, agent="planner", scenario="realistic", call_index=0)
 
     found = relay_buckets(record)
-    assert set(found) == {"dfo_translator", "untagged"}, found
-    over = [
-        author for author, chars in found.items() if chars > RELAY_BY_AUTHOR_CEILINGS.get(author, 0)
-    ]
-    assert sorted(over) == ["dfo_translator", "untagged"], (
-        f"a zero ceiling did not fail on a relay built to exceed it: {found}"
-    )
+    assert set(found) == {"dfo_orchestrator", "untagged"}, found
+    assert all(found.values()), found
 
 
 # Mechanism assertions -----------------------------------------------------------
@@ -781,12 +678,10 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
     recreates the cache: a fail-open degradation with no loud path, which is
     why this assertion is not redundant with ADK's own behaviour.
 
-    What it protects is measured: across the 44 Langfuse traces recorded since the planner and translator
-    began sharing one session, 234 of 237 planner calls after a turn's first
-    hit the cache, and 46.5% of the planner's input tokens were served from
-    it. The change most
-    likely to break it is setting `static_instruction` or moving to an
-    `InstructionProvider`, either of which can make the instruction vary per
+    A stable prefix is what Gemini's implicit caching matches across requests,
+    and what the explicit cache (`STUDIO_CONTEXT_CACHE=true`) fingerprints. The
+    change most likely to break it is setting `static_instruction` or moving to
+    an `InstructionProvider`, either of which can make the instruction vary per
     request and destroy that saving with nothing in the log to say so.
 
     Two things ADK already handles, so nothing here tests for them: it sorts each
@@ -794,12 +689,6 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
     hashing, so reordering is safe; and the declarations only have to be
     invariant within one run, not between conversations, so growth between runs
     is safe.
-
-    The translator's pair is checked in
-    `tests/translator/test_reasoning_effort.py`, on a ranking turn. A clean
-    translation reaches the translator's model once (the opener supplies
-    `translate`), so this scenario captures one translator request and no
-    pair. A ranking turn is where the translator makes two generations.
     """
     _records, requests = measured[("realistic", "planner")]
     assert len(requests) >= 2, (
@@ -950,7 +839,7 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
     `get_skill` answer past its own.
     """
     request = _request(
-        tool_names=["propose_plan", "dfo_translator", "adk_request_input", "submit_plan"],
+        tool_names=["propose_plan", "translate", "adk_request_input", "submit_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
         skill=SKILL_PAGE_CEILING + 1,
@@ -962,22 +851,6 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
         "a ceiling did not fail on a request built to exceed it, so that bound is not "
         f"live. Missing from the reported set: {sorted(expected - reported)}"
     )
-
-    translator_request = _request(
-        tool_names=["translate", "set_model_response"], texts=["t" * _INFLATED]
-    )
-    inflated_translator = compose(
-        translator_request, agent="translator", scenario="realistic", call_index=0
-    )
-    translator_reported = {
-        label
-        for label, measured, ceiling in _declare_for_translator(inflated_translator)
-        if measured > ceiling
-    }
-    assert translator_reported == {
-        "translator declarations",
-        "translator contents",
-    }, f"a translator ceiling is not live: {sorted(translator_reported)}"
 
 
 # The seam brief at its realistic upper end --------------------------------------
@@ -1203,7 +1076,7 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
     past the ceiling), and requires the bound to report.
     """
     request = _request(
-        tool_names=["propose_plan", "dfo_translator", "adk_request_input", "submit_plan"],
+        tool_names=["propose_plan", "translate", "adk_request_input", "submit_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
     )
@@ -1433,6 +1306,7 @@ def _maximal_envelope() -> dict[str, Any]:
         "wide": long,
         "stat_var_shape_kind": long,
         "stat_var_item_count": long,
+        "stat_var_member_count_exact": True,
         "entity_roles": [long] * 8,
         "stat_var_truncated": long,
         "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
@@ -1449,6 +1323,7 @@ def _maximal_envelope() -> dict[str, Any]:
                 "wide": long,
                 "stat_var_shape_kind": long,
                 "stat_var_item_count": long,
+                "stat_var_member_count_exact": True,
                 "entity_roles": [long] * 8,
                 "stat_var_truncated": long,
                 "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
@@ -1636,7 +1511,7 @@ def test_a_seed_s_description_stays_under_its_ceiling() -> None:
 def test_a_seed_described_past_the_ceiling_is_refused_not_cut() -> None:
     """The control: one more entity than fits refuses the seed, with the size."""
     seed, entities = fullest_described_seed(0)
-    over = bounded_seed(0, entities=entities + 1, stat_vars=MAX_SEED_STAT_VARS)
+    over = bounded_seed(0, entities=entities + 1)
 
     read_seed(0, seed)
     with pytest.raises(ValueError, match="characters to describe, past the cap of 65,536"):
@@ -1727,7 +1602,7 @@ def test_the_seeded_sources_state_stays_under_its_ceiling_across_drafts_and_amen
             result = propose.func(
                 question="q",
                 answer_mode="series",
-                decisions=[
+                decisions=drafts(
                     pinning_decision(
                         spec_id,
                         slot=f"d{index}",
@@ -1737,7 +1612,7 @@ def test_the_seeded_sources_state_stays_under_its_ceiling_across_drafts_and_amen
                         rationale="r",
                     )
                     for index, spec_id in pins
-                ],
+                ),
                 evidence_requirements=[
                     requirement(
                         id=f"r{index}",
@@ -2254,18 +2129,19 @@ def test_the_propose_plan_declaration_carries_the_plan_limits(measured: Any) -> 
     def properties(model: str) -> dict[str, Any]:
         return definitions[model]["properties"]
 
-    assert properties("Decision")["description"].get("maxLength") == MAX_DECISION_DESCRIPTION_CHARS
-    assert properties("Decision")["rationale"].get("maxLength") == MAX_DECISION_RATIONALE_CHARS
-    assert properties("Decision")["chosen"].get("maxLength") == MAX_OPTION_CHARS
-    assert properties("Decision")["options"].get("maxItems") == MAX_DECISION_OPTIONS
-    assert properties("Decision")["options"]["items"].get("maxLength") == MAX_OPTION_CHARS
-    assert properties("DatasetRequirement")["measure"].get("maxLength") == MAX_MEASURE_CHARS
     assert (
-        properties("DatasetRequirement")["source"]["anyOf"][0].get("maxLength") == MAX_SOURCE_CHARS
+        properties("DecisionDraft")["description"].get("maxLength")
+        == MAX_DECISION_DESCRIPTION_CHARS
     )
+    assert properties("DecisionDraft")["rationale"].get("maxLength") == MAX_DECISION_RATIONALE_CHARS
+    assert properties("DecisionDraft")["chosen"].get("maxLength") == MAX_OPTION_CHARS
+    assert properties("DecisionDraft")["options"].get("maxItems") == MAX_DECISION_OPTIONS
+    assert properties("DecisionDraft")["options"]["items"].get("maxLength") == MAX_OPTION_CHARS
+    assert properties("DatasetRequirement")["measure"].get("maxLength") == MAX_MEASURE_CHARS
+    assert properties("DatasetRequirement")["source"].get("maxLength") == MAX_SOURCE_CHARS
     assert properties("DatasetRequirement")["entities"].get("maxItems") == MAX_ENTITIES
     assert properties("Entity")["name"].get("maxLength") == MAX_ENTITY_NAME_CHARS
-    assert properties("Entity")["role"]["anyOf"][0].get("maxLength") == MAX_ENTITY_ROLE_CHARS
+    assert properties("Entity")["role"].get("maxLength") == MAX_ENTITY_ROLE_CHARS
     assert properties("EntityIn")["names"].get("maxItems") == MAX_ENTITIES
     assert properties("FilterRequirement")["predicates"].get("maxItems") == MAX_PREDICATES
     unbounded = [

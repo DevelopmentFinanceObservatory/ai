@@ -78,9 +78,10 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
+from common.price_basis import price_basis_reading
 from data_mcp.manifest import Manifest
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
 from planner.parties import Party, across_party, flow_side, place_qualified_party
@@ -99,7 +100,7 @@ from planner.records import (
     StrictModel,
 )
 from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource
-from pydantic import ConfigDict, JsonValue
+from pydantic import ConfigDict, JsonValue, ValidationError
 
 from compiler.frame_columns import columns_on_axes
 from compiler.sources import member_digest
@@ -158,6 +159,12 @@ class RetrievalEvidence(StrictModel):
     statistics name each entity's role by the column the frame carries
     (`financingProvider`), so this is what ties the two together. `None` at
     discovery origin.
+
+    A unit is stated in one of two forms. `unit_ref` and `unit_label` hold a
+    unit named by reference (a Data Commons unit dcid such as `CurrencyUSD`)
+    and its text. `stated_unit` holds a unit stated field by field, the
+    frame grammar's `{currency, prices, base_year}` object a mint serves when
+    its definition binds the unit by request. Only a manifest carries it.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -174,6 +181,7 @@ class RetrievalEvidence(StrictModel):
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
+    stated_unit: Unit | None = None
     provenance_ref: str | None = None
     provenance_label: str | None = None
     window: Period | None = None
@@ -234,6 +242,7 @@ def evidence_from_manifest(
     if manifest.definition is None:
         raise ValueError("the manifest describes a collection, not one definition")
     units = _series_units(series_stats) if series_stats is not None else set()
+    unit = next(iter(units)) if len(units) == 1 else None
     sources = manifest.citation.sources
     return RetrievalEvidence(
         origin="manifest",
@@ -247,7 +256,8 @@ def evidence_from_manifest(
         axis_by_column={
             dimension.label: dimension.axis for dimension in manifest.coverage.dimensions
         },
-        unit_ref=next(iter(units)) if len(units) == 1 else None,
+        unit_ref=unit if isinstance(unit, str) else None,
+        stated_unit=unit if isinstance(unit, Unit) else None,
         provenance_ref="; ".join(one.ref for one in sources) or None,
         provenance_label="; ".join(one.label for one in sources) or None,
         window=_window_of(series_stats),
@@ -344,14 +354,20 @@ def resolve_entity(entity: Entity, resolved: Sequence[ResolvedEntity]) -> Resolv
     """Return the one resolved entity that answers `entity`, or `None` when none or several do.
 
     Matches `Entity.name` against `label`, case-folded. When the requirement
-    states a role, a match whose role column names it is preferred, so a name
+    states a role, a match whose role column names it, or sits on the same
+    side of the flow (`donor` and `origin`), is preferred, so a name
     resolving under several role columns is told apart.
     """
     wanted = entity.name.casefold()
     matches = [one for one in resolved if one.label.casefold() == wanted]
     if entity.role is not None and len(matches) > 1:
         role = entity.role.casefold()
-        matches = [one for one in matches if one.role.casefold() == role]
+        side = flow_side(role)
+        matches = [
+            one
+            for one in matches
+            if one.role.casefold() == role or (side is not None and flow_side(one.role) == side)
+        ]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -933,6 +949,34 @@ _CURRENCY_SYMBOLS: dict[str, str] = {"US$": "USD", "$": "USD", "€": "EUR", "£
 # currency; extend it when a source reports in another.
 _KNOWN_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CNY", "CHF", "CAD", "AUD", "XDR"})
 
+# The unit ids that name a currency structurally, read before any text
+# heuristic: Data Commons' `Currency<ISO>` (any ISO-4217 code, so the closed
+# set above does not apply), its `USDollar`, this deployment's
+# constant-price `Constant<ISO>_<year>`, and the SDG/OECD
+# `SDG_CU_<ISO>`/`SDG_CON[_<year>]_<ISO>` family with an optional magnitude
+# suffix. The first three are one letter run each, so the letter scan below
+# cannot see the code inside them, and the scan reads no basis from `CU` or
+# `CON`.
+_CURRENCY_DCID = re.compile(r"Currency(?P<currency>[A-Z]{3})")
+_CONSTANT_PRICE_DCID = re.compile(r"Constant(?P<currency>[A-Z]{3})_(?P<year>\d{4})")
+_SDG_PRICE_BASIS_ID = re.compile(
+    r"SDG_(?:(?P<current>CU)|CON(?:_(?P<year>\d{4}))?)_(?P<currency>[A-Z]{3})(?:_[KMB])?"
+)
+_NAMED_CURRENCY_DCIDS = {"USDollar": "USD"}
+
+# What a unit in international dollars reads as. Purchasing-power-parity
+# dollars carry no ISO-4217 code and are not US dollars, though the UN's id
+# for them names USD (`undata/UNIT_MEASURE-CR_USD_PPP`), so a `PPP` segment
+# of a unit id, or Data Commons' `InternationalDollar`, reads as this rather
+# than as the currency beside it. A unit's text reads the same way when it
+# says "PPP", "purchasing power parity" or "international dollars", whatever
+# symbol it carries, before any symbol maps to a currency.
+_PPP = "PPP"
+_PPP_DCIDS = frozenset({"InternationalDollar"})
+_PPP_TEXT = re.compile(
+    r"\bPPP\b|purchasing[\s-]+power[\s-]+parity|international\s+(?:dollars?|\$)", re.IGNORECASE
+)
+
 # A run of letters, in either case. Not `\b`-delimited words: `_` is a word
 # character, so a word boundary cannot see the "USD" in "SDG_CU_USD_M". The
 # closed currency set above is what keeps a bare letter scan safe.
@@ -944,6 +988,59 @@ PriceBasis = Literal["current", "constant"]
 _CONSTANT_WORDS = frozenset({"constant", "real", "deflated"})
 _CURRENT_WORDS = frozenset({"current", "nominal"})
 _YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+
+
+class UnitReading(NamedTuple):
+    """What a source's unit states: a currency, a price basis, and a base year,
+    each `None` when the unit does not state it."""
+
+    currency: str | None = None
+    prices: PriceBasis | None = None
+    base_year: int | None = None
+
+
+def _read_unit(evidence: RetrievalEvidence, described: str) -> UnitReading:
+    """Read the unit `evidence` states: a field-by-field unit as it stands, a
+    unit dcid by its structure, and whatever either leaves unstated from the
+    unit's text."""
+    if (stated := evidence.stated_unit) is not None:
+        return UnitReading(stated.currency, stated.prices, stated.base_year)
+    by_ref = read_unit_dcid(evidence.unit_ref)
+    prices, base_year = (
+        (by_ref.prices, by_ref.base_year)
+        if by_ref.prices is not None
+        else _detect_price_basis(described)
+    )
+    currency = by_ref.currency or (
+        _PPP
+        if _PPP_TEXT.search(described)
+        else _detect_currency(evidence.unit_ref, evidence.unit_label)
+    )
+    return UnitReading(currency, prices, base_year)
+
+
+def read_unit_dcid(ref: str | None) -> UnitReading:
+    """The currency and price basis a unit id's own structure names."""
+    if ref is None:
+        return UnitReading()
+    dcid = ref.removeprefix("dcid:")
+    if dcid in _PPP_DCIDS or _PPP in _LETTER_RUNS.findall(dcid):
+        return UnitReading(currency=_PPP)
+    if match := _CURRENCY_DCID.fullmatch(dcid):
+        return UnitReading(currency=match["currency"])
+    if match := _CONSTANT_PRICE_DCID.fullmatch(dcid):
+        return UnitReading(match["currency"], "constant", int(match["year"]))
+    if match := _SDG_PRICE_BASIS_ID.fullmatch(dcid):
+        return _sdg_unit_reading(match)
+    return UnitReading(currency=_NAMED_CURRENCY_DCIDS.get(dcid))
+
+
+def _sdg_unit_reading(match: re.Match[str]) -> UnitReading:
+    """The currency and price basis an `_SDG_PRICE_BASIS_ID` match names."""
+    if match["current"]:
+        return UnitReading(match["currency"], "current")
+    year = match["year"]
+    return UnitReading(match["currency"], "constant", int(year) if year else None)
 
 
 def _detect_currency(*parts: str | None) -> str | None:
@@ -979,9 +1076,8 @@ def _unit_issues(
     unit = requirement.unit
     if unit is None:
         return []
-    described = " ".join(part for part in (evidence.unit_ref, evidence.unit_label) if part)
-    currency = _detect_currency(evidence.unit_ref, evidence.unit_label)
-    basis, base_year = _detect_price_basis(described)
+    described = _describe_unit(evidence)
+    currency, basis, base_year = _read_unit(evidence, described)
     issues: list[EvidenceIssue] = []
     if currency == unit.currency:
         stated = f" in {basis} prices" if basis is not None else ""
@@ -1030,6 +1126,15 @@ def _unit_issues(
         )
     issues.extend(_price_basis_issues(requirement, unit, described, basis, base_year))
     return issues
+
+
+def _describe_unit(evidence: RetrievalEvidence) -> str:
+    """The unit `evidence` states, as the issues quote it."""
+    if (stated := evidence.stated_unit) is not None:
+        return price_basis_reading(
+            currency=stated.currency, prices=stated.prices, base_year=stated.base_year
+        )
+    return " ".join(part for part in (evidence.unit_ref, evidence.unit_label) if part)
 
 
 def _price_basis_issues(
@@ -1839,14 +1944,21 @@ def _family_member_count(trace: Mapping[str, object]) -> int | None:
     return count
 
 
-def _facet_unit(value: object) -> str | None:
-    """The unit a series' facet states, whether as a bare ref or a `{ref, label}` block."""
+def _facet_unit(value: object) -> str | Unit | None:
+    """The unit a series' facet states: a bare ref, a `{ref, label}` block,
+    or the frame grammar's `{currency, prices, base_year}` object. An object
+    outside that grammar states no unit."""
     if isinstance(value, str):
         return value or None
-    if isinstance(value, dict):
-        ref = value.get("ref") or value.get("label")
-        return ref if isinstance(ref, str) and ref else None
-    return None
+    if not isinstance(value, dict):
+        return None
+    if "currency" in value:
+        try:
+            return Unit.model_validate(value)
+        except ValidationError:
+            return None
+    ref = value.get("ref") or value.get("label")
+    return ref if isinstance(ref, str) and ref else None
 
 
 def _year_of(period: str) -> int | None:
@@ -1895,7 +2007,7 @@ def _series_entities(series: pa.Table) -> tuple[ResolvedEntity, ...]:
     )
 
 
-def _series_units(series: pa.Table) -> set[str]:
+def _series_units(series: pa.Table) -> set[str | Unit]:
     """The units the facets of `series` state, read once per distinct facet."""
     distinct = array_kernel("unique", _column(series, "facet")).to_pylist()
     facets = (json.loads(facet) for facet in distinct)

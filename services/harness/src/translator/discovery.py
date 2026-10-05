@@ -79,9 +79,11 @@ together is one `search` deadline -- 30 s, the deadline `search` and
 `describe` share (per the capability row) -- per wave of concurrent calls
 the budget admits, rather than one deadline per call. A turn discovering
 `DISCOVERY_CALL_BUDGET` requirements at once waits out that one deadline
-together. Once the search budget is spent, a caller sees
-the same `budget_exhausted` refusal (`_budget_error`, action
-`return_to_planner`) whether it was spent on answers or on timeouts.
+together. Once the search budget is spent, a caller sees the same
+`budget_exhausted` refusal (`_budget_error`, action `return_to_planner`)
+whether it was spent on answers or on timeouts. The referral it names is
+the transient `discovery_unavailable` when the most recent call that spent
+it timed out and `discovery_budget_exhausted` otherwise (`_budget_referral`).
 """
 
 from __future__ import annotations
@@ -92,7 +94,7 @@ import uuid
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from enum import StrEnum
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 from weakref import WeakValueDictionary
 
 import rfc8785
@@ -101,17 +103,17 @@ from compiler.sources import (
     EXACT_COVERAGE,
     DiscoveryStatus,
     PartWarning,
+    is_family,
     outcome_from_envelope,
     source_from_spec_block,
+    stat_var_count,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
+from planner.parties import party_role
 from planner.plan import (
-    ENVELOPE_SPEC_BLOCK_STATE_KEY,
-    ENVELOPE_SPEC_STATE_KEY,
-    ENVELOPE_SPEC_WARNINGS_STATE_KEY,
     DatasetRequirement,
     Plan,
     PlanStatus,
@@ -120,6 +122,7 @@ from planner.plan import (
     dataset_of,
     load_plan,
     names_dropped_seed,
+    pin_sources,
     plan_revision,
     seeded_source,
     seeded_sources,
@@ -148,7 +151,7 @@ DISCOVERY_CALL_BUDGET_PER_REQUIREMENT = 4
 
 # The session-state slot holding the `DiscoveryLog`. Session-scoped, so what
 # one revision discovered stays known to a later one. `calls` is counted per
-# plan revision; `selectable`, `candidates_for` and `nearest_for` are counted
+# plan revision; `selectable`, `candidates_for`, `pinnable_for` and `nearest_for` are counted
 # per requirement instead -- see `requirement_revision`.
 DISCOVERY_STATE_KEY = "translator:discovery"
 
@@ -178,9 +181,11 @@ BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_p
 # the turn dropped (`planner.plan.names_dropped_seed`).
 SEED_DROPPED_BLOCK = "seed_dropped"
 
-# The answers a pin may be honoured from. A `no_data` answer's nearest real
-# series are offered instead of the ask, not as it, so a pin among them is
-# not the source the search found for the requirement.
+# The answers a pin may be honoured from. A pin the planner chose among a
+# `source_ambiguous` referral's candidates is honoured from the `candidates`
+# answer a search for the pinned requirement gives again. A `no_data`
+# answer's nearest real series are offered instead of the ask, not as it, so
+# a pin among them is not the source the search found for the requirement.
 _PIN_HONOURING = frozenset({DiscoveryStatus.DEFINITE, DiscoveryStatus.CANDIDATES})
 
 # The referral kind to point at for each answer that is not `definite`. A
@@ -199,7 +204,7 @@ class DiscoveryRecord(StrictModel):
     what scopes `calls` and `DISCOVERY_CALL_BUDGET` to one revision of the
     plan. `requirement_key` is the same call's requirement's own
     `requirement_revision`, which is what scopes `selectable`,
-    `candidates_for` and `nearest_for` instead -- unlike `revision`, it does
+    `candidates_for`, `pinnable_for` and `nearest_for` instead -- unlike `revision`, it does
     not change when a different requirement or a decision is edited, only
     when this requirement's own searched content or pin does. Both are
     carried because they answer different questions: `revision` bounds cost
@@ -327,6 +332,22 @@ class DiscoveryLog(StrictModel):
             and record.tool == "search"
         )
 
+    def last_call_timed_out(self, revision: str, requirement_id: str | None = None) -> str | None:
+        """The requirement of `revision`'s most recent `search` call, or of its
+        most recent one on `requirement_id`, when that call timed out; `None`
+        when it was answered or there is none."""
+        last = next(
+            (
+                record
+                for record in reversed(self.records)
+                if record.revision == revision
+                and record.tool == "search"
+                and requirement_id in (None, record.requirement_id)
+            ),
+            None,
+        )
+        return last.requirement_id if last is not None and last.transport_failed else None
+
     def selectable(
         self,
         *,
@@ -428,6 +449,53 @@ class DiscoveryLog(StrictModel):
                 return tuple(found[spec_id] for spec_id in record.spec_ids)
         return ()
 
+    def pinnable_for(self, requirement_key: str, requirement_id: str) -> tuple[SelectedSource, ...]:
+        """The sources the latest matching answer a pin may be taken from returned for `requirement_id`.
+
+        Same shape as `candidates_for`, over every `_PIN_HONOURING` status
+        and skipping a `blocked` record, as `_select_definite` does: a
+        `definite` answer's one source as well as a `candidates` answer's
+        several. A `pinned_source_not_found` referral offers these.
+        """
+        for record in reversed(self.records):
+            if (
+                record.requirement_key == requirement_key
+                and record.requirement_id == requirement_id
+                and record.status in _PIN_HONOURING
+                and not record.blocked
+            ):
+                found = self.sources.get(requirement_id, {})
+                return tuple(found[spec_id] for spec_id in record.spec_ids)
+        return ()
+
+    def stale_pin_sources(
+        self, requirement_key: str, requirement_id: str, pinned_spec_id: str
+    ) -> tuple[SelectedSource, ...] | None:
+        """The sources found in place of `pinned_spec_id`, or `None` when the pin is not stale.
+
+        The pin is stale when the latest `search` answer for `requirement_id`
+        at `requirement_key` is an unblocked one a pin may be taken from
+        that does not name it: the answer `discover_source` refers back as
+        `pinned_source_not_found`.
+        """
+        for record in reversed(self.records):
+            if (
+                record.tool != "search"
+                or record.requirement_key != requirement_key
+                or record.requirement_id != requirement_id
+                or record.status is None
+            ):
+                continue
+            if (
+                record.status not in _PIN_HONOURING
+                or record.blocked
+                or pinned_spec_id in record.spec_ids
+            ):
+                return None
+            found = self.sources.get(requirement_id, {})
+            return tuple(found[spec_id] for spec_id in record.spec_ids)
+        return None
+
     def nearest_for(self, requirement_key: str, requirement_id: str) -> tuple[SelectedSource, ...]:
         """The nearest real sources the latest matching `no_data` answer for `requirement_id` named.
 
@@ -485,6 +553,26 @@ class DiscoveryLog(StrictModel):
                 record.requirement_id: {**own, **{source.spec_id: source for source in sources}},
             },
         )
+
+
+class DatasetKeys(NamedTuple):
+    """What `DiscoveryLog.selectable` matches a plan's dataset requirements by,
+    each keyed by requirement id: its `requirement_revision`, its pin, and
+    whether it states `across`."""
+
+    requirement_keys: dict[str, str]
+    pinned: dict[str, str]
+    across: frozenset[str]
+
+
+def dataset_keys(plan: Plan) -> DatasetKeys:
+    """`plan`'s dataset requirements as `DiscoveryLog.selectable` matches them."""
+    datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
+    return DatasetKeys(
+        requirement_keys={r.id: requirement_revision(r) for r in datasets},
+        pinned={r.id: r.source_spec_id for r in datasets if r.source_spec_id is not None},
+        across=frozenset(r.id for r in datasets if r.across is not None),
+    )
 
 
 def settled_sources(
@@ -664,7 +752,14 @@ def compact_source(source: SelectedSource, *, selectable: bool = True) -> dict[s
     described without its `spec_id`, so the only way it reaches a referral is
     through the code that attaches candidates from the log. `searched_as` is
     always shown, so a reader sees the phrase that found the source without
-    comparing it against the requirement. `open_entity_axes`, present only when
+    comparing it against the requirement. `measure` is what the source
+    measures, by `search`'s label; `measure_count` says how many StatVars
+    `search` confirmed for it (`compiler.sources.stat_var_count`), "at
+    least" that many when the count is a floor; and `varies_by`, present
+    only when the source has open axes, names the slots its StatVars vary
+    along. The description names no StatVar, since a partial list reads to a
+    model as the whole family or as a pattern to guess other names from.
+    `open_entity_axes`, present only when
     the source leaves an entity axis open, names each one and how many members
     it holds, the population a requirement's `across` covers. `definition` carries
     whatever `fetch_definitions` has already fetched for this source --
@@ -680,7 +775,9 @@ def compact_source(source: SelectedSource, *, selectable: bool = True) -> dict[s
         "searched_as": source.searched_as,
         "confidence": source.confidence,
         "has_data": source.has_data,
-        "measures": list(source.stat_vars),
+        "measure": source.measure_label,
+        "measure_count": _measure_count(source),
+        **({"varies_by": [axis.property for axis in source.open_axes]} if source.open_axes else {}),
         "entities": [{"label": e.label, "role": e.role} for e in source.entities],
         **({"open_entity_axes": open_entity_axes} if open_entity_axes else {}),
         "unit": source.unit_label or source.unit_ref,
@@ -689,6 +786,26 @@ def compact_source(source: SelectedSource, *, selectable: bool = True) -> dict[s
         ),
         "definition": source.definition,
     }
+
+
+def _measure_count(source: SelectedSource) -> str | None:
+    """How many StatVars `source` holds, in words: "at least" that many when `search` states the count as a floor."""
+    count = stat_var_count(source)
+    if count == 0:
+        return None
+    floor = (
+        source.stat_var_member_count_exact is False
+        if source.stat_var_member_count is not None
+        else source.stat_var_truncated is not False
+    )
+    return stat_var_count_text(count, floor=floor)
+
+
+def stat_var_count_text(count: int, *, floor: bool) -> str:
+    """`count` StatVars in words, "at least" that many when the count is a `floor`."""
+    if floor:
+        return f"at least {count:,} StatVars"
+    return "1 StatVar" if count == 1 else f"{count:,} StatVars"
 
 
 # The members of a source's description that name one retrieval of it: the
@@ -716,7 +833,9 @@ def described_sources(sources: Sequence[SelectedSource]) -> list[dict[str, objec
     years (`planner.plan.dataset_of`), whatever sentence and coverage Search
     states for each period. Two sources that carry no identity are one
     dataset when `compact_source` describes them alike apart from
-    `_RETRIEVAL_KEYS` and `definition`. Each dataset is listed once, as
+    `_RETRIEVAL_KEYS` and `definition`, and bind the same members: the same
+    `shape_member_digest` where `search` states one, else the same listed
+    StatVars. Each dataset is listed once, as
     its first retrieval, in the order given, with the first definition any of
     its retrievals fetched. Every further retrieval adds its own
     `_RETRIEVAL_KEYS` and `coverage_window`, and its `has_data` when that
@@ -736,7 +855,8 @@ def described_sources(sources: Sequence[SelectedSource]) -> list[dict[str, objec
                     key: value
                     for key, value in compact.items()
                     if key not in (*_RETRIEVAL_KEYS, "definition")
-                }
+                },
+                "members": source.shape_member_digest or source.stat_vars,
             }
         )
         first = first_of.get(dataset)
@@ -796,7 +916,7 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
 
 
 def _budget_error(
-    log: DiscoveryLog, revision: str, reservations: _Reservations
+    log: DiscoveryLog, revision: str, requirement_id: str, reservations: _Reservations
 ) -> dict[str, object] | None:
     """The problem a call is refused with once `revision` has spent every call its budget allows.
 
@@ -815,13 +935,7 @@ def _budget_error(
         ProblemCode.BUDGET_EXHAUSTED,
         message,
         outcome=Outcome.REFUSED,
-        action=Action(
-            call="return_to_planner",
-            arguments={
-                "kind": ReferralKind.DISCOVERY_BUDGET_EXHAUSTED.value,
-                "reason": message,
-            },
-        ),
+        action=_budget_referral(message, timed_out_requirement=log.last_call_timed_out(revision)),
         detail={"budget": DISCOVERY_CALL_BUDGET, "used": used},
     )
 
@@ -849,17 +963,40 @@ def _requirement_budget_error(
         ProblemCode.BUDGET_EXHAUSTED,
         message,
         outcome=Outcome.REFUSED,
-        action=Action(
-            call="return_to_planner",
-            arguments={
-                "kind": ReferralKind.DISCOVERY_BUDGET_EXHAUSTED.value,
-                "reason": message,
-            },
+        action=_budget_referral(
+            message, timed_out_requirement=log.last_call_timed_out(revision, requirement_id)
         ),
         detail={
             "budget": DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
             "used": used,
             "requirement_id": requirement_id,
+        },
+    )
+
+
+def _budget_referral(message: str, *, timed_out_requirement: str | None) -> Action:
+    """The referral a spent budget makes, by how the most recent `search` call that spent it ended.
+
+    When that call timed out (`timed_out_requirement` names its
+    requirement), the referral is `discovery_unavailable` about that
+    requirement, marked `budget_spent`. A retry of the same revision is
+    refused before it searches, so the planner entry ends on it. When that call was answered, the referral is
+    `discovery_budget_exhausted`, whatever earlier calls did, and the
+    planner may correct the plan. The budget refuses the call either way,
+    which keeps the number of `search` calls a revision makes bounded.
+    """
+    if timed_out_requirement is None:
+        return Action(
+            call="return_to_planner",
+            arguments={"kind": ReferralKind.DISCOVERY_BUDGET_EXHAUSTED.value, "reason": message},
+        )
+    return Action(
+        call="return_to_planner",
+        arguments={
+            "kind": ReferralKind.DISCOVERY_UNAVAILABLE.value,
+            "reason": message,
+            "requirement_id": timed_out_requirement,
+            "budget_spent": True,
         },
     )
 
@@ -879,11 +1016,16 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     does for a question that names nobody on it. Never carries `source`:
     data-mcp refuses a search naming one without a unit, and ignores it when
     a unit is also given, so there is nothing for stating it to buy.
+
+    An entity's role goes as the `PARTY_ROLES` word it stands for
+    (`party_role`), each a word of `search`'s role lexicon. A role standing
+    for none, which only a plan read back from session state can hold, goes
+    unstated.
     """
-    entities = [
-        {"text": entity.name, **({"role": entity.role} if entity.role is not None else {})}
-        for entity in requirement.entities
-    ]
+    entities = []
+    for entity in requirement.entities:
+        role = party_role(entity.role) if entity.role is not None else None
+        entities.append({"text": entity.name, **({"role": role} if role is not None else {})})
     part: dict[str, object] = {"variable": variable}
     if entities:
         part["entities"] = entities
@@ -1056,10 +1198,12 @@ async def fetch_definitions(
     same discipline `discover_source`'s own closing phase follows. Held apart
     this way, the `describe` round trip below runs with the lock released.
 
-    Every source still needing a fetch is batched into as few `describe`
-    calls as `DESCRIBE_ID_BATCH_MAX` allows, one call per chunk of the
-    sources' own first stat var each, so a plan's single-digit
-    definite-source count costs one round trip rather than one per source.
+    Only a source that is one StatVar is described, since a family's
+    definition would be one member's and a model would read it as the family's. Every
+    source still needing a fetch is batched into as few `describe` calls as
+    `DESCRIBE_ID_BATCH_MAX` allows, one call per chunk of the sources' own
+    stat var each, so a plan's single-digit definite-source count costs one
+    round trip rather than one per source.
 
     A `describe` that times out, is refused, or never names a source's own
     stat var leaves that source's `definition` unset (`None` on first
@@ -1071,6 +1215,7 @@ async def fetch_definitions(
         for requirement_id, source in sources.items()
         if requirement_id in requirement_keys
         and source.stat_vars
+        and not is_family(source)
         and source.spec_id
         not in _described_source_ids(log, requirement_keys[requirement_id], requirement_id)
     ]
@@ -1151,7 +1296,7 @@ def _ready_to_search(
     revision = plan_revision(plan)
     key = requirement_revision(requirement)
     log = load_log(tool_context.state)
-    blocked = _budget_error(log, revision, reservations)
+    blocked = _budget_error(log, revision, requirement_id, reservations)
     if blocked is not None:
         return blocked
     blocked = _requirement_budget_error(log, revision, requirement_id, reservations)
@@ -1437,36 +1582,34 @@ async def _seeded_source(
 def _resolve_pin_block(
     tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
-    """The resolve's own spec block, when every reuse condition below holds; `None` otherwise.
+    """The spec block of the dataset `requirement` pins, when the planner was shown it; `None` otherwise.
 
-    So the resolve's own single-part search is provably an answer to this
-    requirement and nothing else: `requirement.source_spec_id` names the
-    exact id the resolve itself settled on this turn
-    (`ENVELOPE_SPEC_STATE_KEY`); the plan states exactly one dataset
-    requirement, since a plan with several gives no way to tell which one
-    the resolve's own search was about; and the resolve's warnings
-    (`ENVELOPE_SPEC_WARNINGS_STATE_KEY`) carry no code in
-    `BLOCKING_WARNING_CODES`, since one means the search dropped part of the
-    ask and answered a narrower one. `None` also on any of those, or when
-    the resolve carried no id this turn, or its own block was not carried
-    forward (a clarify re-entry, which re-searches nothing).
+    The pin is the planner's assertion that the dataset answers the
+    requirement, so a dataset it was shown this entry
+    (`planner.plan.pin_sources`) is reused when `requirement` is the only
+    dataset requirement in `plan` pinning it. With several, nothing tells
+    which one the search that returned it was about. `None` too when the
+    search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
+    since one means the search dropped part of the ask and answered a
+    narrower one, and when no block was carried forward for it (a clarify
+    re-entry, which re-searches nothing). An earlier turn's source reads the
+    block that turn stored (`PinSource.spec_block`). The compiler checks the
+    reused source's entities and window against the requirement.
     """
     pin = requirement.source_spec_id
-    if pin is None or pin != tool_context.state.get(ENVELOPE_SPEC_STATE_KEY):
+    if pin is None:
         return None
-    dataset_requirements = [
-        item for item in plan.evidence_requirements if isinstance(item, DatasetRequirement)
+    source = pin_sources(tool_context.state).get(pin)
+    if source is None or BLOCKING_WARNING_CODES.intersection(source.warnings):
+        return None
+    pinning = [
+        item
+        for item in plan.evidence_requirements
+        if isinstance(item, DatasetRequirement) and item.source_spec_id == pin
     ]
-    if len(dataset_requirements) != 1:
+    if len(pinning) != 1:
         return None
-    warnings = tool_context.state.get(ENVELOPE_SPEC_WARNINGS_STATE_KEY)
-    if isinstance(warnings, list) and any(
-        isinstance(warning, Mapping) and warning.get("code") in BLOCKING_WARNING_CODES
-        for warning in warnings
-    ):
-        return None
-    block = tool_context.state.get(ENVELOPE_SPEC_BLOCK_STATE_KEY)
-    return block if isinstance(block, Mapping) else None
+    return source.spec_block(pin)
 
 
 async def _source_from_resolve_pin(
@@ -1486,13 +1629,15 @@ async def _source_from_resolve_pin(
     period, or every year with data when its window is the user's own. A
     problem `_seeded_source` met is returned as it is.
 
-    Otherwise the source is the resolve's own block (`_resolve_pin_block`),
-    when it parses as a source and, when its own `coverage_kind` is `exact`,
-    its `coverage_window` equals `requirement.period`. That check exists
-    because the resolve's identity carries the question's own window and the
+    Otherwise the source is the pinned dataset's block as the planner was
+    shown it (`_resolve_pin_block`), when it parses as a source whose
+    `coverage_kind` is `exact` and whose `coverage_window` equals
+    `requirement.period`. That check exists because a search's identity
+    carries the question's own window and the
     plan's retrieval writes no `scope` (`compiler.compile._retrieve_arguments`),
     so a requirement over other years needs another spec, which a fresh
-    search finds. Returns `None`, not a raised problem, when the block is
+    search finds. A `breadth`, `bare` or `latest` block states no window to
+    compare. Returns `None`, not a raised problem, when the block is
     missing, does not parse, or fails the window check. The caller falls
     through to a fresh `search`, the existing, tested path for a pin
     `search` itself must confirm.
@@ -1508,7 +1653,7 @@ async def _source_from_resolve_pin(
             source = source_from_spec_block(block)
         except ValueError:
             return None
-        if source.coverage_kind == EXACT_COVERAGE and source.coverage_window != requirement.period:
+        if source.coverage_kind != EXACT_COVERAGE or source.coverage_window != requirement.period:
             return None
     variable = requirement.measure
     source = source.model_copy(update={"searched_as": variable})
@@ -1866,7 +2011,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             # `honoured` is what this call actually found among the
             # statuses a pin may be taken from -- the same sources
             # `return_to_planner` attaches to the referral as
-            # `candidates`. Naming how many here tells the planner this
+            # `candidates` (`DiscoveryLog.pinnable_for`). Naming how many here tells the planner this
             # question can still be answered: a `candidates` answer's
             # two-plus sources are the real alternative worth naming when
             # this action replaces the `source_ambiguous` hint.

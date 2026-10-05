@@ -1,4 +1,4 @@
-"""What the planner and the translator are actually handed, measured offline.
+"""What the planner is actually handed, measured offline.
 
 Three jobs. The composition records bound the *size* of a request: which segment
 grew. The canonical forms below bound its *stability*: whether the part ADK has
@@ -7,14 +7,11 @@ is the plan: `plan_record` and `field_limits_record` build the largest legal
 plan, and `unbounded_paths` finds any string, array or map in the plan's schema
 with no bound, for the legal-maximum tests in `test_context_budget.py`.
 
-That second job exists because the prefix is cached in production. Across the
-44 Langfuse traces recorded since the planner and translator began sharing one
-session, 234 of 237 planner calls after a turn's first hit the cache, 46.5% of
-the planner's input tokens were served from it, and in 41 of those traces every
-later call reports one constant cached count. ADK caches the system
-instruction, the tool declarations and the contents before the last run of
-user contents, so that saving holds only while those stay byte-identical from
-call to call. The part of a request this budget bounds most directly is the
+That second job exists because the prefix is cached. Gemini's implicit caching
+matches it across requests, and ADK's explicit cache (`STUDIO_CONTEXT_CACHE=true`)
+holds the system instruction, the tool declarations and the contents before the
+last run of user contents, so that saving holds only while those stay
+byte-identical from call to call. The part of a request this budget bounds most directly is the
 `contents` that arrive after the cache is made.
 
 `test_context_budget.py` asserts ceilings against this module's composition
@@ -30,7 +27,7 @@ would put a third-party count between a change and the number it moved.
 
 The request is assembled by ADK, not by this module: `RecordingLlm` is a
 `BaseLlm` that answers from a script and records every `LlmRequest` ADK hands
-it, planner generations and translator generations alike. So the measurement
+it. So the measurement
 covers the whole surface a real model call would see: the system instruction,
 the tool declarations, and the full `contents` history ADK built, not
 whatever a fixture believes it passed in.
@@ -134,11 +131,9 @@ RELAY_MARKER = "<<<BEGIN_QUOTED_AGENT_CONTENT>>>"
 # `[<author>]`, so the same text that carries the relay also names the agent it
 # came from. The breakdown is by that name, and every author gets its own row:
 # ADK's own preamble carries the markers without an author tag, so it gets its
-# own bucket, not absorbed into `dfo_translator`'s. That matters because the
+# own bucket, not absorbed into the author's. That matters because the
 # preamble is pure overhead, about 409 chars emitted once per relayed event: it
-# scales with the count of relays, not with what any of them said. Merging the
-# two would let a fix that moved only the translator's payloads report a
-# partial win against a number the preamble kept up.
+# scales with the count of relays, not with what any of them said.
 _UNTAGGED = "untagged"
 _RELAY_AUTHOR = re.compile(r"^\[([^\]]+)\]")
 
@@ -177,8 +172,8 @@ class RecordingLlm(BaseLlm):
     JSON-serialisable only while it does not try to carry them.
 
     `agent_name` and `scenario` are what a record says it measured, set by
-    the caller, so a record from the planner and a record from the translator,
-    under one scenario and another, are told apart in one baseline.
+    the caller, so records from one agent under one scenario and another are
+    told apart in one baseline.
     """
 
     model: str = "recording-context-probe"
@@ -251,8 +246,8 @@ def _declaration_chars(declaration: Any) -> int:
 def _declarations(config: Any) -> list[dict[str, Any]]:
     """Every function declaration the request offers, largest first.
 
-    One `Tool` may carry several declarations. `dfo_translator` and
-    `adk_request_input` each arrive as their own tool today, so this flattens
+    One `Tool` may carry several declarations. `adk_request_input` arrives as
+    its own tool today, so this flattens
     across every tool's declarations, without assuming a one-to-one mapping.
     """
     found: list[dict[str, Any]] = [
@@ -409,8 +404,8 @@ def contents_leading(llm_request: Any) -> tuple[str, ...]:
 def relay_buckets(record: dict[str, Any]) -> dict[str, int]:
     """Every relayed author's chars in `record`, keyed by author.
 
-    `dfo_translator`, `untagged` for ADK's own preamble, and any other author
-    that ever appears, each on its own row, so an unmoved author cannot hide
+    Each relaying agent by name, `untagged` for ADK's own preamble, and any
+    other author that ever appears, each on its own row, so an unmoved author cannot hide
     behind a moved one.
     """
     found: dict[str, int] = {}
