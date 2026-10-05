@@ -233,8 +233,8 @@ async def filter_verb(
     # other verb populates both: `aggregate`/`rank` with a real
     # grain-coverage fraction, `compare`/`share_of` with a cross-side
     # coverage fraction, `growth` with a coverage fraction computed from its
-    # own present/expected year counts (always 1.0 because a returned
-    # entity's window is gap-free by construction), and `join` with
+    # own present/expected year counts (below 1.0 when a computed entity
+    # lacks interior years), and `join` with
     # `matched / (matched + dropped)` (the identical kept-over-total shape).
     detail: dict[str, object] = {
         "predicate_count": len(canonical_predicates),

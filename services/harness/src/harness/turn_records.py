@@ -25,6 +25,7 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
+from compiler.sources import is_family
 from planner.parties import column_party_roles
 from planner.plan import (
     DatasetRequirement,
@@ -93,6 +94,16 @@ class PlanSource(StrictModel):
     it, since a spec minted for a range reports coverage only within the
     years asked; `coverage` when it is the span the source holds data
     across. `None` when no coverage is stated.
+
+    `identity` is the identity document `spec_id` hashes from
+    (`planner.workflow.SelectedSource.identity`), `None` when the source
+    carried none. `stat_vars` are the StatVars a source that is no family
+    (`compiler.sources.is_family`) elected, which Search needs to resolve
+    its identity again; empty for a family, whose shape Search resolves
+    without them. Both are kept so a later turn's pin of a source only the
+    translator found has its definition on record
+    (`harness.studio_state.ConversationState.recorded_identity`). No
+    rendering of the record reads either.
     """
 
     spec_id: str
@@ -103,6 +114,20 @@ class PlanSource(StrictModel):
     coverage_source: Literal["requested", "coverage"] | None
     members: int | None
     origin: Origin
+    identity: dict[str, Any] | None = None
+    stat_vars: tuple[str, ...] = ()
+
+
+class RecordedIdentity(StrictModel):
+    """A source's definition as a later turn resubmits it to Search.
+
+    `identity` is the identity document its spec_id hashes from, and
+    `stat_vars` the StatVars data-mcp's `resolve_definition` passes with it:
+    the one a source that is no family elected, none for a family.
+    """
+
+    identity: dict[str, Any]
+    stat_vars: tuple[str, ...] = ()
 
 
 class PlanDecision(StrictModel):
@@ -771,6 +796,8 @@ def _sources(
                 max(len(source.stat_vars), source.stat_var_member_count or 0) if family else None
             ),
             origin=origin,
+            identity=source.identity,
+            stat_vars=() if is_family(source) else source.stat_vars,
         )
     return tuple(seen.values())
 

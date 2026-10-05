@@ -22,6 +22,7 @@ from translator.tool import build_translate_tool
 
 from harness.conversation import current_conversation_caller
 from harness.mcp_deadlines import McpTimeoutPolicy
+from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 
 
@@ -64,6 +65,7 @@ def create_planner_with_translator(
     agent_settings: AgentSettings | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
+    prefix_cache: PrefixCache | None = None,
 ) -> LlmAgent:
     """Build the planner agent with the `translate` tool attached.
 
@@ -83,6 +85,7 @@ def create_planner_with_translator(
             own planner through `create_planner_agent` directly, not through this
             function, so the default here only has to keep this function's
             other callers byte-identical.
+        prefix_cache: Passed straight through to `create_planner_agent`.
 
     Returns:
         The planner `LlmAgent`, carrying `translate` among its tools. It is
@@ -95,4 +98,5 @@ def create_planner_with_translator(
         translate=build_translate_tool(surface=resolved_surface),
         surface=resolved_surface,
         question_fixed=question_fixed,
+        prefix_cache=prefix_cache,
     )

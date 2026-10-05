@@ -9,7 +9,8 @@ from typing import Any
 
 import httpx2
 import pytest
-from data_mcp import client_holder
+from data_mcp import client_holder, search_tool
+from data_mcp.deadline import CallDeadline
 from data_mcp.digest import render_answer, render_digest
 from data_mcp.result_bound import MAX_RESULT_BYTES
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -29,7 +30,7 @@ from pydantic import TypeAdapter
 from .conftest import (
     _reset_client,  # noqa: F401 (re-exported for test_search_tool_definition_store.py)
 )
-from .test_client import _client, _problem_body, text_of
+from .test_client import _client, _FakeClock, _problem_body, text_of
 from .test_digest import _envelope, _spec
 
 Handler = (
@@ -374,6 +375,35 @@ async def test_transport_error_becomes_a_refusal() -> None:
     assert result.is_error is True
     assert result.structured_content is not None
     assert result.structured_content["retry_mode"] == "retry_after_delay"
+
+
+@pytest.mark.parametrize(
+    ("attempt_cost_s", "attempts"),
+    [(0.0, 2), (3.0, 1)],
+    ids=["a fast 503 is retried", "a 503 that spent the budget is not"],
+)
+async def test_a_retry_starts_only_while_the_call_budget_has_time_left(
+    monkeypatch: pytest.MonkeyPatch, attempt_cost_s: float, attempts: int
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(search_tool, "_call_deadline", lambda: CallDeadline.after(2.5, clock=clock))
+    envelope = _envelope("no_data", no_data={"reason": "no_observations", "category": "absent"})
+    calls = 0
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal calls
+        calls += 1
+        clock.now += attempt_cost_s
+        if calls == 1:
+            return httpx2.Response(
+                503, content=_problem_body(code="temporarily_unavailable", retryable=True)
+            )
+        return httpx2.Response(200, json=envelope)
+
+    result = await _call_search(handler, [{"variable": "malaria grants"}])
+
+    assert calls == attempts
+    assert result.is_error is (attempts == 1)
 
 
 async def test_request_invalid_problem_body_becomes_a_correct_and_retry_refusal_with_pointer() -> (

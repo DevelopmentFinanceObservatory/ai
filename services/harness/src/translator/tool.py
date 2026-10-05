@@ -153,7 +153,8 @@ class IssueResolution(StrEnum):
     is a fault no plan change repairs. `build_translation` copies a valid
     plan's requirements verbatim, so a structural issue in the translation is
     a translator fault, and a capability or schema issue is the services'
-    configuration. `UNSUPPORTED` is an operation no tool performs.
+    configuration. `UNSUPPORTED` is an operation no tool performs, including
+    one that sets a unit-less side against a side in a unit.
     `UNMEETABLE` is a requirement the user decides how to change, and
     `REPAIR` one the planner repairs itself, as `_PERMITTED_REPAIRS` names.
     """
@@ -176,7 +177,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             return IssueResolution.DISCOVER_AGAIN
         case CompileIssueCode.SOURCE_UNUSABLE | CompileIssueCode.REQUIREMENT_UNMEETABLE:
             return IssueResolution.UNMEETABLE
-        case CompileIssueCode.NO_CAPABILITY:
+        case CompileIssueCode.NO_CAPABILITY | CompileIssueCode.FRAME_UNIT_UNBOUND:
             return IssueResolution.UNSUPPORTED
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
@@ -211,7 +212,6 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.INPUT_IS_TERMINAL
             | CompileIssueCode.CYCLE
             | CompileIssueCode.UNKNOWN_TERMINAL
-            | CompileIssueCode.TERMINAL_IS_READ
             | CompileIssueCode.OPERATION_UNREACHABLE
             | CompileIssueCode.AMBIGUOUS_CAPABILITY
             | CompileIssueCode.UNKNOWN_TOOL

@@ -51,19 +51,21 @@ someone running `just context-baseline` carelessly.
 
 One of those mechanism assertions is about stability, not size, and it is
 the one this whole budget is least able to feel. The planner's prefix is cached:
-Gemini's implicit caching matches it across requests, and ADK's explicit cache
-(`STUDIO_CONTEXT_CACHE=true`) is built from it. Either saving depends on the prefix
-being byte-identical from call to call. For the explicit cache that is exactly what
-`google.adk.models.gemini_context_cache_manager._generate_cache_fingerprint`
-hashes, and a mismatch there is logged at DEBUG level and silently recreates the
-cache. A change that made the instruction or the tool list vary per request would
-cost the cached share with nothing in the log to say so, which is why
-`test_the_cached_prefix_is_stable_across_a_run` exists.
+`harness.prefix_cache` keeps one explicit cache per prefix, keyed by the hash of
+the model, the system instruction, the tool declarations and the tool config, and
+Gemini's implicit caching matches whatever follows it. Either saving depends on
+the prefix being byte-identical from call to call. A change that made the
+instruction or the tool list vary per request would create a new cache on every
+call, at the price of an uncached call each, with nothing but an INFO line per
+create to say so, which is why `test_the_cached_prefix_is_stable_across_a_run`
+exists.
 
 The scenario is one plan-then-translate round. The seam is handed an already
 drafted plan as `prior_plan`, the way `harness.graph`'s own planner node hands
-it one. The planner's model loads a skill with `get_skill`, answered with one
-full page, then calls `translate`, which runs the real mechanical loop
+it one, and the realistic round's brief carries the search readings, the two
+digests, the asks and the question a deployed planner call recorded
+(`_RECORDED_BRIEF_PATH`). The planner's model loads a skill with `get_skill`,
+answered with one full page, then calls `translate`, which runs the real mechanical loop
 against a canned `no_data` search and refers the plan back. The planner then has
 no `submit_plan` to reach, so the seam raises `PlannerSeamError` after its
 correction rounds: an unfinished turn, which is what leaves the largest
@@ -107,6 +109,7 @@ from harness.planner_seam import (
     _plan_context,
     _section,
 )
+from harness.prefix_cache import prefix_key
 from harness.seeds import seeded_envelope
 from harness.settings import Settings
 from harness.studio_state import (
@@ -133,6 +136,7 @@ from harness.wire import (
 from planner.agent import build_planner_tools
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
+    ASKS_STATE_KEY,
     CUT_MARKER,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_DECISION_OPTIONS,
@@ -183,7 +187,6 @@ from .context_probe import (
     SEAM_MARKER,
     RecordingLlm,
     bucket_chars,
-    canonical_tools,
     compose,
     contents_leading,
     plan_record,
@@ -209,22 +212,22 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 12,699 with the skill tools and
+# `planner.agent.planner_instruction`. Measured 12,533 with the skill tools and
 # `translate` attached. The margin is 8.5% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 13_780
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 13_600
 
-# Every planner tool declaration together: 34,130 (`propose_plan` 29,246,
+# Every planner tool declaration together: 32,006 (`propose_plan` 27,122,
 # `translate` 338, and 4,546 across the smaller ones). The margin is 10%.
-PLANNER_DECLARATIONS_TOTAL_CEILING = 37_550
+PLANNER_DECLARATIONS_TOTAL_CEILING = 35_210
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 29,246. It sits in the static prefix every planner call
+# arguments. Measured 27,122. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
 # the planner writes a plan from. The margin is 2%.
-PROPOSE_PLAN_DECLARATION_CEILING = 29_840
+PROPOSE_PLAN_DECLARATION_CEILING = 27_670
 
 # `translate`'s declaration, built by ADK from the function's name and
 # docstring. Measured 338.
@@ -236,9 +239,10 @@ TRANSLATE_DECLARATION_CEILING = 420
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_690
 
 # The planner's `contents` history on its largest captured generation, less
-# the skill text `SKILL_PAGE_CEILING` bounds on its own (1,849 chars, the
-# fifth generation of the realistic scenario).
-PLANNER_CONTENTS_CEILING = 2_300
+# the skill text `SKILL_PAGE_CEILING` and the brief `RECORDED_BRIEF_CEILING`
+# bound on their own (792 chars, the fifth generation of the realistic
+# scenario).
+PLANNER_CONTENTS_CEILING = 1_000
 
 # The `get_skill` answer in the planner's `contents`, bucketed as
 # `functionResponse:get_skill`: one full page of a skill file
@@ -258,18 +262,22 @@ SKILL_PAGE_CEILING = 40_800
 # envelope and the prior plan as line-rendered digests, which is what this
 # bounds.
 #
-# Measured 1,150 here, where the fixture's plan is two requirements and the
-# envelope is `{}`. That is the wrong end of the range to size a ceiling from:
-# the seam's own docstring probe records the realistic upper end at nine
-# requirements, and the section that dominates it is the prior plan, re-sent on
+# A two-requirement plan with an empty envelope is the wrong end of the range
+# to size this from: the seam's own docstring probe records the realistic upper
+# end at nine requirements, and the section that dominates it is the prior plan, re-sent on
 # every fresh render. `test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling`
 # measures that upper end, with a `candidates` envelope at every cap
 # `harness.planner_seam` sets: 9,941 chars for a draft plan and 11,437 for a
 # compiled one (the plan section alone is 8,723 -> 6,942 raw-to-digest for the
 # draft, 22,609 -> 8,438 for the compiled one). The ceiling is 25% above the
-# compiled case, as this file's own convention says, not above the fixture's
-# two-requirement number.
+# compiled case, as this file's own convention says.
 SEAM_BRIEF_CEILING = 14_300
+
+# The seam's brief in the realistic scenario, which carries the brief a
+# deployed planner call recorded (`_RECORDED_BRIEF_PATH`): three search
+# readings, four canvas blocks, one earlier turn, two asks and the question,
+# plus the scenario's two-requirement plan. Measured 7,511.
+RECORDED_BRIEF_CEILING = 9_400
 
 
 # The measured scenario ----------------------------------------------------------
@@ -335,20 +343,44 @@ def _script() -> list[Any]:
     ]
 
 
+# The brief the deployed planner's first call of a recorded turn carried: the
+# second turn of a Studio conversation about Guatemala's GDP and population,
+# with three search readings, four canvas blocks, one earlier turn and two asks.
+_RECORDED_BRIEF_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "brief_guatemala_gdp_population.json"
+)
+
+
+def _recorded_brief() -> dict[str, Any]:
+    """The realistic round's `context` and session `state`, from `_RECORDED_BRIEF_PATH`."""
+    recorded = json.loads(_RECORDED_BRIEF_PATH.read_text())
+    return {
+        "context": {
+            "question": recorded["question"],
+            "envelope": {},
+            "readings": recorded["readings"],
+            "canvas_digest": recorded["canvas_digest"],
+            "conversation_digest": recorded["conversation_digest"],
+        },
+        "state": {ASKS_STATE_KEY: recorded["asks"]},
+    }
+
+
 async def _recorded_round(
     *,
     scenario: str,
     decision: Callable[..., Any],
     requirement: Callable[..., Any],
     derived_requirement: Callable[..., Any],
-    context: dict[str, Any] | None = None,
+    context: dict[str, Any],
+    state: dict[str, Any] | None = None,
 ) -> dict[str, tuple[list[dict[str, Any]], list[Any]]]:
     """One plan-then-translate round, with every request the planner's model was handed.
 
     `context` is what the seam's brief carries besides the plan: the resolve
-    `envelope` and the `canvas_digest` and `conversation_digest`. Left out, the
-    envelope is empty and there are no digests, the smallest brief the seam
-    renders.
+    `envelope` or the search `readings`, the `canvas_digest` and
+    `conversation_digest`, and the `question` when it is not the draft's own.
+    `state` is what the session holds before the round, such as the asks.
 
     Returns `{"planner": (records, requests)}`: the `context_probe.compose`
     records in call order, and the raw `LlmRequest` objects the stability
@@ -359,31 +391,11 @@ async def _recorded_round(
     planner_llm = RecordingLlm(script=_script(), agent_name="planner", scenario=scenario)
     seam._agent.model = planner_llm
 
+    arguments: dict[str, Any] = {"question": draft.question, **context}
     with pytest.raises(PlannerSeamError):
-        await _SeamHarness().run(
-            seam,
-            question=draft.question,
-            prior_plan=draft.model_dump(mode="json"),
-            **({"envelope": {}} if context is None else context),
-        )
+        await _SeamHarness(state).run(seam, prior_plan=draft.model_dump(mode="json"), **arguments)
 
     return {"planner": (planner_llm.record, planner_llm.captured)}
-
-
-async def _all_records(
-    *,
-    decision: Callable[..., Any],
-    requirement: Callable[..., Any],
-    derived_requirement: Callable[..., Any],
-) -> list[dict[str, Any]]:
-    """Every record from the realistic scenario, without `BOUNDED_CONTEXT`."""
-    measured = await _recorded_round(
-        scenario="realistic",
-        decision=decision,
-        requirement=requirement,
-        derived_requirement=derived_requirement,
-    )
-    return list(measured["planner"][0])
 
 
 # Baseline -----------------------------------------------------------------------
@@ -429,17 +441,19 @@ async def measured(
     the freshly written file, not a skipped gate.
     """
     measured: dict[tuple[str, str], tuple[list[dict[str, Any]], list[Any]]] = {}
-    scenarios: list[tuple[str, dict[str, Any] | None]] = [
-        ("realistic", None),
-        (BOUNDED_CONTEXT, _bounded_context()),
+    recorded = _recorded_brief()
+    scenarios: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = [
+        ("realistic", recorded["context"], recorded["state"]),
+        (BOUNDED_CONTEXT, _bounded_context(), None),
     ]
-    for scenario, context in scenarios:
+    for scenario, context, state in scenarios:
         round_measured = await _recorded_round(
             scenario=scenario,
             decision=decision,
             requirement=requirement,
             derived_requirement=derived_requirement,
             context=context,
+            state=state,
         )
         measured[(scenario, "planner")] = round_measured["planner"]
 
@@ -562,10 +576,12 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
         ),
         (
             "planner contents",
-            record["contents"]["total_chars"] - bucket_chars(record, SKILL_BUCKET),
+            record["contents"]["total_chars"]
+            - bucket_chars(record, SKILL_BUCKET)
+            - bucket_chars(record, SEAM_BUCKET),
             PLANNER_CONTENTS_CEILING,
         ),
-        ("seam brief", bucket_chars(record, SEAM_BUCKET), SEAM_BRIEF_CEILING),
+        ("seam brief", bucket_chars(record, SEAM_BUCKET), RECORDED_BRIEF_CEILING),
         ("skill page", bucket_chars(record, SKILL_BUCKET), SKILL_PAGE_CEILING),
     ]
 
@@ -668,27 +684,20 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
     """Each consecutive pair of requests carries a byte-identical cached prefix.
 
     Between two requests in one run, `config.system_instruction` is byte-identical
-    and `config.tools` is byte-identical after canonicalisation. Those are the
-    inputs to ADK's own cache fingerprint:
-    `google.adk.models.gemini_context_cache_manager._generate_cache_fingerprint`
-    (`gemini_context_cache_manager.py:310-384`) hashes the model, the cache scope,
-    the system instruction, the canonicalised tools, the tool config and the
-    first N contents. On a mismatch its caller (`:305`) logs
-    `"Cache content fingerprint mismatch"` at **debug** level and silently
-    recreates the cache: a fail-open degradation with no loud path, which is
-    why this assertion is not redundant with ADK's own behaviour.
+    and so is the `harness.prefix_cache.prefix_key` the shared cache files it
+    under: the hash of the model, the system instruction, the tool declarations
+    as sent and the tool config. A mismatch creates a second cache, which costs
+    about one uncached call, with one INFO line to show for it.
 
-    A stable prefix is what Gemini's implicit caching matches across requests,
-    and what the explicit cache (`STUDIO_CONTEXT_CACHE=true`) fingerprints. The
-    change most likely to break it is setting `static_instruction` or moving to
-    an `InstructionProvider`, either of which can make the instruction vary per
-    request and destroy that saving with nothing in the log to say so.
+    A stable prefix is what the shared explicit cache serves and what Gemini's
+    implicit caching matches across requests. The change most likely to break
+    it is setting `static_instruction` or moving to an `InstructionProvider`,
+    either of which can make the instruction vary per request and destroy that
+    saving with nothing in the log to say so.
 
-    Two things ADK already handles, so nothing here tests for them: it sorts each
-    tool's declarations by name and the tool list by its canonical JSON before
-    hashing, so reordering is safe; and the declarations only have to be
-    invariant within one run, not between conversations, so growth between runs
-    is safe.
+    The comparison is within one run. A cache is shared between conversations
+    only while every conversation builds the same prefix. A deploy that changes
+    the prompt starts a new cache, as it should.
     """
     _records, requests = measured[("realistic", "planner")]
     assert len(requests) >= 2, (
@@ -704,24 +713,20 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
         assert instruction_before == instruction_after, (
             f"realistic/planner: the system instruction differs between {first} and "
             f"{second} ({len(instruction_before)} vs {len(instruction_after)} chars). "
-            "ADK's cache fingerprint covers it and a mismatch is only logged at debug "
-            "level, so this silently costs the cached share."
+            "The shared prefix cache is keyed on it, so each variant creates a cache."
         )
-
-        tools_before = canonical_tools(before)
-        tools_after = canonical_tools(after)
-        assert tools_before == tools_after, (
-            f"realistic/planner: the tool declarations differ between {first} and "
-            f"{second} ({len(tools_before)} vs {len(tools_after)} canonical chars). "
-            "ADK's cache fingerprint covers them, and a mismatch is only logged at debug "
-            "level, so this silently costs the cached share."
+        key_before = prefix_key(before.model or "", before.config)
+        assert key_before == prefix_key(after.model or "", after.config), (
+            f"realistic/planner: the tool declarations or tool config differ between "
+            f"{first} and {second}. The shared prefix cache is keyed on them, so each "
+            "variant creates a cache."
         )
 
 
 def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) -> None:
     """Each planner request's `contents` begins with the previous one's, unchanged.
 
-    The cache fingerprint also covers the first N contents, so a run whose
+    Gemini's implicit caching matches a leading run of contents, so a run whose
     earlier turn was rewritten, not merely appended to, would miss the cache
     from the rewrite onward. Every request ADK assembles here is the session's
     whole history, so this is a real property of the served path and not an
@@ -745,8 +750,8 @@ def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) 
             f"realistic/planner: request {index + 1}'s contents do not begin with request "
             f"{index}'s. {len(before)} leading contents compared. The first difference is at "
             f"index {next(i for i, (a, b) in enumerate(zip(before, after, strict=False)) if a != b)}. "
-            "ADK's cache fingerprint covers the leading contents, and a rewrite here "
-            "invalidates the cache silently."
+            "Implicit caching matches the leading contents, and a rewrite here "
+            "loses the cached share silently."
         )
 
 
@@ -855,11 +860,11 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
 
 # The seam brief at its realistic upper end --------------------------------------
 #
-# The recorded scenario above runs a two-requirement plan with an empty
-# envelope, which is the smallest brief this seam ever renders and the wrong
-# end to size a ceiling from. `planner_seam.py`'s own docstring probe records
-# nine requirements as the realistic upper end, so the ceiling above is sized
-# from that and this test measures it directly.
+# The recorded scenario above runs a two-requirement plan, the small end of the
+# plans this seam renders and the wrong end to size a ceiling from.
+# `planner_seam.py`'s own docstring probe records nine requirements as the
+# realistic upper end, so `SEAM_BRIEF_CEILING` is sized from that and this test
+# measures it directly.
 
 # Requirements in the plan the seam probe records as the realistic upper end.
 _SEAM_PROBE_REQUIREMENTS = 9
@@ -2059,8 +2064,7 @@ BOUNDED_CONTEXT_BRIEF_CEILING = (
 )
 
 # The planner's whole `contents` in that scenario: the realistic history's
-# ceiling plus the brief's, which the realistic ceiling already counts a small
-# brief of, plus the one skill page the round reads.
+# ceiling plus the brief's, plus the one skill page the round reads.
 BOUNDED_CONTEXT_CONTENTS_CEILING = (
     PLANNER_CONTENTS_CEILING + BOUNDED_CONTEXT_BRIEF_CEILING + SKILL_PAGE_CEILING
 )

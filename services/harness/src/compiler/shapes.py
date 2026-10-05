@@ -95,6 +95,8 @@ class ResolvedRole:
     since a column that started out wider than the requirement stays so
     wherever the frame travels, until a filter narrows it. `breakdown`
     mirrors the dimension's own flag: the column holds a breakdown's codes.
+    `open` mirrors it too and marks the column as the open entity axis the
+    requirement's `across` covers.
     """
 
     column: str
@@ -104,6 +106,7 @@ class ResolvedRole:
     narrowed: bool
     surplus: bool
     breakdown: bool = False
+    open: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,10 +288,11 @@ def _retrieve_resolved(
     The columns kept are the ones the requirement's own entities resolve
     under, in the source's order, as `compile._role_columns` reads them,
     then the open entity axis `compiler.evidence.open_axis_for` matches to
-    its `across`. A requirement with no `across` falls back to every column
-    the source resolves when none of its entities do. An `across` no open
-    entity axis matches builds no shape: `compile._check_sources` reports it
-    as the source's `open_axis_unresolved` finding.
+    its `across`, marked `open`. A requirement with no `across` falls back
+    to every column the source resolves when none of its entities do. An
+    `across` no open entity axis matches builds no shape:
+    `compile._check_sources` reports it as the source's
+    `open_axis_unresolved` finding.
 
     A requirement stating a breakdown keeps its codes' column last
     (`breakdown_column`), a role nothing in the source resolves and so no
@@ -320,23 +324,28 @@ def _retrieve_resolved(
         if entity.role is not None:
             phrase_by_column.setdefault(resolved.role, entity.role)
     chosen = [column for column in every_column if column in wanted]
+    open_column: str | None = None
     if requirement.across is None:
         chosen = chosen or every_column
     else:
         axis = open_axis_for(requirement.across, source.open_entity_axes)
         if isinstance(axis, str):
             return None
-        chosen.append(axis.column)
+        open_column = axis.column
+        chosen.append(open_column)
         phrase_by_column[axis.column] = requirement.across
     columns: list[ResolvedRole] = []
     dims: list[RoleDimension] = []
     for column in chosen:
         phrase = phrase_by_column.get(column, column)
+        is_open = column == open_column
         surplus = any(
             entity.role == column and entity.label.casefold() not in named
             for entity in source.entities
         )
-        dims.append(RoleDimension(role=phrase, requirement_id=operation.requirement_id))
+        dims.append(
+            RoleDimension(role=phrase, requirement_id=operation.requirement_id, open=is_open)
+        )
         columns.append(
             ResolvedRole(
                 column=column,
@@ -345,6 +354,7 @@ def _retrieve_resolved(
                 spec_id=source.spec_id,
                 narrowed=False,
                 surplus=surplus,
+                open=is_open,
             )
         )
     if requirement.breakdown is not None:
@@ -384,7 +394,7 @@ def _carry_columns(
     through unchanged or selects one from a single side, so `(role,
     requirement_id)` always finds its match in `previous` -- this only
     updates `narrowed` to what the new shape says, since `filtered` is the
-    one transform that flips it.
+    one transform that flips it. `surplus` and `open` carry unchanged.
     """
     by_key = {(role.role, role.requirement_id): role for role in previous}
     result: list[ResolvedRole] = []

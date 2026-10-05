@@ -14,10 +14,17 @@ gets the same treatment:
 - every `title`, which repeats the property or class name it sits under;
 - the `null` branch of an optional field's `anyOf`, leaving the field's own
   schema in its place: an optional field is one `required` does not list;
-- a `null` or `[]` default, which the same absence from `required` says;
+- a `null` or `[]` default, which the same absence from `required` says, and
+  a default equal to the `const` beside it;
 - the description of a field named in `SHARED_FIELDS`, which every
   requirement kind carries with the same meaning. The `evidence_requirements`
-  argument states that meaning once.
+  argument states that meaning once;
+- the description of an enum named in `FIELD_DESCRIBED_ENUMS`, whose values
+  the field using it describes.
+
+It then states two schemas once under `$defs` and refers to them everywhere
+else: an `Identifier`, which names every requirement and decision, and the
+`decision_ids` list every requirement kind carries.
 
 The validator is untouched: `propose_plan` still validates what the model
 sends against the models themselves, so an explicit `null` is accepted as
@@ -32,10 +39,23 @@ from typing import Any, override
 from google.adk.features import FeatureName, is_feature_enabled
 from google.adk.tools.function_tool import FunctionTool
 from google.genai import types
+from pydantic import TypeAdapter
+
+from planner.records import Identifier
 
 # Fields every requirement kind declares with one meaning, described once on
 # the `evidence_requirements` argument rather than on each kind.
 SHARED_FIELDS = frozenset({"kind", "id", "decision_ids", "input_id"})
+
+# Enums whose every value the field using them describes, so the enum's own
+# description would only repeat it: `stat_vars`, `among` and
+# `denominator_scope`.
+FIELD_DESCRIBED_ENUMS = frozenset({"StatVarReading", "RankAmong", "DenominatorScope"})
+
+# The schemas stated once under `$defs`, by the name they are stated under.
+_IDENTIFIER_DEF = "Identifier"
+_DECISION_IDS_DEF = "DecisionIds"
+_IDENTIFIER_SCHEMA: dict[str, Any] = TypeAdapter(Identifier).json_schema()
 
 # Why a `PlanTool` refuses to build without a JSON schema to describe.
 _NO_JSON_SCHEMA = (
@@ -71,7 +91,10 @@ def _compact(node: Any) -> Any:
                 name: _compact(_shared_undescribed(name, schema) if key == "properties" else schema)
                 for name, schema in value.items()
             }
-        elif key == "title" or (key == "default" and (value is None or value == [])):
+        elif key == "title" or (
+            key == "default"
+            and (value is None or value == [] or ("const" in node and value == node["const"]))
+        ):
             continue
         else:
             compacted[key] = _compact(value)
@@ -84,9 +107,68 @@ def _shared_undescribed(name: str, schema: Any) -> Any:
     return schema
 
 
+def _ref(name: str) -> dict[str, str]:
+    return {"$ref": f"#/$defs/{name}"}
+
+
+def _refer_identifiers(node: Any, found: list[Any]) -> Any:
+    """`node` with every `Identifier` schema replaced by a reference, its other keys kept.
+
+    Each schema replaced is appended to `found`.
+    """
+    if isinstance(node, list):
+        return [_refer_identifiers(item, found) for item in node]
+    if not isinstance(node, dict):
+        return node
+    referred = {key: _refer_identifiers(value, found) for key, value in node.items()}
+    if _IDENTIFIER_SCHEMA.items() <= referred.items():
+        found.append(_IDENTIFIER_SCHEMA)
+        kept = {key: value for key, value in referred.items() if key not in _IDENTIFIER_SCHEMA}
+        return _ref(_IDENTIFIER_DEF) | kept
+    return referred
+
+
+def _refer_decision_ids(node: Any, found: list[Any]) -> Any:
+    """`node` with every `decision_ids` property replaced by a reference, collected in `found`."""
+    if isinstance(node, list):
+        return [_refer_decision_ids(item, found) for item in node]
+    if not isinstance(node, dict):
+        return node
+    referred = {key: _refer_decision_ids(value, found) for key, value in node.items()}
+    properties = referred.get("properties")
+    if isinstance(properties, dict) and "decision_ids" in properties:
+        found.append(properties["decision_ids"])
+        referred["properties"] = properties | {"decision_ids": _ref(_DECISION_IDS_DEF)}
+    return referred
+
+
+def _factored(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` stating `Identifier` and `decision_ids` once under `$defs`.
+
+    Raises when two requirement kinds declare `decision_ids` differently,
+    since one definition would then misstate one of them.
+    """
+    identifiers: list[Any] = []
+    decision_ids: list[Any] = []
+    factored = _refer_decision_ids(_refer_identifiers(schema, identifiers), decision_ids)
+    defs = {
+        name: {key: value for key, value in enum.items() if key != "description"}
+        if name in FIELD_DESCRIBED_ENUMS
+        else enum
+        for name, enum in factored.get("$defs", {}).items()
+    }
+    if identifiers:
+        defs[_IDENTIFIER_DEF] = _IDENTIFIER_SCHEMA
+    if decision_ids:
+        if any(declared != decision_ids[0] for declared in decision_ids):
+            raise ValueError("requirement kinds declare `decision_ids` differently")
+        defs[_DECISION_IDS_DEF] = decision_ids[0]
+    return factored | {"$defs": defs}
+
+
 def compact_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """`schema` without titles, `null` branches, empty defaults and shared field descriptions."""
-    return _compact(dict(schema))
+    """`schema` compacted, with `Identifier` and `decision_ids` stated once under `$defs`."""
+    return _factored(_compact(dict(schema)))
 
 
 class PlanTool(FunctionTool):

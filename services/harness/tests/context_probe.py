@@ -8,11 +8,10 @@ plan, and `unbounded_paths` finds any string, array or map in the plan's schema
 with no bound, for the legal-maximum tests in `test_context_budget.py`.
 
 That second job exists because the prefix is cached. Gemini's implicit caching
-matches it across requests, and ADK's explicit cache (`STUDIO_CONTEXT_CACHE=true`)
-holds the system instruction, the tool declarations and the contents before the
-last run of user contents, so that saving holds only while those stay
-byte-identical from call to call. The part of a request this budget bounds most directly is the
-`contents` that arrive after the cache is made.
+matches it across requests, and the shared explicit cache (`harness.prefix_cache`)
+holds the system instruction and the tool declarations, so that saving holds only
+while those stay byte-identical from call to call. The part of a request this
+budget bounds most directly is the `contents` that arrive after the cache is made.
 
 `test_context_budget.py` asserts ceilings against this module's composition
 records, and `just context-baseline` writes them to `context_baseline.json`, so
@@ -145,13 +144,15 @@ RELAY_BUCKET = "text(fenced-relay)"
 RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
 # The seam's own brief, bucketed on the opening words of `harness.planner_seam.
-# _ENVELOPE_CONTEXT`, the one part of a planner request this seam assembles
-# itself, not ADK relaying or a tool answering. Spelled out, not imported from
-# `planner_seam`, for the same reason `RELAY_MARKER` is: importing it would
-# hide the fact that the text moved, which is the thing this bucket exists to
-# measure. It is the one input on the planner path that varies with the plan,
-# the envelope and the digests.
+# _ENVELOPE_CONTEXT` or, on the orchestrator engine, `_READINGS_CONTEXT`: the
+# one part of a planner request this seam assembles itself, not ADK relaying or
+# a tool answering. Spelled out, not imported from `planner_seam`, for the same
+# reason `RELAY_MARKER` is: importing it would hide the fact that the text
+# moved, which is the thing this bucket exists to measure. It is the one input
+# on the planner path that varies with the plan, the envelope or readings, and
+# the digests.
 SEAM_MARKER = "Context for this question. The search step has already run"
+READINGS_SEAM_MARKER = "Context for this question. These are the readings of the searches"
 SEAM_BUCKET = "text(seam-brief)"
 
 
@@ -278,7 +279,8 @@ def _part_bucket(part: Any) -> tuple[str, str | None]:
         match = _RELAY_AUTHOR.match(text)
         author = match.group(1) if match else _UNTAGGED
         return f"{RELAY_BUCKET_PREFIX}{author}", author
-    return (SEAM_BUCKET, None) if SEAM_MARKER in text else ("text", None)
+    seam = SEAM_MARKER in text or READINGS_SEAM_MARKER in text
+    return (SEAM_BUCKET, None) if seam else ("text", None)
 
 
 def _part_chars(part: Any) -> int:
@@ -339,20 +341,13 @@ def compose(llm_request: Any, *, agent: str, scenario: str, call_index: int) -> 
     }
 
 
-# Stability: the inputs to ADK's own cache fingerprint ---------------------------
+# Stability: what the prompt caches match ------------------------------------------
 #
-# `google.adk.models.gemini_context_cache_manager._generate_cache_fingerprint`
-# hashes the model, the cache scope, the system instruction, the canonicalised
-# tools, the tool config and the first N contents. `_generate_cache_fingerprint`'s
-# caller logs "Cache content fingerprint mismatch" at DEBUG level and recreates
-# the cache, so a prefix that starts varying per request costs the whole cached
-# share with nothing in the log to say so. That is the fail-open path these
-# helpers exist to make loud.
-#
-# Two things ADK already protects, so nothing below tests for them: it sorts each
-# tool's declarations by name and the tool list before hashing, so reordering is
-# safe; and a declaration only has to be invariant within one run, not across
-# conversations.
+# `harness.prefix_cache.prefix_key` hashes the model, the system instruction, the
+# tool declarations and the tool config, so a prefix that starts varying per
+# request creates a cache per variant. Gemini's implicit caching matches the longest
+# leading run of the request it has seen before, so a rewritten earlier content
+# loses the cached share from that point. Neither failure says so in the log.
 
 
 def system_instruction_text(llm_request: Any) -> str:
@@ -366,35 +361,13 @@ def system_instruction_text(llm_request: Any) -> str:
     return str(instruction)
 
 
-def canonical_tools(llm_request: Any) -> str:
-    """The request's tool declarations canonically, for byte comparison.
-
-    Each tool's `function_declarations` is sorted by name and the tool list is
-    sorted by its own canonical form, so this proves "same declarations in the
-    same order the fingerprint sees them," not merely "the same Python list
-    happened to be built in the same order."
-    """
-    canonical: list[str] = []
-    for tool in getattr(llm_request.config, "tools", None) or []:
-        declarations = getattr(tool, "function_declarations", None)
-        if declarations:
-            ordered = sorted(
-                (_compact(d.model_dump(exclude_none=True)) for d in declarations),
-                key=lambda text: json.loads(text)["name"],
-            )
-            canonical.append(_compact({"function_declarations": ordered}))
-        else:
-            canonical.append(_compact(tool.model_dump(exclude_none=True)))
-    return _compact(sorted(canonical))
-
-
 def contents_leading(llm_request: Any) -> tuple[str, ...]:
     """One canonical string per content in the request's `contents`, in order.
 
-    The fingerprint covers the first N contents, so a run whose earlier turns
-    were rewritten, not merely appended to, would miss the cache from the point
-    of the rewrite. Comparing two calls' `contents_leading` prefix-wise is how
-    that shows up.
+    Gemini's implicit caching matches a leading run of contents, so a run whose
+    earlier turns were rewritten, not merely appended to, would miss the cache
+    from the point of the rewrite. Comparing two calls' `contents_leading`
+    prefix-wise is how that shows up.
     """
     return tuple(
         _compact(content.model_dump(exclude_none=True)) for content in llm_request.contents

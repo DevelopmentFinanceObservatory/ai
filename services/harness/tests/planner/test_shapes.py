@@ -38,9 +38,13 @@ _PERIOD = Period(start=2015, end=2020)
 
 
 def _role(
-    role: str | None = "donor", requirement_id: str = "req_a", narrowed: bool = False
+    role: str | None = "donor",
+    requirement_id: str = "req_a",
+    narrowed: bool = False,
+    *,
+    open: bool = False,
 ) -> RoleDimension:
-    return RoleDimension(role=role, requirement_id=requirement_id, narrowed=narrowed)
+    return RoleDimension(role=role, requirement_id=requirement_id, narrowed=narrowed, open=open)
 
 
 def _shape(
@@ -100,6 +104,18 @@ def test_aggregated_by_entity_and_period_keeps_roles_and_stays_observation():
     assert out.period == shape.period
     assert out.one_row_per_entity is False
     assert out.roots == shape.roots
+
+
+def test_aggregated_by_entity_keeps_the_named_roles_and_sums_the_open_one():
+    # Aid to the DRC from every donor, grouped by period and entity, gives one
+    # total per year for the named recipient, with every donor summed.
+    recipient, donors = _role(role="recipient"), _role(role="donor", open=True)
+    shape = _shape(roles=(recipient, donors))
+
+    out = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True)
+
+    assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=True) is None
+    assert out.roles == (recipient,)
 
 
 @pytest.mark.parametrize(
@@ -528,6 +544,33 @@ def test_rejects_aggregate_grouping_by_entity_with_no_roles():
     reason = rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=False)
     assert reason is not None
     assert "entity" in reason
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        (_role(role="donor", open=True),),
+        (
+            _role(role="donor", open=True),
+            RoleDimension(role="sector", requirement_id="req_a", breakdown=True),
+        ),
+    ],
+    ids=["open-alone", "open-beside-breakdown"],
+)
+def test_an_aggregate_by_entity_over_a_frame_naming_no_entity_is_refused(
+    roles: tuple[RoleDimension, ...],
+) -> None:
+    # Each donor's total with no donor named. The group by entity keeps the
+    # named parties, of which there are none, so it would total everything.
+    shape = _shape(roles=roles)
+
+    reason = rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=False)
+
+    assert reason is not None
+    assert "sums its open ['donor'] away, and this input names no entity" in reason
+    assert "group by period alone" in reason
+    assert "rank with a reduction" in reason
+    assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True) is None
 
 
 def test_aggregate_grouping_by_period_alone_with_no_roles_is_not_refused():
@@ -1390,7 +1433,7 @@ def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() ->
 def _every_place() -> FrameShape:
     return retrieved(
         requirement_id="req_a",
-        roles=(_role(role="country"),),
+        roles=(_role(role="country", open=True),),
         period=_PERIOD,
         measures=1,
         names_no_place=True,
@@ -1424,15 +1467,15 @@ def test_a_rank_a_total_and_a_share_over_mixed_levels_are_refused():
         assert "place_level" in reason
 
 
-def test_a_step_that_keeps_each_place_apart_reads_mixed_levels_and_carries_them():
+def test_a_growth_keeps_each_place_apart_and_carries_mixed_levels():
+    # An aggregate keeps no place apart. A group by entity sums the open place
+    # axis, which names no place, and is refused.
     shape = _every_place()
 
-    assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=False) is None
     assert rejects(ShapeVerb.GROWTH, shape, change=GrowthChange.RELATIVE) is None
-    per_place = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True)
+    assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=False) is not None
     growth = grown(shape, change=GrowthChange.RELATIVE, window=_PERIOD)
 
-    assert (per_place.mixed_levels, per_place.place_typed) == (True, False)
     assert (growth.mixed_levels, growth.place_typed) == (True, False)
     assert rejects(ShapeVerb.RANK, growth, axis="country") is not None
 
@@ -1451,7 +1494,7 @@ def test_a_level_filter_leaves_one_level_and_any_other_filter_leaves_them_mixed(
 
 def test_a_level_filter_reads_only_a_frame_that_still_carries_place_types():
     named = retrieved(requirement_id="req_a", roles=(_role(),), period=_PERIOD, measures=1)
-    per_place = aggregated(_every_place(), reduction=Reduction.SUM, by_entity=True, by_period=True)
+    per_place = grown(_every_place(), change=GrowthChange.RELATIVE, window=_PERIOD)
 
     assert rejects(ShapeVerb.FILTER, _every_place(), place_level=True) is None
     assert rejects(ShapeVerb.FILTER, named) is None

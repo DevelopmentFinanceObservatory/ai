@@ -137,7 +137,9 @@ def build_translation(plan: Plan, discovered: Mapping[str, str]) -> Translation:
     own `id` -- so any other requirement's `input_id`/`left_id`/`right_id`
     (or a `RequirementSide.input_id`) already names the right operation,
     with no id remapping needed. The terminal operations are the
-    requirements `inputs_of` names as nobody's input.
+    requirements `inputs_of` names as nobody's input, then every other
+    requirement `plan.answered` names. An ask answered by a result another
+    requirement reads still gets that result.
 
     Args:
         plan: The plan whose requirements to build operations for. Every
@@ -160,10 +162,11 @@ def build_translation(plan: Plan, discovered: Mapping[str, str]) -> Translation:
         for requirement in plan.evidence_requirements
         for input_id in inputs_of(requirement)
     }
+    answered = {output for answer in plan.answered for output in answer.outputs}
     terminal = tuple(
         requirement.id
         for requirement in plan.evidence_requirements
-        if requirement.id not in read_ids
+        if requirement.id not in read_ids or requirement.id in answered
     )
     return Translation(operations=tuple(operations), terminal=terminal)
 

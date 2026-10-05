@@ -145,8 +145,8 @@
       ]
     },
     {
-      "eval_id": "maps-a-per-head-figure-onto-share_of",
-      "note": "share_of divides one series by another, so a per-head figure is carried out, not referred: the seeded plan states debt-service and population dataset requirements plus a share_of requirement citing the normalisation decision (numerator debt, denominator population). The canned discovery answers population definitively, so nothing stops a full proposal; workflow_outcome pins the exact shape. This case used to be a referral (refers-a-per-head-requirement) before share_of existed as an operation kind.",
+      "eval_id": "refers-a-per-head-figure-with-a-unit-less-denominator",
+      "note": "The seeded plan divides Kenya's debt service, in US dollars, by its population, a count whose source declares no unit, as a share_of. analysis-mcp's share_of refuses a unit-less side against a side in a unit (cross_frame_unit_unbound), so the compiler refuses the pair before approval with frame_unit_unbound. The correct outcome is a referral: no_operation_covers naming the share_of requirement, which the planner declines. A population source that declared the numerator's unit would clear it, but the canned discovery offers none.",
       "session_input": {
         "app_name": "harness_translator_v1",
         "user_id": "eval-user",
@@ -170,26 +170,11 @@
               {
                 "name": "translate",
                 "response": {
-                  "outcome": "ok",
-                  "steps": [
-                    {
-                      "tool": "data-mcp.get_data"
-                    },
-                    {
-                      "tool": "data-mcp.get_data"
-                    },
-                    {
-                      "tool": "analysis-mcp.share_of"
-                    }
-                  ],
-                  "sources": [
-                    {
-                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
-                    },
-                    {
-                      "spec_id": "spec_99999999999999999999999999999999"
-                    }
-                  ]
+                  "outcome": "referred",
+                  "referral": {
+                    "kind": "no_operation_covers",
+                    "requirement_id": "debt_service_per_head"
+                  }
                 }
               }
             ]

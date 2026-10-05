@@ -28,7 +28,9 @@ The harness gives it nine (`harness.orchestrator_tools`):
 | `recall`         | An earlier turn's plan records or readings, or a canvas component's entry, in full; a typed refusal names the legal turns or ids |
 
 The model sees digests only: part readings, frame views, one-line summaries
-and chart facts, never rows. Its instruction reads the canvas digest and the
-conversation digest from session state, and within a turn it sees its own
-calls and every hand-back (see "The orchestrator engine" in
+and chart facts, never rows. Each request opens with the canvas digest and
+the conversation digest from session state (`prepend_digests`), so the
+instruction stays the same on every call and its prefix is served from the
+shared cache (`harness.prefix_cache`). Within a turn it sees its own calls
+and every hand-back (see "The orchestrator engine" in
 `services/harness/README.md`).

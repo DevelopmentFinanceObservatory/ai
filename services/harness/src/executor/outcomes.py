@@ -95,6 +95,11 @@ class MethodChoiceNeeded(StrictModel):
     `candidates` is whatever the refusal offered to choose from, verbatim.
     `also_stopped` names the wave's other stops, wave order, when this one
     is the wave's first and so the one a run raises (`executor.run._Run.execute`).
+    `completed` and `evidence` hold the steps that finished before the stop
+    and the evidence their retrievals recorded, in the plan's own step order.
+    `answers` holds, by step id, each finished terminal step's frame that
+    passed the answer check an accepted run applies (`executor.run._Run.
+    _answer_refusal`).
     """
 
     kind: Literal["method_choice_needed"] = "method_choice_needed"
@@ -105,6 +110,8 @@ class MethodChoiceNeeded(StrictModel):
     candidates: JsonValue
     refusal: ToolFailure
     completed: tuple[StepRecord, ...]
+    evidence: tuple[EvidenceRecord, ...] = ()
+    answers: dict[str, FrameRef] = Field(default_factory=dict)
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 
@@ -113,6 +120,11 @@ class Refused(StrictModel):
 
     `also_stopped` names the wave's other stops, wave order, when this one
     is the wave's first and so the one a run raises (`executor.run._Run.execute`).
+    `completed` and `evidence` hold the steps that finished before the stop
+    and the evidence their retrievals recorded, in the plan's own step order.
+    `answers` holds, by step id, each finished terminal step's frame that
+    passed the answer check an accepted run applies (`executor.run._Run.
+    _answer_refusal`).
     """
 
     kind: Literal["refused"] = "refused"
@@ -124,6 +136,8 @@ class Refused(StrictModel):
     payload: ToolFailure | None = None
     issues: tuple[EvidenceIssue, ...] = ()
     completed: tuple[StepRecord, ...] = ()
+    evidence: tuple[EvidenceRecord, ...] = ()
+    answers: dict[str, FrameRef] = Field(default_factory=dict)
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 
@@ -137,6 +151,11 @@ class RediscoveryNeeded(StrictModel):
     nothing to rediscover, so its refusal comes back as `Refused` instead.
     `also_stopped` names the wave's other stops, wave order, when this one
     is the wave's first and so the one a run raises (`executor.run._Run.execute`).
+    `completed` and `evidence` hold the steps that finished before the stop
+    and the evidence their retrievals recorded, in the plan's own step order.
+    `answers` holds, by step id, each finished terminal step's frame that
+    passed the answer check an accepted run applies (`executor.run._Run.
+    _answer_refusal`).
     """
 
     kind: Literal["rediscovery_needed"] = "rediscovery_needed"
@@ -147,6 +166,8 @@ class RediscoveryNeeded(StrictModel):
     spec_id: SpecId
     refusal: ToolFailure
     completed: tuple[StepRecord, ...]
+    evidence: tuple[EvidenceRecord, ...] = ()
+    answers: dict[str, FrameRef] = Field(default_factory=dict)
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 

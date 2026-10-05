@@ -93,7 +93,8 @@ adds two single-series results at each period both report, leaving out a
 period only one reports; `RankRequirement`
 orders every entity, and keeps the top or bottom N when it states `limit`,
 reducing an input that spans several years to one value each first; `ShareOfRequirement` divides one
-requirement's result by another's, period by period; `JoinRequirement` joins
+requirement's result by another's, period by period, when the two sources declare one unit
+or both declare none; `JoinRequirement` joins
 two requirements' results on the keys they share; and `FilterRequirement` keeps
 the rows that satisfy every one of a conjunction of predicates: a value or
 year threshold, an `EntityIn` naming entities, or a `PlaceLevel` keeping one
@@ -121,7 +122,7 @@ each with the operations the question asked of it. The planner's brief lists
 them with their open entity axes, and the plan gives each its own dataset
 requirement pinned to the seed's spec_id. `propose_plan` moves that pin to
 the seed's identity over the requirement's own period
-(`_window_seeded_pins`, `data_mcp.definition_writes.windowed_identity`), so
+(`_window_pins`, `data_mcp.definition_writes.windowed_identity`), so
 the plan retrieves the years it states, and records the copy beside the seed.
 One decision cannot fix a seed over two periods. When a seed's StatVars have
 left its dataset, the turn drops it (`planner.plan.dropped_seeds`) and tells

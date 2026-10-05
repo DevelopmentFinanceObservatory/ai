@@ -48,6 +48,9 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
+from compiler.sources import is_family, source_from_spec_block
+from data_mcp.definition_store.identity import IdentityMismatch
+from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from fastapi.responses import JSONResponse
 from google.adk.errors import StaleSessionError
 from google.adk.events import Event, EventActions
@@ -61,6 +64,7 @@ from harness.conversation import current_conversation_key
 from harness.graph import ORCHESTRATOR_SPECS_KEY
 from harness.turn_records import (
     PlanRecord,
+    RecordedIdentity,
     SearchReading,
     named_spec_ids,
     newest_per_spec_id,
@@ -162,7 +166,7 @@ _RECALL_TEXT_BUDGET = 4_000
 _RECALL_ID_CAP = 20
 # The keys of a turn record kept for the planner's ledger, which
 # `recall_state` leaves out.
-_TURN_LEDGER_KEYS = frozenset({"plans", "readings", "specs"})
+_TURN_LEDGER_KEYS = frozenset({"plans", "readings", "specs", "identities"})
 # Where a sentence ends: its closing mark, when whitespace follows.
 _SENTENCE_END = re.compile(r"[.!?](?=\s)")
 
@@ -423,13 +427,16 @@ class ConversationState:
     # with the rest of this state on restart (`ApprovalRecord`'s docstring).
     approvals: list[ApprovalRecord] = field(default_factory=list)
     # One record per completed turn: {user, assistant, cards, error, plans,
-    # readings, specs}, where `plans` are the `PlanRecord`s of the plans the
-    # turn ran, `readings` the `SearchReading`s it read, as JSON, and
-    # `specs` the spec block `search` returned for each source those plans
-    # used. Every key but `user` and `assistant` is optional, and a record
-    # without `plans`, `readings` or `specs` holds none. Feeds the conversation digest (newest window), the recall
-    # seam (everything older) and the planner's ledger
-    # (`prior_ledger_state`).
+    # readings, specs, identities}, where `plans` are the `PlanRecord`s of
+    # the plans the turn ran, `readings` the `SearchReading`s it read, as
+    # JSON, `specs` the spec block `search` returned for each source those
+    # plans used, and `identities` the `RecordedIdentity` of every source the
+    # turn's searches returned or its plans used, as JSON, by spec_id
+    # (`recorded_identity`). Every key but `user` and `assistant` is
+    # optional, and a record without `plans`, `readings`, `specs` or
+    # `identities` holds none. Feeds the conversation digest (newest
+    # window), the recall seam (everything older) and the planner's ledger
+    # (`prior_ledger_state`). None of them reads `identities`.
     turns: list[dict[str, Any]] = field(default_factory=list)
     # MCP calls that have timed out at least once in this conversation, keyed
     # by tool + the call's own arguments (`mcp_client._McpTimeoutError.
@@ -686,7 +693,34 @@ class ConversationState:
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
+        identities = _turn_identities(self.turn_specs, plans)
+        if identities:
+            record["identities"] = {
+                spec_id: recorded.model_dump(mode="json")
+                for spec_id, recorded in identities.items()
+            }
         self.turns.append(record)
+
+    def recorded_identity(self, spec_id: str) -> RecordedIdentity | None:
+        """The identity `spec_id` hashes from and the StatVars Search
+        resolves it with, as this turn or an earlier one recorded them. None
+        when none did.
+
+        This turn's are those of the spec blocks its searches have returned
+        so far and of the sources its plans have used. An earlier turn's
+        are the ones `close_turn` stored. Every identity hashes to its
+        spec_id (`_turn_identities`), so which turn recorded it does not
+        change it.
+        """
+        plans = _validated(PlanRecord, self.turn_plans, reader="identity", what="plan record")
+        recorded = _turn_identities(self.turn_specs, plans).get(spec_id)
+        if recorded is not None:
+            return recorded
+        for turn in reversed(self.turns):
+            stored = (turn.get("identities") or {}).get(spec_id)
+            if stored is not None:
+                return RecordedIdentity.model_validate(stored)
+        return None
 
     def prior_ledger_state(self) -> dict[str, Any] | None:
         """The search readings of every earlier turn, for this turn's planner
@@ -1904,6 +1938,51 @@ def _history_turn(
     if turn.get("error"):
         record["error"] = _cut_text(turn["error"], _HISTORY_ERROR_BYTE_CAP >> shrink)
     return record
+
+
+def _turn_identities(
+    specs: dict[str, Any], plans: Iterable[PlanRecord]
+) -> dict[str, RecordedIdentity]:
+    """The identity and StatVars of each spec block in `specs` and of each
+    source of `plans`, by spec_id.
+
+    A block is read as a source (`source_from_spec_block`) for its
+    `definition.identity` and, when it is no family (`is_family`), the one
+    StatVar it elected. A plan source states both (`PlanSource`). An
+    identity data-mcp's `resolve_definition` would refuse
+    (`caller_definition`: one that does not hash to its spec_id, or one past
+    `MAX_IDENTITY_BYTES` as compact JSON) is left out, so each entry is one
+    a later pin can resolve, and none takes more than that cap plus one
+    StatVar. A family's StatVars and the rest of a block are dropped."""
+    found: dict[str, RecordedIdentity] = {}
+    for spec_id, block in specs.items():
+        if not isinstance(block, dict):
+            continue
+        try:
+            source = source_from_spec_block(block)
+        except ValueError:
+            continue
+        if source.identity is not None:
+            found[spec_id] = RecordedIdentity(
+                identity=source.identity, stat_vars=() if is_family(source) else source.stat_vars
+            )
+    found.update(
+        (source.spec_id, RecordedIdentity(identity=source.identity, stat_vars=source.stat_vars))
+        for plan in plans
+        for source in plan.sources
+        if source.identity is not None
+    )
+    identities: dict[str, RecordedIdentity] = {}
+    for spec_id, recorded in found.items():
+        try:
+            caller_definition(
+                {"schema_version": 1, "spec_id": spec_id, "identity": recorded.identity}
+            )
+        except (IdentityMismatch, IdentityUnusable):
+            logger.warning("not recording the identity of %s, which does not resolve", spec_id)
+            continue
+        identities[spec_id] = recorded
+    return identities
 
 
 def _validated[M: BaseModel](

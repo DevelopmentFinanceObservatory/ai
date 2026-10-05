@@ -107,12 +107,13 @@ load-bearing:
 - `declared_shape` refuses `STEP_RESULT_UNUSABLE` when a result's declared
   `role_keys` are not valid role columns, so every role key a later step
   binds to has passed `normalize_role_keys`.
-- `_answer_frame` refuses `EMPTY_ANSWER` when a terminal step's own
+- `_answer_refusal` refuses `EMPTY_ANSWER` when a terminal step's own
   capability says an empty result is not an answer (`empty_is_an_answer`,
   `True` on `filter` alone) and the call declared zero rows, and refuses
   `STEP_RESULT_UNUSABLE` when the tool declares an output schema but the
   call carried no row count -- the schema promises the field, so its absence
-  is a broken contract, not an unknown.
+  is a broken contract, not an unknown. A run that stops carries the
+  finished terminal frames this check lets stand as its `answers`.
 """
 
 from __future__ import annotations
@@ -120,7 +121,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from functools import partial
 
@@ -647,24 +648,24 @@ class _Run:
             if stopped is not None:
                 # The wave has already run every one of its steps to
                 # completion, so `_completed_so_far` names every step that
-                # finished in this wave and in every wave before it --
-                # re-stamp the outcome, and every sibling stop, with that
-                # rather than whatever each saw at the moment it stopped.
-                completed = self._completed_so_far()
+                # finished in this wave and in every wave before it,
+                # `_evidence_so_far` the evidence they recorded, and
+                # `_answers` the finished terminal steps that stand as
+                # answers. Re-stamp the outcome, and every sibling stop,
+                # with those rather than whatever each saw at the moment it
+                # stopped.
                 raise _Stopped(
-                    stopped.outcome.model_copy(update={"completed": completed}),
-                    siblings=tuple(
-                        sibling.model_copy(update={"completed": completed})
-                        for sibling in other_stops
-                    ),
+                    self._restamped(stopped.outcome),
+                    siblings=tuple(self._restamped(sibling) for sibling in other_stops),
                 )
+        answers, refused = self._answers(self.workflow.terminal_steps)
+        if refused is not None:
+            raise _Stopped(self._restamped(refused.outcome))
         return Accepted(
             revision=self.revision,
             evidence=self._evidence_so_far(),
             steps=self._completed_so_far(),
-            results={
-                step_id: self._answer_frame(step_id) for step_id in self.workflow.terminal_steps
-            },
+            results=answers,
         )
 
     async def _attempt(
@@ -702,14 +703,44 @@ class _Run:
             if step.id in self.evidence_by_step
         )
 
-    def _answer_frame(self, step_id: str) -> FrameRef:
-        """The frame a terminal step produced, refusing when it produced none
-        or when its own declared row count says it should not stand as an
-        answer.
+    def _restamped(
+        self, outcome: MethodChoiceNeeded | Refused | RediscoveryNeeded
+    ) -> MethodChoiceNeeded | Refused | RediscoveryNeeded:
+        """`outcome` carrying what the run finished: its steps, their evidence
+        and the terminal frames that stand as answers (`_answers`)."""
+        return outcome.model_copy(
+            update={
+                "completed": self._completed_so_far(),
+                "evidence": self._evidence_so_far(),
+                "answers": self._answers(
+                    step_id for step_id in self.workflow.terminal_steps if step_id in self.records
+                )[0],
+            }
+        )
+
+    def _answers(self, step_ids: Iterable[str]) -> tuple[dict[str, FrameRef], _Stopped | None]:
+        """The frame of each of `step_ids` (terminal steps) that stands as an
+        answer (`_answer_refusal`), by step id in the order given, and the
+        first refusal when one does not stand.
         """
-        frame = self.frames.get(step_id)
-        if frame is None:
-            raise self._refused(
+        answers: dict[str, FrameRef] = {}
+        refused: _Stopped | None = None
+        for step_id in step_ids:
+            refusal = self._answer_refusal(step_id)
+            if refusal is None:
+                answers[step_id] = self.frames[step_id]
+            elif refused is None:
+                refused = refusal
+        return answers, refused
+
+    def _answer_refusal(self, step_id: str) -> _Stopped | None:
+        """Why a terminal step's frame does not stand as an answer: it
+        produced none, its own declared row count is missing where its output
+        schema promises one, or that count is zero from a tool whose empty
+        result is not an answer. `None` when the frame stands.
+        """
+        if step_id not in self.frames:
+            return self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE,
                 f"terminal step {step_id!r} produced no frame to answer with",
                 step_id=step_id,
@@ -717,7 +748,7 @@ class _Run:
         step = self.steps_by_id[step_id]
         row_count = self.row_counts.get(step_id)
         if step.output_schema_hash is not None and row_count is None:
-            raise self._refused(
+            return self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE,
                 f"{step.tool.name!r} declares an output schema promising a row count, but "
                 f"terminal step {step_id!r}'s result carried none",
@@ -726,13 +757,13 @@ class _Run:
         if row_count == 0:
             capability = self.capabilities.get(step.tool)
             if capability is None or not capability.empty_is_an_answer:
-                raise self._refused(
+                return self._refused(
                     RefusalKind.EMPTY_ANSWER,
                     f"terminal step {step_id!r} matched no rows, and {step.tool.name!r} is not "
                     "one whose empty result is itself an answer",
                     step_id=step_id,
                 )
-        return frame
+        return None
 
     # -- before the first call ------------------------------------------------------
 
@@ -870,7 +901,7 @@ class _Run:
     ) -> None:
         """Compare a result's own declared shape against the shape `step` must
         produce, refusing `SHAPE_MISMATCH` on a difference, and record the
-        declared row count, role keys and StatVar count for `_answer_frame`,
+        declared row count, role keys and StatVar count for `_answer_refusal`,
         the steps reading this one and the step's `StepRecord`.
 
         `expected_role_keys` is `None` for a retrieval: the role keys and
@@ -1130,6 +1161,7 @@ class _Run:
                     candidates=candidates_of(failure),
                     refusal=failure,
                     completed=self._completed_so_far(),
+                    evidence=self._evidence_so_far(),
                 )
             )
         binding = self.evidence_bindings.get(step.id)
@@ -1143,6 +1175,7 @@ class _Run:
                     spec_id=binding.spec_id,
                     refusal=failure,
                     completed=self._completed_so_far(),
+                    evidence=self._evidence_so_far(),
                 )
             )
         # A rediscovery on a step bound to no evidence would name nothing to
@@ -1239,5 +1272,6 @@ class _Run:
                 payload=payload,
                 issues=issues,
                 completed=self._completed_so_far(),
+                evidence=self._evidence_so_far(),
             )
         )

@@ -1429,6 +1429,38 @@ async def test_two_refusals_in_one_wave_carry_the_second_as_a_sibling(
     assert [step.step_id for step in sibling.completed] == []
 
 
+@pytest.mark.parametrize(("rows", "answers"), [(1, ["totals"]), (0, [])])
+async def test_a_stopped_run_answers_with_the_finished_terminal_steps_an_accepted_run_would(
+    two_source_plan: PlanFactory,
+    manifest_for: Callable[..., dict[str, Any]],
+    source: Callable[..., SelectedSource],
+    population_source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+    rows: int,
+    answers: list[str],
+) -> None:
+    """`totals` finishes in the wave where its sibling terminal step refuses.
+    Zero rows from `aggregate`, whose empty result is not an answer, keeps it
+    out of the stop's `answers`, as `EMPTY_ANSWER` would on an accepted run."""
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [ok(manifest_for(source())), ok(manifest_for(population_source()))],
+            "aggregate": [
+                ok({**RESULT_FRAME, "rows": rows, "stat_var_count": rows}),
+                refusal("growth_gap_year", "do_not_retry"),
+            ],
+        },
+    )
+
+    outcome = await _run(two_source_plan(), surface=surface, sleep=_Sleeps())
+
+    assert not isinstance(outcome, Accepted), outcome
+    assert outcome.step_id == "population_totals_op"
+    assert [step.step_id for step in outcome.completed] == ["debt", "totals", "pop"]
+    assert list(outcome.answers) == answers
+
+
 # -- wave concurrency is bounded -------------------------------------------------------
 
 _SIX_REQ_IDS = tuple(f"req{n}" for n in range(6))
