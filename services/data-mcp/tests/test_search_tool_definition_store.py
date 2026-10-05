@@ -200,8 +200,8 @@ async def test_no_data_flagged_match_definition_is_written_as_a_single_object() 
 # The elected StatVars: `resolved.stat_vars.items[].ref`
 
 
-async def test_elected_stat_vars_are_named_to_the_caller_and_not_stored() -> None:
-    """The caller passes them back to `get_data`; the store holds the identity alone."""
+async def test_elected_stat_vars_are_neither_named_to_the_caller_nor_stored() -> None:
+    """The digest counts them and names none; the store holds the identity alone."""
     definition = _valid_definition("definite-elected")
     spec = _with_elected(
         {**_spec(spec_id=definition["spec_id"]), "definition": definition},
@@ -216,15 +216,10 @@ async def test_elected_stat_vars_are_named_to_the_caller_and_not_stored() -> Non
 
     assert result.is_error is False
     assert store.written == [_stored(definition)]
-    assert (
-        "StatVars for get_data's resolved_stat_var_dcids: "
-        "Count_Person_Female (Count_Person_Female), Count_Person_Male (Count_Person_Male)."
-    ) in text_of(result)
+    assert "2 StatVars" in text_of(result)
+    assert "Count_Person_" not in text_of(result)
     assert result.structured_content is not None
-    assert result.structured_content["parts"][0]["specs"][0]["resolved_stat_var_dcids"] == [
-        "Count_Person_Female",
-        "Count_Person_Male",
-    ]
+    assert "Count_Person_" not in json.dumps(result.structured_content)
 
 
 # Skips

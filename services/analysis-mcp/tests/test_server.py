@@ -77,6 +77,7 @@ async def test_server_exposes_one_tool_per_verb() -> None:
         "share_of",
         "join",
         "filter",
+        "sum_of",
     }
 
 
@@ -260,7 +261,7 @@ async def test_build_store_does_not_seed_by_default() -> None:
 async def test_build_store_seeds_fixtures_when_the_flag_is_enabled() -> None:
     store = await _build_store(Settings(seed_fixture_frames=True))
 
-    assert len(store._entries) == 6
+    assert len(store._entries) == 8
 
 
 async def test_build_store_forwards_settings_to_the_factory(
@@ -511,7 +512,7 @@ async def test_backstop_leaves_protocol_failures_to_report_themselves(
     )
 
 
-_SEVEN_VERBS = {"aggregate", "compare", "growth", "rank", "share_of", "join", "filter"}
+_VERBS = {"aggregate", "compare", "growth", "rank", "share_of", "join", "filter", "sum_of"}
 
 
 @pytest.mark.parametrize(
@@ -523,7 +524,7 @@ async def test_unknown_tool_name_names_the_registered_verbs(
     tool_name: str, args: dict[str, object]
 ) -> None:
     """An unknown tool name -- whether made up or belonging to another
-    server, such as data-mcp's `get_data` -- names all seven registered
+    server, such as data-mcp's `get_data` -- names all eight registered
     verbs and points the caller at `tools/list`. FastMCP's own default
     response is the bare `Unknown tool: {name!r}`.
     """
@@ -533,7 +534,7 @@ async def test_unknown_tool_name_names_the_registered_verbs(
     assert result.is_error is True
     (content,) = result.content
     assert tool_name in content.text
-    for verb in _SEVEN_VERBS:
+    for verb in _VERBS:
         assert verb in content.text
     assert "tools/list" in content.text
 

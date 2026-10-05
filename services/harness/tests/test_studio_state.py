@@ -43,6 +43,7 @@ from google.adk.errors import StaleSessionError
 from google.adk.sessions import DatabaseSessionService, InMemorySessionService
 from harness import studio_state
 from harness.approval import ApprovalDecision, ApprovalRecord
+from harness.graph import ORCHESTRATOR_SPECS_KEY
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
@@ -56,10 +57,12 @@ from harness.studio_state import (
     _PendingInterrupt,
     land_component,
 )
+from harness.turn_records import SearchReading
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
+from .test_turn_records import _top_donors
 
 CONVERSATION = "conv_01test0000"
 
@@ -90,14 +93,22 @@ def test_close_turn_ends_the_span_exactly_once(monkeypatch):
     monkeypatch.setattr(
         studio_state, "start_turn_span", lambda trace_id, *, session_id=None: fake_span
     )
-    monkeypatch.setattr(studio_state, "end_turn_span", ended.append)
+    monkeypatch.setattr(
+        studio_state,
+        "end_turn_span",
+        lambda handle, *, request, response, error: ended.append(
+            (handle, request, response, error)
+        ),
+    )
 
     state = ConversationState(conversation_id=CONVERSATION)
     state.begin_turn()
+    state.turn_user_message = "life expectancy in Kenya"
     state.close_turn(final_text="done")
     state.close_turn(final_text="done again")  # the resume protocol can call this twice
 
-    assert ended == [fake_span]
+    # The span ends once, carrying the turn's question and answer and no error.
+    assert ended == [(fake_span, "life expectancy in Kenya", "done", None)]
     assert state._telemetry_span is None
 
 
@@ -115,7 +126,11 @@ def test_abandoned_turn_closes_its_span_before_the_next_one_opens(monkeypatch):
         "start_turn_span",
         lambda trace_id, *, session_id=None: (opened.append(trace_id), remaining.pop(0))[1],
     )
-    monkeypatch.setattr(studio_state, "end_turn_span", ended.append)
+    monkeypatch.setattr(
+        studio_state,
+        "end_turn_span",
+        lambda handle, *, error, **_: ended.append((handle, error)),
+    )
 
     state = ConversationState(conversation_id=CONVERSATION)
     state.begin_turn()  # turn 1, never closed
@@ -125,7 +140,7 @@ def test_abandoned_turn_closes_its_span_before_the_next_one_opens(monkeypatch):
     turn_2_trace_id = state.trace_id
 
     assert opened == [turn_1_trace_id, turn_2_trace_id]
-    assert ended == [turn_1_span]
+    assert ended == [(turn_1_span, "abandoned")]
     assert state._telemetry_span is turn_2_span
     assert state.turns[-1] == {"user": "", "assistant": "", "error": "abandoned"}
 
@@ -317,6 +332,12 @@ def test_digest_entry_stays_bounded_however_many_series_the_frame_holds() -> Non
     assert all(
         _serialised(name) <= studio_state._DIGEST_NAME_BYTE_CAP for name in block["entities"]
     )
+    assert block["entities_truncated"] == {
+        "showing": studio_state._DIGEST_SHOW_CAP,
+        "total": 200,
+        "rule": "display order",
+    }
+    assert "variable_truncated" not in block
 
 
 def test_digest_entry_omits_what_a_component_does_not_show() -> None:
@@ -415,7 +436,10 @@ def _serialised(value: Any) -> int:
     return len(json.dumps(value))
 
 
-def test_a_realistic_canvas_block_passes_through_byte_for_byte():
+def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
+    """Every series of the four-series block holds the same coordinates, so
+    the block states them once and no series repeats them. The fact
+    summary's component id and revision, which the block carries, go."""
     entries = {
         "cmp_01j9zc3aqw": _entry("Life expectancy in Kenya (1960-2023)", _fact_summary(1)),
         "cmp_01j9zc3aqx": _entry("Aid to five East African countries, 2000-2023", _fact_summary(4)),
@@ -426,8 +450,60 @@ def test_a_realistic_canvas_block_passes_through_byte_for_byte():
     digest = state.canvas_digest_state()
 
     assert digest is not None
+
+    def factored(summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "window": summary["window"],
+            "indicators": summary["indicators"],
+            "attribution": summary["attribution"],
+            "shared_coordinates": {"unit": "Year", "observationAbout": "country/COD"},
+            "series": [
+                {key: value for key, value in series.items() if key != "coordinates"}
+                for series in summary["series"]
+            ],
+        }
+
     assert digest["blocks"] == [
-        {"component_id": component_id, **entry} for component_id, entry in entries.items()
+        {
+            "component_id": component_id,
+            **entry,
+            "fact_summary": entry["fact_summary"] and factored(entry["fact_summary"]),
+        }
+        for component_id, entry in entries.items()
+    ]
+
+
+def test_a_coordinate_one_series_differs_in_stays_on_every_series():
+    """Only a coordinate every series holds at the same value is factored.
+    `provenance` differs on one series and `financingProvider` on all, so
+    each series keeps its own value of both; a coordinate one series lacks
+    stays with the series that hold it."""
+    summary = _fact_summary(3)
+    providers = ["country/USA", "country/ESP", "country/FRA"]
+    for series, provider in zip(summary["series"], providers, strict=True):
+        series["coordinates"] = {
+            "unit": "CurrencyUSD",
+            "stat_var": "dcid:spec_f8bf",
+            "provenance": "provenance/CRS",
+            "financingProvider": provider,
+        }
+    summary["series"][1]["coordinates"]["provenance"] = "provenance/Imputed"
+    summary["series"][2]["coordinates"]["measurementMethod"] = "Modelled"
+    state = _canvas({"cmp_01": _entry("Aid to Guatemala", summary)})
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    shown = digest["blocks"][0]["fact_summary"]
+    assert shown["shared_coordinates"] == {"unit": "CurrencyUSD", "stat_var": "dcid:spec_f8bf"}
+    assert [series["coordinates"] for series in shown["series"]] == [
+        {"provenance": "provenance/CRS", "financingProvider": "country/USA"},
+        {"provenance": "provenance/Imputed", "financingProvider": "country/ESP"},
+        {
+            "provenance": "provenance/CRS",
+            "financingProvider": "country/FRA",
+            "measurementMethod": "Modelled",
+        },
     ]
 
 
@@ -454,9 +530,41 @@ def test_a_title_of_escaped_characters_is_cut_by_its_serialised_size():
     assert _serialised(title) <= studio_state._TITLE_BYTE_CAP
 
 
+def test_an_oversized_fact_summary_keeps_its_leading_series_and_labels_the_subset():
+    """A summary over its cap keeps the series that fit from the front, in
+    display order, and states how many of the card's series it shows and by
+    which rule."""
+    series = _fact_summary(BIG // 500)["series"]
+    for index, item in enumerate(series):
+        item["coordinates"] = {"unit": "Year", "observationAbout": f"country/C{index:03d}"}
+    oversized = {**_fact_summary(), "series": series}
+    state = _canvas({"cmp_01": _entry("Aid", oversized)})
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    summary = digest["blocks"][0]["fact_summary"]
+    showing = summary["series_truncated"]["showing"]
+    assert 0 < showing < len(series)
+    assert summary["series_truncated"] == {
+        "showing": showing,
+        "total": len(series),
+        "rule": "display order",
+    }
+    assert [item["id"] for item in summary["series"]] == [item["id"] for item in series[:showing]]
+    assert summary["shared_coordinates"] == {"unit": "Year"}
+    assert _serialised(summary) <= studio_state._FACT_SUMMARY_BYTE_CAP
+    assert (
+        _serialised({**summary, "series": series[: showing + 1]})
+        > studio_state._FACT_SUMMARY_BYTE_CAP
+    )
+
+
 def test_an_oversized_fact_summary_becomes_a_stub_that_says_it_was_cut():
-    oversized_object = {**_fact_summary(), "series": _fact_summary(BIG // 500)["series"]}
-    for oversized in (oversized_object, "s" * BIG):
+    """A summary that does not fit even with no series, or that is not a
+    summary at all, becomes a stub."""
+    no_series_fit = {**_fact_summary(), "indicators": _fact_summary(BIG // 100)["indicators"]}
+    for oversized in (no_series_fit, "s" * BIG):
         state = _canvas({"cmp_01": _entry("Aid", oversized)})
 
         digest = state.canvas_digest_state()
@@ -605,6 +713,276 @@ def test_recall_serves_the_uncut_canvas_entries():
 
     assert served["cards"] == [{"component_id": "cmp_01", **_entry(title, summary)}]
     assert state.components["cmp_01"] == _entry(title, summary)  # the digest cuts a copy
+
+
+_PLAN = _top_donors()[1]
+_PLAN_JSON = _PLAN.model_dump(mode="json")
+_READING_JSON = SearchReading.from_part(
+    {"variable": "aid to Guatemala", "status": "definite", "spec_id": "spec_" + "a" * 32}
+).model_dump(mode="json")
+
+
+def test_a_closed_turn_keeps_its_plans_and_readings_and_reads_each_unsearched_source():
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_user_message = "top donors to guatemala since 2020"
+    state.turn_plans = [_PLAN_JSON]
+    state.turn_readings = [_READING_JSON]
+    used = _PLAN.sources[0].spec_id
+    state.turn_specs = {used: {"spec_id": used}, _READING_JSON["spec_id"]: {"spec_id": "a"}}
+
+    state.close_turn(final_text="The top donor was the United States.")
+
+    (record,) = state.turns
+    assert record["plans"] == [_PLAN_JSON]
+    # Only the block of a source the turn's plan used is kept.
+    assert record["specs"] == {used: {"spec_id": used}}
+    searched, translated = (SearchReading.model_validate(r) for r in record["readings"])
+    assert searched == SearchReading.model_validate(_READING_JSON)
+    assert (translated.spec_id, translated.origin) == (_PLAN.sources[0].spec_id, "translator")
+    assert translated.window is not None and (translated.window.start, translated.window.end) == (
+        2020,
+        2023,
+    )
+
+
+def test_a_closed_turn_keeps_no_block_for_a_spec_id_only_offered_as_a_candidate():
+    candidate = "spec_" + "d" * 32
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_readings = [
+        SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "candidates",
+                "candidates": [{"spec_id": candidate, "label": "Aid"}],
+            }
+        ).model_dump(mode="json")
+    ]
+    state.turn_specs = {candidate: {"spec_id": candidate}}
+
+    state.close_turn(final_text="Which aid measure?")
+
+    (record,) = state.turns
+    assert "specs" not in record
+    assert state.prior_ledger_state()["spec_ids"] == []
+    assert state.earlier_block(candidate) is None
+
+
+def test_begin_turn_clears_the_previous_turns_plans_and_readings():
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_plans = [_PLAN_JSON]
+    state.turn_readings = [_READING_JSON]
+    state.turn_specs = {"spec_a": {}}
+
+    state.begin_turn()
+
+    assert (state.turn_plans, state.turn_readings, state.turn_specs) == ([], [], {})
+
+
+_LONG_ANSWER = (
+    "The United States gave the most, followed by the European Union institutions. "
+    "Germany came third and Japan fourth. "
+    + "Every other donor, "
+    + "small and large, " * 12
+    + "gave less than a tenth of that. "
+    + "Would you like the same ranking for Honduras?"
+)
+
+
+def test_the_digest_keeps_asks_and_the_previous_answer_whole_and_states_each_plan():
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {
+            "user": "top donors to guatemala since 2020",
+            "assistant": _LONG_ANSWER,
+            "plans": [_PLAN_JSON],
+            "readings": [_READING_JSON],
+        },
+        {
+            "user": "why is the data through 2023 when 2024 is the latest year?",
+            "assistant": _LONG_ANSWER,
+        },
+    ]
+
+    digest = state.conversation_digest_state()
+
+    assert digest is not None
+    older, previous = digest["turns"]
+    assert older["user"] == "top donors to guatemala since 2020"
+    assert older["plans"] == [_PLAN.digest_line()]
+    assert "readings" not in older
+    # The older answer keeps its leading sentences, cut where one ends.
+    assert older["assistant"] == (
+        "The United States gave the most, followed by the European Union institutions. "
+        "Germany came third and Japan fourth." + studio_state._CUT_MARKER
+    )
+    assert previous["assistant"] == _LONG_ANSWER
+    assert len(json.dumps(digest)) <= CONVERSATION_DIGEST_MAX_BYTES
+
+
+def test_the_digest_skips_a_stored_plan_record_that_no_longer_validates(
+    caplog: pytest.LogCaptureFixture,
+):
+    state = ConversationState(conversation_id=CONVERSATION)
+    malformed = {**_PLAN_JSON, "unknown_field": 1}
+    state.turns = [
+        {"user": "q1", "assistant": "a1", "plans": [malformed, _PLAN_JSON]},
+        {"user": "q2", "assistant": "a2"},
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
+        digest = state.conversation_digest_state()
+
+    assert digest is not None
+    assert digest["turns"][0]["plans"] == [_PLAN.digest_line()]
+    assert "skipping a stored plan record" in caplog.text
+
+
+_MALFORMED = {"unknown_field": 1}
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda state: state.recall_part(part="plan", turn=1)["text"],
+        lambda state: state.recall_part(part="readings", turn=1)["text"],
+        lambda state: state.prior_ledger_state()["readings"],
+        lambda state: state.close_turn(final_text="a2") or state.turns[-1]["readings"],
+    ],
+    ids=["recall_plan", "recall_readings", "prior_ledger", "close_turn"],
+)
+def test_every_reader_of_stored_turn_records_skips_one_that_no_longer_validates(
+    read, caplog: pytest.LogCaptureFixture
+):
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {
+            "user": "q1",
+            "assistant": "a1",
+            "plans": [{**_PLAN_JSON, **_MALFORMED}, _PLAN_JSON],
+            "readings": [{**_READING_JSON, **_MALFORMED}, _READING_JSON],
+        }
+    ]
+    state.turn_plans = [{**_PLAN_JSON, **_MALFORMED}, _PLAN_JSON]
+    state.turn_readings = [_READING_JSON]
+
+    with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
+        served = read(state)
+
+    assert served
+    assert "skipping a stored" in caplog.text
+
+
+def test_the_prior_ledger_keeps_each_spec_ids_newest_reading_and_its_turns_block():
+    newer = {**_READING_JSON, "sentence": "newer"}
+    latest = SearchReading(
+        text="latest aid",
+        status="definite",
+        spec_id="spec_" + "c" * 32,
+        requested_window_kind="latest",
+    ).model_dump(mode="json")
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {
+            "user": "q1",
+            "assistant": "a1",
+            "readings": [_READING_JSON, latest],
+            "specs": {_READING_JSON["spec_id"]: {"turn": 1}, latest["spec_id"]: {"turn": 1}},
+        },
+        {"user": "q2", "assistant": "a2"},
+        {
+            "user": "q3",
+            "assistant": "a3",
+            "readings": [newer],
+            "specs": {_READING_JSON["spec_id"]: {"turn": 3}},
+        },
+    ]
+
+    ledger = state.prior_ledger_state()
+
+    assert ledger is not None
+    assert ledger["readings"] == [latest, newer]
+    assert ledger["spec_ids"] == [_READING_JSON["spec_id"]]
+    assert set(ledger["warnings"]) == {_READING_JSON["spec_id"], latest["spec_id"]}
+    # The ledger a turn's session is seeded with carries no block; a pin or
+    # a fetch reads the newest one through `earlier_block`.
+    assert set(ledger) == {"readings", "warnings", "spec_ids"}
+    assert state.earlier_block(_READING_JSON["spec_id"]) == {"turn": 3}
+    assert state.earlier_block(latest["spec_id"]) is None
+    assert ConversationState(conversation_id=CONVERSATION).prior_ledger_state() is None
+
+
+def test_recall_leaves_out_a_turns_plans_and_readings():
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {"user": "q", "assistant": "a", "plans": [_PLAN_JSON], "readings": [], "specs": {}}
+    ]
+
+    assert state.recall_state(scope="conversation", query="")["turns"] == [
+        {"turn": 1, "user": "q", "assistant": "a"}
+    ]
+
+
+def _recallable() -> ConversationState:
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {"user": "q1", "assistant": "a1", "plans": [_PLAN_JSON], "readings": [_READING_JSON]},
+        {"user": "q2", "assistant": "a2"},
+        {"user": "q3", "assistant": "a3", "plans": [_PLAN_JSON]},
+    ]
+    state.components = {"cmp_01": _entry("Aid", {"series": ["x"]})}
+    return state
+
+
+def test_recall_part_returns_a_turns_plan_record_in_full_and_defaults_to_the_newest_plan():
+    state = _recallable()
+
+    first = state.recall_part(part="plan", turn=1)
+    newest = state.recall_part(part="plan")
+
+    assert first["turn"] == 1 and first["user"] == "q1"
+    assert first["text"] == [_PLAN.render(budget=studio_state._RECALL_TEXT_BUDGET)]
+    assert newest["turn"] == 3
+
+
+def test_recall_part_returns_a_turns_readings_and_a_canvas_entry():
+    state = _recallable()
+
+    readings = state.recall_part(part="readings")
+    canvas = state.recall_part(part="canvas", component_id="cmp_01")
+
+    assert readings["turn"] == 1 and "aid to Guatemala" in readings["text"][0]
+    assert canvas == {
+        "part": "canvas",
+        "component_id": "cmp_01",
+        **_entry("Aid", {"series": ["x"]}),
+    }
+
+
+@pytest.mark.parametrize(
+    ("target", "legal"),
+    [
+        ({"part": "plan", "turn": 2}, {"turns": [1, 3]}),
+        ({"part": "plan", "turn": 9}, {"turns": [1, 3]}),
+        ({"part": "readings", "turn": 3}, {"turns": [1]}),
+        ({"part": "canvas", "component_id": "cmp_99"}, {"component_ids": ["cmp_01"]}),
+        ({"part": "canvas"}, {"component_ids": ["cmp_01"]}),
+    ],
+)
+def test_recall_part_refuses_a_missing_target_naming_the_legal_values(target, legal):
+    with pytest.raises(studio_state.RecallRefusedError) as refused:
+        _recallable().recall_part(**target)
+
+    assert refused.value.legal == legal
+
+
+def test_recall_part_bounds_what_it_renders_of_a_turn_with_several_plans():
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [{"user": "q", "assistant": "a", "plans": [_PLAN_JSON] * 4}]
+
+    text = state.recall_part(part="plan")["text"]
+
+    assert len(text) == 4
+    assert all(len(plan) <= studio_state._RECALL_TEXT_BUDGET // 4 for plan in text)
 
 
 def _turn(index: int, **fields: Any) -> dict[str, Any]:
@@ -900,6 +1278,42 @@ def _approval(**overrides: Any) -> ApprovalRecord:
     return ApprovalRecord(**fields)
 
 
+async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(session_service) -> None:
+    """A checkpoint after a search writes no spec block to the ledger; closing
+    the turn on another instance stores the block of the source its plan
+    used, read from the turn's own session."""
+    used = _PLAN.sources[0].spec_id
+    candidate = "spec_" + "d" * 32
+    blocks = {used: {"spec_id": used, "note": "used block"}, candidate: {"note": "unused block"}}
+    store_a = StudioStore(session_service, app_name="app")
+    state = await store_a.create("principal", CONVERSATION)
+    segment_id = store_a.claim_segment("principal", CONVERSATION)
+    state.begin_turn()
+    await store_a.save("principal", CONVERSATION)
+    await session_service.create_session(
+        app_name="app",
+        user_id="principal",
+        session_id=state.session_id,
+        state={ORCHESTRATOR_SPECS_KEY: blocks},
+    )
+    state.turn_specs = dict(blocks)
+    state.turn_plans = [_PLAN_JSON]
+
+    await store_a.checkpoint("principal", CONVERSATION, segment_id)
+
+    ledger = await session_service.get_session(
+        app_name="app.ledger", user_id="principal", session_id=CONVERSATION
+    )
+    written = json.dumps([ledger.state, *(e.actions.state_delta for e in ledger.events)])
+    assert "used block" not in written and "unused block" not in written
+
+    resumed = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    assert resumed is not None
+    resumed.close_turn(final_text="The top donor was the United States.")
+
+    assert resumed.turns[-1]["specs"] == {used: blocks[used]}
+
+
 async def test_round_trip_of_every_durable_field(session_service) -> None:
     """Every durable field survives a save on one store and a load on a
     SECOND store over the same ledger -- the actual cross-instance case,
@@ -914,6 +1328,8 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     state.turn_final_text = "Kenya received $1.2B in 2023."
     state.turn_recorded = True
     state.turn_components = [{"component_id": "cmp_1", "type": "line_chart", "action": "created"}]
+    state.turn_plans = [_PLAN_JSON]
+    state.turn_readings = [_READING_JSON]
     state.timed_out_calls = {"get_data:call_a", "get_data:call_b"}
     state.plan_version_ids = {1: "plan_a", 2: "plan_b"}
     state.latest_plan_version = 2
@@ -929,7 +1345,9 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     )
     state.segment = Segment(id="seg_1", owner="owner_a", expires_at=1_700_000_045.0, cancel=True)
     state.components["cmp_1"] = {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
+    # A record stored before turns held plans and readings, and one that holds them.
     state.turns.append({"user": "q1", "assistant": "a1"})
+    state.turns.append({"user": "q2", "assistant": "a2", "plans": [_PLAN_JSON]})
     state.approvals.append(_approval())
     block = CompositionBlock(
         component_id="cmp_1", revision=1, type=ComponentType.LINE_CHART, title="Aid to Kenya"
@@ -951,6 +1369,8 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     assert loaded.turn_final_text == state.turn_final_text
     assert loaded.turn_recorded is True
     assert loaded.turn_components == state.turn_components
+    assert loaded.turn_plans == [_PLAN_JSON]
+    assert loaded.turn_readings == [_READING_JSON]
     assert loaded.timed_out_calls == state.timed_out_calls
     assert loaded.plan_version_ids == {1: "plan_a", 2: "plan_b"}
     assert loaded.latest_plan_version == 2
@@ -970,7 +1390,8 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     assert loaded.components == {
         "cmp_1": {"type": "line_chart", "title": "Aid to Kenya", "revision": 1}
     }
-    assert loaded.turns == [{"user": "q1", "assistant": "a1"}]
+    assert loaded.turns == state.turns
+    assert loaded.conversation_digest_state() == state.conversation_digest_state()
     assert len(loaded.approvals) == 1
     assert loaded.approvals[0].revision == "rev_1"
     assert loaded.approvals[0].decision == ApprovalDecision.APPROVED
@@ -1616,6 +2037,44 @@ async def test_release_drops_resuming_entries_clears_the_segment_and_persists(
     assert set(reloaded.pending) == {"int_other"}
     assert reloaded.segment is None
     assert reloaded.turn_final_text == "done"
+
+
+@pytest.mark.parametrize("method", ["release", "renew"])
+async def test_a_cancelled_segment_write_still_lands_then_reraises_the_cancel(
+    session_service: Any, method: str
+) -> None:
+    """A disconnect cancels the task running `release`, and the stream's end
+    cancels the heartbeat running `renew`, while the write is on its read.
+    The write runs to the end and the caller's cancellation is raised once
+    it has."""
+    clock = [1_000.0]
+    store = StudioStore(session_service, app_name="app", clock=lambda: clock[0])
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    clock[0] += 30
+    reading = asyncio.Event()
+    real_get_session = session_service.get_session
+
+    async def slow_get_session(*args: Any, **kwargs: Any) -> Any:
+        reading.set()
+        await asyncio.sleep(0.05)
+        return await real_get_session(*args, **kwargs)
+
+    session_service.get_session = slow_get_session
+    writing = asyncio.ensure_future(getattr(store, method)("principal", CONVERSATION, segment_id))
+    await reading.wait()
+    writing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+
+    session_service.get_session = real_get_session
+    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    if method == "release":
+        assert reloaded.segment is None
+    else:
+        assert reloaded.segment is not None
+        assert reloaded.segment.expires_at == clock[0] + studio_state.SEGMENT_TTL_S
 
 
 async def test_release_never_raises_on_a_db_error(tmp_path) -> None:

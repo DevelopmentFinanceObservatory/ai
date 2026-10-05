@@ -1,4 +1,4 @@
-"""Env-driven settings for the planner and translator agents."""
+"""Env-driven settings for the planner agent."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _PINNED_AGENT_MODEL = "gemini-3.8-flash"
 
 
 class AgentSettings(BaseServiceSettings):
-    """The models the planner and translator agents run on.
+    """The model the planner agent runs on, and its entry deadlines.
 
     Separate from `harness.settings.Settings`, which configures the service
     around them -- the MCP URLs, the session backend -- and whose inherited
@@ -25,8 +25,8 @@ class AgentSettings(BaseServiceSettings):
     string from here costs a caller none of that surface, which is what lets
     the eval agents under `evals/` read the same field the service does.
 
-    `PLANNER_MODEL_NAME` and `TRANSLATOR_MODEL_NAME` override the pins. That
-    override is how a different model gets scored -- see `evals/README.md`.
+    `PLANNER_MODEL_NAME` overrides the pin. That override is how a
+    different model gets scored (see `evals/README.md`).
 
     `PLANNER_ENTRY_DEADLINE_SECONDS` bounds one entry into the planner
     (`harness.planner_seam.PlannerSeam.__call__`), wall-clock, from the
@@ -47,13 +47,12 @@ class AgentSettings(BaseServiceSettings):
     keeps over its own LOW-thinking measurements.
 
     `THINKING_SAMPLE_RATE` is the share of turns `harness.planner_seam.
-    PlannerSeam` runs both agents at the model's default thinking level
+    PlannerSeam` runs the planner at the model's default thinking level
     instead of `AGENT_THINKING_CONFIG`'s `LOW` (see `DEFAULT_THINKING_CONFIG`
     and `override_thinking_on_sampled_turns`). `0` disables sampling.
     """
 
     planner_model_name: str = _PINNED_AGENT_MODEL
-    translator_model_name: str = _PINNED_AGENT_MODEL
     planner_entry_deadline_seconds: float = 60.0
     planner_entry_deadline_seconds_sampled: float = 240.0
     thinking_sample_rate: float = 0.05
@@ -61,13 +60,13 @@ class AgentSettings(BaseServiceSettings):
 
 # `gemini-3.8-flash` takes a `thinking_level` of `LOW`, `MEDIUM` or `HIGH`
 # (`MINIMAL` is a flash-lite-only value this model rejects) and otherwise
-# runs at an unset, much larger default. Both agents run every generation at
+# runs at an unset, much larger default. The planner runs every generation at
 # `LOW`: measured against the real planner brief, it reproduces the unset
 # default's validity outcome on both a well-formed and a malformed draft, at
 # roughly 1/14 to 1/46 the wall time and near-zero reasoning tokens.
 # `include_thoughts=True` puts the model's own thought summary on the
 # response, so a trace shows what a generation reasoned rather than only a
-# token count. `drop_thought_parts`, registered as both agents'
+# token count. `drop_thought_parts`, registered as the planner's
 # `after_model_callback`, keeps that summary out of the model's later
 # requests and the user-facing stream once the trace has it.
 AGENT_THINKING_CONFIG = types.ThinkingConfig(
@@ -76,8 +75,8 @@ AGENT_THINKING_CONFIG = types.ThinkingConfig(
 
 # Session-state slot `harness.planner_seam.PlannerSeam.__call__` writes once
 # per turn with this turn's sampling draw (a `bool`), and
-# `override_thinking_on_sampled_turns` reads on every generation of both
-# agents. Absent (a standalone agent run outside the seam) reads as `False`,
+# `override_thinking_on_sampled_turns` reads on every planner generation.
+# Absent (a standalone agent run outside the seam) reads as `False`,
 # so `AGENT_THINKING_CONFIG`'s `LOW` stands, unoverridden.
 THINKING_SAMPLE_STATE_KEY = "planner:thinking_sampled"
 
@@ -102,8 +101,7 @@ def override_thinking_on_sampled_turns(
     has to overwrite the one field. Mutates `llm_request` in place and
     returns `None`, so composing this ahead of another `before_model_callback`
     never short-circuits the list, see
-    `harness.planner_seam.PlannerSeam.__init__` and
-    `translator.agent.create_translator_agent`.
+    `harness.planner_seam.PlannerSeam.__init__`.
     """
     if callback_context.session.state.get(THINKING_SAMPLE_STATE_KEY, False):
         assert llm_request.config is not None
@@ -122,15 +120,15 @@ def drop_thought_parts(
     afterward.
 
     Left in, a thought-summary part would ride into every later request of
-    the same turn, since both agents replay their own turn's prior events
+    the same turn, since the planner replays its own turn's prior events
     back to the model, and into the harness's SSE stream and its digest,
     which read the same events. A part carrying `thought_signature` is kept
     regardless of `thought`: Gemini requires that signature on a later
     request's function-call or final text part and answers one without it
-    with a 400 (see `translator.agent._SKIP_SIGNATURE`).
+    with a 400 (see `harness.planner_seam._SKIP_THOUGHT_SIGNATURE`).
     `_nl_planning._remove_thought_from_request` only strips `thought` for a
     non-`BuiltInPlanner`, so this callback is what keeps a thought part out
-    of replay for the `BuiltInPlanner` both agents run.
+    of replay for the `BuiltInPlanner` the planner runs.
 
     `after_model_callback` runs a list in order and stops at the first
     truthy return, so a caller composing this alongside another callback

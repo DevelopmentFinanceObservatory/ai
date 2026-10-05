@@ -47,6 +47,7 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
 from planner.plan import (
@@ -66,6 +67,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
+    SumOfRequirement,
     Unit,
 )
 from planner.records import (
@@ -1727,39 +1729,52 @@ def test_a_translation_that_stops_at_the_retrieval_compiles(
 
 
 @pytest.mark.parametrize(
-    ("stat_vars", "expected"),
+    ("overrides", "expected"),
     [
         (
-            ("Count_Person", "Count_Person_Female"),
+            {"stat_vars": ("Count_Person", "Count_Person_Female")},
             {
                 "spec_id": SPEC_KENYA,
                 "stat_vars": "separate",
                 "resolved_stat_var_dcids": ["Count_Person", "Count_Person_Female"],
             },
         ),
-        (("Count_Person",), {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["Count_Person"]}),
-        ((), {"spec_id": SPEC_KENYA}),
+        (
+            {"stat_vars": ("Count_Person",)},
+            {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["Count_Person"]},
+        ),
+        ({"stat_vars": ()}, {"spec_id": SPEC_KENYA}),
+        (
+            {"stat_vars": ("Count_Person", "Count_Person_Female"), "shape_member_digest": "d"},
+            {"spec_id": SPEC_KENYA, "stat_vars": "separate"},
+        ),
+        (
+            {"stat_vars": ("Count_Person",), "shape_member_digest": "d", "pinned": True},
+            {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["Count_Person"]},
+        ),
     ],
-    ids=["a-family-elected", "one-elected", "none-elected"],
+    ids=["a-family-elected", "one-elected", "none-elected", "a-digest-family", "a-pinned-root"],
 )
 def test_a_retrieval_posts_the_statvars_its_source_elected(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
-    stat_vars: tuple[str, ...],
+    overrides: dict[str, object],
     expected: dict[str, object],
 ) -> None:
-    # The source's elected StatVars ride on the retrieval, in the source's
-    # order, as `get_data`'s `resolved_stat_var_dcids`, beside the reading a
-    # family states. A source that elected none leaves the key out, so
-    # `get_data` resolves the family alone.
+    # A source without a member digest lists its membership, which rides on
+    # the retrieval in the source's order as `get_data`'s
+    # `resolved_stat_var_dcids`, beside the reading a family states. A
+    # source that elected none leaves the key out, so `get_data` resolves the
+    # family alone, and so does a family with a member digest, which the mint
+    # elects again; a pinned source posts its root.
     plan = _draft([decision()], [requirement()], answer_mode=AnswerMode.SERIES)
 
     result = build(
         plan,
         _translation(_retrieve(), terminal=["debt"]),
-        discovered={"annual_debt_service": source(stat_vars=stat_vars)},
+        discovered={"annual_debt_service": source(**overrides)},
     )
 
     assert result.issues == ()
@@ -2638,6 +2653,570 @@ def test_share_of_gets_the_same_side_checks_as_compare(
     assert Code.UNKNOWN_ENTITY in _codes(result)
 
 
+_USD = Unit(currency="USD", prices="current")
+
+
+def _summed(
+    requirement: RequirementFactory, *, right_unit: Unit | None = _USD
+) -> tuple[list[EvidenceRequirement], Translation]:
+    """Bilateral debt service plus a second source's, added as `total`, read by a growth."""
+    multilateral = requirement(
+        id="multilateral", measure="imputed multilateral debt service", unit=right_unit
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="annual_debt_service"),
+        right=RequirementSide(input_id="multilateral"),
+    )
+    growth = GrowthRequirement(
+        id="growth", decision_ids=["measure"], input_id="total", window_start=2016, window_end=2020
+    )
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="multi", requirement_id="multilateral", spec_id=SPEC_OTHER),
+        SumOfOperation(
+            id="total", requirement_id="total", left=Side(input="debt"), right=Side(input="multi")
+        ),
+        GrowthOperation(
+            id="growth", requirement_id="growth", input="total", window_start=2016, window_end=2020
+        ),
+        terminal=["growth"],
+    )
+    return [requirement(), multilateral, total, growth], translation
+
+
+# The identity facets of the ONE imputed multilateral definition `search` binds
+# when the question states its unit: the unit is a request, so the fetched frame
+# is converted and declares the request object, while the source's own unit ref
+# stays `CurrencyUSD`.
+_REQUEST_BOUND_UNIT = {
+    "unit": {"state": "value", "request": {"currency": "USD", "prices": "current"}},
+    "provenance": {"ref": "provenance/ONEImputedMultilateralSectors", "state": "value"},
+}
+
+
+_BOUND_BY_REQUEST = {"unit_ref": "CurrencyUSD", "identity": {"facets": _REQUEST_BOUND_UNIT}}
+
+
+@pytest.mark.parametrize(
+    ("left_source", "right_source", "pins"),
+    [
+        pytest.param({}, {}, {"left_unit": "usd", "right_unit": "usd"}, id="unit-ref"),
+        pytest.param(
+            _BOUND_BY_REQUEST,
+            _BOUND_BY_REQUEST,
+            {
+                "left_unit": {"currency": "USD", "prices": "current"},
+                "right_unit": {"currency": "USD", "prices": "current"},
+            },
+            id="unit-request",
+        ),
+        pytest.param(
+            {},
+            {
+                "unit_ref": "CurrencyUSD",
+                "identity": {
+                    "facets": {
+                        "unit": {
+                            "state": "value",
+                            "request": {"currency": {"role": "origin"}, "prices": "current"},
+                        }
+                    }
+                },
+            },
+            {"left_unit": "usd"},
+            id="unit-request-by-role",
+        ),
+    ],
+)
+def test_a_sum_binds_both_frames_pins_each_sides_unit_and_feeds_a_growth(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    left_source: dict[str, Any],
+    right_source: dict[str, Any],
+    pins: dict[str, object],
+) -> None:
+    requirements, translation = _summed(requirement)
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**left_source),
+            "multilateral": source(
+                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), **right_source
+            ),
+        },
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    steps = {step.id: step for step in result.workflow.steps}
+    assert steps["total"].tool.name == "sum_of"
+    assert steps["total"].args == pins
+    assert steps["total"].bindings == {
+        "frame_ref": Binding(from_step="debt", output=ArtifactKind.FRAME_REF),
+        "right_frame_ref": Binding(from_step="multi", output=ArtifactKind.FRAME_REF),
+    }
+    assert steps["total"].expected_role_keys == ()
+    assert steps["growth"].bindings == {
+        "frame_ref": Binding(from_step="total", output=ArtifactKind.FRAME_REF)
+    }
+
+
+_CHINA = ResolvedEntity(role="origin", ref="country/CHN", label="China")
+_KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+_GHANA = ResolvedEntity(role="destination", ref="country/GHA", label="Ghana")
+
+
+@pytest.mark.parametrize(
+    ("entities", "resolved", "pools"),
+    [
+        pytest.param(
+            [Entity(name="China", role="creditor"), Entity(name="Kenya", role="debtor")],
+            (_CHINA, _KENYA),
+            False,
+            id="one-per-side-of-the-flow",
+        ),
+        pytest.param(
+            [Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor")],
+            (_KENYA, _GHANA),
+            True,
+            id="two-on-one-side",
+        ),
+    ],
+)
+def test_a_whole_sum_side_needs_an_entity_only_where_its_requirement_pools_several(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entities: list[Entity],
+    resolved: tuple[ResolvedEntity, ...],
+    pools: bool,
+) -> None:
+    # A creditor and its debtor are one series, which a whole side reads as
+    # it is; two debtors are two a whole side would add into one.
+    bilateral = requirement(entities=entities)
+    multilateral = requirement(
+        id="multilateral", measure="imputed multilateral debt service", entities=entities
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="annual_debt_service"),
+        right=RequirementSide(input_id="multilateral"),
+    )
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="multi", requirement_id="multilateral", spec_id=SPEC_OTHER),
+        SumOfOperation(
+            id="total", requirement_id="total", left=Side(input="debt"), right=Side(input="multi")
+        ),
+        terminal=["total"],
+    )
+
+    result = build(
+        _draft([decision()], [bilateral, multilateral, total]),
+        translation,
+        discovered={
+            "annual_debt_service": source(entities=resolved),
+            "multilateral": source(
+                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), entities=resolved
+            ),
+        },
+    )
+
+    assert (Code.ENTITY_REQUIRED in _codes(result)) is pools
+    assert result.ok is not pools, result.issues
+
+
+@pytest.mark.parametrize(
+    ("right_source", "right_unit", "code"),
+    [
+        pytest.param(
+            {"spec_id": SPEC_KENYA, "stat_vars": ("MultilateralDebtService",)},
+            _USD,
+            Code.SUM_SIDES_OVERLAP,
+            id="the-same-definition",
+        ),
+        pytest.param(
+            {"spec_id": SPEC_OTHER, "stat_vars": ("DebtServicePaid", "Other")},
+            _USD,
+            Code.SUM_SIDES_OVERLAP,
+            id="a-statvar-in-common",
+        ),
+        pytest.param(
+            {"spec_id": SPEC_OTHER, "stat_vars": (), "shape_member_digest": "d"},
+            _USD,
+            Code.SUM_SIDES_OVERLAP,
+            id="one-family-under-two-definitions",
+        ),
+        pytest.param(
+            {"spec_id": SPEC_OTHER, "stat_vars": ("Other",), "unit_ref": "eur"},
+            Unit(currency="EUR", prices="current"),
+            Code.SUM_UNITS_DIFFER,
+            id="another-currency",
+        ),
+        pytest.param(
+            {"spec_id": SPEC_OTHER, "stat_vars": ("Other",)},
+            None,
+            Code.SUM_UNITS_DIFFER,
+            id="one-side-states-no-unit",
+        ),
+    ],
+)
+def test_a_sum_that_could_count_a_flow_twice_or_mix_units_is_refused(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    right_source: dict[str, Any],
+    right_unit: Unit | None,
+    code: CompileIssueCode,
+) -> None:
+    requirements, translation = _summed(requirement, right_unit=right_unit)
+    translation = translation.model_copy(
+        update={
+            "operations": tuple(
+                op.model_copy(update={"spec_id": right_source["spec_id"]})
+                if op.id == "multi"
+                else op
+                for op in translation.operations
+            )
+        }
+    )
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            # Search lists no member of a family it states a member digest
+            # for, so two such sides overlap when the digests are equal.
+            "annual_debt_service": source(
+                **(
+                    {"stat_vars": (), "shape_member_digest": "d"}
+                    if "shape_member_digest" in right_source
+                    else {}
+                )
+            ),
+            "multilateral": source(**right_source),
+        },
+    )
+
+    assert code in _codes(result)
+    assert {Code.SUM_SIDES_OVERLAP, Code.SUM_UNITS_DIFFER} - {code} & set(_codes(result)) == set()
+
+
+# The StatVar shape of a nominal series, as a definition's identity states it.
+_NOMINAL = {"shape": {"kind": "statvar_schema", "measurement_qualifier": "Nominal"}}
+
+
+@pytest.mark.parametrize(
+    ("left_source", "code"),
+    [
+        pytest.param(
+            {"unit_ref": "CurrencyUSD", "identity": _NOMINAL},
+            Code.FRAME_UNIT_FORMS_DIFFER,
+            id="current-usd-as-a-ref-against-a-request",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyEUR", "identity": _NOMINAL},
+            Code.FRAME_UNITS_DIFFER,
+            id="another-currency-as-a-ref",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyUSD", "identity": {"shape": {"kind": "statvar_schema"}}},
+            Code.FRAME_UNITS_DIFFER,
+            id="a-ref-stating-no-price-basis",
+        ),
+    ],
+)
+def test_two_sides_whose_frames_state_their_units_differently_are_refused_before_running(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    left_source: dict[str, Any],
+    code: CompileIssueCode,
+) -> None:
+    # analysis-mcp pairs two frames only when their unit cells are equal. A
+    # ref and a request denoting one currency and price basis differ in form
+    # alone, and the refusal names the side to retrieve by request.
+    requirements, translation = _summed(requirement)
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**left_source),
+            "multilateral": source(
+                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), **_BOUND_BY_REQUEST
+            ),
+        },
+    )
+
+    unit_codes = {Code.FRAME_UNIT_FORMS_DIFFER, Code.FRAME_UNITS_DIFFER}
+    assert [found for found in _codes(result) if found in unit_codes] == [code]
+    if code is Code.FRAME_UNIT_FORMS_DIFFER:
+        assert result.issues[0].requirement_id == "annual_debt_service"
+
+
+def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_then_the_years(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # The sum_of adds the two yearly series over the years both report,
+    # and an aggregate grouped by entity reduces that one series whole.
+    multilateral = requirement(
+        id="multilateral",
+        measure="imputed multilateral debt service",
+        period=Period(start=2016, end=2024),
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="annual_debt_service"),
+        right=RequirementSide(input_id="multilateral"),
+    )
+    span = AggregateRequirement(
+        id="span",
+        decision_ids=["measure"],
+        input_id="total",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="multi", requirement_id="multilateral", spec_id=SPEC_OTHER),
+        SumOfOperation(
+            id="total", requirement_id="total", left=Side(input="debt"), right=Side(input="multi")
+        ),
+        _aggregate(id="span", requirement_id="span", input="total", group_by=(GroupBy.ENTITY,)),
+        terminal=["span"],
+    )
+
+    result = build(
+        _draft([decision()], [requirement(), multilateral, total, span]),
+        translation,
+        discovered={
+            "annual_debt_service": source(),
+            "multilateral": source(spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",)),
+        },
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    steps = {step.id: step for step in result.workflow.steps}
+    assert steps["span"].args == {"aggregation": "sum", "group_by": []}
+    assert steps["span"].bindings == {
+        "frame_ref": Binding(from_step="total", output=ArtifactKind.FRAME_REF)
+    }
+
+
+# A described identity of gross ODA disbursements, the `shape` a family's
+# StatVars share.
+_ODA_SHAPE = {
+    "kind": "statvar_schema",
+    "population_type": "FinancialFlow",
+    "measured_property": "amount",
+    "stat_type": "measuredValue",
+}
+_EDUCATION = ("CRSPurposeCode110", "CRSPurposeCode112", "CRSPurposeCode11220")
+_HEALTH = ("CRSPurposeCode120", "CRSPurposeCode121", "CRSPurposeCode12220")
+
+
+def _family(
+    digest: str, *, slot_codes: dict[str, tuple[str, ...] | None] | None, **shape: str
+) -> dict:
+    """A source `search` states by member digest alone, listing none of its members."""
+    return {
+        "stat_vars": (),
+        "shape_member_digest": digest,
+        "shape_member_count": 40,
+        "identity": {"shape": _ODA_SHAPE | shape},
+        "slot_codes": slot_codes,
+    }
+
+
+@pytest.mark.parametrize(
+    ("right_family", "code"),
+    [
+        pytest.param(
+            {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)}},
+            Code.SUM_SIDES_OVERLAP,
+            id="all-sectors-holds-education",
+        ),
+        pytest.param(
+            {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": _HEALTH}},
+            None,
+            id="education-and-health-share-no-code",
+        ),
+        pytest.param(
+            {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)}, "measured_property": "count"},
+            None,
+            id="another-measure",
+        ),
+        pytest.param(
+            {"slot_codes": {"crsCooperationModality": ("CRSModalityC01",)}},
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="each-binds-a-property-the-other-leaves-open",
+        ),
+        pytest.param({"slot_codes": None}, Code.SUM_OVERLAP_UNDECIDED, id="slots-unread"),
+        pytest.param(
+            {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": None}},
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="a-set-whose-codes-are-not-stated",
+        ),
+    ],
+)
+def test_two_families_listed_by_digest_alone_are_summed_as_their_identities_allow(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    right_family: dict[str, Any],
+    code: CompileIssueCode | None,
+) -> None:
+    requirements, translation = _summed(requirement)
+    education = {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": _EDUCATION}
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_family("d-education", slot_codes=education)),
+            "multilateral": source(spec_id=SPEC_OTHER, **_family("d-other", **right_family)),
+        },
+    )
+
+    sum_codes = {Code.SUM_SIDES_OVERLAP, Code.SUM_OVERLAP_UNDECIDED} & set(_codes(result))
+    assert sum_codes == ({code} if code is not None else set())
+
+
+_UGANDA = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
+_EAST_AFRICA = ResolvedEntity(role="destination", ref="EastAfrica", label="East Africa")
+
+
+@pytest.mark.parametrize(
+    ("right_entities", "shared", "code"),
+    [
+        pytest.param((_UGANDA,), {"shape_member_digest": "d"}, None, id="other-recipient"),
+        pytest.param(
+            (_UGANDA,), {"stat_vars": ("DebtServicePaid",)}, None, id="other-recipient-listed"
+        ),
+        pytest.param(
+            None, {"shape_member_digest": "d"}, Code.SUM_SIDES_OVERLAP, id="same-recipient"
+        ),
+        pytest.param((), {"shape_member_digest": "d"}, Code.SUM_SIDES_OVERLAP, id="unscoped"),
+        pytest.param(
+            (_EAST_AFRICA,), {"shape_member_digest": "d"}, Code.SUM_SIDES_OVERLAP, id="a-region"
+        ),
+    ],
+)
+def test_one_family_summed_over_entities_it_binds_apart_counts_nothing_twice(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    right_entities: tuple[ResolvedEntity, ...] | None,
+    shared: dict[str, Any],
+    code: CompileIssueCode | None,
+) -> None:
+    # ODA to Kenya plus ODA to another recipient: one family, its rows kept
+    # apart only by the recipient each side binds.
+    requirements, translation = _summed(requirement)
+    family = {"stat_vars": ()} | shared
+    entities = {} if right_entities is None else {"entities": right_entities}
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**family),
+            "multilateral": source(spec_id=SPEC_OTHER, **family, **entities),
+        },
+    )
+
+    overlap = {Code.SUM_SIDES_OVERLAP, Code.SUM_OVERLAP_UNDECIDED} & set(_codes(result))
+    assert overlap == ({code} if code is not None else set())
+
+
+_SPEC_THIRD = "spec_" + "c" * 32
+
+
+@pytest.mark.parametrize(
+    ("third_unit", "code"),
+    [
+        pytest.param(_USD, None, id="three-sources-in-one-unit"),
+        pytest.param(
+            Unit(currency="EUR", prices="current"), Code.SUM_UNITS_DIFFER, id="mixed-units"
+        ),
+        pytest.param(None, Code.SUM_SIDES_OVERLAP, id="a-source-added-twice"),
+    ],
+)
+def test_a_sum_of_a_sum_is_checked_through_to_every_source(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    third_unit: Unit | None,
+    code: CompileIssueCode | None,
+) -> None:
+    # `sum_of(total, third)`, or with no third source `sum_of(total, debt)`,
+    # which adds bilateral debt service into the total a second time.
+    requirements, translation = _summed(requirement)
+    requirements = [r for r in requirements if r.id != "growth"]
+    operations = [op for op in translation.operations if op.id != "growth"]
+    discovered = {
+        "annual_debt_service": source(),
+        "multilateral": source(spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",)),
+    }
+    right = RequirementSide(input_id="annual_debt_service")
+    right_op = Side(input="debt")
+    if code is not Code.SUM_SIDES_OVERLAP:
+        requirements.append(
+            requirement(id="private", measure="private debt service", unit=third_unit)
+        )
+        operations.append(_retrieve(id="private", requirement_id="private", spec_id=_SPEC_THIRD))
+        discovered["private"] = source(
+            spec_id=_SPEC_THIRD,
+            stat_vars=("PrivateDebtService",),
+            unit_ref="usd" if third_unit == _USD else "eur",
+        )
+        right = RequirementSide(input_id="private")
+        right_op = Side(input="private")
+    requirements.append(
+        SumOfRequirement(
+            id="grand_total",
+            decision_ids=["measure"],
+            left=RequirementSide(input_id="total"),
+            right=right,
+        )
+    )
+    operations.append(
+        SumOfOperation(
+            id="grand_total", requirement_id="grand_total", left=Side(input="total"), right=right_op
+        )
+    )
+
+    result = build(
+        _draft([decision()], requirements),
+        _translation(*operations, terminal=["grand_total"]),
+        discovered=discovered,
+    )
+
+    sum_codes = {Code.SUM_SIDES_OVERLAP, Code.SUM_UNITS_DIFFER} & set(_codes(result))
+    assert sum_codes == ({code} if code is not None else set())
+    if code is None:
+        assert result.ok, result.issues
+
+
 def test_join_needs_two_sources_that_share_a_role_column(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
@@ -3371,7 +3950,6 @@ def test_top_donors_to_kenya_ranks_by_the_open_origin_axis(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
-        "resolved_stat_var_dcids": list(kenya_from_every_donor.stat_vars),
     }
     assert kenya_from_every_donor.stat_vars
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.RULE
@@ -3463,16 +4041,18 @@ def test_a_rank_over_a_donor_family_read_separately_is_refused(
     decision: DecisionFactory,
     role_open_block: dict[str, Any],
 ) -> None:
-    # The recorded block names two StatVars of its family. Served with no
-    # `summable` on its slots, no axis may be summed, so the rule reads them
-    # separately and the frame carries one measure per StatVar. A rank over
-    # the open `origin` axis reads one.
+    # The recorded block lists two of the 89 StatVars Search confirmed for its
+    # family. Served with no `summable` on its slots, no axis may be summed,
+    # so the rule reads them separately and the frame carries one measure per
+    # StatVar, counted from the confirmed members rather than the listing. A
+    # rank over the open `origin` axis reads one.
+    assert role_open_block["resolved"]["stat_vars"]["member_count"] == 89
     result = _rank_donors(build, decision, _donor_family_stating_no_summable(role_open_block))
 
     (issue,) = result.issues
     assert issue.code is Code.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "ranked"
-    assert "rank reads a single measure; got 2" in issue.reason
+    assert "rank reads a single measure; got 89" in issue.reason
     assert "cannot be summed over " + ", ".join(_DONOR_FAMILY_AXES) in issue.reason
     assert result.workflow is None
 
@@ -3498,7 +4078,6 @@ def test_a_rank_over_a_donor_family_the_plan_reads_summed_asks_for_the_sum(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
-        "resolved_stat_var_dcids": list(source_from_spec_block(role_open_block).stat_vars),
     }
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.PLAN
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}

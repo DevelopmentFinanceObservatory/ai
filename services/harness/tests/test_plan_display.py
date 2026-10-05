@@ -24,6 +24,7 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
 from planner.plan import (
@@ -42,9 +43,12 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
+    SumOfRequirement,
     names_no_place,
 )
 from planner.records import (
+    Breakdown,
+    BreakdownDimension,
     DenominatorScope,
     EntityIn,
     GroupBy,
@@ -92,8 +96,8 @@ def _population_decision(decision: DecisionFactory, **overrides: object) -> Deci
 # Mirrors `tests/planner/test_plan.py::_every_kind_plan`: `dataset_a` feeds
 # `totals_a` (aggregate), which feeds `growth_a` (growth) and `rank_a` (rank);
 # `dataset_b` feeds `filtered_b` (filter); `joined` (join), `share_a`
-# (share_of) and `comparison_a` (comparison) each read `totals_a` and
-# `filtered_b`. Every requirement id below is also its operation id and its
+# (share_of), `comparison_a` (comparison) and `sum_a` (sum_of) each read
+# `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
 # workflow step id, so the same id names one thing throughout a row.
 
 _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
@@ -101,6 +105,7 @@ _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
     AggregateRequirement: "totals_a",
     GrowthRequirement: "growth_a",
     ComparisonRequirement: "comparison_a",
+    SumOfRequirement: "sum_a",
     RankRequirement: "rank_a",
     ShareOfRequirement: "share_a",
     JoinRequirement: "joined",
@@ -166,6 +171,12 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         left=RequirementSide(input_id="totals_a"),
         right=RequirementSide(input_id="filtered_b"),
     )
+    sum_a = SumOfRequirement(
+        id="sum_a",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="totals_a"),
+        right=RequirementSide(input_id="filtered_b"),
+    )
     return [
         dataset_a,
         dataset_b,
@@ -176,6 +187,7 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         joined,
         share_a,
         comparison_a,
+        sum_a,
     ]
 
 
@@ -236,8 +248,14 @@ def _every_kind_translation() -> Translation:
                 left=Side(input="totals_a"),
                 right=Side(input="filtered_b"),
             ),
+            SumOfOperation(
+                id="sum_a",
+                requirement_id="sum_a",
+                left=Side(input="totals_a"),
+                right=Side(input="filtered_b"),
+            ),
         ],
-        terminal=["growth_a", "rank_a", "joined", "share_a", "comparison_a"],
+        terminal=["growth_a", "rank_a", "joined", "share_a", "comparison_a", "sum_a"],
     )
 
 
@@ -273,6 +291,7 @@ def _every_kind_workflow() -> Workflow:
             _step("joined", tool="join", from_steps=("filtered_b", "totals_a")),
             _step("share_a", tool="share_of", from_steps=("totals_a", "filtered_b")),
             _step("comparison_a", tool="compare", from_steps=("totals_a", "filtered_b")),
+            _step("sum_a", tool="sum_of", from_steps=("totals_a", "filtered_b")),
         ],
         sources=[
             SelectedSource(spec_id=_SPEC_A, sentence="external debt service paid", has_data=True),
@@ -282,7 +301,7 @@ def _every_kind_workflow() -> Workflow:
             EvidenceBinding(requirement_id="dataset_a", step_id="dataset_a", spec_id=_SPEC_A),
             EvidenceBinding(requirement_id="dataset_b", step_id="dataset_b", spec_id=_SPEC_B),
         ],
-        terminal_steps=["growth_a", "rank_a", "joined", "share_a", "comparison_a"],
+        terminal_steps=["growth_a", "rank_a", "joined", "share_a", "comparison_a", "sum_a"],
     )
 
 
@@ -357,13 +376,22 @@ def test_requirement_rows_carries_id_kind_decision_ids_and_sentence(
     assert dataset_row["decision_ids"] == ["measure"]
     assert "external debt service paid" in dataset_row["sentence"]
     assert "Kenya" in dataset_row["sentence"]
+    sum_row = next(row for row in rows if row["id"] == "sum_a")
+    assert sum_row["kind"] == "sum_of"
+    assert sum_row["sentence"].endswith(
+        "for each year both report; years one side lacks are left out."
+    )
 
 
 def _one_requirement_compiled_plan(
-    decision: DecisionFactory, *, definition: str | None, **source_fields: Any
+    decision: DecisionFactory,
+    *,
+    definition: str | None,
+    breakdown: Breakdown | None = None,
+    **source_fields: Any,
 ) -> Plan:
     """A `DRAFT` plan reading one dataset requirement, compiled, whose source carries `definition`
-    and any other `source_fields`.
+    and any other `source_fields`, and whose requirement states `breakdown`.
 
     `totals_a` (an aggregate) reads `dataset_a`, so the plan carries a
     calculation and its own source alongside the one requirement this test
@@ -375,6 +403,7 @@ def _one_requirement_compiled_plan(
         measure="external debt service paid",
         entities=[Entity(name="Kenya", role="debtor")],
         period=Period(start=2015, end=2024),
+        breakdown=breakdown,
     )
     totals_a = AggregateRequirement(
         id="totals_a",
@@ -1846,4 +1875,75 @@ def test_the_dataset_sentence_states_how_a_family_is_read(
     dataset_row = next(row for row in rows if row["id"] == "dataset_a")
     assert dataset_row["sentence"] == (
         f"Retrieves external debt service paid for Kenya, 2015-2024, {clause}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("level", "rolled_up_to"),
+    [(0, "the top level of its hierarchy"), (1, "level 1 below the top of its hierarchy")],
+)
+def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
+    decision: DecisionFactory, level: int, rolled_up_to: str
+) -> None:
+    """ "Which sectors received the most aid in Kenya?": the card says the retrieval
+    keeps the sector, the total is taken per sector, and the rank orders sectors."""
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across="donor",
+        period=Period(start=2024, end=2024),
+        stat_vars=StatVarReading.SEPARATE,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=level),
+    )
+    plan = Plan(
+        question="q",
+        decisions=[decision(fixes=DecisionFixes(among=RankAmong.POPULATION))],
+        evidence_requirements=[
+            aid,
+            _total("aid", GroupBy.PERIOD, GroupBy.BREAKDOWN),
+            RankRequirement(
+                id="ranked",
+                decision_ids=["measure"],
+                input_id="total",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis="sector",
+                limit=10,
+            ),
+        ],
+    )
+
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert sentences["aid"] == (
+        f"Retrieves aid for Kenya and every donor, 2024-2024, broken down by sector, each code "
+        f"rolled up to {rolled_up_to}."
+    )
+    assert sentences["total"] == "The total of aid, grouped by year and by sector."
+    assert sentences["ranked"].startswith(
+        "Ranks by the total of aid: ranks every sector the source holds; "
+    )
+    assert _label(plan.requirement("ranked"), plan) == "Rank the top 10 sectors by the total of aid"
+
+
+def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
+    decision: DecisionFactory,
+) -> None:
+    plan = _one_requirement_compiled_plan(
+        decision,
+        definition=None,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0),
+        stat_vars=tuple(f"Flow_{index}" for index in range(200)),
+        stat_var_member_count=705,
+        stat_var_reading=StatVarReading.SEPARATE,
+        stat_var_reading_set_by=ReadingSetBy.PLAN,
+    )
+
+    (dataset_row,) = [row for row in requirement_rows(plan) if row["id"] == "dataset_a"]
+
+    assert dataset_row["sentence"] == (
+        "Retrieves external debt service paid for Kenya, 2015-2024, broken down by sector, "
+        "each code rolled up to the top level of its hierarchy."
     )

@@ -5,7 +5,7 @@ pinned planner agent and its plan contract. The frozen adapter that drove
 them, `harness.planner_seam`, exported `PlannerAgent` and
 `PlannerAgentError`. That module path now names its replacement instead
 (`harness.planner_seam.PlannerSeam`, over `planner.agent` and
-`translator.agent`), so banning the path would also ban legitimate use of
+`translator.tool`), so banning the path would also ban legitimate use of
 the current seam. Banning `PlannerAgent`/`PlannerAgentError` by name is
 strictly stronger than banning the old path was: it catches the frozen
 adapter reintroduced under any module, not only the one it used to live at.

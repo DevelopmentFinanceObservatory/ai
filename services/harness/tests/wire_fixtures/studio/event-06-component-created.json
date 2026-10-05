@@ -59,11 +59,17 @@
       }
     ],
     "attribution": {
-      "label": "World Bank IDS · 1 indicator",
+      "label": "World Bank IDS \u00b7 1 indicator",
       "source_count": 1,
       "indicator_count": 1,
       "source_detail_url": "/data/sources/wb-ids"
-    }
+    },
+    "defaults": [
+      {
+        "pointer": "/component/intent/select/values",
+        "detail": "Drew every recipient, largest first; name the recipients to narrow the chart."
+      }
+    ]
   },
   "provenance": {
     "inputs": [
@@ -91,7 +97,7 @@
     },
     "warnings": [],
     "generated_at": "2026-08-04T09:20:41Z",
-    "citation": "World Bank (2026) – International Debt Statistics. With major processing by Development Finance Observatory (DFO).",
+    "citation": "World Bank (2026) \u2013 International Debt Statistics. With major processing by Development Finance Observatory (DFO).",
     "refreshed_from": null
   },
   "created_from": {

@@ -10,6 +10,9 @@ result (left alone stands for "two slices of one frame_ref" -- see
 exceptions to its own refusal -> mint identity, build the trace, write the
 store under the result's own pair -> render the digest. Every typed failure this
 function itself anticipates is returned via `to_tool_result`, never raised.
+`resolve_slice_pair`, `SLICE_PAIR_ERRORS` and `_refusal_for_engine_error`
+serve `sum_of_tool.sum_of` too, which pairs its sides through the same
+engine helpers.
 An exception outside that set would escape this function; `server.py`'s
 registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
@@ -40,6 +43,7 @@ from analysis_mcp.engine.compare import (
     run_compare,
 )
 from analysis_mcp.frame_ref_resolution import (
+    AdmittedFrame,
     canonical_entity_binding,
     derive_frame_content_version,
     derived_marker_detail,
@@ -51,7 +55,7 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frames,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import CompareOpSpec, PinnedUnit
+from analysis_mcp.op_spec import CompareOpSpec, PinnedUnit, SumOfOpSpec
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
@@ -64,11 +68,12 @@ from analysis_mcp.tool_pipeline import (
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from analysis_mcp.units import unit_json
 
-# Every typed exception `run_compare` can raise maps to exactly one
-# refusal by `_refusal_for_engine_error` below. `comparison_periods_disjoint`,
-# `cross_frame_unit_mismatch`, `cross_frame_unit_unbound`, and
-# `cross_frame_facet_mismatch` are compare-specific; the rest reuse
-# `aggregate`'s existing refusal factories directly.
+# Every typed exception `run_compare` or `run_sum_of` can raise maps to
+# exactly one refusal by `_refusal_for_engine_error` below.
+# `comparison_periods_disjoint`, `cross_frame_unit_mismatch`,
+# `cross_frame_unit_unbound`, and `cross_frame_facet_mismatch` are the
+# two-slice verbs' own; the rest reuse `aggregate`'s existing refusal
+# factories directly. `run_sum_of` never raises `CompareFacetMismatchError`.
 _EngineError = (
     CompareAmbiguousSliceError
     | ComparisonPeriodsDisjointError
@@ -80,6 +85,18 @@ _EngineError = (
     | UnitNotPresentError
     | UnknownEntityColumnError
     | FacetHeterogeneousError
+)
+SLICE_PAIR_ERRORS = (
+    CompareAmbiguousSliceError,
+    ComparisonPeriodsDisjointError,
+    CompareUnitMismatchError,
+    CompareUnitUnboundError,
+    CompareFacetMismatchError,
+    CompareNonFiniteResultError,
+    UnitNotPresentError,
+    UnitHeterogeneousError,
+    UnknownEntityColumnError,
+    FacetHeterogeneousError,
 )
 
 # `resolve_unit_and_facets`/`validate_entity_columns` (`analysis_mcp.engine.
@@ -93,7 +110,7 @@ _LEFT_OR_RIGHT_ENTITY = "left_entity or right_entity"
 
 
 def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
-    """Map one of `run_compare`'s typed exceptions to its refusal.
+    """Map one of `run_compare`'s or `run_sum_of`'s typed exceptions to its refusal.
 
     `CompareAmbiguousSliceError` reuses `role_ambiguous`: an `entity`
     binding that fails to narrow a side down to one row per period is, in
@@ -117,7 +134,8 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     (`cross_frame_facet_mismatch`), distinct from `FacetHeterogeneousError`
     (one side's own slice internally heterogeneous on an axis).
     `CompareNonFiniteResultError` reuses `non_finite_result`, the same
-    overflow discipline `aggregate` and `growth` already carry.
+    overflow discipline `aggregate` and `growth` already carry, naming the
+    quantity that overflowed (`delta` or `sum`).
     """
     # An if/elif chain with one assignment and one return, rather than one
     # early return per branch, matching `aggregate_tool._refusal_for_engine_error`'s
@@ -159,7 +177,7 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         )
     elif isinstance(exc, CompareNonFiniteResultError):
         refusal = ToolRefusal.non_finite_result(
-            group_key={"time_period": exc.time_period}, aggregation="delta"
+            group_key={"time_period": exc.time_period}, aggregation=exc.quantity
         )
     elif isinstance(exc, UnitNotPresentError):
         refusal = ToolRefusal.unit_not_present(
@@ -172,6 +190,32 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     else:
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     return refusal
+
+
+async def resolve_slice_pair(
+    op_spec: CompareOpSpec | SumOfOpSpec,
+) -> tuple[AdmittedFrame, AdmittedFrame, list[str]] | ToolResult:
+    """The left and right inputs `op_spec` names, and the distinct input
+    content_versions its identity is minted over, or the resolution refusal.
+
+    Both sides resolve in one call, so the call claims both sides' rows
+    before decoding either (`resolve_input_frames`). With no
+    `right_frame_ref` the right side is the left frame itself.
+    """
+    frame_refs = [op_spec.frame_ref]
+    if op_spec.right_frame_ref is not None:
+        frame_refs.append(op_spec.right_frame_ref)
+    resolved = await resolve_input_frames(frame_refs, settings=Settings())
+    if isinstance(resolved, ToolResult):
+        return resolved
+    left, right = resolved[0], resolved[-1]
+    left_cv = input_content_version(left.trace)
+    input_content_versions = (
+        [left_cv]
+        if op_spec.right_frame_ref is None
+        else dedupe_input_content_versions(left_cv, input_content_version(right.trace))
+    )
+    return left, right, input_content_versions
 
 
 @holds_input_rows
@@ -276,24 +320,12 @@ async def compare(
     if isinstance(op_spec, ToolResult):
         return op_spec
 
-    # Both sides in one call, so the call claims both sides' rows before
-    # decoding either (`resolve_input_frames`). With no `right_frame_ref` the
-    # right side is the left frame itself.
-    frame_refs = [op_spec.frame_ref]
-    if op_spec.right_frame_ref is not None:
-        frame_refs.append(op_spec.right_frame_ref)
-    resolved = await resolve_input_frames(frame_refs, settings=Settings())
-    if isinstance(resolved, ToolResult):
-        return resolved
-    left, right = resolved[0], resolved[-1]
+    sides = await resolve_slice_pair(op_spec)
+    if isinstance(sides, ToolResult):
+        return sides
+    left, right, input_content_versions = sides
     left_frame, left_trace = left.frame, left.trace
     right_frame, right_trace = right.frame, right.trace
-    left_cv = input_content_version(left_trace)
-    input_content_versions = (
-        [left_cv]
-        if op_spec.right_frame_ref is None
-        else dedupe_input_content_versions(left_cv, input_content_version(right_trace))
-    )
 
     # `left_entity`/`right_entity` are canonicalised (key order sorted)
     # before the engine runs -- see `frame_ref_resolution.canonical_entity_
@@ -309,18 +341,7 @@ async def compare(
             left_pinned_unit=op_spec.left_unit,
             right_pinned_unit=op_spec.right_unit,
         )
-    except (
-        CompareAmbiguousSliceError,
-        ComparisonPeriodsDisjointError,
-        CompareUnitMismatchError,
-        CompareUnitUnboundError,
-        CompareFacetMismatchError,
-        CompareNonFiniteResultError,
-        UnitNotPresentError,
-        UnitHeterogeneousError,
-        UnknownEntityColumnError,
-        FacetHeterogeneousError,
-    ) as exc:
+    except SLICE_PAIR_ERRORS as exc:
         return to_tool_result(_refusal_for_engine_error(exc))
 
     identity = mint_identity_or_refusal(op_spec, input_content_versions=input_content_versions)

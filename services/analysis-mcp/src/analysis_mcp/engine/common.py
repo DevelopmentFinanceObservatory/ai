@@ -15,20 +15,23 @@ mismatch, which always is.
 
 Every exception raised here is caught only at its own verb's tool boundary
 (`aggregate_tool`, `compare_tool`, `growth_tool`, `join_tool`, `rank_tool`,
-`share_of_tool`), never inside the engine itself.
+`share_of_tool`, `sum_of_tool`), never inside the engine itself.
 
-Partial-overlap policy: `compare`, `share_of` and `join` each combine two
+Partial-overlap policy: `compare`, `sum_of`, `share_of` and `join` each combine two
 independently-sourced inputs and eventually meet a period or key where the
 two sides differ; `growth` takes one input but meets the analogous gap
 inside its own single series. One framework produces the answer for all
-four:
+five:
 
     Proceed when each output row is independently complete and the
     denominator concept is not a claimed total. Refuse otherwise.
 
 `compare` intersects periods and proceeds, reporting both sides' coverage:
 one output row is one period's delta, complete from the two values actually
-present, and `delta` claims no total. `share_of` refuses on any period-set
+present, and `delta` claims no total. `sum_of` proceeds the same way: one
+output row is one period's sum of two values both present, a total over
+exactly two series for that period, and a period one side lacks is left
+out rather than summed with a zero. `share_of` refuses on any period-set
 difference: its denominator is a claimed total, and a missing period
 silently changes what "total" means. `growth` refuses on any gap year
 inside the window: a growth row spans the whole window by construction

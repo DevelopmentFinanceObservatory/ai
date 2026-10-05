@@ -251,7 +251,7 @@ def test_every_analysis_verb_has_a_stat_var_bound() -> None:
         capability.tool for capability in CAPABILITIES if capability.tool.server == "analysis-mcp"
     ]
 
-    assert len(verbs) == 7
+    assert len(verbs) == 8
     for verb in verbs:
         bound_stat_var_count(verb, {}, input_stat_var_count=1)
 

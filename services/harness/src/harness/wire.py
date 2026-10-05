@@ -252,6 +252,16 @@ class SeriesTruncated(_WireModel):
     total: int = Field(ge=0)
 
 
+class AppliedDefault(_WireModel):
+    """A choice the platform made where the card's intent left one open: a
+    bar chart that listed no values draws every value of its one varying
+    dimension. `pointer` is the JSON Pointer to the intent field the default
+    fills; `detail` says what was chosen and how to narrow it."""
+
+    pointer: str
+    detail: str
+
+
 class FactSummary(_WireModel):
     """What the chat chip and the More Info panel render, and the only facts
     narration may cite. Closed on purpose: anything repeated on every
@@ -267,6 +277,7 @@ class FactSummary(_WireModel):
     unit: Unit | None = None
     series_truncated: SeriesTruncated | None = None
     countries: list[str] | None = None
+    defaults: list[AppliedDefault] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -424,14 +435,12 @@ MAX_SEED_LIST_ITEMS = 64
 # `harness.seeds.read_answer` drops a seed whose answer is past either.
 #
 # The description a model reads of a seeded source
-# (`translator.discovery.compact_source`: its sentence, StatVars and
-# entities), which `translate` returns once for each seed. It lists
-# `resolved.entities`, the entities the question named; a region's members
-# sit in `resolved.scope` and are not listed. 200 StatVars of the longest
-# recorded dcid (133 characters) take about 27,000 characters and an entity
-# with a 40-character label about 78, so a block with every StatVar Search
-# lists has room for about 480 named entities. The largest recorded block
-# describes itself in 24,290 characters.
+# (`translator.discovery.compact_source`: its sentence, measure label and
+# count, and entities), which `translate` returns once for each seed. It
+# lists `resolved.entities`, the entities the question named; a region's
+# members sit in `resolved.scope` and are not listed. An entity with a
+# 40-character label takes about 78 characters, so a block has room for
+# about 800 named entities.
 MAX_SEED_SOURCE_CHARS = 65_536
 # The record session state keeps of a seed (`planner.plan.SeededSource`): the
 # description's members with their refs, and the identity, which data-mcp
@@ -630,22 +639,31 @@ class SeedStatVars(_SeedMember):
     items: list[SeedStatVar] = Field(default_factory=list, max_length=MAX_SEED_STAT_VARS)
 
 
+class SeedShape(_SeedMember):
+    """Whether Search states a member digest for the Spec's binding."""
+
+    member_digest: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+
+
 class SeedResolved(_SeedMember):
     stat_vars: SeedStatVars = Field(default_factory=SeedStatVars)
+    shape: SeedShape | None = None
 
 
 class SeedSpec(_SeedMember):
     """What a seed hands over of one definite part's Spec block: the spec_id,
-    the definition, and the dcids of the StatVars Search listed
-    (`resolved.stat_vars.items[].ref`).
+    the definition, the dcids of the StatVars Search listed
+    (`resolved.stat_vars.items[].ref`), and whether Search stated a member
+    digest (`resolved.shape.member_digest`).
 
     The website posts the block as Search served it. Every other member,
     labels, sentence, coverage, headline and slots among them, is dropped as
     the block is read, so nothing in the harness reads them from the browser:
     `harness.graph`'s `seed` node takes them from Search's own answer for the
     identity (`SpecBlock`). The StatVars are what Search re-reads in the
-    graph when the identity's shape names no measure family. The block is
-    bounded at `MAX_SEED_SPEC_BYTES` as posted; the identity's own bound is
+    graph when the identity's shape names no measure family. A family with a
+    member digest is one Search elects again, so its StatVars are not
+    re-posted (`resubmitted_stat_vars`). The block is bounded at `MAX_SEED_SPEC_BYTES` as posted; the identity's own bound is
     data-mcp's (`data_mcp.definition_writes.MAX_IDENTITY_BYTES`).
     """
 
@@ -673,6 +691,14 @@ class SeedSpec(_SeedMember):
     def stat_vars(self) -> tuple[str, ...]:
         """The dcids of the StatVars Search listed for the Spec, in its order."""
         return tuple(item.ref for item in self.resolved.stat_vars.items)
+
+    @property
+    def resubmitted_stat_vars(self) -> tuple[str, ...]:
+        """The StatVars a resubmit of the identity posts: none for a family with a
+        member digest, which Search elects again from its code index, and
+        `stat_vars` otherwise."""
+        shape = self.resolved.shape
+        return () if shape is not None and shape.member_digest else self.stat_vars
 
 
 class OperationVerb(StrEnum):
@@ -994,6 +1020,19 @@ class PlanOperation(_WireModel):
     requirement_id: str | None = None
 
 
+class PlanAsk(_WireModel):
+    """One output the user asked for and how the plan accounts for it:
+    `answered_by` names the `PlanStep` ids whose results answer it, and
+    `declined` says in words why the plan does not compute it. An ask
+    answered in part carries both, with `not_computed` naming the part
+    declined in the user's words."""
+
+    ask: str
+    answered_by: list[str] = []
+    declined: str | None = None
+    not_computed: str | None = None
+
+
 class PlanProposed(_WireModel):
     """The plan awaiting approval. The run is genuinely paused: nothing is
     retrieved or computed until an interrupt.response arrives, and this
@@ -1020,6 +1059,9 @@ class PlanProposed(_WireModel):
     revision: str | None = None
     requirements: list[PlanRequirement] | None = None
     operations: list[PlanOperation] | None = None
+    # Delta 20 (v1.5): the outputs the user asked for, in the order the
+    # brief lists them; absent when the plan was given none.
+    asks: list[PlanAsk] | None = None
 
 
 class PlanVersioned(_WireModel):
@@ -1160,9 +1202,9 @@ class ElicitationOption(_WireModel):
     id: str
     label: str
     description: str | None = None
-    # Set on at most one option: the candidate a referral's own
-    # `recommendation` names, when the ask carries one. `rationale`, on the
-    # frame rather than repeated per option, is that recommendation's own.
+    # Set on at most one option: the candidate the planner's ask favours,
+    # when it favours one. `rationale`, on the frame rather than repeated per
+    # option, is the planner's reason.
     recommended: bool = False
 
 
@@ -1183,9 +1225,9 @@ class ElicitationRequest(_WireModel):
     allow_free_text: bool = False
     skippable: bool = False
     progress: StepProgress | None = None
-    # Why the `recommended` option (if any) is recommended -- a
-    # `translator.referral.SourceRecommendation.rationale`, written for the
-    # person settling the choice. `None` when no option is recommended.
+    # Why the `recommended` option (if any) is recommended, as the planner
+    # wrote it for the person settling the choice. `None` when no option is
+    # recommended.
     rationale: str | None = None
 
 

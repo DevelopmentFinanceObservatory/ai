@@ -14,6 +14,16 @@ Modes:
   --mode scripted    in-process app with the deterministic scripted seams
                      (`harness.scripted`) — no server, no key, no network.
   --mode live        against a running server (--url), real agent + data.
+  --mode orchestrator
+                     the orchestrator engine in-process, its models scripted
+                     (`orchestrator_scripted`): every model request is recorded
+                     and the case's `checks` read them. No server, key or network.
+  --mode orchestrator-live
+                     the orchestrator engine's cases against a running server
+                     started with STUDIO_ENGINE=orchestrator.
+
+The classic modes read `harness-studio-v1.cases.json`, the orchestrator modes
+`harness-studio-orchestrator-v1.cases.json`.
 
     uv run --package harness python evals/studio/run.py --mode scripted
     uv run --env-file .env --package harness python evals/studio/run.py \
@@ -33,8 +43,8 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +52,12 @@ import checks
 import httpx2
 
 _HERE = Path(__file__).resolve().parent
-_CASES_PATH = _HERE / "harness-studio-v1.cases.json"
+_CASES_PATHS = {
+    "scripted": _HERE / "harness-studio-v1.cases.json",
+    "live": _HERE / "harness-studio-v1.cases.json",
+    "orchestrator": _HERE / "harness-studio-orchestrator-v1.cases.json",
+    "orchestrator-live": _HERE / "harness-studio-orchestrator-v1.cases.json",
+}
 _CONFIG_PATH = _HERE / "test_config.json"
 _RESULTS_DIR = _HERE / ".results"
 
@@ -213,13 +228,17 @@ async def _run_mutate_turn(
 
 
 async def run_case(
-    client: httpx2.AsyncClient, case: dict[str, Any], *, conversation_id: str | None = None
+    client: httpx2.AsyncClient,
+    case: dict[str, Any],
+    *,
+    conversation_id: str | None = None,
+    on_turn: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     """Runs one case's turns. Violations come back in two buckets, because
     they mean different things to an xfail marker: `contract` (wire
     validity, stream invariants, segment discipline — never excusable) and
     `expectation` (the case's expect blocks — what an xfail expects to
-    miss)."""
+    miss). `on_turn` is told each message turn's number as it starts."""
     conversation_id = conversation_id or f"eval_{uuid.uuid4().hex[:12]}"
     all_frames: list[dict[str, Any]] = []
     turn_frames: list[list[dict[str, Any]]] = []
@@ -233,6 +252,8 @@ async def run_case(
             result = await _run_mutate_turn(client, conversation_id, turn, produced)
             expectation += _check_mutation(turn, result, label=f"turn {index}")
             continue
+        if on_turn is not None:
+            on_turn(index)
         frames, segment_violations, protocol_misses = await _run_message_turn(
             client, conversation_id, turn, produced
         )
@@ -656,6 +677,24 @@ async def _run_case_fresh(case: dict[str, Any], *, conversation_id: str) -> dict
         return await run_case(client, case, conversation_id=conversation_id)
 
 
+async def _run_orchestrator_case(case: dict[str, Any]) -> dict[str, Any]:
+    """One case on its own scripted orchestrator studio (its scripts are
+    consumed as it runs), then the case's `checks` over what the models were
+    shown. A model script that ran dry is a contract failure, since the case
+    drove less than it says."""
+    import orchestrator_scripted  # noqa: PLC0415 -- the harness import chain is slow
+
+    async with orchestrator_scripted.orchestrator_client(case["scenario"]) as (client, log):
+        outcome = await run_case(client, case, on_turn=log.mark_turn)
+    outcome["contract"] += [
+        f"the {agent} model's script ran out: the case drove fewer model calls than it needs"
+        for agent in sorted(set(log.exhausted))
+    ]
+    evidence = checks.Evidence(turn_frames=outcome["turn_frames"], log=log.entries)
+    outcome["expectation"] += checks.run_case_checks(case.get("checks", []), evidence)
+    return outcome
+
+
 @asynccontextmanager
 async def _scripted_client() -> AsyncIterator[httpx2.AsyncClient]:
     """The scripted app, in-process: no server, no ports, no key.
@@ -715,8 +754,17 @@ async def _live_client(url: str) -> AsyncIterator[httpx2.AsyncClient]:
 
 
 def load_cases(mode: str, only: list[str] | None = None) -> list[dict[str, Any]]:
-    suite = json.loads(_CASES_PATH.read_text())
-    cases = [case for case in suite["cases"] if mode in case["modes"]]
+    """The cases that run in `mode`. A case's `scenario` may name an entry of
+    the file's `scenarios`, which is then resolved into the case."""
+    suite = json.loads(_CASES_PATHS[mode].read_text())
+    scenarios = suite.get("scenarios", {})
+    cases = [
+        {**case, "scenario": scenarios[case["scenario"]]}
+        if isinstance(case.get("scenario"), str)
+        else case
+        for case in suite["cases"]
+        if mode in case["modes"]
+    ]
     if only:
         cases = [case for case in cases if case["id"] in only]
     return cases
@@ -728,6 +776,9 @@ async def run_suite(
     config = json.loads(_CONFIG_PATH.read_text())
     cases = load_cases(mode, only)
     factory = _scripted_client if mode == "scripted" else lambda: _live_client(url)
+    # An orchestrator case builds its own studio, so it needs no shared client.
+    if mode == "orchestrator":
+        factory = nullcontext
     results = []
     suite_passed = True
     async with factory() as client:
@@ -757,7 +808,12 @@ async def run_suite(
                         outcome["expectation"] + second["expectation"]
                     )
                 else:
-                    outcome = await run_case(client, case)
+                    if mode == "orchestrator":
+                        outcome = await _run_orchestrator_case(case)
+                    else:
+                        assert client is not None  # only the orchestrator mode has none
+                        outcome = await run_case(client, case)
+                        outcome["expectation"] += _frame_checks(case, outcome)
                     record["contract_violations"] = outcome["contract"]
                     record["expectation_violations"] = outcome["expectation"]
                 if judge and case.get("rubrics"):
@@ -795,6 +851,13 @@ async def run_suite(
     return results, suite_passed
 
 
+def _frame_checks(case: dict[str, Any], outcome: dict[str, Any]) -> list[str]:
+    """The case's `checks` that read frames only, for a run with no request log."""
+    wanted = case.get("checks", [])
+    evidence = checks.Evidence(turn_frames=outcome["turn_frames"])
+    return checks.run_case_checks(wanted, evidence)
+
+
 _STABLE_EXCLUDED = {"duration_ms"}
 
 
@@ -827,13 +890,13 @@ def _print_record(record: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["scripted", "live"], required=True)
+    parser.add_argument("--mode", choices=list(_CASES_PATHS), required=True)
     parser.add_argument("--url", default="http://localhost:8080")
     parser.add_argument("--judge", action="store_true", help="score rubrics with the judge model")
     parser.add_argument("--case", action="append", help="run only these case ids", default=None)
     args = parser.parse_args()
 
-    if args.mode == "live" and args.judge is False:
+    if args.mode in ("live", "orchestrator-live") and args.judge is False:
         print("note: live mode without --judge runs the contract layer only\n")
 
     results, passed = asyncio.run(

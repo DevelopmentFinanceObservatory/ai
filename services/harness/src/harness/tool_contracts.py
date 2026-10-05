@@ -20,6 +20,7 @@ from typing import Any
 from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
+    block_posts_stat_vars,
     elected_stat_vars,
     open_entity_axes_of,
     pinned_stat_var,
@@ -98,13 +99,16 @@ def _search_warnings(envelope: dict[str, Any], part: dict[str, Any]) -> list[dic
 def _spec_candidates(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One entry per offered spec: its id, its sentence, its width facts
     (`_wide_facts`) and `stat_vars`, the StatVars `search` elected for it
-    (`_elected_dcids`), which a `get_data` call for the chosen candidate
-    posts as `resolved_stat_var_dcids`."""
+    (`_elected_dcids`) that a `get_data` call for the chosen candidate posts
+    as `resolved_stat_var_dcids`, empty for a block whose retrieval posts
+    none (`compiler.sources.block_posts_stat_vars`)."""
     return [
         {
             "spec_id": spec.get("spec_id"),
             "label": (spec.get("resolved") or {}).get("rendered_sentence") or spec.get("spec_id"),
-            "stat_vars": _elected_dcids(spec.get("resolved") or {}),
+            "stat_vars": (
+                _elected_dcids(spec.get("resolved") or {}) if block_posts_stat_vars(spec) else []
+            ),
             **_wide_facts(spec),
         }
         for spec in specs
@@ -161,12 +165,22 @@ def _year(value: Any) -> int | None:
 
 
 def _coverage_window(resolved: dict[str, Any]) -> tuple[int, int] | None:
-    """The earliest `start` and latest `end` year across every elected
-    item's own `data_date_range`, the same per-item field a served
-    `get_data` mint reads to build a frame's window. This is the span
-    the resolver found data across, regardless of whether the question
-    named a time range. `None` when no elected item states a usable
-    range."""
+    """The first and last years the resolver found data across.
+
+    `resolved.download.window`, the first and last years of the points a
+    mint of the definition writes, when it states both. Otherwise the
+    earliest `start` and latest `end` year across every elected item's own
+    `data_date_range`, the same per-item field a served `get_data` mint
+    reads to build a frame's window. `search` lists only some of a large
+    family's items, so this is the narrower read. `None` when neither
+    states a usable range."""
+    download = resolved.get("download")
+    window = download.get("window") if isinstance(download, Mapping) else None
+    if isinstance(window, Mapping):
+        start = _year(window.get("start_year"))
+        end = _year(window.get("end_year"))
+        if start is not None and end is not None:
+            return start, end
     starts: list[int] = []
     ends: list[int] = []
     for item in _elected_items(resolved):
@@ -183,6 +197,18 @@ def _coverage_window(resolved: dict[str, Any]) -> tuple[int, int] | None:
     return min(starts), max(ends)
 
 
+def requested_range(identity: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The years an identity's `requested_window` names outright: both ends
+    of a `range` kind, as whole years. `None` for any other kind, and for a
+    range naming one end or neither."""
+    requested = identity.get("requested_window") or {}
+    if not isinstance(requested, Mapping) or requested.get("kind") != "range":
+        return None
+    start = _year(requested.get("start_year"))
+    end = _year(requested.get("end_year"))
+    return (start, end) if start is not None and end is not None else None
+
+
 def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
     """The dataset requirement's settled time window, as whole years, and
     which side settled it.
@@ -190,11 +216,10 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
     `spec.definition.identity.requested_window` (the same field
     `compiler.evidence._scope_window_issues` reads) states a complete
     range only under its `range` kind, at `start_year`/`end_year`; that
-    pair wins when both parse, `source: "requested"`. A `range` naming
-    only one end ("since 1990"), or an `all` kind with no time text at
-    all, falls back to the resolved stat_var items' own
-    `data_date_range` (`_coverage_window`), the coverage the resolver
-    actually found data across: a bare open end is completed from it
+    pair (`requested_range`) wins when both parse, `source: "requested"`.
+    A `range` naming only one end ("since 1990"), or an `all` kind with no
+    time text at all, falls back to the years the resolver found data
+    across (`_coverage_window`): a bare open end is completed from it
     (`{"start": 1990, "end": <the coverage's latest year>}`), and a
     fully open request takes the whole span, `source: "coverage"`.
     `latest` names a single most-recent observation rather than a range
@@ -202,14 +227,12 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
     neither side states a usable range, leaving `window` out of the
     envelope and the period a decision for the caller."""
     identity = _identity(spec)
+    if (asked := requested_range(identity)) is not None:
+        return {"start": asked[0], "end": asked[1], "source": "requested"}
     requested = identity.get("requested_window") or {}
     kind = requested.get("kind") if isinstance(requested, Mapping) else None
-    start = end = None
-    if kind == "range":
-        start = _year(requested.get("start_year"))
-        end = _year(requested.get("end_year"))
-    if start is not None and end is not None:
-        return {"start": start, "end": end, "source": "requested"}
+    start = _year(requested.get("start_year")) if kind == "range" else None
+    end = _year(requested.get("end_year")) if kind == "range" else None
     if kind not in (None, "range", "all"):
         return None
     coverage = _coverage_window(spec.get("resolved") or {})
@@ -225,7 +248,8 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
 
 def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
     """The single-series facts and derived `wide` verdict for one resolved
-    spec: shape kind, entity roles, elected item count, truncation, and
+    spec: shape kind, entity roles, member count and whether it is exact or a
+    floor, truncation, and
     whether the identity mints as one series (`graph_envelope`'s docstring
     has the full predicate). Also
     `open_entity_axes`, each entity axis `search` left open with how many members
@@ -241,8 +265,15 @@ def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
     items = _elected_items(resolved)
     shape_kind = _identity_shape_kind(spec)
     entity_roles = _entity_roles(spec)
-    item_count = len(items)
-    truncated = bool((resolved.get("stat_vars") or {}).get("truncated"))
+    stat_vars = resolved.get("stat_vars") or {}
+    # `items` may list only part of the family. `member_count` counts it whole.
+    member_count = stat_vars.get("member_count")
+    counted = isinstance(member_count, int) and not isinstance(member_count, bool)
+    item_count = member_count if counted else len(items)
+    truncated = bool(stat_vars.get("truncated"))
+    # A count Search states is a floor when it says so. A count of the items
+    # alone is a floor when the list was cut.
+    count_exact = stat_vars.get("member_count_exact") is not False if counted else not truncated
     described_arm = shape_kind == DESCRIBED_SHAPE_KIND
     pinned_arm = shape_kind == "stat_var"
     single_series = pinned_stat_var(identity, items, slots=resolved.get("slots")) is not None
@@ -254,6 +285,7 @@ def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
         "wide": wide,
         "stat_var_shape_kind": shape_kind,
         "stat_var_item_count": item_count,
+        "stat_var_member_count_exact": count_exact,
         "entity_roles": entity_roles,
         "stat_var_truncated": truncated,
         "open_entity_axes": [
@@ -283,10 +315,10 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     window as whole years plus which side settled it, `{"start": ...,
     "end": ..., "source": "requested" | "coverage"}`. `"requested"` is the
     identity's own `requested_window` when its `range` kind names both
-    ends outright. Otherwise -- the question gave no time text at all, or
-    it named only one end of an open range ("since 1990") -- the resolved
-    stat_var items' own `data_date_range` fills in what's missing,
-    `"coverage"`: the resolver has already found data across some span, so
+    ends outright. Otherwise, when the question gave no time text at all or
+    named only one end of an open range ("since 1990"), the years the
+    resolver found data across (`_coverage_window`) fill in what's missing,
+    `"coverage"`. The resolver has already found data across some span, so
     that is what the planner states rather than guessing. Left out of the
     digest when the identity names only a single most-recent observation
     (`requested_window.kind == "latest"`, never a range either side could
@@ -362,8 +394,8 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
 
     `part_digests` keeps every part, the first included, as a short summary
     (`_part_summary`): what was asked, its status, its spec_id or
-    candidates, and what it resolved to. The decision fields above still
-    read the first part only.
+    candidates, what it resolved to, and for a `no_data` part its `reason`
+    code. The decision fields above still read the first part only.
 
     `skills`, on every branch, reads the whole envelope: the skills the
     envelope's `skills` map attaches to any part's specs, as
@@ -400,6 +432,93 @@ def _decision_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     return digest
 
 
+def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
+    """The digest a `harness.graph.Resolver` returns for a search envelope.
+
+    `graph_envelope` reduces the raw envelope to `spec_id` alone.
+    `harness.planner_seam` needs the `definite` part's own `spec` block
+    whole, to build a pinned requirement's source from it with no second
+    `search` call (`translator.discovery.discover_source`), so `spec_block`
+    holds it, `None` on every other status, matching `graph_envelope`'s own
+    `spec_id`. Each part digest carries its own block the same way, for a
+    caller that fetches each part (`harness.orchestrator_tools`), and
+    `candidate_blocks`, each candidate's block keyed by its spec_id, so a
+    candidate the caller picks is fetched as a family or a single series
+    the same way a definite part is. `kind` is what the envelope says of
+    itself: a resolution, a catalogue, or a declined question, `resolution`
+    when it states none. The skills it names for `get_skill` are
+    `graph_envelope`'s own `skills`.
+    """
+    digest = graph_envelope(envelope)
+    raw_parts = envelope.get("parts") or []
+    raw_part = raw_parts[0] if raw_parts else {}
+    digest["spec_block"] = raw_part.get("spec") if digest.get("status") == "definite" else None
+    for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
+        summary["spec_block"] = part.get("spec") if summary.get("status") == "definite" else None
+        summary["candidate_blocks"] = {
+            spec["spec_id"]: spec
+            for spec in (part.get("candidates") or {}).get("specs") or []
+            if spec.get("spec_id")
+        }
+    digest["kind"] = envelope.get("kind") or "resolution"
+    return digest
+
+
+def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """What a stored search reading holds of a `definite` part's spec block beyond its summary.
+
+    `coverage_kind` is `resolved.coverage.kind` (`exact`, `breadth`,
+    `bare`); `requested_window_kind` the identity's `requested_window.kind`
+    (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
+    `_wide_facts` reads them; `recent_years` the headline's per-year counts,
+    newest first, as `{"year", "observations", "series"}`, empty when the
+    block carries no headline or the headline no `recent_years`. These are
+    keys `harness.turn_records.SearchReading.from_part` reads. The
+    orchestrator's search result shows the model none of them.
+    """
+    spec = dict(spec)
+    resolved = spec.get("resolved") or {}
+    requested = _identity(spec).get("requested_window")
+    headline = resolved.get("headline")
+    years = headline.get("recent_years") if isinstance(headline, Mapping) else None
+    facts = _wide_facts(spec)
+    return {
+        "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
+        "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
+        "entity_roles": facts["entity_roles"],
+        "open_entity_axes": facts["open_entity_axes"],
+        "recent_years": [
+            {key: year.get(key) for key in ("year", "observations", "series")}
+            for year in years or ()
+            if isinstance(year, Mapping)
+            and isinstance(year.get("year"), int)
+            and isinstance(year.get("observations"), int)
+        ],
+    }
+
+
+def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, Any]:
+    """A candidate's spec block, chosen and fetched, as a `_part_summary` entry with `reading_facts`.
+
+    `status` is `chosen`, and `variable` is the text of the part that offered
+    it. Window, `wide` and the resolved sentence are read from the block
+    the way a `definite` part's are.
+    """
+    spec = dict(spec)
+    summary: dict[str, Any] = {
+        "variable": variable,
+        "status": "chosen",
+        "spec_id": spec.get("spec_id"),
+        "resolved": (spec.get("resolved") or {}).get("rendered_sentence"),
+        "wide": _wide_facts(spec)["wide"],
+        **reading_facts(spec),
+    }
+    window = _window(spec)
+    if window is not None:
+        summary["window"] = window
+    return summary
+
+
 def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, Any]:
     """One search part, as `graph_envelope`'s `part_digests` names it."""
     digest = _part_digest(envelope, part, 1)
@@ -418,6 +537,10 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
     for key in ("window", "wide"):
         if key in digest:
             summary[key] = digest[key]
+    no_data = part.get("no_data") or {}
+    for key in ("reason", "message"):
+        if value := no_data.get(key):
+            summary[key] = value
     return summary
 
 
@@ -537,4 +660,4 @@ def _part_digest(envelope: dict[str, Any], part: dict[str, Any], count: int) -> 
     }
 
 
-__all__ = ["ResolverError", "graph_envelope"]
+__all__ = ["ResolverError", "chosen_part", "graph_envelope", "reading_facts"]

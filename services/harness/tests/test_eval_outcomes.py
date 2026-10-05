@@ -1,20 +1,18 @@
-"""Proves each translator eval case's expected outcome is reachable, with no model.
+"""Proves each eval case's expected outcome is reachable, with no model.
 
 `evals/agents/harness_translator_v1/outcome_metric.py`'s `workflow_outcome`
-metric asserts a case's expected `propose_operations`/`return_to_planner`
-response against a real run's, but nothing checks that the expectation itself
-is one the translator's own core functions can actually produce against the
-canned discovery stub -- an author could type a spec_id that discovery never
-returns, or a `group_by` the requirement doesn't state, and every model-free
-gate would stay green.
+metric asserts a case's expected tool response against a real run's, but
+nothing there checks that the expectation itself is one the real tools can
+produce against the canned discovery stub -- an author could type a spec_id
+that discovery never returns, or a `group_by` the requirement doesn't state.
+The translation cases run no model at all, so this module is the only thing
+that checks them.
 
 This module closes that gap. For every case in `harness-translator-v1.
-evalset.json` and `harness-pair-v1.evalset.json`, it loads the seeded plan
-(or, for the one pair case with none, builds the plan its rubric describes),
-drives the real `discover_source` and `propose_operations`/`return_to_planner`
-functions (`translator.agent.build_translator_core`, the same three
-`translate` drives directly, in Python, with no model turn of its own)
-against `harness_translator_v1.discovery_stub.EvalSurface` on a fake
+evalset.json`, it loads the seeded plan and drives the real `discover_source`
+and `propose_operations`/`return_to_planner` functions
+(`translator.tool.build_translator_core`, the same three `translate` drives
+directly, in Python) against `harness_translator_v1.discovery_stub.EvalSurface` on a fake
 `ToolContext`, and asserts the result against the case's own expected
 `tool_responses` entry with `matches_subset` -- the same subset matcher
 `workflow_outcome` uses, imported rather than restated, so the two can never
@@ -39,6 +37,11 @@ the `action` the tools themselves recommend, and asserts that action names
 the referral kind and target the case expects, then calls `return_to_planner`
 with exactly that action to reach the outcome and check it the same way as a
 mapping case.
+
+`harness-pair-v1.evalset.json` states what `translate` answers the planner,
+so its cases run through the `translate` tool itself (`build_translate_tool`)
+on the seeded plan, or, for the one case with none, on the plan its rubric
+describes.
 
 `harness-planner-v2.evalset.json` seeds no plan -- the live planner drafts
 its own -- and states its expectations on `propose_plan` and `reject_plan`
@@ -88,9 +91,11 @@ from planner.plan import (  # noqa: E402
     ShareOfRequirement,
     inputs_of,
 )
-from translator.agent import build_translator_core  # noqa: E402
 from translator.mechanical import TranslatorCore  # noqa: E402
 from translator.referral import ReferralKind  # noqa: E402
+from translator.tool import build_translate_tool, build_translator_core  # noqa: E402
+
+from .decision_drafts import drafts  # noqa: E402
 
 _TRANSLATOR_DIR = REPO_ROOT / "evals" / "agents" / "harness_translator_v1"
 _PAIR_DIR = REPO_ROOT / "evals" / "agents" / "harness_pair_v1"
@@ -136,6 +141,11 @@ def _context_holding(plan: Plan) -> FakeToolContext:
 
 def _core() -> TranslatorCore:
     return build_translator_core(surface=EvalSurface())
+
+
+async def _translate(context: FakeToolContext) -> dict[str, Any]:
+    """What the planner's `translate` tool answers on `context`'s plan."""
+    return await build_translate_tool(surface=EvalSurface()).func(tool_context=context)
 
 
 def mirror(plan: Plan, spec_ids: dict[str, str]) -> Translation:
@@ -303,7 +313,6 @@ async def test_the_constant_price_referral_is_reachable() -> None:
         kind=ReferralKind(action["arguments"]["kind"]),
         reason="no operation restates a series in another year's prices",
         requirement_id=action["arguments"].get("requirement_id"),
-        decision_id=action["arguments"].get("decision_id"),
         tool_context=context,
     )
 
@@ -337,56 +346,25 @@ async def test_the_several_sources_referral_is_reachable() -> None:
 
 async def test_the_pair_sets_translated_case_expected_outcome_is_reachable() -> None:
     # `translates-before-inviting-approval` seeds no plan -- the live planner
-    # drafts its own -- so this builds the plan the case's own
+    # drafts its own -- so this translates the plan the case's own
     # `pair-states-evidence-requirements` rubric describes: a dataset
     # requirement naming Kenya with a period starting in 2015, fed by a
     # calculation, each citing the decision that fixed it. It is the same
-    # shape as harness-translator-v1's own annual-total case, which is what
-    # the case's `note` says the workflow_outcome expectation was written
-    # against.
+    # shape as harness-translator-v1's own annual-total case.
     case = _PAIR_CASES["translates-before-inviting-approval"]
     plan = _plan_from(_TRANSLATOR_CASES["maps-an-annual-total-onto-aggregate"])
-    context = _context_holding(plan)
-    core = _core()
 
-    spec_ids = {
-        requirement.id: await _discover_definite(core, context, requirement.id)
-        for requirement in plan.evidence_requirements
-        if isinstance(requirement, DatasetRequirement)
-    }
-    translation = mirror(plan, spec_ids)
+    answer = await _translate(_context_holding(plan))
 
-    result = await core.propose_operations(translation=translation, tool_context=context)
-
-    assert result["outcome"] == "ok", result
-    assert matches_subset(_expected_response(case)["response"], result)
+    assert matches_subset(_expected_response(case)["response"], answer), answer
 
 
 async def test_the_pair_sets_unmeetable_case_expected_outcome_is_reachable() -> None:
     case = _PAIR_CASES["takes-an-unmeetable-requirement-back-to-the-user"]
-    plan = _plan_from(case)
-    context = _context_holding(plan)
-    core = _core()
 
-    (dataset,) = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
-    spec_id = await _discover_definite(core, context, dataset.id)
-    translation = mirror(plan, {dataset.id: spec_id})
+    answer = await _translate(_context_holding(_plan_from(case)))
 
-    proposed = await core.propose_operations(translation=translation, tool_context=context)
-
-    assert proposed["outcome"] == "invalid_input", proposed
-    action = proposed["action"]
-    assert action["call"] == "return_to_planner"
-
-    referred = core.return_to_planner(
-        kind=ReferralKind(action["arguments"]["kind"]),
-        reason="no operation restates a series in another year's prices",
-        requirement_id=action["arguments"].get("requirement_id"),
-        decision_id=action["arguments"].get("decision_id"),
-        tool_context=context,
-    )
-
-    assert matches_subset(_expected_response(case)["response"], referred)
+    assert matches_subset(_expected_response(case)["response"], answer), answer
 
 
 def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
@@ -408,7 +386,7 @@ def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
         return tools["propose_plan"].func(
             question=plan.question,
             answer_mode=plan.answer_mode,
-            decisions=list(plan.decisions),
+            decisions=drafts(plan.decisions),
             evidence_requirements=list(plan.evidence_requirements),
             tool_context=context,
             amends_version=amends_version,

@@ -36,6 +36,7 @@ the node can only relay once the draft is done (`harness.graph`'s
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -62,7 +63,7 @@ from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import ToolId
 from pydantic import ValidationError
-from translator.agent import AGENT_NAME as PLAN_TRANSLATOR_AGENT_NAME
+from translator.tool import TRANSLATE_TOOL_NAME
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -74,8 +75,9 @@ from harness.graph import (
     STEP_PROGRESS_KEY,
     Executor,
 )
+from harness.orchestrator_tools import HANDED_OFF
 from harness.planner_seam import PlannerSeamError
-from harness.provenance import ProvenanceStore, retrieval_frame_ref
+from harness.provenance import ProvenanceStore, manifest_with_stat_vars, retrieval_frame_ref
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -98,6 +100,7 @@ from harness.wire import (
     MessageComplete,
     MessageDelta,
     PlanAction,
+    PlanAsk,
     PlanDecision,
     PlanDepth,
     PlanOperation,
@@ -129,7 +132,7 @@ _RESOLVED_BY_TO_WIRE = {"planner_default": "default", "user": "user"}
 # Status lines for the planner's own calls. A call not named here leaves
 # the current line running.
 _PLANNER_CALL_LABELS = {
-    PLAN_TRANSLATOR_AGENT_NAME: "Checking the plan against the data",
+    TRANSLATE_TOOL_NAME: "Checking the plan against the data",
     "submit_plan": "Getting the plan ready for you",
 }
 
@@ -228,7 +231,7 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
 
     A `PlannerSeamError` keeps its code and retry mode but not its detail:
     that text is the seam's message to the planner model ("Call
-    `dfo_translator` first"), logged by the caller, and the user reads
+    `translate` first"), logged by the caller, and the user reads
     `_PLANNER_FAILED_DETAIL` with the trace id instead.
     """
     timeout_tool = getattr(exc, "timeout_tool", None)
@@ -614,6 +617,13 @@ class _RecordingSurface:
             )
             raise
         if self._provenance is not None and tool.name == "get_data" and not result.is_error:
+            result = result.model_copy(
+                update={
+                    "structured_content": await manifest_with_stat_vars(
+                        dict(result.structured_content or {})
+                    )
+                }
+            )
             self._remember_manifest(result)
         self._record(tool.name, arguments, _surface_call_outcome(result), started=started)
         return result
@@ -717,6 +727,11 @@ class _RecordingSurface:
         evidence_frame_refs: Sequence[Mapping[str, str | None]],
         stat_var_count: int | None,
         carried_frame_refs: Sequence[Mapping[str, str | None]],
+        summed_frame_refs: Sequence[Sequence[Mapping[str, str | None]]] = (),
+        sum_of_sides: Mapping[
+            str, tuple[Sequence[Mapping[str, str | None]], Sequence[Mapping[str, str | None]]]
+        ]
+        | None = None,
     ) -> None:
         """Write `frame_ref`'s lineage from the retrieval frames in `evidence_frame_refs`.
 
@@ -731,7 +746,11 @@ class _RecordingSurface:
         StatVars the terminal step declared its frame carries (`None` for a
         retrieval whose `get_data` call did not read the frame), counting a
         summed family ref from a retrieval in `carried_frame_refs` as the
-        StatVars it sums. Called once per terminal frame from
+        StatVars it sums, and each `sum_of` ref the frame carries as the
+        distinct StatVars of its entry in `summed_frame_refs`, the retrievals
+        under that sum. `sum_of_sides` maps each `sum_of` result's StatVar
+        ref to the retrieval frames under its left and right side, which the
+        card names that ref by. Called once per terminal frame from
         `harness.graph._link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
@@ -754,6 +773,17 @@ class _RecordingSurface:
             carried=[
                 (ref.get("spec_id"), ref.get("content_version")) for ref in carried_frame_refs
             ],
+            summed=[
+                [(ref.get("spec_id"), ref.get("content_version")) for ref in under]
+                for under in summed_frame_refs
+            ],
+            sum_of_sides={
+                stat_var: tuple(
+                    tuple((ref.get("spec_id"), ref.get("content_version")) for ref in side)
+                    for side in sides
+                )
+                for stat_var, sides in (sum_of_sides or {}).items()
+            },
         )
         if not linked:
             logger.warning(
@@ -826,8 +856,14 @@ def _request_input_call(event: Event) -> tuple[str, dict[str, Any]] | None:
     """The (interrupt id, `RequestInput` dump) a pausing node's interrupt
     event carries. The dump is keyed by RequestInput's camelCase aliases;
     the id is the function call's own `id` (set to the interrupt id by
-    ADK's `create_request_input_event`)."""
-    if not (event.content and event.content.parts):
+    ADK's `create_request_input_event`).
+
+    None for a partial event. A streamed model call reaches the runner
+    first as partial chunks and then as one aggregated non-partial event,
+    and the runner saves only the non-partial one to the session. A pause
+    frame built from a chunk would name a call the session may never hold,
+    so `/interrupt`'s answer to it would match no call."""
+    if event.partial or not (event.content and event.content.parts):
         return None
     for part in event.content.parts:
         call = part.function_call
@@ -1300,6 +1336,8 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
+            shown_slots = {decision.slot for decision in plan_display.shown_decisions(plan)}
+            named = functools.partial(plan_display.with_source_names, plan=plan)
             revision = payload.get("revision")
             steps = [
                 PlanStep(
@@ -1333,6 +1371,17 @@ class _Translator:
                 PlanOperation(**cast("dict[str, Any]", row))
                 for row in plan_display.operation_rows(plan)
             ]
+            asks = [
+                PlanAsk(
+                    ask=str(row["ask"]),
+                    answered_by=cast("list[str]", row["answered_by"]),
+                    declined=cast("str | None", row["reason"]),
+                    not_computed=cast("str | None", row["not_computed"])
+                    if row["answered_by"]
+                    else None,
+                )
+                for row in plan_display.ask_rows(plan)
+            ]
             frames.append(
                 PlanProposed(
                     event="plan.proposed",
@@ -1347,20 +1396,26 @@ class _Translator:
                     decisions=[
                         PlanDecision(
                             id=decision.get("slot", f"d{index + 1}"),
-                            question=decision.get("description", ""),
-                            chosen=decision.get("chosen", ""),
-                            alternatives=decision.get("options"),
-                            reason=decision.get("rationale", ""),
+                            question=named(decision.get("description", "")),
+                            chosen=named(decision.get("chosen", "")),
+                            alternatives=(
+                                [named(option) for option in decision["options"]]
+                                if decision.get("options") is not None
+                                else None
+                            ),
+                            reason=named(decision.get("rationale", "")),
                             resolved_by=_RESOLVED_BY_TO_WIRE.get(
                                 decision.get("resolved_by", ""), "default"
                             ),
                         )
                         for index, decision in enumerate(payload.get("decisions", []))
+                        if decision.get("slot") in shown_slots
                     ],
                     actions=[PlanAction.APPROVE, PlanAction.AMEND, PlanAction.REJECT],
                     revision=revision,
                     requirements=requirements,
                     operations=operations,
+                    asks=asks or None,
                 )
             )
             conversation.pending[wire_id] = _PendingInterrupt(
@@ -1529,20 +1584,21 @@ class _OrchestratorTranslator(_Translator):
             self._open_calls[call.id or frame.step_id] = (frame.step_id, label)
             frames.append(frame)
         for response in event.get_function_responses():
-            # A hand-off counts once the tool took it; a refused one (its
-            # budget spent) leaves the model to answer, and that text shows.
+            # A hand-off counts once the tool recorded it; a refused or
+            # failed one leaves the model to answer, and that text shows.
             answer = response.response or {}
-            if response.name in ("plan", "ask_user") and "error" not in answer:
+            if answer.get(HANDED_OFF):
                 self._handed_off = True
             opened = self._open_calls.get(response.id or "")
             if opened is not None:
-                error = answer.get("error")
+                failed = "error" in answer or "refusal" in answer
+                reason = answer.get("error") or answer.get("refusal")
                 frames.append(
                     self._step(
                         *opened,
-                        StepStatus.FAILED if error else StepStatus.COMPLETE,
+                        StepStatus.FAILED if failed else StepStatus.COMPLETE,
                         tool=response.name,
-                        detail=str(error)[:_STEP_DETAIL_CAP] if error else None,
+                        detail=str(reason)[:_STEP_DETAIL_CAP] if failed and reason else None,
                     )
                 )
         if event.get_function_responses():
@@ -1604,6 +1660,7 @@ _ORCHESTRATOR_TOOL_LABELS = {
     "ask_user": "Asking you a question",
     "plan": "Handing the question to the planner",
     "explain_dfo": "Reading about DFO",
+    "recall": "Looking back at an earlier turn",
 }
 
 

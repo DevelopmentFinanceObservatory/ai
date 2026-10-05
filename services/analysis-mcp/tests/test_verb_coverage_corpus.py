@@ -44,6 +44,7 @@ from analysis_mcp.op_spec import AggregateOpSpec, CategoryMatchPredicate, Ordere
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.server import mcp
 from analysis_mcp.share_of_tool import share_of
+from analysis_mcp.sum_of_tool import sum_of
 from analysis_mcp.tool_errors import ToolResult
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
@@ -114,6 +115,7 @@ def test_every_verb_in_the_closed_set_answers_at_least_one_question() -> None:
         "share_of",
         "join",
         "filter",
+        "sum_of",
     }
 
 
@@ -725,6 +727,38 @@ async def _run_kenya_rank_change_since_2010(store: InMemoryMaterialisationStore)
     )
 
 
+async def _run_france_guatemala_total_aid(store: InMemoryMaterialisationStore) -> ToolResult:
+    bilateral = _frame(
+        [
+            _row(
+                stat_var="dcid:OdaBilateral",
+                reporter="dcid:FRA",
+                year=year,
+                value=value,
+                unit="dcid:USDollar",
+                provenance="dcid:OECD_CRS",
+            )
+            for year, value in (("2010", 4_000_000.0), ("2011", 4_250_000.0), ("2012", 4_500_000.0))
+        ]
+    )
+    imputed = _frame(
+        [
+            _row(
+                stat_var="dcid:OdaImputedMultilateral",
+                reporter="dcid:FRA",
+                year=year,
+                value=value,
+                unit="dcid:USDollar",
+                provenance="dcid:ONE_ImputedMultilateral",
+            )
+            for year, value in (("2011", 1_500_000.0), ("2012", 1_600_000.0))
+        ]
+    )
+    left = await _seed(store, bilateral)
+    right = await _seed(store, imputed)
+    return await sum_of(frame_ref=left, right_frame_ref=right)
+
+
 _ENTRY_PLANS: tuple[_Entry, ...] = (
     _Entry(
         "What was Nigeria's GDP from 2021 to 2023?",
@@ -865,6 +899,18 @@ _ENTRY_PLANS: tuple[_Entry, ...] = (
         "How has Kenya's rank among aid recipients changed since 2010?",
         _run_kenya_rank_change_since_2010,
         check=lambda r: _assert_all_in(_digest(r), "1 place better", "2 -> 1"),
+    ),
+    _Entry(
+        "Give me the total (bilateral and imputed multilateral) aid France gave Guatemala "
+        "between 2010 and the latest",
+        _run_france_guatemala_total_aid,
+        # 2010 is bilateral only, so the sum covers 2011-2012 and names it.
+        check=lambda r: _assert_all_in(
+            _digest(r),
+            "2011: 4250000 + 1500000 = 5750000",
+            "6100000",
+            "2010: not in the sum; only the left side",
+        ),
     ),
 )
 

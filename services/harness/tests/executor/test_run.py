@@ -15,6 +15,7 @@ import random
 from collections.abc import Callable, Mapping
 from typing import Any
 
+import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -27,9 +28,13 @@ from compiler.surface import (
     ToolSchema,
     ToolSurfaceUnavailableError,
 )
+from data_mcp import stat_var_list
+from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
+from data_mcp.settings import Settings as DataMcpSettings
+from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import BACKOFF_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_delay
 from executor.outcomes import Accepted, MethodChoiceNeeded, RediscoveryNeeded, RefusalKind, Refused
 from executor.run import (
@@ -1025,6 +1030,44 @@ async def test_a_retrieval_whose_identity_drifted_since_approval_is_not_evidence
     assert isinstance(outcome, Refused)
     assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
     assert "source_drift" in [issue.code.value for issue in outcome.issues]
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "refused_as"),
+    [
+        # The list read back binds another StatVar: membership drift.
+        (
+            httpx2.Response(
+                200,
+                json={"trace": {"resolved_stat_vars": [{"ref": "dcid:Other", "roles": []}]}},
+            ),
+            RefusalKind.REQUIREMENT_UNMET,
+        ),
+        # The list cannot be read back: the result is unusable as evidence.
+        (httpx2.Response(404, json={"code": "not_found"}), RefusalKind.STEP_RESULT_UNUSABLE),
+    ],
+)
+async def test_a_stat_var_list_the_result_left_out_is_read_back_for_the_membership_check(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: httpx2.Response,
+    refused_as: RefusalKind,
+) -> None:
+    left_out = manifest()
+    left_out[STAT_VARS_OMITTED_KEY] = len(left_out["trace"].pop("resolved_stat_vars"))
+    upstream = UpstreamClient(
+        settings=DataMcpSettings(upstream_max_attempts=1),
+        transport=httpx2.MockTransport(lambda request: snapshot),
+    )
+    monkeypatch.setattr(stat_var_list, "get_client", lambda: upstream)
+
+    outcome = await _run(approved_plan(), surface=_surface(real_schemas, left_out), sleep=_Sleeps())
+
+    assert isinstance(outcome, Refused)
+    assert outcome.refusal is refused_as
+    assert outcome.step_id == "debt"
 
 
 async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(

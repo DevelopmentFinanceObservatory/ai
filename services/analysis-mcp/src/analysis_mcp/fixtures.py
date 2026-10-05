@@ -49,6 +49,8 @@ _UNIT_PERCENT = "dcid:Percent"
 _STAT_VAR_ODA_DISBURSED = "dcid:OfficialDevelopmentAssistanceNet_Disbursement"
 _STAT_VAR_ODA_RECEIVED = "dcid:OfficialDevelopmentAssistanceNet_Received"
 _STAT_VAR_GNI = "dcid:GrossNationalIncome"
+_STAT_VAR_ODA_BILATERAL = "dcid:OdaBilateralGrossDisbursement"
+_STAT_VAR_ODA_IMPUTED_MULTILATERAL = "dcid:OdaImputedMultilateralGrossDisbursement"
 
 # Plausible, not authoritative -- these figures exist only to give a fixture
 # frame realistic magnitude, never to answer a real development-finance
@@ -236,6 +238,57 @@ def join_compatible_frame_pair() -> tuple[Frame, Frame]:
         ],
     )
     return oda, gni
+
+
+# One donor's aid to one recipient in USD, from two datasets. Reported
+# bilateral flows run over 2010-2024 and modelled imputed multilateral shares
+# over 2011-2023.
+_ODA_BILATERAL_FRA_GTM_BY_YEAR: dict[str, float] = {
+    str(year): 4_000_000.0 + 250_000.0 * (year - 2010) for year in range(2010, 2025)
+}
+_ODA_IMPUTED_MULTILATERAL_FRA_GTM_BY_YEAR: dict[str, float] = {
+    str(year): 1_500_000.0 + 100_000.0 * (year - 2011) for year in range(2011, 2024)
+}
+
+
+def two_source_sum_frame_pair() -> tuple[Frame, Frame]:
+    """France's ODA to Guatemala from two datasets, for `sum_of`. The first
+    holds reported bilateral flows (2010-2024) and the second modelled
+    imputed multilateral shares (2011-2023), both in USD, each with its own
+    `provenance` and `measurementMethod`. The periods overlap on 2011-2023."""
+    bilateral = Frame.build(
+        role_keys=["donor", "recipient"],
+        rows=[
+            {
+                "stat_var": _STAT_VAR_ODA_BILATERAL,
+                "donor": "dcid:FRA",
+                "recipient": "dcid:GTM",
+                "time_period": year,
+                "value": value,
+                "unit": _UNIT_USD,
+                "provenance": "dcid:OECD_CRS",
+                "measurementMethod": "dcid:Reported",
+            }
+            for year, value in _ODA_BILATERAL_FRA_GTM_BY_YEAR.items()
+        ],
+    )
+    imputed = Frame.build(
+        role_keys=["donor", "recipient"],
+        rows=[
+            {
+                "stat_var": _STAT_VAR_ODA_IMPUTED_MULTILATERAL,
+                "donor": "dcid:FRA",
+                "recipient": "dcid:GTM",
+                "time_period": year,
+                "value": value,
+                "unit": _UNIT_USD,
+                "provenance": "dcid:ONE_ImputedMultilateral",
+                "measurementMethod": "dcid:Modelled",
+            }
+            for year, value in _ODA_IMPUTED_MULTILATERAL_FRA_GTM_BY_YEAR.items()
+        ],
+    )
+    return bilateral, imputed
 
 
 def time_series_with_gap_year_frame() -> Frame:
@@ -493,6 +546,7 @@ class SeededFixtures:
     sparse_coverage: dict[str, str]
     join_pair: tuple[dict[str, str], dict[str, str]]
     time_series_with_gap: dict[str, str]
+    sum_pair: tuple[dict[str, str], dict[str, str]]
 
 
 async def seed_fixture_store(store: MaterialisationStore) -> SeededFixtures:
@@ -505,6 +559,7 @@ async def seed_fixture_store(store: MaterialisationStore) -> SeededFixtures:
     sparse_frame = sparse_coverage_frame()
     oda_frame, gni_frame = join_compatible_frame_pair()
     time_series_frame = time_series_with_gap_year_frame()
+    bilateral_frame, imputed_frame = two_source_sum_frame_pair()
 
     plain_ref = _fixture_ref("plain_single_unit")
     await store.put(
@@ -553,6 +608,21 @@ async def seed_fixture_store(store: MaterialisationStore) -> SeededFixtures:
         writer="fixtures",
     )
 
+    bilateral_ref = _fixture_ref("sum_pair_bilateral")
+    await store.put(
+        bilateral_ref,
+        frame=bilateral_frame,
+        trace=_fixture_trace("sum_pair_bilateral", bilateral_frame),
+        writer="fixtures",
+    )
+    imputed_ref = _fixture_ref("sum_pair_imputed")
+    await store.put(
+        imputed_ref,
+        frame=imputed_frame,
+        trace=_fixture_trace("sum_pair_imputed", imputed_frame),
+        writer="fixtures",
+    )
+
     return SeededFixtures(
         plain_single_unit={
             "spec_id": plain_ref.spec_id,
@@ -574,4 +644,8 @@ async def seed_fixture_store(store: MaterialisationStore) -> SeededFixtures:
             "spec_id": time_series_ref.spec_id,
             "content_version": time_series_ref.content_version,
         },
+        sum_pair=(
+            {"spec_id": bilateral_ref.spec_id, "content_version": bilateral_ref.content_version},
+            {"spec_id": imputed_ref.spec_id, "content_version": imputed_ref.content_version},
+        ),
     )

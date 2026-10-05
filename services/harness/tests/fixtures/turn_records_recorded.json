@@ -1,0 +1,1225 @@
+{
+  "plans": {
+    "guatemala_top_donors": {
+      "question": "top donors to guatemala since 2020",
+      "answer_mode": "computed",
+      "decisions": [
+        {
+          "slot": "time_period",
+          "description": "Time window for assessing donor contributions since 2020.",
+          "options": [
+            "2020-2023",
+            "2020-2022"
+          ],
+          "chosen": "2020-2023",
+          "resolved_by": "planner_default",
+          "rationale": "Captures the most recent complete reporting years for official development finance data.",
+          "fixes": {
+            "period": {
+              "start": 2020,
+              "end": 2023
+            },
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "measure_choice",
+          "description": "Measure of donor funding to Guatemala.",
+          "options": [
+            "official development assistance",
+            "total official flows"
+          ],
+          "chosen": "official development assistance",
+          "resolved_by": "planner_default",
+          "rationale": "Official development assistance (ODA) is the standard international metric for aid flows.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": "official development assistance",
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "ranking_scope",
+          "description": "Scope of donors compared in the ranking.",
+          "options": [
+            "all reporting donors in the population",
+            "bilateral donors only"
+          ],
+          "chosen": "all reporting donors in the population",
+          "resolved_by": "planner_default",
+          "rationale": "Evaluating all reporting donors gives a complete view of aid to Guatemala.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": "population",
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "ranking_limit",
+          "description": "Number of top donors to include in the ranking.",
+          "options": [
+            "top 10 donors",
+            "top 5 donors"
+          ],
+          "chosen": "top 10 donors",
+          "resolved_by": "planner_default",
+          "rationale": "A top 10 ranking provides a detailed yet concise overview of the leading donors.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": 10
+          }
+        },
+        {
+          "slot": "aggregation_method",
+          "description": "Method of collapsing multiple years of donor aid.",
+          "options": [
+            "cumulative sum across years",
+            "annual average across years"
+          ],
+          "chosen": "cumulative sum across years",
+          "resolved_by": "planner_default",
+          "rationale": "Summing across the 2020-2023 window reflects the total volume of assistance provided since 2020.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": "sum",
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "guatemala_oda",
+          "decision_ids": [
+            "time_period",
+            "measure_choice"
+          ],
+          "measure": "official development assistance",
+          "entities": [
+            {
+              "name": "Guatemala",
+              "role": "recipient"
+            }
+          ],
+          "across": "donor",
+          "period": {
+            "start": 2020,
+            "end": 2023
+          },
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_spec_id": null,
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null
+        },
+        {
+          "kind": "rank",
+          "id": "top_donors",
+          "decision_ids": [
+            "ranking_scope",
+            "ranking_limit",
+            "aggregation_method"
+          ],
+          "input_id": "guatemala_oda",
+          "direction": "highest_first",
+          "among": "population",
+          "axis": "donor",
+          "reduction": "sum",
+          "window_start": null,
+          "window_end": null,
+          "per_period": false,
+          "limit": 10
+        }
+      ],
+      "translation": {
+        "operations": [
+          {
+            "kind": "retrieve",
+            "id": "guatemala_oda",
+            "requirement_id": "guatemala_oda",
+            "spec_id": "spec_fd8b7635d17fe5f552ae2f31b6c78b89"
+          },
+          {
+            "kind": "rank",
+            "id": "top_donors",
+            "requirement_id": "top_donors",
+            "input": "guatemala_oda",
+            "direction": "highest_first",
+            "among": "population",
+            "axis": "donor",
+            "reduction": "sum",
+            "window_start": null,
+            "window_end": null,
+            "per_period": false,
+            "limit": 10
+          }
+        ],
+        "terminal": [
+          "top_donors"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "guatemala_oda",
+            "operation_id": "guatemala_oda",
+            "tool": {
+              "server": "data-mcp",
+              "name": "get_data"
+            },
+            "args": {
+              "spec_id": "spec_fd8b7635d17fe5f552ae2f31b6c78b89",
+              "stat_vars": "sum",
+              "resolved_stat_var_dcids": [
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode51010_Nominal",
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode13030_Nominal",
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode14020_Nominal"
+              ]
+            },
+            "bindings": {},
+            "implementation_version": "1",
+            "input_schema_hash": "0cef787e58d146ecd015c5f3f29241391d032ba6e9d505111cc9ca9a735ec0a5",
+            "output_schema_hash": null,
+            "expected_role_keys": [
+              "destination",
+              "origin"
+            ]
+          },
+          {
+            "id": "top_donors",
+            "operation_id": "top_donors",
+            "tool": {
+              "server": "analysis-mcp",
+              "name": "rank"
+            },
+            "args": {
+              "limit": 10,
+              "rank_by": [
+                "origin"
+              ],
+              "ascending": false,
+              "aggregation": "sum"
+            },
+            "bindings": {
+              "frame_ref": {
+                "from_step": "guatemala_oda",
+                "output": "frame_ref"
+              }
+            },
+            "implementation_version": "1",
+            "input_schema_hash": "07c8b73cc4a8d9793b988ac64aa1fbfc41fe0400eda5166ddf43db3ec33d0055",
+            "output_schema_hash": "34968b094625cea3cd644ad2ee9bb78ac0f6f596dfdb017610c2138e245ccc19",
+            "expected_role_keys": [
+              "origin"
+            ]
+          }
+        ],
+        "sources": [
+          {
+            "spec_id": "spec_fd8b7635d17fe5f552ae2f31b6c78b89",
+            "sentence": "Gross disbursements (nominal; US dollar) for official development assistance to Guatemala, 2020 to 2023, according to OECD Creditor Reporting System (CRS). In 2023, the latest year with data in the years asked, there are 705 observations across 705 series, covering 47 donors and 1 recipient. The question names 2020 to 2023. These counts are for 2023 alone.",
+            "searched_as": "official development assistance",
+            "confidence": "medium",
+            "has_data": true,
+            "stat_vars": [
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode51010_Nominal",
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode13030_Nominal",
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode14020_Nominal"
+            ],
+            "stat_var_member_count": 489,
+            "stat_var_truncated": false,
+            "pinned": false,
+            "shape_member_count": 3687,
+            "shape_member_digest": "a7115fa9b30afef48979db31549005a0cd84c73758f339a615ef3ff98aa37930",
+            "entities": [
+              {
+                "role": "destination",
+                "ref": "country/GTM",
+                "label": "Guatemala"
+              }
+            ],
+            "open_entity_axes": [
+              {
+                "column": "origin",
+                "member_count": 67
+              }
+            ],
+            "unit_ref": "CurrencyUSD",
+            "unit_label": "US Dollar",
+            "provenance_ref": "provenance/OECDCreditorReportingSystem",
+            "provenance_label": "OECD Creditor Reporting System (CRS)",
+            "coverage_kind": "exact",
+            "coverage_window": {
+              "start": 2020,
+              "end": 2023
+            },
+            "identity": {
+              "shape": {
+                "kind": "statvar_schema",
+                "stat_type": "measuredValue",
+                "population_type": "FinancialFlow",
+                "measured_property": "amount",
+                "measurement_qualifier": "Nominal"
+              },
+              "slots": [
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsCooperationModality"
+                },
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsPurpose"
+                },
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsTypeOfFinance"
+                },
+                {
+                  "binding": {
+                    "ref": "CRSTypeOfFlow10",
+                    "state": "value"
+                  },
+                  "property": "crsTypeOfFlow"
+                },
+                {
+                  "binding": {
+                    "ref": "Disbursement",
+                    "state": "value"
+                  },
+                  "property": "financialFlowType"
+                },
+                {
+                  "binding": {
+                    "ref": "Gross",
+                    "state": "value"
+                  },
+                  "property": "nettingBasis"
+                }
+              ],
+              "entities": {
+                "destination": [
+                  "country/GTM"
+                ]
+              },
+              "identity_version": "spec1",
+              "requested_window": {
+                "kind": "range",
+                "end_year": 2023,
+                "start_year": 2020
+              }
+            },
+            "definition": null,
+            "open_axes": [
+              {
+                "property": "crsCooperationModality",
+                "summable": true
+              },
+              {
+                "property": "crsPurpose",
+                "summable": true
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "summable": true
+              }
+            ],
+            "stat_var_reading": "sum",
+            "stat_var_reading_set_by": "rule"
+          }
+        ],
+        "evidence_bindings": [
+          {
+            "requirement_id": "guatemala_oda",
+            "step_id": "guatemala_oda",
+            "spec_id": "spec_fd8b7635d17fe5f552ae2f31b6c78b89"
+          }
+        ],
+        "terminal_steps": [
+          "top_donors"
+        ],
+        "warnings": []
+      },
+      "version": 1,
+      "previous_version": null,
+      "status": "pending_approval",
+      "approved_revision": null
+    },
+    "france_guatemala_join": {
+      "question": "Total aid (sum of bilateral ODA and imputed multilateral ODA) from France to Guatemala from 2010 to 2023",
+      "answer_mode": "computed",
+      "decisions": [
+        {
+          "slot": "bilateral_source",
+          "description": "Source dataset for bilateral ODA from France to Guatemala",
+          "options": [
+            "spec_4b23d29a5d384574e1a40d2ffb22e952",
+            "search_other_sources"
+          ],
+          "chosen": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+          "resolved_by": "planner_default",
+          "rationale": "Use OECD Creditor Reporting System (CRS) bilateral ODA dataset from earlier context.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "imputed_source",
+          "description": "Source dataset for imputed multilateral ODA from France to Guatemala",
+          "options": [
+            "spec_d483f9b9d15fc52a1e1652ca32546c96",
+            "search_other_sources"
+          ],
+          "chosen": "spec_d483f9b9d15fc52a1e1652ca32546c96",
+          "resolved_by": "planner_default",
+          "rationale": "Use ONE Imputed Multilateral Sectors dataset from earlier context.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "across": null,
+            "measure": null,
+            "source_spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96",
+            "stat_vars": null,
+            "reduction": null,
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null,
+            "limit": null
+          }
+        },
+        {
+          "slot": "combining_method",
+          "description": "Method for combining bilateral and imputed multilateral ODA series",
+          "options": [
+            "join",
+            "separate_series"
+          ],
+          "chosen": "join",
+          "resolved_by": "planner_default",
+          "rationale": "Join the bilateral ODA and imputed multilateral ODA series into one combined frame across common years.",
+          "fixes": null
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "bilateral_oda",
+          "decision_ids": [
+            "bilateral_source"
+          ],
+          "measure": "official development assistance",
+          "entities": [
+            {
+              "name": "France",
+              "role": "donor"
+            },
+            {
+              "name": "Guatemala",
+              "role": "recipient"
+            }
+          ],
+          "across": null,
+          "period": {
+            "start": 2010,
+            "end": 2023
+          },
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null
+        },
+        {
+          "kind": "dataset",
+          "id": "imputed_multilateral_oda",
+          "decision_ids": [
+            "imputed_source"
+          ],
+          "measure": "official development assistance, imputed multilateral ODA",
+          "entities": [
+            {
+              "name": "France",
+              "role": "donor"
+            },
+            {
+              "name": "Guatemala",
+              "role": "recipient"
+            }
+          ],
+          "across": null,
+          "period": {
+            "start": 2010,
+            "end": 2023
+          },
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96",
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null
+        },
+        {
+          "kind": "join",
+          "id": "joined_oda",
+          "decision_ids": [
+            "combining_method"
+          ],
+          "left_id": "bilateral_oda",
+          "right_id": "imputed_multilateral_oda"
+        }
+      ],
+      "translation": {
+        "operations": [
+          {
+            "kind": "retrieve",
+            "id": "bilateral_oda",
+            "requirement_id": "bilateral_oda",
+            "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952"
+          },
+          {
+            "kind": "retrieve",
+            "id": "imputed_multilateral_oda",
+            "requirement_id": "imputed_multilateral_oda",
+            "spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96"
+          },
+          {
+            "kind": "join",
+            "id": "joined_oda",
+            "requirement_id": "joined_oda",
+            "left": "bilateral_oda",
+            "right": "imputed_multilateral_oda"
+          }
+        ],
+        "terminal": [
+          "joined_oda"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "bilateral_oda",
+            "operation_id": "bilateral_oda",
+            "tool": {
+              "server": "data-mcp",
+              "name": "get_data"
+            },
+            "args": {
+              "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+              "stat_vars": "sum",
+              "resolved_stat_var_dcids": [
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode41030_Nominal",
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode99810_Nominal",
+                "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal"
+              ]
+            },
+            "bindings": {},
+            "implementation_version": "1",
+            "input_schema_hash": "0cef787e58d146ecd015c5f3f29241391d032ba6e9d505111cc9ca9a735ec0a5",
+            "output_schema_hash": null,
+            "expected_role_keys": [
+              "destination",
+              "origin"
+            ]
+          },
+          {
+            "id": "imputed_multilateral_oda",
+            "operation_id": "imputed_multilateral_oda",
+            "tool": {
+              "server": "data-mcp",
+              "name": "get_data"
+            },
+            "args": {
+              "spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96",
+              "stat_vars": "sum",
+              "resolved_stat_var_dcids": [
+                "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+                "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+                "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal"
+              ]
+            },
+            "bindings": {},
+            "implementation_version": "1",
+            "input_schema_hash": "0cef787e58d146ecd015c5f3f29241391d032ba6e9d505111cc9ca9a735ec0a5",
+            "output_schema_hash": null,
+            "expected_role_keys": [
+              "destination",
+              "origin"
+            ]
+          },
+          {
+            "id": "joined_oda",
+            "operation_id": "joined_oda",
+            "tool": {
+              "server": "analysis-mcp",
+              "name": "join"
+            },
+            "args": {
+              "join_keys": [
+                "destination",
+                "origin"
+              ]
+            },
+            "bindings": {
+              "frame_ref": {
+                "from_step": "bilateral_oda",
+                "output": "frame_ref"
+              },
+              "right_frame_ref": {
+                "from_step": "imputed_multilateral_oda",
+                "output": "frame_ref"
+              }
+            },
+            "implementation_version": "1",
+            "input_schema_hash": "1901fa26209ee959653ed0c2938792655e65f78242963a21df120309840eee24",
+            "output_schema_hash": "34968b094625cea3cd644ad2ee9bb78ac0f6f596dfdb017610c2138e245ccc19",
+            "expected_role_keys": [
+              "destination",
+              "origin"
+            ]
+          }
+        ],
+        "sources": [
+          {
+            "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+            "sentence": "Gross disbursements (nominal; US dollar) for official development assistance to Guatemala from France, 2010 to 2023, according to OECD Creditor Reporting System (CRS). In 2023, the latest year with data in the years asked, there are 15 observations across 15 series, covering 1 donor and 1 recipient. The question names 2010 to 2023. These counts are for 2023 alone.",
+            "searched_as": "official development assistance",
+            "confidence": "medium",
+            "has_data": true,
+            "stat_vars": [
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode41030_Nominal",
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode99810_Nominal",
+              "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal"
+            ],
+            "stat_var_member_count": 57,
+            "stat_var_truncated": false,
+            "pinned": false,
+            "shape_member_count": 3687,
+            "shape_member_digest": "a7115fa9b30afef48979db31549005a0cd84c73758f339a615ef3ff98aa37930",
+            "entities": [
+              {
+                "role": "destination",
+                "ref": "country/GTM",
+                "label": "Guatemala"
+              },
+              {
+                "role": "origin",
+                "ref": "country/FRA",
+                "label": "France"
+              }
+            ],
+            "open_entity_axes": [],
+            "unit_ref": "CurrencyUSD",
+            "unit_label": "US Dollar",
+            "provenance_ref": "provenance/OECDCreditorReportingSystem",
+            "provenance_label": "OECD Creditor Reporting System (CRS)",
+            "coverage_kind": "exact",
+            "coverage_window": {
+              "start": 2010,
+              "end": 2023
+            },
+            "identity": {
+              "shape": {
+                "kind": "statvar_schema",
+                "stat_type": "measuredValue",
+                "population_type": "FinancialFlow",
+                "measured_property": "amount",
+                "measurement_qualifier": "Nominal"
+              },
+              "slots": [
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsCooperationModality"
+                },
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsPurpose"
+                },
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsTypeOfFinance"
+                },
+                {
+                  "binding": {
+                    "ref": "CRSTypeOfFlow10",
+                    "state": "value"
+                  },
+                  "property": "crsTypeOfFlow"
+                },
+                {
+                  "binding": {
+                    "ref": "Disbursement",
+                    "state": "value"
+                  },
+                  "property": "financialFlowType"
+                },
+                {
+                  "binding": {
+                    "ref": "Gross",
+                    "state": "value"
+                  },
+                  "property": "nettingBasis"
+                }
+              ],
+              "entities": {
+                "origin": [
+                  "country/FRA"
+                ],
+                "destination": [
+                  "country/GTM"
+                ]
+              },
+              "identity_version": "spec1",
+              "requested_window": {
+                "kind": "range",
+                "end_year": 2023,
+                "start_year": 2010
+              }
+            },
+            "definition": null,
+            "open_axes": [
+              {
+                "property": "crsCooperationModality",
+                "summable": true
+              },
+              {
+                "property": "crsPurpose",
+                "summable": true
+              },
+              {
+                "property": "crsTypeOfFinance",
+                "summable": true
+              }
+            ],
+            "stat_var_reading": "sum",
+            "stat_var_reading_set_by": "rule"
+          },
+          {
+            "spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96",
+            "sentence": "Gross disbursements (nominal; US dollar) for official development assistance for imputed multilateral ODA to Guatemala from France, 2011 to 2023, according to ONE Imputed Multilateral Sectors. In 2023, the latest year with data in the years asked, there are 82 observations across 82 series, covering 1 donor and 1 recipient. The question names 2010 to 2023. These counts are for 2023 alone.",
+            "searched_as": "official development assistance, imputed multilateral ODA",
+            "confidence": "medium",
+            "has_data": true,
+            "stat_vars": [
+              "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+              "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+              "AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal"
+            ],
+            "stat_var_member_count": 133,
+            "stat_var_truncated": false,
+            "pinned": false,
+            "shape_member_count": 255,
+            "shape_member_digest": "82f8b59132471f13c53d4a08395e08c5de4a05065747fe1789874fa14550597d",
+            "entities": [
+              {
+                "role": "destination",
+                "ref": "country/GTM",
+                "label": "Guatemala"
+              },
+              {
+                "role": "origin",
+                "ref": "country/FRA",
+                "label": "France"
+              }
+            ],
+            "open_entity_axes": [],
+            "unit_ref": "CurrencyUSD",
+            "unit_label": "US Dollar",
+            "provenance_ref": "provenance/ONEImputedMultilateralSectors",
+            "provenance_label": "ONE Imputed Multilateral Sectors",
+            "coverage_kind": "exact",
+            "coverage_window": {
+              "start": 2011,
+              "end": 2023
+            },
+            "identity": {
+              "shape": {
+                "kind": "statvar_schema",
+                "stat_type": "measuredValue",
+                "population_type": "FinancialFlow",
+                "measured_property": "attributedAmount",
+                "measurement_qualifier": "Nominal"
+              },
+              "slots": [
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "crsPurpose"
+                },
+                {
+                  "binding": {
+                    "ref": "CRSTypeOfFlow10",
+                    "state": "value"
+                  },
+                  "property": "crsTypeOfFlow"
+                },
+                {
+                  "binding": {
+                    "ref": "DAC2aAidType106",
+                    "state": "value"
+                  },
+                  "property": "dac2aAidType"
+                },
+                {
+                  "binding": {
+                    "ref": "Disbursement",
+                    "state": "value"
+                  },
+                  "property": "financialFlowType"
+                },
+                {
+                  "binding": {
+                    "ref": "Gross",
+                    "state": "value"
+                  },
+                  "property": "nettingBasis"
+                }
+              ],
+              "entities": {
+                "origin": [
+                  "country/FRA"
+                ],
+                "destination": [
+                  "country/GTM"
+                ]
+              },
+              "identity_version": "spec1",
+              "requested_window": {
+                "kind": "range",
+                "end_year": 2023,
+                "start_year": 2010
+              }
+            },
+            "definition": null,
+            "open_axes": [
+              {
+                "property": "crsPurpose",
+                "summable": true
+              }
+            ],
+            "stat_var_reading": "sum",
+            "stat_var_reading_set_by": "rule"
+          }
+        ],
+        "evidence_bindings": [
+          {
+            "requirement_id": "bilateral_oda",
+            "step_id": "bilateral_oda",
+            "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952"
+          },
+          {
+            "requirement_id": "imputed_multilateral_oda",
+            "step_id": "imputed_multilateral_oda",
+            "spec_id": "spec_d483f9b9d15fc52a1e1652ca32546c96"
+          }
+        ],
+        "terminal_steps": [
+          "joined_oda"
+        ],
+        "warnings": [
+          {
+            "code": "window_short",
+            "severity": "warning",
+            "requirement_id": "imputed_multilateral_oda",
+            "detail": "the source covers 2011-2023, the requirement asks for 2010-2023",
+            "found": {
+              "end": 2023,
+              "start": 2011
+            },
+            "required": {
+              "end": 2023,
+              "start": 2010
+            }
+          }
+        ]
+      },
+      "version": 1,
+      "previous_version": null,
+      "status": "pending_approval",
+      "approved_revision": null
+    }
+  },
+  "searches": {
+    "kenya_sectors": [
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "aid by sector",
+              "status": "no_data",
+              "spec_id": null,
+              "resolved": null,
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                },
+                {
+                  "code": "time_text_not_parsed",
+                  "severity": "warn",
+                  "message": "time_text 'latest year available' did not match any recognised date grammar (a bare year; 'YYYY to YYYY'/'YYYY-YYYY'; 'since YYYY'/'depuis YYYY'/'desde YYYY'; 'latest'/'current'/'now'; 'last N years'/'past N years'; 'last decade'/'past decade'/'over the last decade'); treated as dateless."
+                },
+                {
+                  "code": "role_text_not_recognised",
+                  "severity": "warn",
+                  "message": "role_text 'in' did not match any recognised role word ('from'/'to', or a synonym -- donor/creditor/lender/exporter for 'from', recipient/debtor/borrower/importer for 'to'); entity treated as undirected."
+                },
+                {
+                  "code": "skills_not_matchable",
+                  "severity": "warn",
+                  "message": "Skills were requested, but this part resolved to no spec, so it binds no graph nodes to match a skill against."
+                }
+              ],
+              "candidates": []
+            }
+          ]
+        }
+      },
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "official development assistance by sector",
+              "status": "definite",
+              "spec_id": "spec_ab788eeca3bf5fc6bddb31cef15936e3",
+              "resolved": "Gross disbursements (nominal; US dollar) for official development assistance to Kenya, latest values, 1990 to 2024, according to OECD Creditor Reporting System (CRS). In 2024, the latest year with data, there are 1,852 observations across 1,852 series, covering 75 donors and 1 recipient. No year was named.",
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                },
+                {
+                  "code": "role_scope_defaulted",
+                  "severity": "warn",
+                  "message": "no provider was named; the answer was resolved across every provider with data."
+                }
+              ],
+              "candidates": [],
+              "wide": true
+            }
+          ],
+          "skills": [
+            {
+              "id": "oda-crs",
+              "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection."
+            }
+          ]
+        }
+      },
+      {
+        "tool": "fetch",
+        "output": {
+          "spec_id": "spec_ab788eeca3bf5fc6bddb31cef15936e3",
+          "summary": "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) \u00b7 2982 series"
+        }
+      },
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "aid by sector",
+              "status": "definite",
+              "spec_id": "spec_171f6e6af278db843fb67e29ec117d20",
+              "resolved": "Gross disbursements (nominal; US dollar) for social infrastructure and services, economic infrastructure and services, productive sector, commodity aid and general programme assistance, multisector, humanitarian aid, administrative costs of donors, unallocated and unspecified, action relating to debt, and support for refugees and asylum seekers in donor countries for official development assistance to Kenya, latest values, 1990 to 2024, according to OECD Creditor Reporting System (CRS). In 2024, the latest year with data, there are 1,852 observations across 1,852 series, covering 75 donors and 1 recipient. No year was named.",
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                },
+                {
+                  "code": "role_scope_defaulted",
+                  "severity": "warn",
+                  "message": "no provider was named; the answer was resolved across every provider with data."
+                }
+              ],
+              "candidates": [],
+              "wide": true
+            }
+          ],
+          "skills": [
+            {
+              "id": "oda-concepts",
+              "description": "Core definitions, measures and classifications in ODA analysis. Covers the 0.7% ODA/GNI target and how ODA/GNI is calculated, the grant equivalent methodology and its 2018 break in comparability, Core ODA and the items it excludes (in-donor refugee costs, imputed student costs, debt relief), donor groupings (DAC members, DAC associates, non-DAC donors and EU Institutions, with the double-counting risk EU Institutions bring), ONE's sector groupings by CRS purpose code, and indicators of donor prioritisation such as sector shares and the bilateral/multilateral split."
+            },
+            {
+              "id": "oda-dataset-selection",
+              "description": "Context for choosing the dataset that answers an ODA or development finance question. Summarises what each dataset covers, which breakdowns each supports, and how their totals relate."
+            },
+            {
+              "id": "oda-crs",
+              "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection."
+            }
+          ]
+        }
+      },
+      {
+        "tool": "fetch",
+        "output": {
+          "spec_id": "spec_171f6e6af278db843fb67e29ec117d20",
+          "summary": "2982 observations, 1990\u20132024 \u00b7 OECD Creditor Reporting System (CRS) \u00b7 2982 series"
+        }
+      },
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "official development assistance",
+              "status": "definite",
+              "spec_id": "spec_ab788eeca3bf5fc6bddb31cef15936e3",
+              "resolved": "Gross disbursements (nominal; US dollar) for official development assistance to Kenya, latest values, 1990 to 2024, according to OECD Creditor Reporting System (CRS). In 2024, the latest year with data, there are 1,852 observations across 1,852 series, covering 75 donors and 1 recipient. No year was named.",
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                },
+                {
+                  "code": "role_scope_defaulted",
+                  "severity": "warn",
+                  "message": "no provider was named; the answer was resolved across every provider with data."
+                }
+              ],
+              "candidates": [],
+              "wide": true
+            }
+          ],
+          "skills": [
+            {
+              "id": "oda-crs",
+              "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection."
+            }
+          ]
+        }
+      }
+    ],
+    "france_bilateral": [
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "bilateral official development assistance",
+              "status": "candidates",
+              "spec_id": null,
+              "resolved": null,
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                },
+                {
+                  "code": "direction_discarded",
+                  "severity": "warn",
+                  "message": "France was named as the provider; this shape reports the place as its own subject, so the direction was dropped."
+                },
+                {
+                  "code": "direction_discarded",
+                  "severity": "warn",
+                  "message": "Guatemala was named as the recipient; this shape reports the place as its own subject, so the direction was dropped."
+                },
+                {
+                  "code": "query_qualifier_dropped",
+                  "severity": "degraded",
+                  "message": "The requested qualifier \"bilateral\" was not applied."
+                }
+              ],
+              "candidates": [
+                {
+                  "spec_id": "spec_75ddf108608eadff0b7918ae26e529c7",
+                  "label": "Outbound official development assistance (ODA) from OECD-DAC countries on grant equivalent basis (united states dollars at constant prices) in France and Guatemala, 2018 to 2023, according to SDG Global Database. This series starts in 2018.",
+                  "wide": false
+                },
+                {
+                  "spec_id": "spec_8517f68e739983ff59327b2becb2d0f4",
+                  "label": "Net outbound official development assistance (ODA) from OECD-DAC countries (united states dollars at constant prices) in France and Guatemala, 2010 to 2023, according to SDG Global Database.",
+                  "wide": false
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "tool": "search",
+        "output": {
+          "kind": "resolution",
+          "parts": [
+            {
+              "variable": "official development assistance",
+              "status": "definite",
+              "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+              "resolved": "Gross disbursements (nominal; US dollar) for official development assistance to Guatemala from France, 2010 to 2023, according to OECD Creditor Reporting System (CRS). In 2023, the latest year with data in the years asked, there are 15 observations across 15 series, covering 1 donor and 1 recipient. The question names 2010 to 2023. These counts are for 2023 alone.",
+              "warnings": [
+                {
+                  "code": "retrieval_score_weak",
+                  "severity": "info",
+                  "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+                }
+              ],
+              "candidates": [],
+              "window": {
+                "start": 2010,
+                "end": 2023,
+                "source": "requested"
+              },
+              "wide": true
+            }
+          ],
+          "skills": [
+            {
+              "id": "oda-crs",
+              "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection."
+            }
+          ]
+        }
+      },
+      {
+        "tool": "fetch",
+        "output": {
+          "spec_id": "spec_4b23d29a5d384574e1a40d2ffb22e952",
+          "summary": "14 observations, 2010\u20132023 \u00b7 OECD Creditor Reporting System (CRS)"
+        }
+      }
+    ]
+  }
+}

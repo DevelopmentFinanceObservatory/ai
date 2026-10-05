@@ -15,7 +15,7 @@ from planner.settings import (
     override_thinking_on_sampled_turns,
 )
 
-_FIELDS = ("PLANNER_MODEL_NAME", "TRANSLATOR_MODEL_NAME")
+_FIELDS = ("PLANNER_MODEL_NAME",)
 
 
 def _callback_context(*, state: dict) -> SimpleNamespace:
@@ -39,23 +39,16 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_defaults_pin_both_agents_to_one_concrete_model() -> None:
-    """Both default to a version, not to a floating alias -- the point of the pin."""
-    settings = AgentSettings()
-
-    assert settings.planner_model_name == "gemini-3.8-flash"
-    assert settings.translator_model_name == "gemini-3.8-flash"
+def test_defaults_pin_the_planner_to_one_concrete_model() -> None:
+    """A version, not a floating alias -- the point of the pin."""
+    assert AgentSettings().planner_model_name == "gemini-3.8-flash"
 
 
 def test_reads_from_env(monkeypatch) -> None:
-    """Each agent's model overrides on its own, which is how one gets scored against another."""
+    """The model overrides from the environment, which is how one gets scored against another."""
     monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-3.1-pro-preview")
-    monkeypatch.setenv("TRANSLATOR_MODEL_NAME", "gemini-flash-latest")
 
-    settings = AgentSettings()
-
-    assert settings.planner_model_name == "gemini-3.1-pro-preview"
-    assert settings.translator_model_name == "gemini-flash-latest"
+    assert AgentSettings().planner_model_name == "gemini-3.1-pro-preview"
 
 
 def test_agent_thinking_config_is_low_with_thoughts_on() -> None:

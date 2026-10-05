@@ -52,9 +52,18 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, InMemorySessionService
 from harness.conversation import current_conversation_id
-from harness.graph import AGENT_NAME, GenerativeNodes, create_root_workflow
+from harness.graph import (
+    AGENT_NAME,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    GenerativeNodes,
+    create_root_workflow,
+)
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
@@ -72,6 +81,7 @@ from harness.studio import (
     StudioRunner,
     _acquire_or_conflict,
     _end_stream,
+    _keep_turn_records,
     _sse_stream,
     _unwind,
     create_studio_router,
@@ -86,6 +96,7 @@ from harness.studio_state import (
 )
 from harness.studio_translate import _RecordingExecutor
 from harness.tool_contracts import ResolverError
+from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
@@ -481,8 +492,14 @@ def _cache_studio(settings: Settings | None) -> StudioRunner:
     )
 
 
-def test_context_cache_defaults_on_with_no_settings() -> None:
-    studio = _cache_studio(None)
+def test_context_cache_defaults_off() -> None:
+    assert _cache_studio(None).runner.context_cache_config is None
+    assert _cache_studio(Settings()).runner.context_cache_config is None
+
+
+def test_context_cache_env_opt_in_builds_the_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STUDIO_CONTEXT_CACHE", "true")
+    studio = _cache_studio(Settings())
     assert studio.runner.context_cache_config is not None
     assert studio.runner.context_cache_config.cache_intervals == 10
 
@@ -657,7 +674,7 @@ async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_repo
         async def __call__(self, *, on_progress: Any = None, **kwargs: Any) -> dict[str, Any]:
             if on_progress is not None:
                 on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-                on_progress({"agent": "dfo_translator", "tools": ["discover_source"]})
+                on_progress({"agent": "dfo_planner", "tools": ["translate"]})
             return await super().__call__(**kwargs)
 
     resolver = ScriptedResolver([_envelope(choice_points=2)])
@@ -3283,6 +3300,91 @@ async def test_a_client_that_leaves_a_running_turn_records_it_as_cancelled(how: 
 # RELIABLE cancellation path either way is POST /api/studio/cancel (delta 14).
 
 
+async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segment() -> None:
+    """The client closes its `/turn` stream right after `plan.proposed`, while
+    the segment's end-of-segment save (`StudioStore.release`) is still on its
+    read. Starlette, as uvicorn runs it, cancels the response on
+    `http.disconnect`, and the stream cancels the segment task under that
+    save. The save still lands, so the ledger holds no live segment and the
+    `/interrupt` that answers the plan streams at once."""
+    session_service = _new_session_service()
+    store = StudioStore(session_service, app_name=AGENT_NAME)
+    app = _app(
+        ScriptedResolver([_envelope(choice_points=2)]),
+        ScriptedExecutor(),
+        session_service=session_service,
+        store=store,
+    )
+    releasing = asyncio.Event()
+    real_release = store.release
+    real_get_session = session_service.get_session
+
+    async def release(*args: Any, **kwargs: Any) -> None:
+        releasing.set()
+        await real_release(*args, **kwargs)
+
+    async def get_session(*args: Any, **kwargs: Any) -> Any:
+        if releasing.is_set():
+            await asyncio.sleep(0.05)  # the save's read is in flight at the disconnect
+        return await real_get_session(*args, **kwargs)
+
+    store.release = release  # type: ignore[method-assign]
+    session_service.get_session = get_session  # type: ignore[method-assign]
+
+    body = json.dumps(_turn_body()).encode()
+    request_sent = False
+    chunks: list[bytes] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await releasing.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body":
+            chunks.append(message.get("body", b""))
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/studio/turn",
+        "raw_path": b"/api/studio/turn",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"authorization", AUTH["Authorization"].encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("studio.test", 80),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+
+    first = [
+        json.loads(line[len("data: ") :])
+        for line in b"".join(chunks).decode().splitlines()
+        if line.startswith("data: ")
+    ]
+    plan = _frame(first, "plan.proposed")
+    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
+    ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    assert ledger is not None
+    assert ledger.segment is None
+
+    async with _client(app) as client:
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "reject")
+        )
+    assert _events(second)[-1] == "done"
+
+
 # --- the Edit Card route (component_ref intent=edit) ----------------------------
 
 
@@ -4593,7 +4695,8 @@ def test_the_conversation_digest_is_bounded() -> None:
     assert digest["total_turns"] == 12
     assert len(digest["turns"]) == 10  # newest window
     assert digest["turns"][0]["user"] == "question 2"
-    assert all(len(turn["assistant"]) <= 280 for turn in digest["turns"])
+    assert all(len(turn["assistant"]) <= 280 for turn in digest["turns"][:-1])
+    assert digest["turns"][-1]["assistant"] == "a" * 400  # the previous answer, whole
     assert len(json.dumps(digest["turns"])) <= 5_000
 
 
@@ -6365,7 +6468,7 @@ async def test_a_card_landed_during_compositions_own_fetch_survives_live_and_the
     assert {b.component_id for b in reloaded.composition.blocks} == {"cmp_01test0001", "cmp_landed"}
 
 
-def test_digest_user_text_is_truncated_and_oldest_dropped_under_byte_cap() -> None:
+def test_digest_asks_stay_whole_and_older_answers_go_before_the_oldest_turn() -> None:
     state = ConversationState(conversation_id=CONVERSATION)
     for index in range(10):
         state.turns.append({"user": f"q{index} " + "u" * 900, "assistant": "a" * 900})
@@ -6373,11 +6476,13 @@ def test_digest_user_text_is_truncated_and_oldest_dropped_under_byte_cap() -> No
     digest = state.conversation_digest_state()
 
     assert digest is not None
-    assert all(len(turn["user"]) <= 280 for turn in digest["turns"])
-    assert len(json.dumps(digest["turns"])) <= 5_000
-    # Truncated turns are ~590 bytes each, so the 5,000-byte cap keeps the
-    # newest eight and drops q0 and q1 -- oldest first, newest kept.
-    assert [turn["user"].split()[0] for turn in digest["turns"]] == [f"q{i}" for i in range(2, 10)]
+    assert len(json.dumps(digest)) <= 5_000
+    # Whole asks run about 900 bytes, so once the older answers are gone the
+    # 5,000-byte cap keeps the newest four turns, dropping the oldest first.
+    assert [turn["user"] for turn in digest["turns"]] == [
+        f"q{i} " + "u" * 900 for i in range(6, 10)
+    ]
+    assert [turn["assistant"] for turn in digest["turns"]] == ["", "", "", "a" * 900]
     assert digest["total_turns"] == 10
 
 
@@ -6619,6 +6724,7 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         "spec.definition.spec_id",
         "spec.definition.identity",
         "spec.resolved.stat_vars.items[].ref",
+        "spec.resolved.shape.member_digest",
         "operations[].verb",
         "operations[].phrase",
         "operations[].over",
@@ -6737,3 +6843,63 @@ async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> N
     assert "6,356,992-byte cap" in response.json()["detail"]
     assert executor.calls == []
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize("engine", ["graph", "orchestrator"])
+async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(engine: str) -> None:
+    """The orchestrator's planner is seeded with the earlier turns' readings,
+    warnings and the spec_ids it can pin from a stored block, and never the
+    block; the classic engine is seeded with none of it."""
+    session_service = _new_session_service()
+    store = StudioStore(session_service, app_name=AGENT_NAME)
+    app = _app(
+        ScriptedResolver([_envelope()]),
+        ScriptedExecutor(),
+        settings=Settings(studio_engine=engine),
+        session_service=session_service,
+        store=store,
+    )
+    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
+    spec_id = "spec_" + "a" * 32
+    reading = SearchReading(text="aid", status="definite", spec_id=spec_id).model_dump(mode="json")
+    conversation = await store.create(principal, CONVERSATION)
+    conversation.turn_index = 1
+    conversation.turn_recorded = True
+    conversation.turns = [
+        {
+            "user": "q1",
+            "assistant": "a1",
+            "readings": [reading],
+            "specs": {spec_id: {"spec_id": spec_id, "note": "stored block"}},
+        }
+    ]
+    await store.save(principal, CONVERSATION)
+
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+
+    session = await session_service.get_session(
+        app_name=AGENT_NAME, user_id=principal, session_id=f"{CONVERSATION}#t2"
+    )
+    assert session is not None
+    assert "stored block" not in json.dumps(session.state, default=str)
+    seeded = session.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY)
+    if engine == "graph":
+        assert seeded is None
+    else:
+        assert seeded == {"readings": [reading], "warnings": {spec_id: []}, "spec_ids": [spec_id]}
+
+
+def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:
+    conversation = ConversationState(conversation_id="conv_keep")
+    delta = {
+        ORCHESTRATOR_PLAN_RECORDS_KEY: [{"plan": 1}],
+        ORCHESTRATOR_SEARCHES_KEY: [{"reading": 1}],
+        ORCHESTRATOR_SPECS_KEY: {"spec_a": {"spec_id": "spec_a"}},
+    }
+
+    _keep_turn_records(conversation, Event(actions=EventActions(state_delta=delta)))
+
+    assert conversation.turn_plans == [{"plan": 1}]
+    assert conversation.turn_readings == [{"reading": 1}]
+    assert conversation.turn_specs == {"spec_a": {"spec_id": "spec_a"}}

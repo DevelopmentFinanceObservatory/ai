@@ -1,19 +1,16 @@
 """Tests for `harness.planner_seam` -- the adapter over `planner.agent`
-paired with `translator.agent`.
+with its `translate` tool.
 
-Model-free: a scripted `BaseLlm` stands in for the planner's own model, and
-most scenarios never exercise the translator's model either -- they either
-hand the seam an already-compiled `Plan` (built the way
+Model-free: a scripted `BaseLlm` stands in for the planner's own model. Most
+scenarios either hand the seam an already-compiled `Plan` (built the way
 `tests/planner/test_agent.py`'s `_translate` helper builds one, through the
 real `Plan.with_translation`) so the scripted model can go straight to
-`submit_plan`, or leave the plan a draft, so `dfo_translator` -- and its own
-model -- is never called. The referral-stall tests below are the exception:
-they script the translator's own model too, because the stall this seam
-guards against only shows up in the events that pair produces together.
-Whether the real models plan and translate WELL is the eval sets' question
+`submit_plan`, or leave the plan a draft. The referral-stall tests below
+script a `translate` call, which runs the real translation loop against a
+canned surface. Whether the real model plans WELL is the eval sets' question
 (`evals/README.md`).
 
-`PlannerSeam` runs the pair through `ctx.run_node`, in the graph's own
+`PlannerSeam` runs the planner through `ctx.run_node`, in the graph's own
 session, so every test below needs a real `Context`, not a bare call.
 `_run_seam` drives one, through a minimal one-node `Workflow`, the same
 primitive `harness.graph`'s own planner node uses.
@@ -25,7 +22,7 @@ import asyncio
 import json
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -33,7 +30,6 @@ from typing import Any, cast
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
 from google.adk import Context, Event
-from google.adk.agents import LlmAgent
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
@@ -46,7 +42,12 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from harness import planner_seam
-from harness.graph import frame_row_ceiling
+from harness.graph import (
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    ORCHESTRATOR_SPEC_WARNINGS_KEY,
+    ORCHESTRATOR_SPECS_KEY,
+    frame_row_ceiling,
+)
 from harness.planner_seam import (
     _DEADLINE_REFUSAL_CODE,
     _ENVELOPE_FIELD_CAP,
@@ -68,26 +69,33 @@ from harness.planner_seam import (
     _seed_of,
 )
 from harness.settings import Settings
+from harness.studio_state import ConversationState
 from harness.tool_contracts import graph_envelope
+from harness.turn_records import SearchReading
 from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
+    ASKS_STATE_KEY,
     CUT_MARKER,
-    ENVELOPE_SPEC_STATE_KEY,
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
+    UNSUPPORTED_STATE_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Decision,
     Entity,
+    JoinRequirement,
     Period,
+    PinSource,
     Plan,
     PlanStatus,
     ResolvedBy,
     SeededSource,
     SessionState,
     Unit,
+    current_earlier_block,
     load_plan,
+    pin_sources,
     plan_revision,
     save_plan,
     save_seeded_sources,
@@ -102,9 +110,12 @@ from planner.settings import (
     drop_thought_parts,
     override_thinking_on_sampled_turns,
 )
+from planner.tool_results import Outcome
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
+from translator.mechanical import COMPILE_FAILURES_STATE_KEY
+from translator.referral import OUTCOME_OF
 
 from .search_results import search_result_parts
 
@@ -244,9 +255,10 @@ class _SeamHarness:
     after a call that raised, without losing what it left behind.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, state: Mapping[str, Any] | None = None) -> None:
         self._sessions = InMemorySessionService()
         self._session_id: str | None = None
+        self._initial_state = dict(state or {})
 
     async def run(
         self,
@@ -289,7 +301,9 @@ class _SeamHarness:
         wf = Workflow(name="seam_test_wf", edges=[(START, node_fn)])
         runner = Runner(node=wf, app_name=_APP, session_service=self._sessions)
         if self._session_id is None:
-            session = await self._sessions.create_session(app_name=_APP, user_id=_USER)
+            session = await self._sessions.create_session(
+                app_name=_APP, user_id=_USER, state=self._initial_state
+            )
             self._session_id = session.id
         content = new_message or types.Content(role="user", parts=[types.Part(text="probe")])
         output: Any = None
@@ -517,6 +531,178 @@ async def test_a_model_that_never_submits_is_corrected_then_raises() -> None:
     assert len(llm.captured_requests) == 3
     for request in llm.captured_requests[1:]:
         assert "submit_plan" in _prompt_text(request)
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool) -> None:
+    """A new planner entry starts with no `unsupported` answer to decline and no
+    compile failure to call repeated; an ask-the-user resume inside one entry
+    keeps both."""
+    stale = {
+        UNSUPPORTED_STATE_KEY: ["calculation_over_combined"],
+        COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
+    }
+    harness = _SeamHarness(state=stale)
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["Which years did you have in mind?"] * 4)
+
+    with pytest.raises(PlannerSeamError):
+        await harness.run(
+            seam,
+            question="kenya debt",
+            envelope={},
+            resume_inputs={"ask": {"result": "since 2015"}} if resumed else None,
+        )
+
+    state = await harness.state()
+    kept = {key: state.get(key) for key in stale}
+    assert kept == (stale if resumed else {key: [] for key in stale})
+
+
+async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
+    decision: Any, requirement: Any
+) -> None:
+    """The planner hears `unsupported` for a total over a join, is refused a plan
+    that drops the total without a decline, then proposes the decline alone. That
+    ends the entry with a final refusal naming the declined ask: no further
+    generation, no plan, and no correction text for the user to read."""
+    seam = _seam()
+    made_decision = decision().model_dump(mode="json")
+    bilateral = requirement(id="bilateral").model_dump(mode="json")
+    multilateral = requirement(id="multilateral", measure="imputed multilateral aid")
+    summed_join = [
+        bilateral,
+        multilateral.model_dump(mode="json"),
+        {
+            "kind": "join",
+            "id": "joined",
+            "decision_ids": ["measure"],
+            "left_id": "bilateral",
+            "right_id": "multilateral",
+        },
+        {
+            "kind": "aggregate",
+            "id": "total",
+            "decision_ids": ["measure"],
+            "input_id": "joined",
+            "reduction": "sum",
+            "group_by": ["period"],
+        },
+    ]
+    first_draft = {"question": "total aid", "answer_mode": "computed", "decisions": [made_decision]}
+    llm = ScriptedPlannerLlm(
+        script=[
+            [("propose_plan", {**first_draft, "evidence_requirements": summed_join})],
+            [
+                (
+                    "propose_plan",
+                    {**first_draft, "answer_mode": "series", "evidence_requirements": [bilateral]},
+                )
+            ],
+            [
+                (
+                    "propose_plan",
+                    {
+                        **first_draft,
+                        "declined": [{"ask": "the total aid", "code": "calculation_over_combined"}],
+                    },
+                )
+            ],
+        ]
+    )
+    seam._agent.model = llm
+    harness = _SeamHarness()
+
+    result = await harness.run(seam, question="total aid", envelope={})
+
+    assert result is not None
+    assert result["refused"]["final"] is True
+    assert "the total aid" in result["refused"]["text"]
+    assert len(llm.captured_requests) == 3
+    answered = [
+        part.function_response.response
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    assert [(r["outcome"], r["code"]) for r in answered] == [
+        ("unsupported", "operation_unsupported"),
+        ("invalid_input", "decline_missing"),
+    ]
+    assert load_plan(await harness.state()) is None
+
+
+async def test_the_brief_lists_the_asks_and_propose_plan_holds_the_plan_to_them(
+    decision: Any, requirement: Any
+) -> None:
+    """The asks in state render numbered after the question; a draft that leaves one
+    unaccounted for is refused naming it, a decline no `unsupported` answer earned is
+    refused, and the redraft that declines it once one has records the mapping on
+    the plan."""
+    asks = ["bilateral aid to Guatemala", "the total of bilateral and multilateral aid"]
+    seam = _seam()
+    first_draft = {
+        "question": "total aid",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [requirement(id="bilateral").model_dump(mode="json")],
+        "answered": [{"ask": 0, "outputs": ["bilateral"]}],
+    }
+    decline = {"ask": asks[1], "code": "calculation_over_combined", "ask_ref": 1}
+    multilateral = requirement(id="multilateral", measure="imputed multilateral aid")
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="bilateral", right_id="multilateral"
+    )
+    summed = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id="joined",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    summed_join = {
+        **first_draft,
+        "evidence_requirements": [
+            *first_draft["evidence_requirements"],
+            *(r.model_dump(mode="json") for r in (multilateral, joined, summed)),
+        ],
+    }
+    llm = ScriptedPlannerLlm(
+        script=[
+            [("propose_plan", first_draft)],
+            [("propose_plan", {**first_draft, "declined": [decline]})],
+            [("propose_plan", summed_join)],
+            [("propose_plan", {**first_draft, "declined": [decline]})],
+            "Planned.",
+        ]
+    )
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    with pytest.raises(PlannerSeamError, match="submit_plan"):
+        await harness.run(seam, question="total aid", envelope={})
+
+    assert "0. bilateral aid to Guatemala\n1. the total of bilateral" in _prompt_text(
+        llm.captured_requests[0]
+    )
+    answered = [
+        part.function_response.response
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    assert [(r["outcome"], r.get("code")) for r in answered] == [
+        ("invalid_input", "asks_unaccounted"),
+        ("invalid_input", "decline_unearned"),
+        ("unsupported", "operation_unsupported"),
+        ("ok", None),
+    ]
+    assert answered[0]["detail"] == {"uncovered": [1], "repeated": []}
+    recorded = load_plan(await harness.state())
+    assert recorded is not None
+    assert recorded.asks == tuple(asks)
+    assert [(a.ask, a.outputs) for a in recorded.answered] == [(0, ("bilateral",))]
+    assert [d.ask_ref for d in recorded.declined] == [1]
 
 
 async def test_a_stopped_run_names_the_problem_it_stopped_on(
@@ -811,7 +997,7 @@ def test_the_envelope_keeps_an_elected_spec_id_for_a_multi_part_question() -> No
     assert SPEC in envelope_json
     assert "Guatemala GDP (constant prices)" in before_question
     assert "resolved_by=user" in before_question
-    assert "fixes.source_spec_id" in before_question
+    assert "fixes naming source_spec_id" in before_question
     assert "own discovery" in before_question
 
 
@@ -921,7 +1107,7 @@ def test_a_wave_with_two_refused_specs_names_and_omits_both() -> None:
     assert "again" in message and "refused" in message
 
 
-# -- `_exposed_spec_id`, read by `propose_plan` off `ENVELOPE_SPEC_STATE_KEY` ----------
+# -- `_exposed_spec_id`, read by `propose_plan` off `PIN_SOURCES_STATE_KEY` ----------
 
 
 def test_exposed_spec_id_agrees_with_a_kept_single_part_envelope() -> None:
@@ -969,10 +1155,10 @@ def test_exposed_spec_id_is_none_for_a_refused_spec() -> None:
 async def test_call_records_the_exposed_spec_id_in_session_state(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """`PlannerSeam.__call__` writes `ENVELOPE_SPEC_STATE_KEY` before running
-    the planner, so `propose_plan`'s own `tool_context.state` already
-    carries it -- `planner.agent._synthesize_source_decisions`'s only
-    source for which pin it may write a `Decision` for."""
+    """`PlannerSeam.__call__` writes the exposed id as the one settled entry
+    of `PIN_SOURCES_STATE_KEY` before running the planner, with the
+    envelope's block and warning codes, so `propose_plan` and the
+    translator's pin reuse read it off their own `tool_context.state`."""
     plan = _translated_plan(decision, requirement, derived_requirement)
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(script=[[("submit_plan", {"version": plan.version})]])
@@ -981,12 +1167,359 @@ async def test_call_records_the_exposed_spec_id_in_session_state(
     await harness.run(
         seam,
         question=plan.question,
-        envelope={"status": "definite", "spec_id": SPEC, "parts": 1},
+        envelope={
+            "status": "definite",
+            "spec_id": SPEC,
+            "parts": 1,
+            "spec_block": {"spec_id": SPEC},
+            "warnings": [{"code": "time_text_not_parsed", "message": "dropped"}],
+        },
         prior_plan=plan.model_dump(mode="json"),
     )
 
     state = await harness.state()
-    assert state[ENVELOPE_SPEC_STATE_KEY] == SPEC
+    assert pin_sources(state) == {
+        SPEC: PinSource(block={"spec_id": SPEC}, warnings=("time_text_not_parsed",), settled=True)
+    }
+
+
+# -- the orchestrator engine's search readings -----------------------------
+
+SPEC_C = "spec_" + "c" * 32
+
+
+def _turn_readings() -> list[dict[str, Any]]:
+    """A definite, a no_data, a candidates and a fetched chosen reading, as `search` stores them."""
+    readings = [
+        SearchReading.model_validate(
+            {
+                "text": "aid",
+                "status": "definite",
+                "spec_id": SPEC,
+                "sentence": "Gross ODA to Guatemala, 2020 to 2024",
+                "window": {"start": 2020, "end": 2024, "source": "coverage"},
+                "recent_years": [
+                    {"year": 2024, "observations": 734},
+                    {"year": 2023, "observations": 1210},
+                ],
+                "warnings": [{"code": "role_scope_defaulted"}],
+            }
+        ),
+        SearchReading(text="aid to Atlantis", status="no_data", refusal_code="role_not_resolved"),
+        SearchReading.model_validate(
+            {
+                "text": "health aid",
+                "status": "candidates",
+                "candidates": [{"spec_id": SPEC_B, "label": "Health ODA"}],
+            }
+        ),
+        SearchReading(text="health aid", status="chosen", spec_id=SPEC_C).with_fetch(
+            {"spec_id": SPEC_C, "summary": "14 observations, 2010-2023"}
+        ),
+    ]
+    return [reading.model_dump(mode="json") for reading in readings]
+
+
+async def _first_request_with_readings(
+    readings: list[dict[str, Any]],
+    *,
+    plan: Plan,
+    stored: Mapping[str, Any] | None = None,
+    refusal: dict[str, Any] | None = None,
+) -> tuple[str, SessionState]:
+    """Run one fresh orchestrator entry over `readings`, with `stored` (the
+    blocks and warnings `search` keeps) already in session state."""
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=[[("submit_plan", {"version": plan.version})]])
+    seam._agent.model = llm
+    harness = _SeamHarness(stored)
+    await harness.run(
+        seam,
+        question=plan.question,
+        envelope={},
+        prior_plan=plan.model_dump(mode="json"),
+        readings=readings,
+        refusal=refusal,
+    )
+    return _prompt_text(llm.captured_requests[0]), await harness.state()
+
+
+async def test_the_orchestrator_planner_first_request_carries_every_search_reading(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    plan = _translated_plan(decision, requirement, derived_requirement)
+
+    text, state = await _first_request_with_readings(_turn_readings(), plan=plan)
+
+    for shown in (
+        f'"aid" definite {SPEC}',
+        "window 2020-2024 (coverage)",
+        "recent years 2024: 734 obs, 2023: 1,210 obs",
+        "warnings: role_scope_defaulted",
+        '"aid to Atlantis" no data: role_not_resolved',
+        f"candidate {SPEC_B}",
+        f'"health aid" chosen {SPEC_C}',
+        "fetched: 14 observations, 2010-2023",
+    ):
+        assert shown in text
+    assert "envelope carried nothing" not in text
+    assert "Resolve envelope:" not in text
+    assert list(pin_sources(state)) == [SPEC, SPEC_B, SPEC_C]
+
+
+@pytest.mark.parametrize(
+    ("refusal", "kept"),
+    [(None, [SPEC, SPEC_B, SPEC_C]), (_rediscovery_refusal(SPEC), [SPEC_B, SPEC_C])],
+    ids=["no_refusal", "executor_refused_spec"],
+)
+async def test_every_shown_id_is_a_pin_source_settled_only_by_its_own_reading(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    refusal: dict[str, Any] | None,
+    kept: list[str],
+) -> None:
+    """The definite and the fetched chosen reading settle their own ids; an id
+    only offered as a candidate is shown unsettled. Each carries the block and
+    warning codes `search` stored for it. A spec the executor refused is left out."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    stored = {
+        ORCHESTRATOR_SPECS_KEY: {
+            spec_id: {"spec_id": spec_id} for spec_id in (SPEC, SPEC_B, SPEC_C)
+        },
+        ORCHESTRATOR_SPEC_WARNINGS_KEY: {SPEC: [{"code": "role_scope_defaulted"}]},
+    }
+
+    _, state = await _first_request_with_readings(
+        _turn_readings(), plan=plan, stored=stored, refusal=refusal
+    )
+
+    expected = {
+        SPEC: PinSource(block={"spec_id": SPEC}, warnings=("role_scope_defaulted",), settled=True),
+        SPEC_B: PinSource(block={"spec_id": SPEC_B}),
+        SPEC_C: PinSource(block={"spec_id": SPEC_C}, settled=True),
+    }
+    assert pin_sources(state) == {spec_id: expected[spec_id] for spec_id in kept}
+
+
+async def test_the_shown_ids_are_exactly_the_ids_the_readings_text_names(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A hundred readings overflow the budget, so the oldest are dropped and their ids go unshown."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    readings = [
+        SearchReading(
+            text=f"measure {number}",
+            status="definite",
+            spec_id=f"spec_{number:032x}",
+            sentence="x" * 400,
+        ).model_dump(mode="json")
+        for number in range(100)
+    ]
+
+    text, state = await _first_request_with_readings(readings, plan=plan)
+
+    shown = list(pin_sources(state))
+    named = [r["spec_id"] for r in readings if r["spec_id"] in text]
+    assert "earlier readings not shown" in text
+    assert shown == named
+    assert 0 < len(shown) < len(readings)
+
+
+async def test_an_orchestrator_turn_with_no_search_says_so(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    plan = _translated_plan(decision, requirement, derived_requirement)
+
+    text, state = await _first_request_with_readings([], plan=plan)
+
+    assert "(no search has run in this conversation)" in text
+    assert "envelope carried nothing" not in text
+    assert pin_sources(state) == {}
+
+
+def _prior_ledger(*turns: tuple[list[SearchReading], Mapping[str, Any]]) -> dict[str, Any]:
+    """The prior ledger a conversation whose turns read `turns`, each its
+    readings and the spec blocks its record stored, seeds the next turn with.
+    The conversation's `earlier_block` becomes the current one, as
+    `harness.studio` sets it for a segment."""
+    conversation = ConversationState(conversation_id="conv_prior")
+    conversation.turns = [
+        {
+            "user": "asked",
+            "assistant": "answered",
+            "readings": [reading.model_dump(mode="json") for reading in readings],
+            "specs": dict(specs),
+        }
+        for readings, specs in turns
+    ]
+    prior = conversation.prior_ledger_state()
+    assert prior is not None
+    current_earlier_block.set(conversation.earlier_block)
+    return prior
+
+
+def _aid_reading(
+    *, window_kind: str | None = None, sentence: str = "Gross ODA", origin: str = "search"
+) -> SearchReading:
+    return SearchReading.model_validate(
+        {
+            "text": "aid",
+            "status": "definite",
+            "spec_id": SPEC,
+            "sentence": sentence,
+            "requested_window_kind": window_kind,
+            "origin": origin,
+            "warnings": [{"code": "role_scope_defaulted"}],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("reading", "stored", "block"),
+    [
+        (_aid_reading(window_kind="range"), {SPEC: {"spec_id": SPEC}}, {"spec_id": SPEC}),
+        (_aid_reading(window_kind="latest"), {SPEC: {"spec_id": SPEC}}, None),
+        (_aid_reading(origin="translator"), {}, None),
+    ],
+    ids=[
+        "range_pins_from_its_block",
+        "latest_falls_through_to_a_search",
+        "translator_found_has_no_block",
+    ],
+)
+async def test_a_later_turn_renders_and_pins_an_earlier_turns_reading(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    reading: SearchReading,
+    stored: dict[str, Any],
+    block: dict[str, Any] | None,
+) -> None:
+    """Turn 1's reading reaches turn 2's ledger and pin map as one of turn 2's
+    own would, from turn 1, with the block turn 1 stored; a `latest` reading
+    or a source only the translator found carries no block, so a pin of it
+    is confirmed by a fresh search."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    prior = _prior_ledger(([reading], {**stored, SPEC_B: {"x": 1}}))
+
+    text, state = await _first_request_with_readings(
+        prior["readings"], plan=plan, stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior}
+    )
+
+    assert f'"aid" definite {SPEC}' in text
+    assert "(no search has run in this conversation)" not in text
+    # The session's pin map holds no earlier turn's block; a pin reads it
+    # through the conversation.
+    assert pin_sources(state) == {
+        SPEC: PinSource(warnings=("role_scope_defaulted",), settled=True, earlier_turn=True)
+    }
+    assert pin_sources(state)[SPEC].spec_block(SPEC) == block
+
+
+async def test_the_newest_reading_of_a_spec_id_wins_across_turns(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A spec_id turn 1 and this turn both read renders once, as this turn
+    read it, and pins from this turn's block; turn 2's `latest` reading of
+    SPEC_C leaves turn 1's block of it behind."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    chosen = SearchReading(text="health aid", status="chosen", spec_id=SPEC_C)
+    prior = _prior_ledger(
+        ([_aid_reading(sentence="turn one"), chosen], {SPEC: {"turn": 1}, SPEC_C: {"turn": 1}}),
+        ([chosen.model_copy(update={"requested_window_kind": "latest"})], {SPEC_C: {"turn": 2}}),
+    )
+    current = [_aid_reading(sentence="turn three").model_dump(mode="json")]
+
+    text, state = await _first_request_with_readings(
+        [*prior["readings"], *current],
+        plan=plan,
+        stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior, ORCHESTRATOR_SPECS_KEY: {SPEC: {"turn": 3}}},
+    )
+
+    ledger = text.split("Search readings (oldest first):")[1].split("\n\n")[0]
+    assert "turn three" in ledger and "turn one" not in ledger
+    assert ledger.count(SPEC) == 1 and ledger.count(SPEC_C) == 1
+    assert ledger.index(SPEC_C) < ledger.index(SPEC)
+    sources = pin_sources(state)
+    assert (sources[SPEC].block, sources[SPEC_C].block) == ({"turn": 3}, None)
+    assert not sources[SPEC].earlier_turn
+
+
+async def test_the_cross_turn_ledger_cuts_the_oldest_readings_and_counts_them(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """Earlier turns' readings past the budget are dropped oldest first with a
+    count, and this turn's reading stays shown and pinnable."""
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    earlier = [
+        SearchReading(
+            text=f"measure {n}", status="definite", spec_id=f"spec_{n:032x}", sentence="x" * 400
+        )
+        for n in range(60)
+    ]
+    prior = _prior_ledger((earlier[:30], {}), (earlier[30:], {}))
+    current = [_aid_reading().model_dump(mode="json")]
+
+    text, state = await _first_request_with_readings(
+        [*prior["readings"], *current], plan=plan, stored={ORCHESTRATOR_PRIOR_LEDGER_KEY: prior}
+    )
+
+    assert "earlier readings not shown" in text
+    assert earlier[0].spec_id not in text
+    shown = list(pin_sources(state))
+    assert shown[-1] == SPEC and earlier[0].spec_id not in shown
+
+
+# The context section of the first message the classic engine's planner
+# reads for the recorded two-country envelope, as the seam rendered it before
+# the orchestrator engine's readings existed.
+_CLASSIC_TWO_COUNTRY_MESSAGE = """\
+Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.
+
+Resolve envelope:
+- status: definite
+- spec_id: spec_97ba9e0ee9eb219b76a3ffdff33bb337
+- parts: 1
+- choice_points: 0
+- wide: false
+- stat_var_shape_kind: statvar_schema
+- stat_var_item_count: 1
+- entity_roles: ["observationAbout"]
+- stat_var_truncated: false
+- candidates (0):
+- skills (0):
+- warnings (0):
+- part_digests: [{"variable":"life expectancy","status":"definite","spec_id":"spec_97ba9e0ee9eb219b76a3ffdff33bb337","resolved":"Life expectancy in Nigeria and Guatemala, 1960 to 2023, according to World Development…
+- window: {"start":1960,"end":2023,"source":"coverage"}
+"""
+
+
+async def test_the_classic_first_request_renders_a_recorded_envelope_as_before(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    plan = _translated_plan(decision, requirement, derived_requirement)
+    envelope = graph_envelope(
+        json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "resolve_life_expectancy_two_countries.json"
+            ).read_text()
+        )
+    )
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=[[("submit_plan", {"version": plan.version})]])
+    seam._agent.model = llm
+
+    await _run_seam(
+        seam,
+        question="life expectancy in Nigeria and Guatemala",
+        envelope=envelope,
+        prior_plan=plan.model_dump(mode="json"),
+    )
+
+    brief = llm.captured_requests[0].contents[-1]
+    text = "".join(part.text or "" for part in brief.parts)
+    assert text.startswith(_CLASSIC_TWO_COUNTRY_MESSAGE + "\nThe plan being changed:")
 
 
 # -- a seeded turn's datasets ---------------------------------------------
@@ -1074,10 +1607,16 @@ def test_a_seeded_envelope_prints_each_seed_s_width_and_facts_under_it() -> None
         wide=True,
         stat_var_shape_kind="statvar_schema",
         stat_var_item_count=3,
+        stat_var_member_count_exact=True,
         entity_roles=["destination"],
         stat_var_truncated=False,
     )
-    envelope["seeds"][1].update(wide=False, stat_var_shape_kind=None)
+    envelope["seeds"][1].update(
+        wide=False,
+        stat_var_shape_kind=None,
+        stat_var_item_count=3687,
+        stat_var_member_count_exact=False,
+    )
 
     seeds = _envelope_context(envelope).split("Seeded datasets (2):")[1]
 
@@ -1091,7 +1630,9 @@ def test_a_seeded_envelope_prints_each_seed_s_width_and_facts_under_it() -> None
         "  open_entity_axes: origin (55 members)\n"
     ) in first
     assert "  wide: false\n" in second
+    assert "  stat_var_item_count: at least 3,687 StatVars\n" in second
     assert "stat_var_shape_kind" not in second
+    assert "stat_var_member_count_exact" not in seeds
 
 
 @pytest.mark.parametrize(
@@ -1392,21 +1933,24 @@ def test_the_digest_carries_what_an_amendment_has_to_preserve() -> None:
 
 
 def test_the_plan_section_writes_structured_values_with_non_ascii_text_as_written() -> None:
-    """Entities, predicates and `fixes` render as JSON, and JSON's default writes
-    each non-ASCII character as one to two `\\uXXXX` escapes.
+    """Entities and predicates render as JSON, and JSON's default writes each
+    non-ASCII character as one to two `\\uXXXX` escapes.
 
     `Plan` limits the serialised size of the record with non-ASCII as written
     (`planner.plan.MAX_PLAN_RECORD_CHARS`), so the section has to render it the
-    same way for that limit to bound it.
+    same way for that limit to bound it. A decision's `fixes` renders as the
+    names of the fields it fixes, the form `propose_plan` takes, so the value
+    appears once, on the requirement.
     """
     name = "C\u00f4te d'Ivoire \U0001f600"
     plan = _distinct_plan()
     plan["evidence_requirements"][0]["entities"][0]["name"] = name
-    plan["decisions"][0]["fixes"] = {"measure": name}
+    plan["decisions"][0]["fixes"] = {"measure": name, "unit": None}
 
     rendered = _plan_context(plan)
 
-    assert rendered.count(name) == 2
+    assert rendered.count(name) == 1
+    assert "  fixes: measure\n" in rendered
     assert "\\u" not in rendered
 
 
@@ -1589,6 +2133,22 @@ def test_an_open_axis_states_one_member_or_an_uncounted_population() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("exact", "line"),
+    [
+        (True, "- stat_var_item_count: 3687"),
+        (False, "- stat_var_item_count: at least 3,687 StatVars"),
+    ],
+)
+def test_the_envelope_counts_a_floor_as_at_least(exact: bool, line: str) -> None:
+    rendered = _render_envelope(
+        {"status": "definite", "stat_var_item_count": 3687, "stat_var_member_count_exact": exact}
+    )
+
+    assert line in rendered.splitlines()
+    assert "stat_var_member_count_exact" not in rendered
+
+
 def test_an_envelope_with_no_open_axis_renders_no_open_entity_axes_line() -> None:
     assert "open_entity_axes" not in _render_envelope(
         {"status": "definite", "open_entity_axes": []}
@@ -1734,12 +2294,12 @@ def test_the_question_fixed_refusal_is_stated_as_asking_the_other_question_separ
 def test_terminal_refusal_covers_budget_exhausted_and_question_fixed_but_not_invalid_plan() -> None:
     """`_is_terminal_refusal` is what `_track_tool_call` uses to stop the
     planner's turn on a `propose_plan` refusal that recorded nothing and
-    left nothing to correct within this entry -- `BUDGET_EXHAUSTED` and
-    `QUESTION_FIXED` alike. `INVALID_PLAN` -- a question-changing amendment
+    left nothing to correct within this entry -- `BUDGET_EXHAUSTED`,
+    `QUESTION_FIXED` and `NOTHING_TO_PLAN` alike. `INVALID_PLAN` -- a question-changing amendment
     under `question_fixed`, say -- is not among them: it is correctable,
     so the model (or, failing that, this seam's own correction loop) gets
     to retry rather than the turn ending on it."""
-    for code in ("budget_exhausted", "question_fixed"):
+    for code in ("budget_exhausted", "question_fixed", "nothing_to_plan"):
         assert PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": code})
     assert not PlannerSeam._is_terminal_refusal({"outcome": "refused", "code": "invalid_plan"})
     assert not PlannerSeam._is_terminal_refusal({"outcome": "ok", "code": "question_fixed"})
@@ -1817,18 +2377,16 @@ def test_a_short_refusal_is_rendered_whole() -> None:
     assert "resolved.stat_vars.member_count = 872" in message
 
 
-# -- a translator referral that repeats without new information ----------
+# -- a referral that repeats without new information ----------
 
 
 def test_stalled_referral_stops_on_the_second_identical_pair_not_the_first() -> None:
     counts: dict[tuple[str, Any], int] = {}
     referred = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "source_ambiguous",
-            "requirement_id": "gdp_gtm",
-            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
-        },
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "gdp_gtm",
+        "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
     }
 
     assert PlannerSeam._stalled_referral(referred, counts) is None
@@ -1849,8 +2407,10 @@ def test_stalled_referral_over_an_unmeetable_ask_tells_the_planner_to_ask_the_us
     until they have answered, so the message sends the planner to them."""
     counts: dict[tuple[str, Any, Any], int] = {}
     referred = {
-        "outcome": "referred",
-        "referral": {"kind": kind, "requirement_id": "gdp_gtm", "reason": "r"},
+        "outcome": "invalid_input",
+        "kind": kind,
+        "requirement_id": "gdp_gtm",
+        "reason": "r",
     }
 
     PlannerSeam._stalled_referral(referred, counts)
@@ -1861,6 +2421,51 @@ def test_stalled_referral_over_an_unmeetable_ask_tells_the_planner_to_ask_the_us
     assert "change what the requirement asks for" not in message
 
 
+def test_every_stalling_referral_kind_has_its_own_act() -> None:
+    """Each kind that can stall names what to do for that kind; a transient kind
+    never stalls and an internal one ends the entry before it could."""
+    stalling = {
+        kind
+        for kind, outcome in OUTCOME_OF.items()
+        if outcome not in (Outcome.TRANSIENT, Outcome.INTERNAL)
+    }
+
+    assert set(planner_seam._STALLED_ACTS) == stalling
+
+
+def test_a_stalled_repair_referral_names_the_repair() -> None:
+    counts: dict[tuple[str, Any], int] = {}
+    referred = {
+        "outcome": "invalid_input",
+        "kind": "requirement_needs_repair",
+        "requirement_id": "gdp_gtm",
+        "constraint": "entity_required",
+        "repair": "name the entity",
+    }
+
+    PlannerSeam._stalled_referral(referred, counts)
+    message = PlannerSeam._stalled_referral(referred, counts)
+
+    assert message is not None
+    assert "name the entity" in message and "entity_required" in message
+    assert "candidates" not in message.split(".", 1)[1]
+
+
+@pytest.mark.parametrize("kind", ["discovery_unavailable", "surface_unavailable"])
+def test_a_transient_referral_never_stalls(kind: str) -> None:
+    counts: dict[tuple[str, Any], int] = {}
+    referred = {
+        "outcome": "transient",
+        "kind": kind,
+        "requirement_id": "gdp_gtm" if kind == "discovery_unavailable" else None,
+        "reason": "r",
+    }
+
+    for _ in range(3):
+        assert PlannerSeam._stalled_referral(referred, counts) is None
+    assert counts == {}
+
+
 def test_stalled_referral_reads_a_referral_with_no_candidates_recorded() -> None:
     """`pinned_source_not_found` carries no `candidates` today
     (`translator/referral.py`'s `_names_what_it_is_about`); this has to
@@ -1869,8 +2474,9 @@ def test_stalled_referral_reads_a_referral_with_no_candidates_recorded() -> None
     """
     counts: dict[tuple[str, Any], int] = {}
     referred = {
-        "outcome": "referred",
-        "referral": {"kind": "pinned_source_not_found", "requirement_id": "gdp_gtm"},
+        "outcome": "choice_required",
+        "kind": "pinned_source_not_found",
+        "requirement_id": "gdp_gtm",
     }
 
     PlannerSeam._stalled_referral(referred, counts)
@@ -1893,40 +2499,62 @@ def test_stalled_referral_ignores_a_response_that_is_not_a_referral() -> None:
     assert counts == {}
 
 
-def test_stalled_referral_does_not_collide_across_decisions_with_no_requirement_id() -> None:
-    """`no_operation_covers` always carries `requirement_id=None` and is
-    identified by `decision_id` instead (`translator/referral.py`'s
-    `_names_what_it_is_about`). Two independent decisions each drawing a
-    first-time `no_operation_covers` referral in one run must not be read
-    as the same pair repeating -- keying on `(kind, requirement_id)` alone
-    would collide both on `("no_operation_covers", None)`.
-    """
-    counts: dict[tuple[str, Any, Any], int] = {}
-    first_decision = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "no_operation_covers",
-            "decision_id": "population_decision",
-            "reason": "no operation performs this",
-        },
-    }
-    second_decision = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "no_operation_covers",
-            "decision_id": "gdp_decision",
-            "reason": "no operation performs this",
-        },
-    }
+@pytest.mark.parametrize(
+    ("referral", "named"),
+    [
+        (
+            {
+                "kind": "internal_failure",
+                "outcome": "internal",
+                "reason": "cycle: loop",
+                "reference": "0123456789ab",
+            },
+            "0123456789ab",
+        ),
+        (
+            {
+                "kind": "requirement_needs_repair",
+                "outcome": "invalid_input",
+                "requirement_id": "cmp",
+                "reason": "entity_required",
+                "repeated": True,
+            },
+            "'cmp'",
+        ),
+        (
+            {
+                "kind": "discovery_unavailable",
+                "outcome": "transient",
+                "requirement_id": "gdp_gtm",
+                "reason": "used 4 discovery calls",
+                "budget_spent": True,
+            },
+            "'gdp_gtm'",
+        ),
+    ],
+    ids=["internal", "repeated", "budget-spent"],
+)
+def test_a_closing_referral_ends_the_entry_on_the_translate_response(
+    referral: dict[str, Any], named: str
+) -> None:
+    """No correction round follows an internal failure, a translation that
+    failed the way it failed before, or a data service that timed out until
+    the discovery budget was spent: the entry ends as a final refusal naming
+    what stopped it, as soon as `translate` answers with it."""
+    tracker = _RunTracker(deadline_at=0.0)
+    PlannerSeam._track_tool_call(
+        tracker,
+        None,
+        agent_name="dfo_planner",
+        tool=cast(BaseTool, SimpleNamespace(name="translate")),
+        tool_response=referral,
+    )
 
-    assert PlannerSeam._stalled_referral(first_decision, counts) is None
-    assert PlannerSeam._stalled_referral(second_decision, counts) is None
-
-    # The same decision referred a second time still stalls.
-    message = PlannerSeam._stalled_referral(first_decision, counts)
-
-    assert message is not None
-    assert "population_decision" in message
+    assert tracker.ready_to_break
+    assert tracker.submitted is None
+    assert tracker.refused is not None
+    assert named in PlannerSeam._refusal_text(tracker.refused)
+    assert PlannerSeam._refused(tracker.refused)["refused"]["final"] is True
 
 
 def test_last_referral_is_cleared_once_a_later_translate_resolves_the_requirement() -> None:
@@ -1937,17 +2565,15 @@ def test_last_referral_is_cleared_once_a_later_translate_resolves_the_requiremen
     no longer needs (`_deadline_response`)."""
     tracker = _RunTracker(deadline_at=0.0)
     referred = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "source_ambiguous",
-            "requirement_id": "gdp_gtm",
-            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
-        },
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "gdp_gtm",
+        "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
     }
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=referred,
     )
@@ -1957,7 +2583,7 @@ def test_last_referral_is_cleared_once_a_later_translate_resolves_the_requiremen
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=resolved,
     )
@@ -1973,17 +2599,15 @@ def test_last_referral_survives_a_translate_response_carrying_no_outcome() -> No
     build its own `adk_request_input` from."""
     tracker = _RunTracker(deadline_at=0.0)
     referred = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "source_ambiguous",
-            "requirement_id": "gdp_gtm",
-            "candidates": [{"spec_id": "spec_nominal"}],
-        },
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "gdp_gtm",
+        "candidates": [{"spec_id": "spec_nominal"}],
     }
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=referred,
     )
@@ -1991,7 +2615,7 @@ def test_last_referral_survives_a_translate_response_carrying_no_outcome() -> No
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response={"malformed": True},
     )
@@ -2012,17 +2636,15 @@ def test_a_referral_resolved_by_a_later_ok_translate_lets_a_deadline_refuse_inst
     seam = _seam(clock=lambda: 10_000.0)
     tracker = _RunTracker(deadline_at=0.0)
     referred = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "source_ambiguous",
-            "requirement_id": "gdp_gtm",
-            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
-        },
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "gdp_gtm",
+        "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
     }
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=referred,
     )
@@ -2030,7 +2652,7 @@ def test_a_referral_resolved_by_a_later_ok_translate_lets_a_deadline_refuse_inst
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=resolved,
     )
@@ -2065,24 +2687,22 @@ def test_a_referral_surviving_a_malformed_translate_response_still_gets_asked_at
     seam = _seam(clock=lambda: 10_000.0)
     tracker = _RunTracker(deadline_at=0.0)
     referred = {
-        "outcome": "referred",
-        "referral": {
-            "kind": "source_ambiguous",
-            "requirement_id": "gdp_gtm",
-            "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
-        },
+        "outcome": "choice_required",
+        "kind": "source_ambiguous",
+        "requirement_id": "gdp_gtm",
+        "candidates": [{"spec_id": "spec_nominal"}, {"spec_id": "spec_per_capita"}],
     }
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response=referred,
     )
     PlannerSeam._track_tool_call(
         tracker,
         None,
-        agent_name="translator",
+        agent_name="dfo_planner",
         tool=cast(BaseTool, SimpleNamespace(name="translate")),
         tool_response={"malformed": True},
     )
@@ -2129,36 +2749,16 @@ _NO_DATA_SEARCH_RESPONSE = ToolCallResult(
 )
 
 
-def _repeating_translate_script(rounds: int) -> list[Any]:
-    """The translator model's closing text for `rounds` pairs of `dfo_translator` calls.
-
-    Each `dfo_translator` call opens on `translate` without asking the model:
-    `translator.agent._before_translator_model` supplies that call itself on a
-    turn's first generation. So the model is asked only to close each turn,
-    and this script is those closings, two per round. That is the shape that
-    stops one `ctx.run_node` call on its second identical referral, once per
-    correction round the seam pays for before it raises.
+def _repeating_translate_call_script(rounds: int) -> list[Any]:
+    """The planner's calls for `rounds` pairs of `translate` calls.
 
     `translate` runs the real mechanical loop against
     `_NO_DATA_SEARCH_RESPONSE`, so both calls in a pair refer the same
-    `(kind, requirement_id)` back without the translator's own model
-    supplying anything. Most referrals arrive this way rather than as a
-    model-dispatched `return_to_planner` call, so this is the shape the stall
-    guard has to catch. The second `dfo_translator` call still needs its own
-    closing text even though the pair has already stalled: the planner's own
-    `after_tool_callback` waits for that tool call to answer normally before
-    it arms the break, so no half-finished nested turn is left for the next
-    `ctx.run_node` call on this session to resume instead of seeing the
-    correction message.
+    `(kind, requirement_id)` back. That is the shape that stops one
+    `ctx.run_node` call on its second identical referral, once per correction
+    round the seam pays for before it raises.
     """
-    script: list[Any] = []
-    for _ in range(rounds):
-        script.extend(["no data (first call)", "no data (second call)"])
-    return script
-
-
-def _repeating_translator_call_script(rounds: int) -> list[Any]:
-    call = [("dfo_translator", {"request": "find gdp for guatemala"})]
+    call = [("translate", {})]
     script: list[Any] = []
     for _ in range(rounds):
         script.extend([call, call])
@@ -2192,13 +2792,10 @@ def _gdp_plan(decision: Any, requirement: Any, derived_requirement: Any) -> Plan
     )
 
 
-def test_both_agents_keep_their_own_after_model_callback_alongside_the_seams() -> None:
-    """`PlannerSeam.__init__` assigns `after_model_callback` once, directly --
-    unlike `after_tool_callback`, which is already composed with
-    `canonical_after_tool_callbacks` -- so a straight overwrite there would
-    silently drop `drop_thought_parts` (`create_planner_agent`,
-    `create_translator_agent`) the moment this seam wraps either agent,
-    on every graph-served turn. `usage_metadata` logging always returns
+def test_the_planner_keeps_its_own_after_model_callback_alongside_the_seams() -> None:
+    """`PlannerSeam.__init__` assigns `after_model_callback` once, directly,
+    so a straight overwrite there would silently drop `drop_thought_parts`
+    (`create_planner_agent`) on every graph-served turn. `usage_metadata` logging always returns
     `None`, so it belongs first in the list: `after_model_callback` stops at
     the first truthy return, and only `drop_thought_parts` -- which returns
     the trimmed response, a truthy value, on any generation that thought --
@@ -2209,10 +2806,6 @@ def test_both_agents_keep_their_own_after_model_callback_alongside_the_seams() -
     assert isinstance(seam._agent.after_model_callback, list)
     assert seam._agent.after_model_callback[0] == seam._after_planner_model
     assert drop_thought_parts in seam._agent.after_model_callback
-
-    assert isinstance(seam._translator.after_model_callback, list)
-    assert seam._translator.after_model_callback[0] == seam._after_translator_model
-    assert drop_thought_parts in seam._translator.after_model_callback
 
 
 def test_the_planner_composes_the_thinking_override_ahead_of_the_deadline_check() -> None:
@@ -2244,12 +2837,8 @@ async def test_a_zero_sample_rate_never_samples(
         thinking_sample_rng=lambda: 0.0,
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "translate the recorded plan"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})]])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _run_seam(
@@ -2257,47 +2846,43 @@ async def test_a_zero_sample_rate_never_samples(
         )
 
     assert planner_llm.captured_requests[0].config.thinking_config == AGENT_THINKING_CONFIG
-    assert translator_llm.captured_requests[0].config.thinking_config == AGENT_THINKING_CONFIG
 
 
-async def test_a_rate_one_always_samples_and_both_agents_carry_the_default_config(
+async def test_a_rate_one_always_samples_and_every_generation_carries_the_default_config(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """`1` always samples: `random.random()` never returns exactly `1.0`, so
     `draw < 1.0` always holds. One draw, made once for this `__call__`
     (`PlannerSeam.__call__`'s own comment), is shared through session state
-    (`THINKING_SAMPLE_STATE_KEY`) by both agents' `before_model_callback` --
-    the planner's `dfo_translator` call and the translator's own opener and
-    closing generation alike carry `DEFAULT_THINKING_CONFIG`."""
+    (`THINKING_SAMPLE_STATE_KEY`) by every generation's
+    `before_model_callback`."""
     seam = _translator_seam(
         responses={"search": _NO_DATA_SEARCH_RESPONSE},
         agent_settings=AgentSettings(thinking_sample_rate=1.0),
         thinking_sample_rng=lambda: 0.5,
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "translate the recorded plan"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})]])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _run_seam(
             seam, question=draft.question, envelope={}, prior_plan=draft.model_dump(mode="json")
         )
 
-    assert planner_llm.captured_requests[0].config.thinking_config == DEFAULT_THINKING_CONFIG
-    assert translator_llm.captured_requests[0].config.thinking_config == DEFAULT_THINKING_CONFIG
-    assert translator_llm.captured_requests[-1].config.thinking_config == DEFAULT_THINKING_CONFIG
+    assert len(planner_llm.captured_requests) > 1
+    assert all(
+        request.config.thinking_config == DEFAULT_THINKING_CONFIG
+        for request in planner_llm.captured_requests
+    )
 
 
 async def test_the_thinking_sample_is_drawn_once_and_recorded_on_the_turn_span(
     decision: Any, requirement: Any, derived_requirement: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The draw is made once per turn, not once per `_propose` call: two
-    generations of one `__call__` (`dfo_translator`'s own request and the
-    translator's opener) see the same recorded draw, and the metadata
+    """The draw is made once per turn, not once per `_propose` call: every
+    generation of one `__call__`, correction rounds included, sees the same
+    recorded draw, and the metadata
     `common.telemetry.record_span` gets tags this turn as sampled records
     once, at the draw, not again on every later generation of the same
     turn."""
@@ -2311,12 +2896,8 @@ async def test_the_thinking_sample_is_drawn_once_and_recorded_on_the_turn_span(
         thinking_sample_rng=lambda: 0.5,
     )
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "translate the recorded plan"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})]])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
     harness = _SeamHarness()
 
     with pytest.raises(PlannerSeamError):
@@ -2329,26 +2910,18 @@ async def test_the_thinking_sample_is_drawn_once_and_recorded_on_the_turn_span(
     assert state[THINKING_SAMPLE_STATE_KEY] is True
 
 
-async def test_the_planner_carries_its_own_turn_across_a_dfo_translator_call(
+async def test_a_correction_round_carries_the_brief_and_the_earlier_tool_calls(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """Regression for the orphan-drop stall: run as a workflow node with no
-    explicit `include_contents`, ADK defaults a `single_turn` agent (what
-    `harness.agents.create_planner_with_translator` builds the planner as)
-    to `include_contents='none'`, which builds every request from only the
-    tail of the current turn (`_get_current_turn_contents`,
-    `google.adk.flows.llm_flows.contents`). The translator's own turn
-    plants an other-agent-reply event partway through the planner's turn,
-    and that event moves the tail boundary past the planner's own
-    `dfo_translator` call -- orphaning its response and, with it, the
-    seam's context message and the earlier `get_skill` call.
-    `planner.agent.create_planner_agent` pins `include_contents='default'`
-    to stop that. This does not assert the drop's absence -- the failure
-    here is silent on both sides (nothing raises; the model just drafts
-    from less) -- it asserts what the planner's next generation positively
-    contains. Reverting that pin reproduces the bug and fails this test:
-    the third generation drops to a single quoted-transcript text part,
-    with neither `Question:` nor either tool call/response pair on it.
+    """A correction round's message carries only the nudge (`_message`'s
+    `fresh=False`), so its first generation has to read the brief and the
+    first round's tool calls from history. Run as a workflow node with no
+    explicit `include_contents`, ADK defaults the planner to `'none'`, which
+    builds every request from the latest user event onwards
+    (`_get_current_turn_contents`, `google.adk.flows.llm_flows.contents`),
+    which is the nudge alone. `planner.agent.create_planner_agent` pins
+    `include_contents='default'` to stop that; reverting the pin fails this
+    test on the correction round's first generation.
     """
     seam = _translator_seam(
         responses={
@@ -2360,13 +2933,11 @@ async def test_the_planner_carries_its_own_turn_across_a_dfo_translator_call(
     planner_llm = ScriptedPlannerLlm(
         script=[
             [("get_skill", {"skill_id": "dfo-faq"})],
-            [("dfo_translator", {"request": "find gdp for guatemala"})],
+            [("translate", {})],
             "stop",
         ]
     )
-    translator_llm = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _run_seam(
@@ -2376,18 +2947,17 @@ async def test_the_planner_carries_its_own_turn_across_a_dfo_translator_call(
             prior_plan=draft.model_dump(mode="json"),
         )
 
-    # `captured_requests[0]` is the generation that calls `get_skill`;
-    # `[1]` is the one after its response, which calls `dfo_translator`;
-    # `[2]` -- the one this test is about -- is the one after
-    # `dfo_translator`'s own response.
-    assert len(planner_llm.captured_requests) >= 3
-    third_generation = planner_llm.captured_requests[2]
-    assert "Question: gdp guatemala" in _prompt_text(third_generation)
-    names = _call_and_response_names(third_generation)
+    # `captured_requests[0..2]` are the first round: `get_skill`, `translate`,
+    # and the closing text that never called `submit_plan`. `[3]` is the
+    # correction round's first generation.
+    assert len(planner_llm.captured_requests) >= 4
+    correction = planner_llm.captured_requests[3]
+    assert "Question: gdp guatemala" in _prompt_text(correction)
+    names = _call_and_response_names(correction)
     assert "FC:get_skill" in names
     assert "FR:get_skill" in names
-    assert "FC:dfo_translator" in names
-    assert "FR:dfo_translator" in names
+    assert "FC:translate" in names
+    assert "FR:translate" in names
 
 
 # An `unsupported` `search` answer: `translate` refers the plan back as
@@ -2410,27 +2980,22 @@ _UNSUPPORTED_SEARCH_RESPONSE = ToolCallResult(
 )
 
 
-async def test_an_answer_that_resumes_a_run_after_a_nested_translator_call_is_read(
+async def test_an_answer_that_resumes_a_run_after_a_translate_call_is_read(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """The user's answer resumes a run whose earlier turn called the translator.
+    """The user's answer resumes a run whose earlier turn called `translate`.
 
-    The planner calls `dfo_translator`, which refers `unsupported_ask`, then
+    The planner calls `translate`, which refers `unsupported_ask`, then
     asks the user through `adk_request_input` and pauses. The answer resumes
     the run, and ADK finishes it without a new generation and without a
     planner-authored event. The seam has to accept that completion, then
     correct the run as it does any run that ends without `submit_plan`: the
     next round reads the answer off the session and `propose_plan` passes
-    the referral guard as version 2.
+    the referral guard as version 2. The `unsupported_ask` decline it owes
+    survives the resume, so the amendment carries it.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
     seam = _translator_seam(responses={"search": _UNSUPPORTED_SEARCH_RESPONSE})
-    referral = [
-        (
-            "set_model_response",
-            {"response": {"kind": "unsupported_ask", "reason": "r", "requirement_id": "gdp_gtm"}},
-        )
-    ]
     amend = [
         (
             "propose_plan",
@@ -2439,22 +3004,19 @@ async def test_an_answer_that_resumes_a_run_after_a_nested_translator_call_is_re
                 "amends_version": draft.version,
                 "decisions": [draft.decisions[0].model_dump(mode="json")],
                 "evidence_requirements": [],
+                "declined": [{"ask": draft.question, "code": "unsupported_ask"}],
             },
         )
     ]
     planner_llm = ScriptedPlannerLlm(
         script=[
-            [("dfo_translator", {"request": "find gdp"})],
+            [("translate", {})],
             [("adk_request_input", {"message": "what can be measured instead?", "candidates": []})],
             amend,
             "stop",
         ]
     )
-    translator_llm = ScriptedPlannerLlm(
-        script=[[("translate", {})], referral, referral, referral, referral, "done"]
-    )
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
     harness = _SeamHarness()
     plan_json = draft.model_dump(mode="json")
 
@@ -2489,7 +3051,7 @@ async def test_an_answer_that_resumes_a_run_after_a_nested_translator_call_is_re
     assert (proposals[0] or {})["version"] == draft.version + 1
 
 
-async def test_a_pair_repeating_the_same_referral_stops_before_max_events(
+async def test_a_repeating_referral_stops_before_max_events(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """Once `_MAX_CORRECTIONS` is spent on referrals that keep repeating,
@@ -2514,10 +3076,8 @@ async def test_a_pair_repeating_the_same_referral_stops_before_max_events(
     # pair that never settles, so the seam pays for all of them and still
     # raises on the last round's referral, not on the event cap.
     rounds = _MAX_CORRECTIONS + 1
-    planner_llm = ScriptedPlannerLlm(script=_repeating_translator_call_script(rounds))
-    translator_llm = ScriptedPlannerLlm(script=_repeating_translate_script(rounds))
+    planner_llm = ScriptedPlannerLlm(script=_repeating_translate_call_script(rounds))
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError) as excinfo:
         await _run_seam(
@@ -2534,40 +3094,32 @@ async def test_a_pair_repeating_the_same_referral_stops_before_max_events(
     assert refusal["fix"]["detail"] == message
 
     # Two planner generations per round -- the stop fires on the second
-    # `dfo_translator` call's referral every time, so the planner is never
-    # asked for a third within a round.
+    # `translate` call's referral every time, so the planner is never asked
+    # for a third within a round.
     assert len(planner_llm.captured_requests) == 2 * rounds
 
 
 async def test_a_run_leaves_every_event_it_appended_scoped_to_the_planner(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """The planner's own events carry `_PLANNER_BRANCH`, the translator's a branch under it.
+    """The planner's own events carry `_PLANNER_BRANCH`, and no other agent runs.
 
     ADK's `_is_event_belongs_to_branch` returns True when either side's branch
-    is empty, so the planner's isolation from the translator's turns rests
-    entirely on the branch the run is stamped with. `ctx.run_node` takes it as
+    is empty, so keeping the planner's turns out of another agent's request
+    (the orchestrator's, on its own branch) rests entirely on the branch the
+    run is stamped with. `ctx.run_node` takes it as
     `override_branch=_PLANNER_BRANCH`. This asserts what that bought, rather
-    than the argument being passed. Removing the keyword reproduces the failure
-    this test exists for: every planner event lands with `branch=None`, the
-    translator's with `dfo_translator@<call id>` and no planner prefix, and
-    the whole foreign-agent relay returns. The planner then reads the
-    translator's own turns as its own context.
+    than the argument being passed.
 
-    The run has to reach the translator for the second half to mean anything,
-    so this scripts one `dfo_translator` call whose `translate` answers
-    `no_data`, which is a referral the seam ends on. The assertion is the
-    guard. `RELAY_BY_AUTHOR_CEILINGS`' zero ceiling in `test_context_budget.py`
-    is the measured consequence of the same property.
+    `translate` runs inside the planner's own tool call, so every function
+    call and response the run appended is the planner's: no second agent
+    makes a model call in a planner run.
     """
     seam = _translator_seam(responses={"search": _NO_DATA_SEARCH_RESPONSE})
     draft = _gdp_plan(decision, requirement, derived_requirement)
     harness = _SeamHarness()
     seam._agent.model = ScriptedPlannerLlm(
-        script=_repeating_translator_call_script(1) + ["done"] * 4
-    )
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = ScriptedPlannerLlm(
-        script=_repeating_translate_script(1)
+        script=_repeating_translate_call_script(1) + ["done"] * 4
     )
 
     with pytest.raises(PlannerSeamError):
@@ -2580,27 +3132,22 @@ async def test_a_run_leaves_every_event_it_appended_scoped_to_the_planner(
 
     events = await harness.events()
     planner_events = [event for event in events if event.author == "dfo_planner"]
-    translator_events = [event for event in events if event.author == "dfo_translator"]
+    tool_authors = {
+        event.author
+        for event in events
+        if event.get_function_calls() or event.get_function_responses()
+    }
 
-    # The run has to have produced both, or the assertions below hold on an
-    # empty list and prove nothing.
-    assert planner_events, "the run appended no planner event to assert on"
-    assert translator_events, (
-        "the run never reached the translator, so its branch scoping is untested"
+    assert any(event.get_function_responses() for event in planner_events), (
+        "the run answered no planner tool call, so there is nothing to assert on"
     )
+    assert tool_authors == {"dfo_planner"}
     assert {event.branch for event in planner_events} == {_PLANNER_BRANCH}, (
         "a planner event this run appended is not scoped to "
         f"{_PLANNER_BRANCH!r}: "
         f"{sorted({str(event.branch) for event in planner_events})!r}. Without "
         "`override_branch=_PLANNER_BRANCH` on the planner's `ctx.run_node` call, ADK "
         "treats an unbranched event as belonging to every branch."
-    )
-    assert all(
-        event.branch and event.branch.startswith(f"{_PLANNER_BRANCH}.")
-        for event in translator_events
-    ), (
-        "a translator event this run appended is not under the planner's branch "
-        f"{_PLANNER_BRANCH!r}: {sorted({str(event.branch) for event in translator_events})!r}"
     )
 
 
@@ -2609,35 +3156,10 @@ def _branch_check(*branches: tuple[str, str | None]) -> None:
     _check_branches(
         [Event(author=author, branch=branch) for author, branch in branches],
         planner="dfo_planner",
-        translator="dfo_translator",
     )
 
 
-def test_a_translator_event_beneath_the_planner_branch_passes_the_branch_check() -> None:
-    """The stamping ADK produces: the planner on the root, the translator one segment below."""
-    _branch_check(
-        ("dfo_planner", _PLANNER_BRANCH),
-        ("dfo_translator", f"{_PLANNER_BRANCH}.dfo_translator@call-1"),
-        ("dfo_planner", _PLANNER_BRANCH),
-        ("dfo_translator", f"{_PLANNER_BRANCH}.dfo_translator@call-2"),
-    )
-
-
-def test_a_translator_event_on_exactly_the_planner_branch_fails_the_branch_check() -> None:
-    """ADK shows an invocation every event on its own branch path or an ancestor's.
-
-    A translator event stamped `_PLANNER_BRANCH` itself is on the planner's
-    path, so the planner's next request would carry it. Only a branch strictly
-    beneath the root keeps the translator's turns out.
-    """
-    with pytest.raises(PlannerSeamError, match="strictly under"):
-        _branch_check(
-            ("dfo_planner", _PLANNER_BRANCH),
-            ("dfo_translator", _PLANNER_BRANCH),
-        )
-
-
-@pytest.mark.parametrize("branch", [None, "", "dfo_translator@1", "dfo_planner.x", "dfo_planner@1"])
+@pytest.mark.parametrize("branch", [None, "", "dfo_orchestrator", "dfo_planner.x", "dfo_planner@1"])
 def test_a_planner_event_off_the_planner_branch_fails_the_branch_check(
     branch: str | None,
 ) -> None:
@@ -2646,21 +3168,9 @@ def test_a_planner_event_off_the_planner_branch_fails_the_branch_check(
         _branch_check(("dfo_planner", branch))
 
 
-@pytest.mark.parametrize("branch", [None, "", "dfo_translator@1", "dfo_planner_x.dfo_translator@1"])
-def test_a_translator_event_outside_the_planner_branch_fails_the_branch_check(
-    branch: str | None,
-) -> None:
-    """A translator event with no branch, or a sibling or lookalike root, sits outside the planner."""
-    with pytest.raises(PlannerSeamError, match="strictly under"):
-        _branch_check(
-            ("dfo_planner", _PLANNER_BRANCH),
-            ("dfo_translator", branch),
-        )
-
-
 @pytest.mark.parametrize(
     "branches",
-    [(), (("user", None),), (("dfo_translator", f"{_PLANNER_BRANCH}.dfo_translator@call-1"),)],
+    [(), (("user", None),), (("dfo_orchestrator", "dfo_orchestrator"),)],
 )
 def test_a_slice_with_no_planner_event_passes_the_branch_check(
     branches: tuple[tuple[str, str | None], ...],
@@ -2672,91 +3182,28 @@ def test_a_slice_with_no_planner_event_passes_the_branch_check(
 
 
 def test_the_branch_check_ignores_events_from_other_authors() -> None:
-    """Only the planner's and the translator's events are judged, so a user event may be bare."""
+    """Only the planner's events are judged, so a user event may be bare."""
     _branch_check(
         ("user", None),
         ("dfo_planner", _PLANNER_BRANCH),
     )
 
 
-async def test_a_short_dfo_translator_request_reaches_the_wire_and_no_plan_rides_along(
-    decision: Any, requirement: Any, derived_requirement: Any
-) -> None:
-    """The wire carries a short `request`, and the plan is not in it.
-
-    `translate` (`translator.agent`) takes no plan, and `run_translate` reads
-    the draft through `current_draft(tool_context)` -> `load_plan(state)`. A
-    planner that retypes the plan into `request` is sending a second copy the
-    translator ignores, and a model retyping structured content can mistype
-    it, the same defect commit 3d97b31 fixed on the translator's closing
-    turn. The scripted model's own `request` argument is fixed by this test's
-    script, not by `_TRANSLATING`, so what this asserts is the wire: a short
-    request goes out and the plan does not ride with it. The instruction text
-    that asks the model for that request is covered by
-    `tests/planner/test_agent.py::
-    test_the_instruction_never_asks_the_planner_to_retype_the_plan`.
-    """
-    seam = _translator_seam(responses={"search": _NO_DATA_SEARCH_RESPONSE})
-    draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "translate the recorded plan"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
-    seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
-
-    with pytest.raises(PlannerSeamError):
-        await _run_seam(
-            seam,
-            question=draft.question,
-            envelope={},
-            prior_plan=draft.model_dump(mode="json"),
-        )
-
-    calls = [
-        part.function_call
-        for request in planner_llm.captured_requests
-        for content in request.contents
-        for part in content.parts or []
-        if part.function_call is not None and part.function_call.name == "dfo_translator"
-    ]
-    assert calls, "the planner never called dfo_translator"
-    request = str((calls[0].args or {}).get("request", ""))
-    for retyped in ("evidence_requirements", "decisions"):
-        assert retyped not in request, (
-            f"the planner retyped the plan into `dfo_translator`'s `request`: {request!r}"
-        )
-    assert json.dumps(draft.model_dump(mode="json")) not in request
-
-
-async def test_the_translator_still_finds_the_plan_with_no_plan_in_the_request(
+async def test_translate_finds_the_plan_with_no_arguments(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """The plan round-trips through session state alone. Nothing is passed in.
 
-    The planner's `dfo_translator` call carries one short instruction and no
-    plan. The translator's turn opens on `translate` with no arguments
-    (`translator.agent._before_translator_model` supplies that call), and
-    `run_translate` reaching the draft through `current_draft(tool_context)`
-    is enough to conclude: the stub answers `no_data`, and the referral names
-    `gdp_gtm`, the plan's own requirement id, which exists nowhere in the
-    request. The planner's next generation reads that referral off the tool
-    response.
+    The planner calls `translate` with no arguments, and `run_translate`
+    reaching the draft through `current_draft(tool_context)` is enough to
+    conclude: the stub answers `no_data`, and the referral names `gdp_gtm`,
+    the plan's own requirement id, which no argument carried. The planner's
+    next generation reads that referral off the tool response.
     """
     seam = _translator_seam(responses={"search": _NO_DATA_SEARCH_RESPONSE})
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "translate the recorded plan"})], "stop"]
-    )
-    translator_llm = ScriptedPlannerLlm(
-        script=[
-            [("translate", {})],
-            [("translate", {})],
-            [("set_model_response", {"response": {"kind": "no_data", "reason": "guess"}})],
-        ]
-    )
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})], "stop"])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _run_seam(
@@ -2771,55 +3218,11 @@ async def test_the_translator_still_finds_the_plan_with_no_plan_in_the_request(
         for request in planner_llm.captured_requests
         for content in request.contents
         for part in content.parts or []
-        if part.function_response is not None and part.function_response.name == "dfo_translator"
+        if part.function_response is not None and part.function_response.name == "translate"
     ]
     assert any(
         isinstance(answer, dict) and answer.get("requirement_id") == "gdp_gtm" for answer in answers
-    ), f"the translator never reached the plan's own requirement: {answers!r}"
-
-
-async def test_a_translator_that_reaches_for_transfer_to_agent_cannot_escape_unmonitored() -> None:
-    """The real failure this stop exists for: a translator model that hands
-    control back through ADK's own `transfer_to_agent` instead of the
-    app's `return_to_planner`, bypassing `_stalled_referral` entirely
-    because no `Referral` is ever built and no `return_to_planner`
-    response is ever emitted for it to inspect
-    (`translator.agent.create_translator_agent`'s `disallow_transfer_to_parent`
-    is what closes this, not a second watcher here).
-
-    A scripted model is not bound by which tools its own turn actually
-    declared, so it can still attempt the transfer `disallow_transfer_to_parent`
-    blocks -- and that attempt fails loudly, inside the run, rather than
-    silently handing control back with nothing recorded: `transfer_to_agent` is not
-    among the translator's tools once `disallow_transfer_to_parent` and
-    `disallow_transfer_to_peers` make ADK build it a `SingleFlow`, so the
-    call resolves to no tool at all, the translator's turn ends in an
-    error instead of a transfer, and the run reaches the seam's own
-    correction-exhaustion `PlannerSeamError` in a couple of planner
-    generations, never an unbounded ride to the event cap an unmonitored
-    channel would produce.
-    """
-    seam = _seam()
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "find gdp for guatemala"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(
-        script=[[("transfer_to_agent", {"agent_name": "dfo_planner"})]]
-    )
-    seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
-
-    with pytest.raises(PlannerSeamError) as excinfo:
-        await _run_seam(seam, question="gdp guatemala", envelope={})
-
-    message = str(excinfo.value)
-    assert "ran past" not in message and "events" not in message
-    # A generous bound well under what an undetected transfer loop would
-    # take to ride to the event cap (33 model calls in the traced
-    # production failure) -- this only needs to show the run stopped
-    # promptly through `_MAX_CORRECTIONS`-bounded correction rounds, not
-    # pin an exact count.
-    assert len(planner_llm.captured_requests) <= 4 * (_MAX_CORRECTIONS + 1)
+    ), f"translate never reached the plan's own requirement: {answers!r}"
 
 
 def _candidate_spec(spec_id: str, sentence: str) -> dict[str, Any]:
@@ -2870,18 +3273,13 @@ _TWO_CANDIDATES_SEARCH_RESPONSE = ToolCallResult(
 )
 
 
-async def test_the_planner_reads_the_recorded_referral_whatever_the_translator_model_closed_with(
+async def test_the_planners_translate_response_is_the_referral_with_its_outcome(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """The translator's closing turn is what `translate` recorded, on the path
-    the planner is actually served from: `PlannerSeam` owns the translator's
-    `after_tool_callback` outright, so the callback that swaps the model's
-    closing payload for the recorded referral has to survive its assignment.
-
-    The translator ranks two candidates (`source_ambiguous`, recorded by
-    `translate`) and then closes with a payload that names no candidates and
-    a different kind; the planner's next generation must read the referral
-    `translate` recorded, both candidates included.
+    """On the path the planner is served from, the function response for
+    its `translate` call is the referral itself: its `outcome` on top
+    (`choice_required` for two candidates), its `kind`, its requirement, and
+    both candidates with the `spec_id` each may be pinned by.
     """
     seam = _translator_seam(responses={"search": _TWO_CANDIDATES_SEARCH_RESPONSE})
     draft = Plan(
@@ -2892,19 +3290,8 @@ async def test_the_planner_reads_the_recorded_referral_whatever_the_translator_m
             derived_requirement(input_id="gdp_gtm"),
         ],
     )
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "find aid for guatemala"})], "stop"]
-    )
-    garbled_close = {"kind": "no_data", "reason": "guess"}
-    translator_llm = ScriptedPlannerLlm(
-        script=[
-            [("translate", {})],
-            [("translate", {"requirement_id": "gdp_gtm", "choice": SPEC_B, "rationale": "closer"})],
-            [("set_model_response", {"response": garbled_close})],
-        ]
-    )
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})], "stop"])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
 
     with pytest.raises(PlannerSeamError):
         await _run_seam(
@@ -2919,41 +3306,22 @@ async def test_the_planner_reads_the_recorded_referral_whatever_the_translator_m
         for part in planner_llm.captured_requests[1].contents[-1].parts
         if part.function_response is not None
     ]
-    assert response.name == "dfo_translator"
+    assert response.name == "translate"
     answer = cast(dict[str, Any], response.response)
-    assert answer["kind"] == "source_ambiguous", answer
+    assert answer["outcome"] == "choice_required", answer
+    assert answer["kind"] == "source_ambiguous"
     assert answer["requirement_id"] == "gdp_gtm"
     assert {candidate["spec_id"] for candidate in answer["candidates"]} == {SPEC, SPEC_B}
 
 
-async def test_two_conversations_do_not_share_the_translators_callbacks(
+async def test_two_conversations_do_not_share_the_seams_callbacks(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """Regression for the shared-translator-callback stall:
-    `self._translator` is never cloned per call -- `LlmAgent.model_post_init`
-    builds the planner's `_SingleTurnAgentTool` over this one long-lived
-    instance, and `BaseAgent.clone` shallow-copies the `tools` list holding
-    it -- so a second conversation's `_propose` call, reassigning the
-    translator's callbacks while a first conversation's own translator turn
-    is still suspended mid-run, would leave the first conversation's own
-    `translate` call reporting into the SECOND conversation's tracker and
-    `on_progress` stream once it finally fires.
-
-    The pause sits in conversation A's *planner* model, not its
-    translator's: `_SingleTurnAgentTool.run_async`
-    (`google.adk.tools.agent_tool`) clones `self._translator` the moment
-    the planner's own `dfo_translator` tool call is dispatched
-    (`ctx.run_node`'s own `build_node` calls `agent_node.clone(...)`
-    synchronously, before any `await`) -- so whatever is on
-    `self._translator.after_tool_callback` at THAT instant is what A's
-    translator turn runs with, not what was there when A's own `_propose`
-    set it up. Pausing after that assignment but before the planner's
-    model has even returned the `dfo_translator` call, running B's whole
-    turn in between, and only then releasing A reproduces exactly that
-    ordering: B's `_propose` reassigns the same `self._translator`
-    (unconditionally, on every call, regardless of what B's own script
-    calls) while A is suspended, so the clone A's own tool dispatch makes
-    once released captures B's callbacks, not A's own -- and `reports_b`
+    """One `PlannerSeam` serves every conversation, and its callbacks are
+    assigned once, in `__init__`, so a callback reads the call it belongs to
+    off `_active_call`. Conversation A pauses on its first planner generation,
+    conversation B runs its whole turn, and only then does A call `translate`:
+    A's report has to land in A's own `on_progress` stream, and B's stream
     must not grow once A resumes.
     """
     seam = _translator_seam(responses={"search": _NO_DATA_SEARCH_RESPONSE})
@@ -2965,7 +3333,7 @@ async def test_two_conversations_do_not_share_the_translators_callbacks(
 
     planner_llm_a = ScriptedPlannerLlm(
         script=[
-            [("dfo_translator", {"request": "find gdp for guatemala"})],
+            [("translate", {})],
             "nothing yet",
             "nothing yet",
             "nothing yet",
@@ -2974,7 +3342,6 @@ async def test_two_conversations_do_not_share_the_translators_callbacks(
         paused=started_a,
         release=release_a,
     )
-    translator_llm_a = ScriptedPlannerLlm(script=[[("translate", {})], "no data"])
     planner_llm_b = ScriptedPlannerLlm(script=["nothing at all"] * 4)
 
     harness_a = _SeamHarness()
@@ -2982,7 +3349,6 @@ async def test_two_conversations_do_not_share_the_translators_callbacks(
 
     async def _run_a() -> None:
         seam._agent.model = planner_llm_a
-        cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm_a
         with pytest.raises(PlannerSeamError):
             await harness_a.run(
                 seam,
@@ -2996,10 +3362,7 @@ async def test_two_conversations_do_not_share_the_translators_callbacks(
     await started_a.wait()
 
     # Conversation B's whole turn, in this coroutine's own task, while A
-    # sits suspended above, mid-translator-turn. B never calls
-    # `dfo_translator` itself -- it does not need to: `_propose` reassigns
-    # `self._translator`'s callbacks unconditionally, on every call,
-    # regardless of what that call's own script does.
+    # sits suspended above, before its `translate` call.
     seam._agent.model = planner_llm_b
     with pytest.raises(PlannerSeamError):
         await harness_b.run(
@@ -3528,32 +3891,14 @@ def test_pinnable_candidates_is_empty_for_no_referral_or_no_candidates() -> None
     assert _pinnable_candidates({"kind": "no_data", "candidates": "not a list"}) == []
 
 
-def test_clarifying_question_args_carries_a_named_recommendation() -> None:
-    referral = {
-        "kind": "source_ambiguous",
-        "requirement_id": "gdp_gtm",
-        "recommendation": {"spec_id": SPEC_B, "rationale": "closer match"},
-    }
+def test_clarifying_question_args_offers_the_candidates_and_recommends_none() -> None:
     candidates = [{"spec_id": SPEC, "label": "a"}, {"spec_id": SPEC_B, "label": "b"}]
 
-    args = _clarifying_question_args(referral, candidates)
+    args = _clarifying_question_args(candidates)
 
-    assert args["candidates"] == candidates
-    assert args["recommended_spec_id"] == SPEC_B
-    assert args["rationale"] == "closer match"
-    assert "gdp_gtm" in args["message"]
-    assert SPEC in args["message"] and SPEC_B in args["message"]
-
-
-def test_clarifying_question_args_omits_the_recommendation_when_none_is_named() -> None:
-    referral = {"kind": "pinned_source_not_found", "requirement_id": None}
-    candidates = [{"spec_id": SPEC, "label": "a"}]
-
-    args = _clarifying_question_args(referral, candidates)
-
-    assert "recommended_spec_id" not in args
-    assert "rationale" not in args
-    assert "the plan" in args["message"]
+    assert args == {"message": args["message"], "candidates": candidates}
+    # The message reaches the user: the candidates' labels name the sources.
+    assert "spec_" not in args["message"]
 
 
 def test_requirements_without_discovery_names_every_requirement_with_no_workflow(
@@ -3709,12 +4054,12 @@ async def test_a_deadline_hit_on_a_referral_with_candidates_asks_the_user_and_th
     way a model-issued ask's own answer does.
 
     The clock is scripted so the deadline has not yet passed when the
-    planner's first generation calls `dfo_translator` (the real mechanical
-    `translate` loop runs against `_TWO_CANDIDATES_SEARCH_RESPONSE` and
-    records a genuine `source_ambiguous` referral naming `SPEC`/`SPEC_B`,
-    the same fixture `test_the_planner_reads_the_recorded_referral_whatever_
-    the_translator_model_closed_with` uses), and has passed by the very next
-    check -- right after `dfo_translator` returns, before the planner's own
+    planner's first generation calls `translate` (the real mechanical loop
+    runs against `_TWO_CANDIDATES_SEARCH_RESPONSE` and records a genuine
+    `source_ambiguous` referral naming `SPEC`/`SPEC_B`, the same fixture
+    `test_the_planners_translate_response_is_the_referral_with_its_outcome`
+    uses), and has passed by the very next check -- right after `translate`
+    returns, before the planner's own
     model is ever asked to react to the referral it carries.
     """
     draft = Plan(
@@ -3731,25 +4076,15 @@ async def test_a_deadline_hit_on_a_referral_with_candidates_asks_the_user_and_th
         agent_settings=AgentSettings(planner_entry_deadline_seconds=100.0),
         clock=clock,
     )
-    planner_llm = ScriptedPlannerLlm(
-        script=[[("dfo_translator", {"request": "find aid for guatemala"})]]
-    )
-    translator_llm = ScriptedPlannerLlm(
-        script=[
-            [("translate", {})],
-            [("translate", {"requirement_id": "gdp_gtm", "choice": SPEC_B, "rationale": "closer"})],
-            [("set_model_response", {"response": {"kind": "no_data", "reason": "guess"}})],
-        ]
-    )
+    planner_llm = ScriptedPlannerLlm(script=[[("translate", {})]])
     seam._agent.model = planner_llm
-    cast(LlmAgent, seam._agent.sub_agents[0]).model = translator_llm
     harness = _SeamHarness()
 
     paused = await harness.run(
         seam, question=draft.question, envelope={}, prior_plan=draft.model_dump(mode="json")
     )
     assert paused is None, "the deadline's own clarifying question should pause this call"
-    # One generation: the one that calls `dfo_translator`. The deadline
+    # One generation: the one that calls `translate`. The deadline
     # intercepts before the planner's own reaction to the referral it
     # returns with, so a second generation is never asked for.
     assert len(planner_llm.captured_requests) == 1
@@ -3763,8 +4098,8 @@ async def test_a_deadline_hit_on_a_referral_with_candidates_asks_the_user_and_th
         if part.function_call is not None and part.function_call.id == interrupt_id
     ]
     assert {c["spec_id"] for c in ask_call.args["candidates"]} == {SPEC, SPEC_B}
-    assert ask_call.args["recommended_spec_id"] == SPEC_B
-    assert "gdp_gtm" in ask_call.args["message"]
+    assert "recommended_spec_id" not in ask_call.args
+    assert "gdp_gtm" not in ask_call.args["message"]
 
     resume_message = types.Content(
         role="user",
@@ -3875,7 +4210,7 @@ async def test_a_deadline_hit_after_submit_plan_succeeds_still_returns_the_submi
 async def test_a_sampled_turn_does_not_refuse_at_a_budget_the_unsampled_one_would(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """A sampled turn runs both agents at the model's own default thinking
+    """A sampled turn runs the planner at the model's own default thinking
     level, deliberately slower than the ordinary `LOW` turn
     `planner_entry_deadline_seconds` is sized for -- so a sampled entry gets
     `planner_entry_deadline_seconds_sampled` instead, and a check at a wall

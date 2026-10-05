@@ -65,7 +65,12 @@ from harness.settings import (
     Settings,
 )
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import StudioStore, deterministic_ids, make_recall
+from harness.studio_state import (
+    StudioStore,
+    deterministic_ids,
+    make_recall,
+    make_recall_part,
+)
 from harness.studio_translate import _OrchestratorTranslator, _Translator
 from harness.wiring import build_generative_nodes, handing_back_planner_failures
 
@@ -379,7 +384,7 @@ def create_app(
     # build their genai clients lazily, so construction here stays keyless --
     # a missing GOOGLE_API_KEY fails the first turn, visibly, as a
     # stream-fatal error frame. The planner node is `planner.agent`'s planner
-    # with `translator.agent`'s translator attached, behind
+    # with `translator.tool`'s `translate` attached, behind
     # `harness.planner_seam.PlannerSeam`.
     # Scripted mode allows every origin: a locally served test page is the
     # mode's whole point. A live server allows exactly the origins listed in
@@ -473,6 +478,7 @@ def create_app(
                         executor=recorder,
                         surface=surface_recorder,
                         dfo_faq_surface=tool_surface,
+                        recall_part=make_recall_part(store),
                     ),
                 )
             return create_root_workflow(

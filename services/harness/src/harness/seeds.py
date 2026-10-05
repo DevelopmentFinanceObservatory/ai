@@ -237,6 +237,7 @@ _SEED_FACT_KEYS = (
     "wide",
     "stat_var_shape_kind",
     "stat_var_item_count",
+    "stat_var_member_count_exact",
     "entity_roles",
     "stat_var_truncated",
     "open_entity_axes",
@@ -373,7 +374,7 @@ def read_answer(taken: TakenSeed, part: Mapping[str, Any]) -> ReadSeed:
     described = len(json.dumps(compact_source(source.source)))
     if described > MAX_SEED_SOURCE_CHARS:
         raise ValueError(
-            f"its sentence, StatVars and entities take {described:,} characters to "
+            f"its sentence and entities take {described:,} characters to "
             f"describe, past the cap of {MAX_SEED_SOURCE_CHARS:,}"
         )
     # As `planner.plan.save_seeded_sources` writes it.
@@ -493,7 +494,7 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
         surface,
         spec_id=spec.spec_id,
         identity=spec.definition.identity,
-        stat_vars=spec.stat_vars,
+        stat_vars=spec.resubmitted_stat_vars,
     )
 
 
@@ -530,14 +531,15 @@ def dropped_seed_shape(*, step_id: str | None, seed: str, failure: ToolFailure) 
     `RediscoveryNeeded` names its source, so `harness.planner_seam` tells the
     planner not to propose it again: the seed has left the turn's seeded
     sources (`_drop_seeds_from_turn`), so nothing maps it back to a seed to
-    keep pinned. The message says why and what to plan instead, and that the
+    keep pinned. The message counts the StatVars that left the dataset and
+    names none. It says why and what to plan instead, and that the
     part of the question the seed answered is left out, which the planner's
     brief would otherwise have it plan as a part no seed covers.
     `propose_plan` and `discover_source` refuse the dataset for the rest of
     the turn (`planner.plan.dropped_seeds`).
     """
     named = failure.fix.get(_NOT_MEMBERS_FIX_KEY)
-    not_members = ", ".join(str(dcid) for dcid in named) if isinstance(named, list) else ""
+    counted = f" ({len(named):,} of them)" if isinstance(named, list) and named else ""
     return {
         "kind": "seed_dropped",
         "step_id": step_id,
@@ -545,8 +547,8 @@ def dropped_seed_shape(*, step_id: str | None, seed: str, failure: ToolFailure) 
         "refusal": {
             "code": failure.code,
             "message": (
-                f"the StatVars Search elected for the seeded dataset {seed!r} are no longer "
-                f"members of its dataset ({not_members}). The user is told that this plan "
+                f"StatVars Search elected for the seeded dataset {seed!r} are no longer "
+                f"members of its dataset{counted}. The user is told that this plan "
                 "leaves it out and to search for it again, so it is dropped from this turn. "
                 "Do not plan that dataset again in this turn: do not pin it, and do not add "
                 "an unpinned requirement for the part of the question it answered, since a "

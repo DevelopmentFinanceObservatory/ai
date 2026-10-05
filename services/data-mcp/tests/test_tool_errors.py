@@ -367,9 +367,9 @@ async def test_over_ceiling_reads_ceiling_kind_off_the_wire_extension() -> None:
     )
 
 
-async def test_a_candidate_window_ceiling_asks_for_the_elected_stat_vars() -> None:
-    """A candidate window is a family too broad to enumerate unaided, so the message
-    asks for the StatVars the search digest listed before the end-user remedy."""
+async def test_a_candidate_window_ceiling_states_its_remedy_and_asks_for_no_stat_vars() -> None:
+    """A candidate window is a family too broad to enumerate unaided. The search
+    digest names no StatVar, so the message asks for none and states the remedy."""
     refusal = await _refusal_from(
         422,
         code="over_ceiling",
@@ -389,9 +389,7 @@ async def test_a_candidate_window_ceiling_asks_for_the_elected_stat_vars() -> No
     assert (refusal.fix["count"], refusal.fix["cap"]) == (500, 500)
     assert "too broad a family of series" in refusal.fix["remedy"]
     assert "has more member series than one request can serve" not in refusal.message
-    assert (
-        "pass the StatVars the search digest listed for this spec_id as resolved_stat_var_dcids"
-    ) in refusal.message
+    assert "resolved_stat_var_dcids" not in refusal.message
     assert refusal.fix["remedy"] in refusal.message
 
 
@@ -858,7 +856,7 @@ async def test_unmapped_non_retryable_code_does_not_claim_a_numeric_wait() -> No
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 
-async def test_member_not_resolvable_on_a_posted_selection_names_the_outsiders() -> None:
+async def test_member_not_resolvable_on_a_posted_selection_lists_the_outsiders_in_fix() -> None:
     refusal = await _refusal_from(
         422,
         code="member_not_resolvable",
@@ -879,13 +877,12 @@ async def test_member_not_resolvable_on_a_posted_selection_names_the_outsiders()
     ]
     assert "Search for the question again" in refusal.fix["remedy"]
     assert refusal.fix["remedy"] in refusal.message
-    assert (
-        "resolved_stat_var_dcids names StatVars that are no longer members of this "
-        "dataset: Count_Household, Count_Death."
-    ) in refusal.message
+    assert "2 StatVars" in refusal.message
+    assert "Count_Household" not in refusal.message
+    assert "Count_Death" not in refusal.message
 
 
-async def test_member_not_resolvable_from_the_graph_names_the_unresolved_members() -> None:
+async def test_member_not_resolvable_from_the_graph_lists_the_unresolved_members_in_fix() -> None:
     """Inconsistent arcs for a walked candidate: no issue points into the selection."""
     refusal = await _refusal_from(
         422,
@@ -896,7 +893,8 @@ async def test_member_not_resolvable_from_the_graph_names_the_unresolved_members
 
     assert refusal.code == ToolErrorCode.SPEC_NOT_EXPORTABLE
     assert refusal.fix == {"members": ["dcid:Count_Person_Odd"]}
-    assert "the graph could not resolve its StatVars (dcid:Count_Person_Odd)" in refusal.message
+    assert "the graph could not resolve its StatVars (1 StatVar)" in refusal.message
+    assert "Count_Person_Odd" not in refusal.message
 
 
 async def test_member_not_resolvable_naming_the_spec_id_names_no_stat_var() -> None:
@@ -1437,6 +1435,10 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             {"detail", "ceiling_kind"},
         ),
         (ToolRefusal.capability_unavailable(detail="not live"), {"detail"}),
+        (
+            ToolRefusal.capability_unavailable(detail="not live", option="breakdown"),
+            {"detail", "option"},
+        ),
         (
             ToolRefusal.upstream_version_changed(capability_version="v2"),
             {"capability_version"},

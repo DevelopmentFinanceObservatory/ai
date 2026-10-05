@@ -29,6 +29,7 @@ from digest_corpus import (
     JOIN_CASES,
     RANK_CASES,
     SHARE_OF_CASES,
+    SUM_OF_CASES,
 )
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
@@ -42,6 +43,7 @@ _ALL_CASES = (
     + tuple(COMPARE_CASES)
     + tuple(RANK_CASES)
     + tuple(SHARE_OF_CASES)
+    + tuple(SUM_OF_CASES)
     + tuple(JOIN_CASES)
     + tuple(FILTER_CASES)
 )

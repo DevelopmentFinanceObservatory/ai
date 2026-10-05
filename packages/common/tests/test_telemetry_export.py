@@ -575,7 +575,8 @@ def test_the_langfuse_export_carries_the_sdks_credentials_and_headers(
     fake_langfuse: FakeLangfuse,
 ) -> None:
     """`init_telemetry` hands the SDK its own exporter, so it sets the
-    credentials and SDK headers the SDK's default exporter would."""
+    credentials and SDK headers the SDK's default exporter would, and the
+    ingestion-version header the SDK asks of a custom exporter."""
     init_telemetry(service_name="harness")
     _join_auth_check_thread()
 
@@ -588,6 +589,7 @@ def test_the_langfuse_export_carries_the_sdks_credentials_and_headers(
     assert headers["x-langfuse-public-key"] == "pk-lf-test"
     assert headers["x-langfuse-sdk-name"] == "python"
     assert headers["x-langfuse-sdk-version"] == langfuse_version
+    assert headers["x-langfuse-ingestion-version"] == "4"
 
 
 def _sdk_default_exporter() -> OTLPSpanExporter:
@@ -617,8 +619,9 @@ def _sdk_default_exporter() -> OTLPSpanExporter:
 def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
     fake_langfuse: FakeLangfuse, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
 ) -> None:
-    """`_langfuse_exporter` copies the SDK's defaults, so an SDK upgrade that
-    changes the endpoint, headers or timeout it would use fails here."""
+    """`_langfuse_exporter` copies the SDK's defaults and adds the v4
+    ingestion header, so an SDK upgrade that changes the endpoint, headers or
+    timeout it would use fails here."""
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
@@ -629,7 +632,7 @@ def test_the_langfuse_exporter_matches_the_one_the_sdk_builds_by_default(
     inner = ours._exporter
     assert isinstance(inner, OTLPSpanExporter)
     assert inner._endpoint == sdk._endpoint
-    assert inner._headers == sdk._headers
+    assert inner._headers == {**sdk._headers, "x-langfuse-ingestion-version": "4"}
     assert inner._timeout == sdk._timeout
 
 
@@ -774,6 +777,7 @@ def test_a_turn_with_a_session_id_exports_it_on_the_turn_and_on_spans_a_library_
     assert {span.name for span in spans} == {"turn", "call_llm"}
     for span in spans:
         assert _attribute(span, "session.id") == "conv-1", span.name
+        assert _attribute(span, "langfuse.trace.name") == "turn", span.name
 
 
 def test_a_turn_without_a_session_id_exports_no_langfuse_session(
@@ -792,6 +796,63 @@ def test_a_turn_without_a_session_id_exports_no_langfuse_session(
     assert {span.name for span in spans} == {"turn", "call_llm"}
     for span in spans:
         assert _attribute(span, "session.id") is None, span.name
+        assert _attribute(span, "langfuse.trace.name") == "turn", span.name
+
+
+def test_a_turn_exports_its_request_and_response_on_the_root_observation_alone(
+    fake_langfuse: FakeLangfuse,
+) -> None:
+    """The turn's request and response are the trace's overall input and
+    output, so they go on `turn`, the root observation, and on no child."""
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    handle = start_turn_span("tr_export0018", session_id="conv-1")
+    with use_turn_span(handle):
+        _adk_child_span("call_llm")
+    end_turn_span(handle, request="life expectancy in Kenya", response="It rose to 66.")
+    get_client().flush()
+
+    io = {
+        span.name: (
+            _attribute(span, "langfuse.observation.input"),
+            _attribute(span, "langfuse.observation.output"),
+        )
+        for span in fake_langfuse.spans()
+    }
+    assert io == {
+        "turn": ("life expectancy in Kenya", "It rose to 66."),
+        "call_llm": (None, None),
+    }
+
+
+@pytest.mark.parametrize(
+    ("error", "level", "status_message"),
+    [(None, None, None), ("cancelled", "ERROR", "cancelled")],
+    ids=["clean", "error"],
+)
+def test_a_turn_closed_with_an_error_exports_its_root_at_level_error(
+    fake_langfuse: FakeLangfuse, error: str | None, level: str | None, status_message: str | None
+) -> None:
+    """A turn ended with an error code marks the root observation `ERROR`,
+    naming the code; a clean turn leaves the root at the default level."""
+    init_telemetry(service_name="harness")
+    _join_auth_check_thread()
+
+    handle = start_turn_span("tr_export0019")
+    with use_turn_span(handle):
+        _child_span("call_llm")
+    end_turn_span(handle, request="q", response="a", error=error)
+    get_client().flush()
+
+    marks = {
+        span.name: (
+            _attribute(span, "langfuse.observation.level"),
+            _attribute(span, "langfuse.observation.status_message"),
+        )
+        for span in fake_langfuse.spans()
+    }
+    assert marks == {"turn": (level, status_message), "call_llm": (None, None)}
 
 
 # --- the session across an MCP call ------------------------------------------
@@ -844,8 +905,15 @@ def test_use_call_session_exports_the_session_on_the_current_span_and_its_childr
         _child_span("after_call")
     get_client().flush()
 
-    sessions = {span.name: _attribute(span, "session.id") for span in fake_langfuse.spans()}
-    assert sessions == {"server": "conv-1", "tool_body": "conv-1", "after_call": None}
+    marks = {
+        span.name: (_attribute(span, "session.id"), _attribute(span, "langfuse.trace.name"))
+        for span in fake_langfuse.spans()
+    }
+    assert marks == {
+        "server": ("conv-1", "turn"),
+        "tool_body": ("conv-1", "turn"),
+        "after_call": (None, None),
+    }
 
 
 @pytest.mark.parametrize("session_id", [None, ""])
@@ -865,3 +933,4 @@ def test_use_call_session_without_a_session_leaves_spans_unmarked(
     spans = fake_langfuse.spans()
     assert {span.name for span in spans} == {"server", "tool_body"}
     assert all(_attribute(span, "session.id") is None for span in spans)
+    assert all(_attribute(span, "langfuse.trace.name") is None for span in spans)

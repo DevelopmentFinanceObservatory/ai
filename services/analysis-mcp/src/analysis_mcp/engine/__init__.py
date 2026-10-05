@@ -5,8 +5,8 @@ per-distinct-value arithmetic in Python. No numpy, no pandas, no SQL.
 (narrowing a frame to the caller's scope, resolving unit/facet
 heterogeneity, recording exclusions). `analysis_mcp.engine.columnar` holds
 the Arrow kernels the verbs share (grouping, masks, output columns and
-frames). `aggregate`, `compare`, `filter`, `growth`, `join`, `rank`, and
-`share_of` are the seven verb engines built on top of them.
+frames). `aggregate`, `compare`, `filter`, `growth`, `join`, `rank`,
+`share_of`, and `sum_of` are the eight verb engines built on top of them.
 """
 
 from __future__ import annotations

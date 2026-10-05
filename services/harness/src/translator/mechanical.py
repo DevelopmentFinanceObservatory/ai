@@ -24,30 +24,31 @@ those fields already name the *requirement* they read
 `JoinRequirement.left_id`/`right_id`), which equals the upstream
 operation's id under this scheme.
 
-One judgement survives, because nothing in the plan or the discovery log
-settles it: which of several candidate sources best answers a requirement.
-`run_translate` stops there and answers `needs_decision`, carrying the
-candidates, their own descriptions, and the decisions citing the
-requirement, so the translator's model can rank them. Its answer -- a
-`choice` and a `rationale` -- rides into the `source_ambiguous` referral as
-a recommendation for the person who settles the choice to read, not a
-pick the translator makes on its own: `discover_source`'s own answer
-already forbids that, and nothing here overrides it.
+Several candidate sources for one requirement close the call on a
+`source_ambiguous` referral carrying the candidates as the discovery log
+recorded them. The planner records the choice as a decision or puts it to
+the user, and `discover_source`'s own answer forbids this loop from picking
+one.
 
-A requirement of a kind no operation builder covers, or a compile issue
-`_compile_failure_action` cannot resolve into a complete `return_to_planner`
-call, refers back or escalates rather than raising: a plan shape this loop
-has not been taught refuses in a way the planner can act on.
+Every stop is a typed referral, whose `outcome` is one of the closed
+set `translator.referral.OUTCOME_OF` names: a requirement of a kind no
+operation builder covers is unsupported, every compile issue resolves
+through `translator.tool.issue_resolution`, a service that did not answer
+is transient, and a shape this loop was not taught is an internal failure.
+A translation that fails with the same issues it failed with before in the
+session (`_failure_fingerprint`) is referred again marked `repeated`, so the
+planner learns the plan did not change where it failed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, cast
 
-from compiler.surface import ToolSurface
+import rfc8785
 from google.adk.tools.tool_context import ToolContext
 from planner.operations import (
     AggregateOperation,
@@ -60,6 +61,7 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
 from planner.plan import (
@@ -73,26 +75,18 @@ from planner.plan import (
     Plan,
     RankRequirement,
     ShareOfRequirement,
+    SumOfRequirement,
     inputs_of,
-    plan_revision,
 )
-from planner.records import Identifier, SpecId, StrictModel
-from planner.tool_results import Action, Outcome, ProblemCode, problem
-from planner.workflow import SelectedSource
-from pydantic import JsonValue
+from planner.tool_results import Action, Outcome, ProblemCode
 
 from translator.discovery import (
-    DescribedPair,
-    apply_definitions,
-    compact_source,
     current_draft,
-    discovery_lock,
-    fetch_definitions,
+    dataset_keys,
     load_log,
-    requirement_revision,
     settled_sources,
 )
-from translator.referral import ReferralKind, SourceRecommendation
+from translator.referral import Referral, ReferralKind, clear_referral, load_referral
 
 # How many propose-then-fix rounds this loop tries before it gives up and
 # escalates. `translator.discovery.DISCOVERY_CALL_BUDGET` bounds how many
@@ -114,62 +108,22 @@ ReturnToPlanner = Callable[..., dict[str, object]]
 
 @dataclass(frozen=True)
 class TranslatorCore:
-    """The translator's three tool functions, plus the surface they read.
+    """The translator's three core functions.
 
-    Built once by `translator.agent` and closed over by the `translate`
-    tool; `surface` is carried alongside the functions because candidate
-    enrichment (`_enrich_candidates`) calls `fetch_definitions` directly,
-    the same describe fetch `propose_operations` runs for a genuinely
-    `definite` source.
+    Built once by `translator.tool` and closed over by the `translate`
+    tool.
     """
 
     discover_source: DiscoverSource
     propose_operations: ProposeOperations
     return_to_planner: ReturnToPlanner
-    surface: ToolSurface
 
 
-# The session-state slot holding the judgement `translate` is waiting on an
-# answer for, if any. One key, since a translator turn asks at most one
-# question before it either settles or refers -- `_settle_discovery` and
-# `_propose_until_settled` both stop the loop the moment they raise one, and
-# `_resolve_dataset_sources` settles its own several concurrent answers one
-# at a time precisely so that only the one it stops on ever writes here.
-_PENDING_JUDGEMENT_STATE_KEY = "translator:pending_judgement"
-
-Judgement = Literal["candidate_ranking", "unmet_capability"]
-
-
-class _PendingJudgement(StrictModel):
-    """What `translate` is waiting on an answer for, and enough to check one.
-
-    `revision` is the plan's `plan_revision` at the moment this was asked:
-    an amendment between this call and the answer changes the plan the
-    judgement was about, so a stale answer is refused rather than applied
-    to a plan it never saw. `requirement_id` and `candidate_spec_ids` are
-    set only for `candidate_ranking`; `unmet_capability` needs neither, since
-    `_compile_failure_action`'s own `no_operation_covers` action names no
-    requirement, only the decision the model still has to pick.
-    """
-
-    judgement: Judgement
-    revision: str
-    reason: str
-    requirement_id: Identifier | None = None
-    candidate_spec_ids: tuple[SpecId, ...] = ()
-
-
-def _save_pending(state: Any, pending: _PendingJudgement) -> None:
-    state[_PENDING_JUDGEMENT_STATE_KEY] = pending.model_dump_json()
-
-
-def _load_pending(state: Any) -> _PendingJudgement | None:
-    raw = state.get(_PENDING_JUDGEMENT_STATE_KEY)
-    return _PendingJudgement.model_validate_json(raw) if raw else None
-
-
-def _clear_pending(state: Any) -> None:
-    state[_PENDING_JUDGEMENT_STATE_KEY] = None
+# The session-state slot holding `_failure_fingerprint` of every translation
+# that failed to compile with no fix this loop applies itself, in the
+# planner's current entry. `harness.planner_seam` clears it when an entry
+# starts (`clear_compile_failures`), so an ask-the-user resume keeps it.
+COMPILE_FAILURES_STATE_KEY = "translator:compile_failures"
 
 
 # --- build_translation: a pure function of the plan, never a fresh choice --
@@ -257,6 +211,16 @@ def _compare(requirement: ComparisonRequirement, discovered: Mapping[str, str]) 
     )
 
 
+def _sum_of(requirement: SumOfRequirement, discovered: Mapping[str, str]) -> Operation:
+    del discovered
+    return SumOfOperation(
+        id=requirement.id,
+        requirement_id=requirement.id,
+        left=_side(requirement.left.input_id, requirement.left.entity),
+        right=_side(requirement.right.input_id, requirement.right.entity),
+    )
+
+
 def _rank(requirement: RankRequirement, discovered: Mapping[str, str]) -> Operation:
     del discovered
     return RankOperation(
@@ -317,6 +281,7 @@ _BUILDERS: dict[type, Callable[[Any, Mapping[str, str]], Operation]] = {
     AggregateRequirement: _aggregate,
     GrowthRequirement: _growth,
     ComparisonRequirement: _compare,
+    SumOfRequirement: _sum_of,
     RankRequirement: _rank,
     ShareOfRequirement: _share_of,
     JoinRequirement: _join,
@@ -344,7 +309,7 @@ def _unsupported_requirement(plan: Plan) -> EvidenceRequirement | None:
     return None
 
 
-# --- discovery: every unsettled requirement at once, stopping at the first referral or judgement --
+# --- discovery: every unsettled requirement at once, stopping at the first referral --
 
 
 def _action_of(payload: Mapping[str, object]) -> Action | None:
@@ -353,12 +318,10 @@ def _action_of(payload: Mapping[str, object]) -> Action | None:
 
 
 # `discover_source`'s own problem codes for a data-service failure rather
-# than a data answer, answered with no `action`: without this list
-# `_settle_discovery` would treat either as a shape it cannot resolve and
-# hand back an unanswerable `needs_decision` -- see `_settle_discovery`'s
-# final branch, which turns either into a
-# `ReferralKind.DISCOVERY_UNAVAILABLE` referral instead. A `SEARCH_REFUSED`
-# that carries an `action`, Search's final answer for a seed's copy over a
+# than a data answer, answered with no `action`: `_settle_discovery` turns
+# either into a transient `ReferralKind.DISCOVERY_UNAVAILABLE` referral
+# rather than the internal failure a shape it cannot resolve becomes. A
+# `SEARCH_REFUSED` that carries an `action`, Search's final answer for a seed's copy over a
 # period (`translator.discovery._seeded_source`), follows its action.
 _NAMED_FAILURE_CODES = frozenset(
     {ProblemCode.SURFACE_UNAVAILABLE.value, ProblemCode.SEARCH_REFUSED.value}
@@ -383,99 +346,6 @@ def _spec_id_of(answer: Mapping[str, object]) -> str | None:
     return spec_ids[0] if len(spec_ids) == 1 else None
 
 
-async def _enrich_candidates(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    revision: str,
-    requirement_id: str,
-    key: str,
-    candidates: tuple[SelectedSource, ...],
-) -> tuple[SelectedSource, ...]:
-    """Fetch each candidate's own `describe` definition, memoized in the log.
-
-    `fetch_definitions` enriches one source per requirement id per call, so
-    several candidates for the same requirement are enriched one call each
-    -- a plan's single-digit candidate count costs a matching handful of
-    `describe` round trips, not a model turn either way. Every round trip
-    runs with `discovery_lock` released: only the log read before them and
-    the write after them need serialising, not the network wait between.
-    """
-    async with discovery_lock(tool_context.state):
-        log = load_log(tool_context.state)
-
-    pairs: list[DescribedPair] = []
-    for candidate in candidates:
-        pairs.extend(
-            await fetch_definitions(
-                core.surface,
-                log,
-                revision=revision,
-                requirement_keys={requirement_id: key},
-                sources={requirement_id: candidate},
-            )
-        )
-
-    log = await apply_definitions(tool_context.state, pairs)
-    enriched = log.sources.get(requirement_id, {})
-    return tuple(enriched.get(c.spec_id, c) for c in candidates)
-
-
-async def _begin_candidate_ranking(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    plan: Plan,
-    requirement_id: str,
-    reason: str,
-) -> dict[str, object]:
-    """Fetch what ranking needs, persist the pending judgement, and answer `needs_decision`.
-
-    The translator keeps exactly one judgement: which candidate best
-    answers `requirement_id`, given the requirement itself and the
-    decisions citing it. Neither is decided here -- picking a candidate is
-    the one thing `discover_source`'s own answer already forbids this loop
-    from doing on its own.
-    """
-    requirement = plan.requirement(requirement_id)
-    assert isinstance(requirement, DatasetRequirement)  # only a dataset requirement is discovered
-    key = requirement_revision(requirement)
-    revision = plan_revision(plan)
-    log = load_log(tool_context.state)
-    candidates = log.candidates_for(key, requirement_id)
-    candidates = await _enrich_candidates(
-        core,
-        tool_context,
-        revision=revision,
-        requirement_id=requirement_id,
-        key=key,
-        candidates=candidates,
-    )
-    _save_pending(
-        tool_context.state,
-        _PendingJudgement(
-            judgement="candidate_ranking",
-            revision=revision,
-            reason=reason,
-            requirement_id=requirement_id,
-            candidate_spec_ids=tuple(c.spec_id for c in candidates),
-        ),
-    )
-    decisions = [
-        decision.model_dump(mode="json")
-        for decision in plan.decisions
-        if decision.slot in requirement.decision_ids
-    ]
-    return {
-        "outcome": "needs_decision",
-        "judgement": "candidate_ranking",
-        "requirement_id": requirement_id,
-        "reason": reason,
-        "candidates": [compact_source(candidate) for candidate in candidates],
-        "decisions": decisions,
-    }
-
-
 @dataclass
 class _Stopped:
     """A `_settle_discovery` call's own reason to stop the whole loop here."""
@@ -483,20 +353,13 @@ class _Stopped:
     result: dict[str, object]
 
 
-def _unmet_capability(reason: str, **detail: object) -> dict[str, object]:
-    """The generic `needs_decision` shape for a step this loop cannot resolve on its own.
-
-    Only ever a real, resumable judgement when the caller has also saved a
-    `_PendingJudgement` for it (`_apply_compile_action`'s `action.needs`
-    branch is the one case that does, mirroring `_compile_failure_action`'s
-    own `NO_CAPABILITY` branch, which always needed the model's `decision_id`).
-    Every other caller reports a shape this loop was not taught a fix for --
-    an answer no `translate` argument is defined to carry -- so it saves
-    nothing to resume: a caller that answers one anyway is refused as having
-    no pending judgement, honestly, rather than accepting an answer that
-    would apply to nothing.
-    """
-    return {"outcome": "needs_decision", "judgement": "unmet_capability", "reason": reason} | detail
+def _internal_failure(
+    core: TranslatorCore, tool_context: ToolContext, reason: str
+) -> dict[str, object]:
+    """Refer a step this loop was not taught to resolve as an internal failure."""
+    return core.return_to_planner(
+        tool_context=tool_context, kind=ReferralKind.INTERNAL_FAILURE, reason=reason
+    )
 
 
 async def _discover_answer(
@@ -518,29 +381,26 @@ async def _discover_answer(
     return await core.discover_source(**arguments, tool_context=tool_context)
 
 
-async def _settle_discovery(
+def _settle_discovery(
     core: TranslatorCore,
     tool_context: ToolContext,
     *,
-    plan: Plan,
     requirement_id: str,
     answer: dict[str, object],
 ) -> str | _Stopped:
     """Settle one `discover_source` answer, following its action or naming a stop.
 
     Returns the discovered `spec_id` to continue with, or a `_Stopped`
-    naming the result the whole `translate` call ends on: a referral this
-    loop raised itself for a determinate, non-ambiguous action; a
-    `needs_decision` for a `source_ambiguous` action, which pauses for the
-    one judgement the translator keeps; a `discovery_unavailable` referral,
+    naming the result the whole `translate` call ends on: the referral a
+    complete `return_to_planner` action names, a `source_ambiguous` one
+    included; a `discovery_unavailable` referral,
     raised here rather than by an `action`, when a data-service failure is
-    what stopped it (`_NAMED_FAILURE_CODES`); or a `needs_decision` for
+    what stopped it (`_NAMED_FAILURE_CODES`); or an internal failure for
     anything else the answer does not resolve to a single source with no
     action attached.
 
-    Writes `translate`'s single-slot state -- the referral or the pending
-    judgement -- when it stops, so a caller settling more than one
-    requirement's answer must do it one call at a time, checking each
+    Writes `translate`'s single-slot referral state when it stops, so a
+    caller settling more than one requirement's answer must do it one call at a time, checking each
     result for a `_Stopped` before settling the next: two settlements in
     flight together would let the later one's write clobber the earlier
     one's, even though both `discover_source` calls that produced their
@@ -548,26 +408,18 @@ async def _settle_discovery(
     """
     action = _action_of(answer)
     if action is not None:
-        reason = str((action.arguments or {}).get("reason", ""))
         if action.call == "return_to_planner" and not action.needs:
-            kind = (action.arguments or {}).get("kind")
-            if kind == ReferralKind.SOURCE_AMBIGUOUS.value:
-                return _Stopped(
-                    await _begin_candidate_ranking(
-                        core, tool_context, plan=plan, requirement_id=requirement_id, reason=reason
-                    )
-                )
             referral = core.return_to_planner(tool_context=tool_context, **(action.arguments or {}))
             return _Stopped(referral)
         # An incomplete action (`needs` set), or one naming a call this loop
         # does not know how to drive itself: `discover_source` names no such
-        # shape today, but escalating rather than guessing keeps this loop
-        # from mis-driving a future one.
+        # shape, and a future one is a fault until this loop is taught it.
         return _Stopped(
-            _unmet_capability(
-                reason or "discover_source named an action this loop cannot complete",
-                requirement_id=requirement_id,
-                action=action.model_dump(mode="json"),
+            _internal_failure(
+                core,
+                tool_context,
+                f"discover_source named an action this loop cannot complete for "
+                f"{requirement_id!r}: {action.model_dump_json()}",
             )
         )
     spec_id = _spec_id_of(answer)
@@ -578,13 +430,7 @@ async def _settle_discovery(
         # outright -- a fact about the data service right now, not about
         # the requirement's own content, so `requirement_unmeetable` would
         # mislabel it and send the planner off rewriting a requirement that
-        # was never the problem. Raised as a referral here, on the first
-        # occurrence, rather than folded into `_unmet_capability`'s
-        # `needs_decision`, which the translator's own `output_schema`
-        # (`Compiled | Referral`, `translator.agent.create_translator_agent`)
-        # gives the model no legal way to close a turn on: every branch in
-        # this loop that stops without compiling produces a schema-conforming
-        # `Referral` for the model to restate verbatim, this one included.
+        # was never the problem.
         reason = str(answer.get("message") or "discover_source could not reach the data service")
         return _Stopped(
             core.return_to_planner(
@@ -595,10 +441,11 @@ async def _settle_discovery(
             )
         )
     return _Stopped(
-        _unmet_capability(
-            "discover_source answered with no action and no single source to use",
-            requirement_id=requirement_id,
-            answer=answer,
+        _internal_failure(
+            core,
+            tool_context,
+            f"discover_source answered {requirement_id!r} with no action and no single "
+            f"source to use: {answer.get('code') or answer.get('outcome')}",
         )
     )
 
@@ -607,21 +454,18 @@ async def _discover_one(
     core: TranslatorCore,
     tool_context: ToolContext,
     *,
-    plan: Plan,
     arguments: dict[str, object],
 ) -> str | _Stopped:
     """Call `discover_source` once and settle its answer immediately.
 
-    For `_apply_compile_action`'s discover-again retry, where one
+    For `_propose_until_settled`'s discover-again retry, where one
     requirement's discovery is in flight at a time, so calling and settling
     together is safe. `_resolve_dataset_sources` keeps the two apart for its
     own concurrent calls.
     """
     requirement_id = cast(str, arguments["requirement_id"])
     answer = await _discover_answer(core, tool_context, arguments=arguments)
-    return await _settle_discovery(
-        core, tool_context, plan=plan, requirement_id=requirement_id, answer=answer
-    )
+    return _settle_discovery(core, tool_context, requirement_id=requirement_id, answer=answer)
 
 
 async def _resolve_dataset_sources(
@@ -647,35 +491,28 @@ async def _resolve_dataset_sources(
     is already safe to run alongside its siblings -- `discovery_lock` guards
     only the budget check, and the log records each requirement under its
     own key. Settling what each call answered (`_settle_discovery`) is not:
-    it is what writes the referral or the pending judgement to `translate`'s
+    it is what writes the referral to `translate`'s
     single-slot state, so the answers are walked back in requirement order
     and settled one at a time -- the first genuine exception is re-raised,
     the first settlement that yields a `_Stopped` is returned at once, and
     no later answer is settled. Every sibling's `discover_source` call has
     already run and written its own record and sources to the log by the
-    time this returns, so a re-entry after the returned referral or
-    judgement still finds the untouched requirements `selectable` and
-    spends no fresh call on them.
+    time this returns, so a re-entry after the returned referral still finds
+    the untouched requirements `selectable` and spends no fresh call on them.
     """
     dataset_requirements = [
         requirement
         for requirement in plan.evidence_requirements
         if isinstance(requirement, DatasetRequirement)
     ]
-    requirement_keys = {
-        requirement.id: requirement_revision(requirement) for requirement in dataset_requirements
-    }
-    pinned = {
-        requirement.id: requirement.source_spec_id
-        for requirement in dataset_requirements
-        if requirement.source_spec_id is not None
-    }
-    across = {
-        requirement.id for requirement in dataset_requirements if requirement.across is not None
-    }
+    keys = dataset_keys(plan)
     log = load_log(tool_context.state)
     settled = settled_sources(
-        tool_context.state, log, requirement_keys=requirement_keys, pinned=pinned, across=across
+        tool_context.state,
+        log,
+        requirement_keys=keys.requirement_keys,
+        pinned=keys.pinned,
+        across=keys.across,
     )
 
     discovered: dict[str, str] = {}
@@ -697,9 +534,7 @@ async def _resolve_dataset_sources(
     for requirement, answer in zip(unsettled, answers, strict=True):
         if isinstance(answer, BaseException):
             raise answer
-        step = await _settle_discovery(
-            core, tool_context, plan=plan, requirement_id=requirement.id, answer=answer
-        )
+        step = _settle_discovery(core, tool_context, requirement_id=requirement.id, answer=answer)
         if isinstance(step, _Stopped):
             return step
         discovered[requirement.id] = step
@@ -709,62 +544,66 @@ async def _resolve_dataset_sources(
 # --- propose-then-fix, following `_compile_failure_action` up to MAX_ROUNDS --
 
 
-async def _apply_compile_action(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    plan: Plan,
-    action: Action,
-    result: dict[str, object],
-) -> dict[str, object] | None:
-    """Follow `action` past a failed `propose_operations`, or `None` to try again this round.
+def _failure_fingerprint(translation: Translation, result: Mapping[str, object]) -> str:
+    """The canonical hash of `translation` plus the sorted codes it failed to compile with."""
+    detail = result.get("detail")
+    issues = detail.get("issues") if isinstance(detail, dict) else None
+    codes = sorted(
+        str(issue.get("code"))
+        for issue in (issues if isinstance(issues, list) else ())
+        if isinstance(issue, dict)
+    )
+    digest = hashlib.sha256(rfc8785.dumps(translation.model_dump(mode="json"))).hexdigest()
+    return f"{digest}:{','.join(codes)}"
 
-    `None` means `action` pointed back at `discover_source` and it resolved
-    a new source to retry with -- the only case `_propose_until_settled`
-    itself has to act on further, since its retry state (`discovered`) is
-    not this function's to hold.
+
+def clear_compile_failures(state: Any) -> None:
+    """Forget the compile-failure fingerprints, as a new planner entry starts."""
+    state[COMPILE_FAILURES_STATE_KEY] = []
+
+
+def _seen_before(state: Any, fingerprint: str) -> bool:
+    """Whether `fingerprint` failed before in this planner entry, recording it if not."""
+    seen = list(state.get(COMPILE_FAILURES_STATE_KEY) or ())
+    if fingerprint in seen:
+        return True
+    state[COMPILE_FAILURES_STATE_KEY] = [*seen, fingerprint]
+    return False
+
+
+def _uncompiled(
+    core: TranslatorCore, tool_context: ToolContext, result: Mapping[str, object]
+) -> dict[str, object]:
+    """Refer a `propose_operations` answer that is not a compile failure.
+
+    A tool surface that could not be listed is transient. Anything else --
+    a translation `build_translation` built in a shape `propose_operations`
+    refuses, or a plan that stopped being a translatable draft mid-run -- is
+    a fault in this loop.
     """
-    if action.needs:
-        # The only `needs_decision` case with an answer this loop can apply
-        # on its own once given: `_compile_failure_action`'s `NO_CAPABILITY`
-        # branch names `needs=("decision_id",)`, so this is the pending
-        # judgement `_settle_unmet_capability` resumes. The reason recorded
-        # is the action's own, not the issue's raw `result`, since that is
-        # what `return_to_planner` needs once the model answers.
-        reason = str((action.arguments or {}).get("reason", "propose_operations named an issue"))
-        _save_pending(
-            tool_context.state,
-            _PendingJudgement(
-                judgement="unmet_capability", revision=plan_revision(plan), reason=reason
-            ),
+    message = str(result.get("message") or "")
+    if result.get("code") == ProblemCode.SURFACE_UNAVAILABLE.value:
+        return core.return_to_planner(
+            tool_context=tool_context,
+            kind=ReferralKind.SURFACE_UNAVAILABLE,
+            reason=message or "the tool surface could not be listed",
         )
-        return _unmet_capability(
-            f"propose_operations named an action needing {list(action.needs)}",
-            action=action.model_dump(mode="json"),
-            problem=result,
-            decisions=[decision.model_dump(mode="json") for decision in plan.decisions],
-        )
-    if action.call == "return_to_planner":
-        kind = (action.arguments or {}).get("kind")
-        reason = str((action.arguments or {}).get("reason", ""))
-        if kind == ReferralKind.SOURCE_AMBIGUOUS.value:
-            requirement_id = cast(str, (action.arguments or {}).get("requirement_id"))
-            return await _begin_candidate_ranking(
-                core, tool_context, plan=plan, requirement_id=requirement_id, reason=reason
-            )
-        return core.return_to_planner(tool_context=tool_context, **(action.arguments or {}))
-    if action.call != "discover_source":
-        return _unmet_capability(
-            f"propose_operations named an unknown next call {action.call!r}",
-            action=action.model_dump(mode="json"),
-        )
-    return None
+    return _internal_failure(
+        core, tool_context, f"propose_operations answered {result.get('code')}: {message}"
+    )
 
 
 async def _propose_until_settled(
     core: TranslatorCore, tool_context: ToolContext, *, plan: Plan, discovered: dict[str, str]
 ) -> dict[str, object]:
-    """Build and propose a translation, following `_compile_failure_action` up to `MAX_ROUNDS`."""
+    """Build and propose a translation, following `_compile_failure_action` up to `MAX_ROUNDS`.
+
+    A source to discover again is the one fix this loop applies itself. Any
+    other compile failure closes on the referral its action names; one whose
+    `_failure_fingerprint` failed before in this session closes marked
+    `repeated`. Only a compile failure counts towards the guard: a transient
+    failure repeats legitimately.
+    """
     for _round in range(MAX_ROUNDS):
         translation = build_translation(plan, discovered)
         result = await core.propose_operations(translation=translation, tool_context=tool_context)
@@ -772,178 +611,79 @@ async def _propose_until_settled(
             return result
 
         action = _action_of(result)
-        if action is None:
-            return _unmet_capability(
-                "propose_operations reported issues with no action to follow", problem=result
+        if action is None or result.get("code") != ProblemCode.COMPILE_FAILED.value:
+            return _uncompiled(core, tool_context, result)
+        if action.call == "return_to_planner":
+            repeated = _seen_before(tool_context.state, _failure_fingerprint(translation, result))
+            return core.return_to_planner(
+                tool_context=tool_context, **(action.arguments or {}), repeated=repeated
             )
-        settled = await _apply_compile_action(
-            core, tool_context, plan=plan, action=action, result=result
-        )
-        if settled is not None:
-            return settled
+        if action.call != "discover_source":
+            return _internal_failure(
+                core, tool_context, f"propose_operations named an unknown next call {action.call!r}"
+            )
 
-        step = await _discover_one(
-            core, tool_context, plan=plan, arguments=dict(action.arguments or {})
-        )
+        step = await _discover_one(core, tool_context, arguments=dict(action.arguments or {}))
         if isinstance(step, _Stopped):
             return step.result
         requirement_id = cast(str, (action.arguments or {})["requirement_id"])
         discovered[requirement_id] = step
 
-    return _unmet_capability(f"propose_operations did not settle within {MAX_ROUNDS} rounds")
-
-
-# --- resuming a pending judgement --------------------------------------------
-
-
-def _mismatch(message: str, **detail: JsonValue) -> dict[str, object]:
-    return problem(
-        ProblemCode.INVALID_ARGUMENTS, message, outcome=Outcome.INVALID_INPUT, detail=detail or None
+    return _internal_failure(
+        core, tool_context, f"propose_operations did not settle within {MAX_ROUNDS} rounds"
     )
 
 
-def _settle_candidate_ranking(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    pending: _PendingJudgement,
-    requirement_id: str | None,
-    choice: str | None,
-    rationale: str | None,
+def _referred_again(
+    core: TranslatorCore, tool_context: ToolContext, referral: Referral
 ) -> dict[str, object]:
-    if requirement_id != pending.requirement_id:
-        return _mismatch(
-            f"translate is waiting on a candidate ranking for {pending.requirement_id!r}, not "
-            f"{requirement_id!r}.",
-            pending_requirement_id=pending.requirement_id,
-        )
-    if choice not in pending.candidate_spec_ids:
-        return _mismatch(
-            f"{choice!r} is not one of the candidates translate showed for {requirement_id!r}.",
-            candidates=list(pending.candidate_spec_ids),
-        )
-    if not rationale:
-        return _mismatch("a candidate ranking needs a rationale, not only a choice.")
-    referral = core.return_to_planner(
-        kind=ReferralKind.SOURCE_AMBIGUOUS,
-        reason=pending.reason,
-        requirement_id=requirement_id,
-        recommendation=SourceRecommendation(spec_id=choice, rationale=rationale),
+    """Answer with the referral already pending on the plan, as `return_to_planner` built it.
+
+    The plan is unchanged since it was referred (`propose_plan` clears the
+    referral), so translating it again could only reach the same stop. A
+    transient referral is the exception, and `run_translate` retries it.
+    """
+    return core.return_to_planner(
         tool_context=tool_context,
+        **referral.model_dump(
+            exclude={"candidates", "no_data_reason", "stale_pins"}, exclude_defaults=True
+        ),
     )
-    _clear_pending(tool_context.state)
-    return referral
-
-
-def _settle_unmet_capability(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    pending: _PendingJudgement,
-    decision_id: str | None,
-) -> dict[str, object]:
-    if not decision_id:
-        return _mismatch(
-            "translate is waiting on which decision no operation covers; answer with decision_id."
-        )
-    referral = core.return_to_planner(
-        kind=ReferralKind.NO_OPERATION_COVERS,
-        reason=pending.reason,
-        decision_id=decision_id,
-        tool_context=tool_context,
-    )
-    _clear_pending(tool_context.state)
-    return referral
-
-
-def _resume(
-    core: TranslatorCore,
-    tool_context: ToolContext,
-    *,
-    plan: Plan,
-    requirement_id: str | None,
-    choice: str | None,
-    rationale: str | None,
-    decision_id: str | None,
-) -> dict[str, object]:
-    pending = _load_pending(tool_context.state)
-    if pending is None:
-        return problem(
-            ProblemCode.NO_PENDING_JUDGEMENT,
-            "translate has no pending judgement to answer; call it with no arguments to "
-            "start a fresh run.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    if pending.revision != plan_revision(plan):
-        _clear_pending(tool_context.state)
-        return problem(
-            ProblemCode.NO_PENDING_JUDGEMENT,
-            "the plan changed since translate asked this; call it again with no arguments.",
-            outcome=Outcome.INVALID_INPUT,
-        )
-    if pending.judgement == "candidate_ranking":
-        return _settle_candidate_ranking(
-            core,
-            tool_context,
-            pending=pending,
-            requirement_id=requirement_id,
-            choice=choice,
-            rationale=rationale,
-        )
-    return _settle_unmet_capability(core, tool_context, pending=pending, decision_id=decision_id)
 
 
 # --- the public entry point --------------------------------------------------
 
 
-async def run_translate(
-    tool_context: ToolContext,
-    *,
-    core: TranslatorCore,
-    requirement_id: str | None = None,
-    choice: str | None = None,
-    rationale: str | None = None,
-    decision_id: str | None = None,
-) -> dict[str, object]:
+async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> dict[str, object]:
     """Run the translator's whole discover-then-compile loop without a model turn.
 
-    Called with every argument `None`, drives `discover_source` for every
-    dataset requirement, then `propose_operations`, following each step's
-    own `action` the way `translator.agent.INSTRUCTION` once told a model
-    to. Called with `requirement_id`/`choice`/`rationale` or `decision_id`
-    set, applies the model's answer to whichever judgement `translate` last
-    asked, and refuses one that does not match what is pending.
+    Answers with the referral already pending on the plan, unless it is
+    transient. Otherwise drives `discover_source` for every dataset
+    requirement, then `propose_operations`, following each step's own
+    `action`.
 
     Returns:
         `{"outcome": "ok", ...}` once `propose_operations` succeeds;
         `{"outcome": "referred", "referral": {...}}` the moment any step
-        names a referral with a complete `Action`, or once a pending
-        candidate ranking or unmet-capability judgement is answered;
-        `{"outcome": "needs_decision", ...}` the moment a step's own answer
-        carries no action, or one naming `needs`, pausing for the model to
-        settle it; or the typed problem that stops a malformed resume.
+        stops short of compiling, the referral's own `outcome` one of
+        `translator.referral.OUTCOME_OF`'s; or the typed problem that stops
+        a call on a plan that is not a translatable draft.
     """
     plan = current_draft(tool_context)
     if isinstance(plan, dict):
         return plan
 
-    answer_given = (requirement_id, choice, rationale, decision_id) != (None, None, None, None)
-    if answer_given:
-        return _resume(
-            core,
-            tool_context,
-            plan=plan,
-            requirement_id=requirement_id,
-            choice=choice,
-            rationale=rationale,
-            decision_id=decision_id,
-        )
+    pending = load_referral(tool_context.state)
+    if pending is not None:
+        if pending.outcome is not Outcome.TRANSIENT:
+            return _referred_again(core, tool_context, pending)
+        clear_referral(tool_context.state)
 
     unsupported = _unsupported_requirement(plan)
     if unsupported is not None:
         return core.return_to_planner(
             tool_context=tool_context,
-            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+            kind=ReferralKind.NO_OPERATION_COVERS,
             requirement_id=unsupported.id,
             reason=(
                 f"no operation this translator builds carries out a {unsupported.kind!r} "

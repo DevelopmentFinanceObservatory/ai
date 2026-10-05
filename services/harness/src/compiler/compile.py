@@ -41,9 +41,11 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
-from planner.plan import DatasetRequirement, Entity, Plan, keeps_one_level
+from planner.parties import flow_side
+from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level
 from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
@@ -54,9 +56,11 @@ from planner.records import (
     PlaceLevel,
     RankAmong,
     RankDirection,
+    StatVarReading,
     StrictModel,
     ValueThreshold,
 )
+from planner.shapes import ValueKind
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -68,7 +72,7 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
-from pydantic import JsonValue, model_validator
+from pydantic import JsonValue, ValidationError, model_validator
 
 from compiler.arguments import (
     literal_argument_errors,
@@ -87,10 +91,17 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_source,
+    read_unit_dcid,
     resolve_entity,
 )
-from compiler.shapes import ResolvedRole, ResolvedShape, shapes_for
-from compiler.sources import stat_var_reading
+from compiler.shapes import BREAKDOWN_CODE_SYSTEMS, ResolvedRole, ResolvedShape, shapes_for
+from compiler.sources import (
+    FamilyOverlap,
+    entity_scopes_disjoint,
+    family_overlap,
+    posted_stat_vars,
+    stat_var_reading,
+)
 from compiler.surface import ToolSchema, schema_hash_error
 
 
@@ -125,6 +136,11 @@ class CompileIssueCode(StrEnum):
     ENTITY_AMBIGUOUS = "entity_ambiguous"
     ENTITY_UNRESOLVED = "entity_unresolved"
     DEGENERATE_SIDES = "degenerate_sides"
+    SUM_SIDES_OVERLAP = "sum_sides_overlap"
+    SUM_OVERLAP_UNDECIDED = "sum_overlap_undecided"
+    SUM_UNITS_DIFFER = "sum_units_differ"
+    FRAME_UNITS_DIFFER = "frame_units_differ"
+    FRAME_UNIT_FORMS_DIFFER = "frame_unit_forms_differ"
     PERIODS_DISJOINT = "periods_disjoint"
     JOIN_NO_COMMON_KEY_COLUMNS = "join_no_common_key_columns"
     NO_CAPABILITY = "no_capability"
@@ -461,9 +477,16 @@ class _Build:
                 continue
             # The reading is settled here, before shapes count measures from it
             # and before the retrieval's arguments are written, so the
-            # approved workflow's source states it and who set it.
-            source = stat_var_reading(source, requirement.stat_vars)
+            # approved workflow's source states it and who set it. A breakdown
+            # is read separately: `get_data` refuses it beside a summed family.
+            requested = (
+                StatVarReading.SEPARATE
+                if requirement.breakdown is not None
+                else requirement.stat_vars
+            )
+            source = stat_var_reading(source, requested)
             self.sources[operation.id] = source
+            self._check_breakdown(operation, requirement, source)
             findings = check_evidence(requirement, evidence_from_source(source))
             for finding in errors(findings):
                 self._issue(
@@ -474,6 +497,29 @@ class _Build:
                     requirement_id=requirement.id,
                 )
             self.warnings.extend(f for f in findings if f not in errors(findings))
+
+    def _check_breakdown(
+        self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
+    ) -> None:
+        """Report a breakdown by a code system the source's family does not vary along.
+
+        `get_data` sums the family within each code of the breakdown's code
+        system, so a source whose members state no value on it has no codes
+        to break its total down by.
+        """
+        if requirement.breakdown is None:
+            return
+        code_system = BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension]
+        if any(axis.property == code_system for axis in source.open_axes):
+            return
+        self._issue(
+            CompileIssueCode.SOURCE_UNUSABLE,
+            f"source {source.spec_id} cannot serve requirement {requirement.id!r}: its "
+            f"StatVars do not vary by {requirement.breakdown.dimension.value} "
+            f"({code_system}), so it has no breakdown by it",
+            operation_id=operation.id,
+            requirement_id=requirement.id,
+        )
 
     def _build_shapes(self) -> None:
         """Resolve one `ResolvedShape` per operation, reporting `INPUT_SHAPE_UNSUPPORTED` on a refusal.
@@ -517,6 +563,9 @@ class _Build:
                 self._check_growth(operation)
             elif isinstance(operation, CompareOperation):
                 self._check_two_sided(operation.id, operation.left, operation.right)
+            elif isinstance(operation, SumOfOperation):
+                self._check_two_sided(operation.id, operation.left, operation.right)
+                self._check_sum_of(operation)
             elif isinstance(operation, RankOperation):
                 self._check_rank(operation)
             elif isinstance(operation, ShareOfOperation):
@@ -553,6 +602,102 @@ class _Build:
                 "resolves no entity columns to group by",
                 operation_id=operation.id,
             )
+
+    def _check_sum_of(self, operation: SumOfOperation) -> None:
+        """Report a sum whose sides could count one flow twice, or add different units.
+
+        Each side is read as the full set of retrievals its shape rests on,
+        so a side that is itself a sum is checked through to its sources.
+        `SUM_SIDES_OVERLAP` when a source behind one side reads the same
+        definition as a source behind the other, they elected a StatVar
+        in common, or one's StatVar family holds the other's, and the
+        entities they bind do not keep their rows apart: the sum would add
+        some values to themselves. `SUM_OVERLAP_UNDECIDED` when a side
+        lists no members and the two identities cannot show the families
+        apart (`compiler.sources.family_overlap`). Whether two
+        distinct sources are additive is a methodological fact the plan's
+        decisions state, not one code can check. `SUM_UNITS_DIFFER` when the
+        dataset requirements behind the sum do not all state the same unit,
+        including one stating a unit and another not: the currency and price
+        basis sit in the StatVar's identity, where analysis-mcp's own unit
+        check does not see them.
+        """
+        left_roots = self._root_requirement_ids(operation.left.input)
+        right_roots = self._root_requirement_ids(operation.right.input)
+        found = {
+            overlap
+            for left_id in left_roots
+            for right_id in right_roots
+            if (overlap := self._sources_overlap(left_id, right_id)) is not None
+        }
+        if overlaps := sorted(
+            what for code, what in found if code is CompileIssueCode.SUM_SIDES_OVERLAP
+        ):
+            self._issue(
+                CompileIssueCode.SUM_SIDES_OVERLAP,
+                f"operation {operation.id!r} adds two sides that both read "
+                f"{'; '.join(overlaps)}, so the sum would count those values twice",
+                operation_id=operation.id,
+            )
+        if undecided := sorted(
+            what for code, what in found if code is CompileIssueCode.SUM_OVERLAP_UNDECIDED
+        ):
+            self._issue(
+                CompileIssueCode.SUM_OVERLAP_UNDECIDED,
+                f"operation {operation.id!r} adds {'; '.join(undecided)}, and the search "
+                "results cannot rule out a StatVar both families hold, so the sum could count "
+                "those values twice",
+                operation_id=operation.id,
+            )
+        roots = [
+            requirement
+            for requirement_id in sorted({*left_roots, *right_roots})
+            if isinstance(requirement := self.requirements.get(requirement_id), DatasetRequirement)
+        ]
+        if len({requirement.unit for requirement in roots}) > 1:
+            stated = ", ".join(
+                f"requirement {requirement.id!r} ({_unit_words(requirement)})"
+                for requirement in roots
+            )
+            self._issue(
+                CompileIssueCode.SUM_UNITS_DIFFER,
+                f"operation {operation.id!r} adds {stated}; a sum needs every side in one "
+                "currency and price basis",
+                operation_id=operation.id,
+            )
+
+    def _sources_overlap(self, left_id: str, right_id: str) -> tuple[CompileIssueCode, str] | None:
+        """What the sources two requirements' retrievals selected read in common, if anything.
+
+        Nothing when the entities they bind keep their rows apart
+        (`compiler.sources.entity_scopes_disjoint`), whatever StatVars they share.
+
+        `SUM_SIDES_OVERLAP` with what both read when they share a definition,
+        a member digest or a listed StatVar, or one family holds the other.
+        Two sources that both list StatVars are compared by those lists
+        alone. A side listing none is a family `search` states by digest,
+        decided from the two identities (`compiler.sources.family_overlap`):
+        `SUM_OVERLAP_UNDECIDED`, with the two definitions, when they cannot
+        show the families apart.
+        """
+        left = self._source_of(left_id)
+        right = self._source_of(right_id)
+        if left is None or right is None or entity_scopes_disjoint(left, right):
+            return None
+        if left.spec_id == right.spec_id:
+            return CompileIssueCode.SUM_SIDES_OVERLAP, f"definition {left.spec_id}"
+        if left.shape_member_digest is not None and (
+            left.shape_member_digest == right.shape_member_digest
+        ):
+            return (
+                CompileIssueCode.SUM_SIDES_OVERLAP,
+                f"StatVar family with member digest {left.shape_member_digest}",
+            )
+        if shared := set(left.stat_vars) & set(right.stat_vars):
+            return CompileIssueCode.SUM_SIDES_OVERLAP, f"StatVars both elected ({len(shared)})"
+        if left.stat_vars and right.stat_vars:
+            return None
+        return _family_overlap_issue(left, right)
 
     def _check_rank(self, operation: RankOperation) -> None:
         source = self._source_upstream(operation.input)
@@ -776,6 +921,62 @@ class _Build:
                 f"operation {op_id!r} sets sides against each other whose periods share no year",
                 operation_id=op_id,
             )
+        self._check_frame_units(op_id, left, right)
+
+    def _check_frame_units(self, op_id: str, left: Side, right: Side) -> None:
+        """Report two sides whose frames declare their units differently.
+
+        analysis-mcp pairs two slices only when their `unit` cells are equal
+        (`cross_frame_unit_mismatch`), and each side's cells are what its
+        source declares (`_frame_unit`): the request object for a definition
+        bound to a unit by request, the source's unit ref for any other.
+        Only a side holding a value in its source's unit, measured or an
+        absolute difference, is read; a side whose unit no single pin covers
+        is left to analysis-mcp.
+
+        `FRAME_UNIT_FORMS_DIFFER` when both denote one currency and price
+        basis (`_denoted_unit`) and only the form differs, a ref against a
+        request: the side whose source binds no unit is named, with what to
+        change so it is retrieved by request too. dfo-apis writes a natively
+        satisfied request as the request object and an unbound definition as
+        its ref (ONEcampaign/dfo-apis#1179). `FRAME_UNITS_DIFFER` otherwise.
+        """
+        read: list[tuple[JsonValue, Unit | None, DatasetRequirement | None]] = []
+        for side in (left, right):
+            resolved = self.shapes.get(side.input)
+            source = self._source_upstream(side.input)
+            if (
+                resolved is None
+                or resolved.shape.value not in (ValueKind.MEASURED, ValueKind.DIFFERENCE)
+                or source is None
+                or (unit := _frame_unit(source)) is None
+            ):
+                return
+            read.append((unit, _denoted_unit(source, unit), self._requirement_upstream(side.input)))
+        (left_unit, left_denoted, left_req), (right_unit, right_denoted, right_req) = read
+        if left_unit == right_unit:
+            return
+        unbound = left_req if not isinstance(left_unit, dict) else right_req
+        if left_denoted is not None and left_denoted == right_denoted and unbound is not None:
+            self._issue(
+                CompileIssueCode.FRAME_UNIT_FORMS_DIFFER,
+                f"operation {op_id!r} pairs two sides in {_denoted_words(left_denoted)}, but "
+                f"requirement {unbound.id!r} reads a source that binds no unit, so its frame "
+                "states the unit differently and the two are not paired; state unit "
+                f"{left_denoted.model_dump_json(exclude_none=True)} on requirement "
+                f"{unbound.id!r} and leave its source_spec_id unset, so it is searched again "
+                "and retrieved bound to that unit",
+                operation_id=op_id,
+                requirement_id=unbound.id,
+            )
+            return
+        self._issue(
+            CompileIssueCode.FRAME_UNITS_DIFFER,
+            f"operation {op_id!r} pairs a side in {_unit_cell(left_unit, left_denoted)} with "
+            f"one in {_unit_cell(right_unit, right_denoted)}, and two frames in different "
+            "units cannot be set against each other",
+            operation_id=op_id,
+        )
 
     def _check_side(self, op_id: str, side: Side) -> DatasetRequirement | None:
         requirement = self._requirement_upstream(side.input)
@@ -791,13 +992,15 @@ class _Build:
             # the chain the same way.
             narrowed = self._chain_narrows_entities(side.input)
             labels = (
-                _distinct_labels(source, requirement) if source is not None and not narrowed else []
+                _pooled_labels(source, requirement) if source is not None and not narrowed else []
             )
-            if len(names) > 1:
+            pooled = _pooled_names(requirement, source)
+            if pooled:
                 self._issue(
                     CompileIssueCode.ENTITY_REQUIRED,
                     f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
-                    f"requirement names several entities {names!r}; say which",
+                    f"requirement names several entities on one side of the flow {pooled!r}; "
+                    "say which",
                     operation_id=op_id,
                     requirement_id=requirement.id,
                 )
@@ -815,9 +1018,10 @@ class _Build:
                     operation_id=op_id,
                     requirement_id=requirement.id,
                 )
-            elif len(labels) > 1 and source is not None:
-                # The requirement names one entity, but the frame carries
-                # several: a whole side would pool them into one series.
+            elif labels and source is not None:
+                # The requirement names one entity per role column, but the
+                # frame carries several on one: a whole side would pool them
+                # into one series.
                 self._issue(
                     CompileIssueCode.ENTITY_REQUIRED,
                     f"operation {op_id!r} takes a whole side from {side.input!r}, whose source "
@@ -1051,6 +1255,7 @@ class _Build:
             AggregateOperation: self._aggregate_arguments,
             GrowthOperation: self._growth_arguments,
             CompareOperation: self._compare_arguments,
+            SumOfOperation: self._sum_of_arguments,
             RankOperation: self._rank_arguments,
             ShareOfOperation: self._share_of_arguments,
             JoinOperation: self._join_arguments,
@@ -1066,11 +1271,16 @@ class _Build:
         per member. It sits outside the definition's identity, so it
         re-mints nothing.
 
-        The elected StatVars go as `resolved_stat_var_dcids`, left out when
-        the source elected none. dfo-apis checks they are still members of
-        the dataset, refusing a stale list with a remedy to search again,
-        and a family's root among them proves a truncated member walk
-        complete. They sit outside the identity too.
+        The StatVars the source posts (`compiler.sources.posted_stat_vars`)
+        go as `resolved_stat_var_dcids`, left out when it posts none.
+        dfo-apis checks they are still members of the dataset, refusing a
+        stale list with a remedy to search again, and a family's root among
+        them proves a truncated member walk complete. They sit outside the
+        identity too.
+
+        `breakdown` is the requirement's, as its code system and level: dfo-apis
+        sums the family within each code rolled up to that level, so the frame
+        carries one series per code under the family's own ref.
 
         `place_types` is written for a retrieval a place-level filter reads
         (`_read_by_level_filter`): it adds the `observationAbout_type`
@@ -1092,8 +1302,14 @@ class _Build:
         args: dict[str, JsonValue] = {"spec_id": source.spec_id}
         if source.stat_var_reading is not None:
             args["stat_vars"] = source.stat_var_reading.value
-        if source.stat_vars:
-            args["resolved_stat_var_dcids"] = list(source.stat_vars)
+        if posted := posted_stat_vars(source):
+            args["resolved_stat_var_dcids"] = list(posted)
+        requirement = self.requirements.get(operation.requirement_id)
+        if isinstance(requirement, DatasetRequirement) and requirement.breakdown is not None:
+            args["breakdown"] = {
+                "code_system": BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension],
+                "level": requirement.breakdown.level,
+            }
         if self._read_by_level_filter(operation.id):
             args["place_types"] = True
         return args, {}
@@ -1117,12 +1333,12 @@ class _Build:
         return False
 
     def _aggregate_arguments(self, operation: AggregateOperation) -> Arguments | None:
-        columns = self._columns_of(operation.input)
-        if columns is None:
+        resolved = self.shapes.get(operation.input)
+        if resolved is None:
             return None
         args: dict[str, JsonValue] = {
             "aggregation": operation.reduction.value,
-            "group_by": _group_columns(operation.group_by, columns),
+            "group_by": _group_columns(operation.group_by, resolved.columns),
         }
         return args, {"frame_ref": _frame_from(operation.input)}
 
@@ -1140,17 +1356,42 @@ class _Build:
         return args, {"frame_ref": _frame_from(operation.input)}
 
     def _compare_arguments(self, operation: CompareOperation) -> Arguments | None:
+        return self._two_sided_arguments(operation.id, operation.left, operation.right)
+
+    def _two_sided_arguments(self, op_id: str, left: Side, right: Side) -> Arguments | None:
+        """The frames and entity bindings of a two-slice verb, `compare` or `sum_of`."""
         args: dict[str, JsonValue] = {}
-        bindings = {"frame_ref": _frame_from(operation.left.input)}
-        if operation.right.input != operation.left.input:
-            bindings["right_frame_ref"] = _frame_from(operation.right.input)
-        for parameter, side in (("left_entity", operation.left), ("right_entity", operation.right)):
+        bindings = {"frame_ref": _frame_from(left.input)}
+        if right.input != left.input:
+            bindings["right_frame_ref"] = _frame_from(right.input)
+        for parameter, side in (("left_entity", left), ("right_entity", right)):
             if side.entity is None:
                 continue
-            resolved = self._side_entity(operation.id, side)
+            resolved = self._side_entity(op_id, side)
             if resolved is None:
                 return None
             args[parameter] = {resolved.role: resolved.ref}
+        return args, bindings
+
+    def _sum_of_arguments(self, operation: SumOfOperation) -> Arguments | None:
+        """`_compare_arguments`' sides, plus each side's unit pinned to the one
+        its fetched frame declares (`_frame_unit`).
+
+        A pin narrows a side to the rows in that unit, so a frame holding
+        several units is summed in the one its source resolved. A side whose
+        frame unit cannot be known ahead is left
+        unpinned, and analysis-mcp checks the two resolved units agree either
+        way.
+        """
+        built = self._two_sided_arguments(operation.id, operation.left, operation.right)
+        if built is None:
+            return None
+        args, bindings = built
+        for parameter, side in (("left_unit", operation.left), ("right_unit", operation.right)):
+            source = self._source_upstream(side.input)
+            unit = _frame_unit(source) if source is not None else None
+            if unit is not None:
+                args[parameter] = unit
         return args, bindings
 
     def _share_of_arguments(self, operation: ShareOfOperation) -> Arguments | None:
@@ -1454,8 +1695,14 @@ class _Build:
 
     def _source_upstream(self, op_id: str) -> SelectedSource | None:
         requirement_id = self._root_requirement_id(op_id)
-        if requirement_id is None:
-            return None
+        return self._source_of(requirement_id) if requirement_id is not None else None
+
+    def _root_requirement_ids(self, op_id: str) -> tuple[str, ...]:
+        """Every dataset requirement `op_id`'s shape rests on, or none if it has no shape."""
+        resolved = self.shapes.get(op_id)
+        return resolved.shape.roots if resolved is not None else ()
+
+    def _source_of(self, requirement_id: str) -> SelectedSource | None:
         retrieve_id = self._retrieve_by_requirement.get(requirement_id)
         return self.sources.get(retrieve_id) if retrieve_id is not None else None
 
@@ -1465,7 +1712,7 @@ class _Build:
         Either can be missing only once an issue has been reported for it:
         the retrieval was refused a source, the requirement it carries out
         is not a dataset one, or `op_id`'s shape rests on more than one
-        retrieval (a compare, share_of or join reading two sides that do not
+        retrieval (a compare, sum_of, share_of or join reading two sides that do not
         coincide).
         """
         source = self._source_upstream(op_id)
@@ -1576,13 +1823,106 @@ def _entity_candidates(
 def _inputs_of(operation: Operation) -> tuple[str, ...]:
     if isinstance(operation, RetrieveOperation):
         return ()
-    if isinstance(operation, CompareOperation):
+    if isinstance(operation, CompareOperation | SumOfOperation):
         return (operation.left.input, operation.right.input)
     if isinstance(operation, ShareOfOperation):
         return (operation.numerator.input, operation.denominator.input)
     if isinstance(operation, JoinOperation):
         return (operation.left, operation.right)
     return (operation.input,)
+
+
+def _frame_unit(source: SelectedSource) -> JsonValue:
+    """The unit a frame fetched from `source` declares in its `unit` cells.
+
+    A definition that binds its unit by request (`facets.unit.request` in its
+    identity) is converted on fetch, so its frame declares that request
+    object; one whose request names its currency by entity role resolves a
+    currency per row, which no single pin covers, so it is `None`. Any
+    other definition serves its source's own unit ref.
+    """
+    facets = (source.identity or {}).get("facets")
+    unit = facets.get("unit") if isinstance(facets, dict) else None
+    if not isinstance(unit, dict) or "request" not in unit:
+        return source.unit_ref
+    try:
+        converted = Unit.model_validate(unit["request"])
+    except ValidationError:
+        return None
+    return converted.model_dump(exclude_none=True)
+
+
+def _denoted_unit(source: SelectedSource, unit: JsonValue) -> Unit | None:
+    """The currency and price basis a frame unit `_frame_unit` returns denotes; `None` when unknown.
+
+    A request object states both. A unit ref states its currency by its
+    structure (`compiler.evidence.read_unit_dcid`), and its price basis
+    either the same way or, for a bare currency such as `CurrencyUSD`,
+    through the StatVar shape's `measurement_qualifier`: `Nominal` is
+    current prices, which is how dfo-apis decides a request for current
+    prices is natively satisfied.
+    """
+    if isinstance(unit, dict):
+        try:
+            return Unit.model_validate(unit)
+        except ValidationError:
+            return None
+    if not isinstance(unit, str):
+        return None
+    reading = read_unit_dcid(unit)
+    prices, base_year = reading.prices, reading.base_year
+    if prices is None:
+        shape = (source.identity or {}).get("shape")
+        qualifier = shape.get("measurement_qualifier") if isinstance(shape, dict) else None
+        prices = "current" if qualifier == "Nominal" else None
+    if reading.currency is None or prices is None:
+        return None
+    try:
+        return Unit(currency=reading.currency, prices=prices, base_year=base_year)
+    except ValidationError:
+        return None
+
+
+def _denoted_words(unit: Unit) -> str:
+    """`unit` in words for an issue's reason."""
+    if unit.base_year is not None:
+        return f"{unit.currency} at constant {unit.base_year} prices"
+    return f"{unit.currency} at {unit.prices} prices"
+
+
+def _unit_cell(unit: JsonValue, denoted: Unit | None) -> str:
+    """A frame unit `_frame_unit` returns, in words for an issue's reason."""
+    if denoted is not None:
+        return _denoted_words(denoted)
+    if isinstance(unit, dict):
+        return "a unit requested by role"
+    return "its source's own unit, whose price basis the source does not state"
+
+
+def _family_overlap_issue(
+    left: SelectedSource, right: SelectedSource
+) -> tuple[CompileIssueCode, str] | None:
+    """The sum issue two StatVar families raise, judged from their identities alone."""
+    definitions = f"the StatVar families of definitions {left.spec_id} and {right.spec_id}"
+    match family_overlap(left, right):
+        case FamilyOverlap.DISJOINT:
+            return None
+        case FamilyOverlap.NESTED:
+            return (
+                CompileIssueCode.SUM_SIDES_OVERLAP,
+                f"{definitions}, one of which holds the other",
+            )
+        case FamilyOverlap.UNDECIDED:
+            return CompileIssueCode.SUM_OVERLAP_UNDECIDED, definitions
+
+
+def _unit_words(requirement: DatasetRequirement) -> str:
+    unit = requirement.unit
+    if unit is None:
+        return "no unit stated"
+    if unit.base_year is None:
+        return f"{unit.prices} {unit.currency}"
+    return f"constant {unit.base_year} {unit.currency}"
 
 
 def _frame_from(op_id: str) -> Binding:
@@ -1617,6 +1957,39 @@ def _distinct_labels(source: SelectedSource, requirement: DatasetRequirement) ->
     return labels
 
 
+def _pooled_names(requirement: DatasetRequirement, source: SelectedSource | None) -> list[str]:
+    """The names `requirement` states that share a role column with another it states.
+
+    One entity per role column, a donor and its recipient say, is one
+    series, which a whole side reads as it is. Two on one column are two
+    series a whole side would pool. A name's column is the one `source`
+    resolves it under, else its role; either is compared by its side of the
+    flow, so `origin` and `donor` are one column. Names neither places
+    share one column, since nothing tells them apart.
+    """
+    columns: dict[str | None, list[str]] = {}
+    for entity in requirement.entities:
+        resolved = resolve_entity(entity, source.entities) if source is not None else None
+        column = resolved.role if resolved is not None else entity.role
+        key = (flow_side(column) or column) if column is not None else None
+        columns.setdefault(key, []).append(entity.name)
+    return [name for names in columns.values() if len(names) > 1 for name in names]
+
+
+def _pooled_labels(source: SelectedSource, requirement: DatasetRequirement) -> list[str]:
+    """The labels `source` resolves on any of `requirement`'s role columns that holds several.
+
+    Case-folded duplicates are counted once, as `_distinct_labels` counts
+    them; a column holding one label is one series and is left out.
+    """
+    columns = set(_role_columns(source, requirement))
+    by_column: dict[str, dict[str, str]] = {}
+    for entity in source.entities:
+        if entity.role in columns:
+            by_column.setdefault(entity.role, {}).setdefault(entity.label.casefold(), entity.label)
+    return [label for labels in by_column.values() if len(labels) > 1 for label in labels.values()]
+
+
 def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> list[str]:
     """The labels `source` resolves under `requirement`'s role columns that it does not name."""
     named = {entity.name.casefold() for entity in requirement.entities}
@@ -1646,7 +2019,7 @@ def _pools_entities(operation: Operation) -> bool:
     """
     if isinstance(operation, AggregateOperation):
         return GroupBy.ENTITY not in operation.group_by
-    if isinstance(operation, CompareOperation):
+    if isinstance(operation, CompareOperation | SumOfOperation):
         sides = (operation.left, operation.right)
     elif isinstance(operation, ShareOfOperation):
         sides = (operation.numerator, operation.denominator)
@@ -1664,7 +2037,7 @@ def _pooled_inputs(operation: Operation) -> tuple[str, ...]:
     """
     if isinstance(operation, AggregateOperation):
         return (operation.input,) if GroupBy.ENTITY not in operation.group_by else ()
-    if isinstance(operation, CompareOperation):
+    if isinstance(operation, CompareOperation | SumOfOperation):
         sides = (operation.left, operation.right)
     elif isinstance(operation, ShareOfOperation):
         sides = (operation.numerator, operation.denominator)
@@ -1756,10 +2129,16 @@ def _role_columns(source: SelectedSource, requirement: DatasetRequirement) -> li
     return [column for column in every if column in wanted] or every
 
 
-def _group_columns(group_by: Sequence[GroupBy], entity_columns: Sequence[str]) -> list[str]:
-    """`group_by` written as literal columns: `entity_columns` for `ENTITY`, the frame's own period column for `PERIOD`."""
+def _group_columns(group_by: Sequence[GroupBy], roles: Sequence[ResolvedRole]) -> list[str]:
+    """`group_by` written as literal columns: every one of `roles` for `ENTITY`, the
+    breakdown's alone for `BREAKDOWN`, the frame's own period column for `PERIOD`."""
     columns: list[str] = []
     for key in group_by:
-        new = [TIME_PERIOD_COLUMN] if key is GroupBy.PERIOD else entity_columns
+        if key is GroupBy.PERIOD:
+            new = [TIME_PERIOD_COLUMN]
+        elif key is GroupBy.BREAKDOWN:
+            new = [role.column for role in roles if role.breakdown]
+        else:
+            new = [role.column for role in roles]
         columns.extend(column for column in new if column not in columns)
     return columns

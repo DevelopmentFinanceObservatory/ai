@@ -52,6 +52,8 @@ _CONTENT_VERSION = "cv_" + "2" * 32
 _FRAME_REF = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
 _ARTIFACT_DIGEST = "sha256:" + "3" * 64
 _SIGNED_URL = "https://storage.example/fresh-signed-url"
+# The options `get_data` posts for the default rendering.
+_OPTIONS: dict[str, object] = {"bundle": False, "format": "parquet"}
 
 
 def _digest_for(data: bytes) -> str:
@@ -75,7 +77,12 @@ def _manifest(
     artifact_digest: str = _ARTIFACT_DIGEST,
     trace: dict[str, Any] | None = None,
     as_collection: bool = False,
+    renderings: dict[str, dict[str, object]] | None = None,
 ) -> Manifest:
+    """A manifest listing one default-rendering artifact under `artifact_digest`, or one
+    artifact per `renderings` entry (digest to rendering), in its order."""
+    if renderings is None:
+        renderings = {artifact_digest: {"bundle": False, "format": "parquet"}}
     payload: dict[str, Any] = {
         "schema_version": 1,
         "content_version": content_version,
@@ -85,13 +92,14 @@ def _manifest(
         "warnings": [],
         "artifacts": [
             {
-                "artifact_digest": artifact_digest,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "artifact_digest": digest,
+                "rendering": rendering,
                 "bytes": 100,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
             }
+            for digest, rendering in renderings.items()
         ],
     }
     if as_collection:
@@ -288,6 +296,7 @@ async def test_materialise_and_register_registers_a_real_frame() -> None:
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -335,6 +344,7 @@ async def test_a_fetched_frames_stat_var_count_is_read_off_its_rows() -> None:
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(artifact_digest=digest),
             settings=_settings(),
             writer="tester",
@@ -357,6 +367,7 @@ async def test_a_held_frames_stat_var_count_is_read_off_its_rows() -> None:
     async with _client(unreachable) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(),
             settings=_settings(),
             writer="tester",
@@ -383,6 +394,7 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
     async with _client(unreachable_snapshot) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -419,6 +431,7 @@ async def test_cache_check_integrity_failure_refuses_without_refetching() -> Non
     async with _client(unreachable) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -449,6 +462,7 @@ async def test_cache_check_too_large_failure_refuses_without_refetching() -> Non
     async with _client(unreachable) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -537,6 +551,7 @@ async def test_a_cache_hit_whose_recomputed_content_version_mismatches_refuses()
     async with _client(unreachable) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(),
             settings=_settings(),
             writer="tester",
@@ -587,6 +602,7 @@ async def _materialise_held() -> MaterialisationOutcome:
     async with _client(unreachable) as upstream:
         client_holder.set_client(upstream)
         return await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(),
             settings=_settings(
                 max_frame_rows=_LOWERED_MAX_FRAME_ROWS,
@@ -667,6 +683,7 @@ async def test_a_cache_hit_is_refused_while_the_row_budget_is_full() -> None:
         client_holder.set_client(upstream)
         with row_budget().claim(1):
             outcome = await materialise_and_register(
+                options=_OPTIONS,
                 manifest=_manifest(),
                 settings=_settings(),
                 writer="tester",
@@ -717,6 +734,7 @@ async def test_a_store_read_that_outruns_the_deadline_keeps_its_rows_claimed_unt
         async with _client(handler) as upstream, asyncio.timeout(5.0):
             client_holder.set_client(upstream)
             outcome = await materialise_and_register(
+                options=_OPTIONS,
                 manifest=_manifest(),
                 settings=_settings(),
                 writer="tester",
@@ -756,12 +774,14 @@ async def test_a_cache_hit_by_a_second_caller_is_still_a_no_op_fetch() -> None:
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         first = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="writer-one",
             transport=httpx2.MockTransport(get_handler),
         )
         second = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="writer-two",
@@ -785,7 +805,7 @@ async def test_manifest_with_no_definition_refuses_upstream_response_unusable() 
     manifest = _manifest(as_collection=True)
 
     outcome = await materialise_and_register(
-        manifest=manifest, settings=_settings(), writer="tester"
+        options=_OPTIONS, manifest=manifest, settings=_settings(), writer="tester"
     )
 
     assert outcome.status == "refused"
@@ -797,12 +817,107 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
     manifest = _manifest(content_version="not-a-valid-content-version")
 
     outcome = await materialise_and_register(
-        manifest=manifest, settings=_settings(), writer="tester"
+        options=_OPTIONS, manifest=manifest, settings=_settings(), writer="tester"
     )
 
     assert outcome.status == "refused"
     assert outcome.refusal is not None
     assert outcome.refusal.code.value == "upstream_error"
+
+
+# A done operation lists every rendering dfo-apis stores under the pair. Dev listed
+# another caller's groupby sum first, then the plain rendering and its statistics.
+_SUM_SIBLING_RENDERING: dict[str, object] = {
+    "bundle": False,
+    "format": "parquet",
+    "groupby": {"by": ["time_period", "crsPurpose"], "op": "sum"},
+}
+_TYPED_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["observationAbout_type"]}
+_STATISTICS_RENDERING: dict[str, object] = {"statistics": "series"}
+
+
+def _bytes_by_digest(count: int) -> dict[str, bytes]:
+    """`count` distinct one-row Parquet blobs, keyed by their own digests."""
+    blobs = [_parquet_bytes(values=[float(i)]) for i in range(count)]
+    return {_digest_for(blob): blob for blob in blobs}
+
+
+@pytest.mark.parametrize(
+    ("listed", "options", "requested_at", "ref_content_version"),
+    [
+        (
+            [_SUM_SIBLING_RENDERING, _OPTIONS, _STATISTICS_RENDERING],
+            _OPTIONS,
+            1,
+            _CONTENT_VERSION,
+        ),
+        (
+            [_OPTIONS, _TYPED_OPTIONS],
+            _TYPED_OPTIONS,
+            1,
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                columns=("observationAbout_type",),
+            ).content_version,
+        ),
+    ],
+    ids=["separate-listed-after-a-sum-sibling", "place-types-listed-after-the-plain-rendering"],
+)
+async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    listed: list[dict[str, object]],
+    options: dict[str, object],
+    requested_at: int,
+    ref_content_version: str,
+) -> None:
+    blobs = _bytes_by_digest(len(listed))
+    digests = list(blobs)
+    fetched: list[str] = []
+
+    async def fake_fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        fetched.append(artifact_digest)
+        return blobs[artifact_digest]
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+    outcome = await materialise_and_register(
+        options=options,
+        manifest=_manifest(renderings=dict(zip(digests, listed, strict=True))),
+        settings=_settings(),
+        writer="tester",
+    )
+
+    assert outcome.status == "registered"
+    assert fetched == [digests[requested_at]]
+    assert outcome.frame_ref == FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
+
+
+async def test_a_manifest_without_the_requested_rendering_refuses_without_fetching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unreachable(**_: Any) -> bytes:
+        raise AssertionError("no fetch is expected without the requested rendering")
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", unreachable)
+    set_frame_store(InMemoryMaterialisationStore())
+    blobs = _bytes_by_digest(2)
+    outcome = await materialise_and_register(
+        options=_OPTIONS,
+        manifest=_manifest(
+            renderings=dict(
+                zip(blobs, [_SUM_SIBLING_RENDERING, _STATISTICS_RENDERING], strict=True)
+            )
+        ),
+        settings=_settings(),
+        writer="tester",
+    )
+
+    assert outcome.status == "refused"
+    assert outcome.attempts == 0
+    assert outcome.refusal is not None
+    assert outcome.refusal.code == ToolErrorCode.UPSTREAM_ERROR
+    assert outcome.refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 
 async def test_fetch_failure_after_the_retry_budget_returns_degraded_not_refused() -> None:
@@ -818,6 +933,7 @@ async def test_fetch_failure_after_the_retry_budget_returns_degraded_not_refused
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -844,6 +960,7 @@ async def test_fetch_budget_timeout_returns_degraded() -> None:
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(artifact_fetch_budget_s=0.02),
             writer="tester",
@@ -870,6 +987,7 @@ async def test_a_sign_failure_before_any_get_returns_degraded_with_zero_attempts
     async with _client(failing_snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -904,6 +1022,7 @@ async def test_a_signed_url_expiry_response_re_signs_once_and_succeeds() -> None
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -931,6 +1050,7 @@ async def test_bytes_not_matching_the_artifact_digest_refuse_with_no_store_write
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -971,6 +1091,7 @@ async def test_row_count_over_the_ceiling_refuses_before_any_row_is_parsed(
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(max_frame_rows=1),
             writer="tester",
@@ -1011,6 +1132,7 @@ async def test_a_store_row_ceiling_below_the_service_ceiling_refuses_rather_than
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             # Well above the store's own 1-row ceiling, so the service-level
             # admission check above passes and `store.put` is what refuses.
@@ -1064,12 +1186,14 @@ async def test_a_fetched_artifact_is_refused_while_the_row_budget_is_full() -> N
         client_holder.set_client(upstream)
         with row_budget().claim(2):
             refused = await materialise_and_register(
+                options=_OPTIONS,
                 manifest=manifest,
                 settings=_settings(),
                 writer="tester",
                 transport=httpx2.MockTransport(get_handler),
             )
         registered = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -1111,6 +1235,7 @@ async def test_corrupt_parquet_bytes_on_a_200_response_refuses_rather_than_raisi
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -1149,6 +1274,7 @@ async def test_a_parquet_file_missing_a_reserved_column_refuses_rather_than_rais
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -1196,6 +1322,7 @@ async def test_a_mismatched_recompute_still_registers_under_the_manifest_content
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -1251,6 +1378,7 @@ async def test_an_expired_held_entry_is_treated_as_not_held_and_heals_on_put() -
     async with _client(snapshot_handler) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -1280,6 +1408,7 @@ async def _fetch_budget_under(
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
     set_frame_store(InMemoryMaterialisationStore())
     outcome = await materialise_and_register(
+        options=_OPTIONS,
         manifest=_manifest(),
         settings=_settings(artifact_fetch_budget_s=60.0),
         writer="tester",
@@ -1320,6 +1449,7 @@ async def test_a_store_read_that_outruns_the_deadline_counts_as_a_miss() -> None
     async with _client(snapshot_handler) as upstream, asyncio.timeout(5.0):
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(artifact_digest=digest),
             settings=_settings(),
             writer="tester",
@@ -1345,6 +1475,7 @@ async def test_a_store_read_that_outruns_the_deadline_degrades_with_no_time_to_f
     async with _client(handler) as upstream, asyncio.timeout(5.0):
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(),
             settings=_settings(),
             writer="tester",
@@ -1375,6 +1506,7 @@ async def test_a_store_write_that_outruns_the_deadline_degrades_unconfirmed() ->
     async with _client(snapshot_handler) as upstream, asyncio.timeout(5.0):
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
+            options=_OPTIONS,
             manifest=_manifest(artifact_digest=digest),
             settings=_settings(),
             writer="tester",
@@ -1430,6 +1562,7 @@ async def test_a_store_write_that_outruns_the_deadline_keeps_its_rows_claimed_un
         async with _client(snapshot_handler) as upstream, asyncio.timeout(5.0):
             client_holder.set_client(upstream)
             outcome = await materialise_and_register(
+                options=_OPTIONS,
                 manifest=_manifest(artifact_digest=digest),
                 settings=_settings(),
                 writer="tester",

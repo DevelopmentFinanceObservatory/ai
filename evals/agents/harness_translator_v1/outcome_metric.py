@@ -2,13 +2,9 @@
 
 The rubric metrics judge behaviour a judge model reads off the trace --
 whether a call was made at all, whether a judgement was answered. None of
-them can assert on the *shape* of what `translate` actually produced: a
-rubric asking "is there an aggregate operation" can be satisfied by a
-translation that also retrieves the wrong requirement, or proposes a second,
-spurious step the rubric never asked about. That gap is what this metric
-closes -- it is the reviewer's own complaint about
-`harness_pair_v1/test_config.json`: rubrics "can pass while the translator
-produces a plausible but semantically wrong workflow."
+them can assert on what a tool actually answered: a rubric asking whether
+the plan was translated can be satisfied by a `translate` call that came
+back referred. That gap is what this metric closes.
 
 How a case states its expectation
 ----------------------------------
@@ -18,17 +14,15 @@ metric works from the one thing every run does carry: the tool responses in
 the trace. A case states what it expects by adding a `FunctionResponse` to a
 turn's `intermediate_data.tool_responses` in the `.evalset.json` file, named
 for one of the tools in `SCORED_TOOLS` --
-`{"name": "translate", "response": {"outcome": "ok", "steps": [...],
-"sources": [...]}}` for a mapping case, `{"name": "translate", "response":
-{"outcome": "referred", "referral": {"kind": ..., "requirement_id":
-...}}}` for a referral case, `{"name": "propose_plan", "response": {"outcome":
-"ok", "version": 2}}` for a planner turn that has to amend rather than start
-over, or `{"name": "reject_plan", "response": {"outcome": "ok"}}` for one that
-has to record a rejection. `translate` drives `discover_source`,
-`propose_operations` and `return_to_planner` itself as plain Python calls
-(`translator.mechanical.run_translate`), so a compiled or referred outcome
-comes back as `translate`'s own response, verbatim, distinguished from one
-another only by `response["outcome"]`. This metric finds the *actual*
+`{"name": "translate", "response": {"outcome": "ok"}}` for a plan that has to
+compile, `{"name": "translate", "response": {"outcome": "invalid_input",
+"kind": ..., "requirement_id": ...}}` for one that has to come back referred,
+`{"name": "propose_plan", "response": {"outcome": "ok", "version": 2}}` for a
+planner turn that has to amend rather than start over, or `{"name":
+"reject_plan", "response": {"outcome": "ok"}}` for one that has to record a
+rejection. `translate` answers `ok` once the plan compiled, or with the
+referral itself, whose `outcome` is one of `translator.referral.OUTCOME_OF`'s.
+This metric finds the *actual*
 response of that same name -- the last one whose `outcome` is the one the
 case states, so a
 retry the tool refused after the accepted call does not hide it (`_by_name`)
@@ -46,9 +40,8 @@ in.
 A turn is also failed when the agent hedged: a reject case that also had
 `submit_plan` answer `ok` -- an agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translate` case hedges
-the same way -- a mapping case (`translate` expecting `ok`) that also had
-`translate` answer `referred`, or a referral case that also had `translate`
-answer `ok` -- since `_by_name` picks whichever response carries the stated
+the same way -- a case expecting `ok` that also had `translate` answer a
+referral, or a referral case that also had `translate` answer `ok` -- since `_by_name` picks whichever response carries the stated
 outcome and would otherwise miss a second, contradicting call the model also
 made on the same turn (`_hedged`). A plan-proposal case has nothing to hedge
 against: `submit_plan` approves and executes nothing itself, so calling it
@@ -84,16 +77,6 @@ expected side -- so a case's own JSON stays the more readable
 `IntermediateData` shape while the metric reads a live run's `InvocationEvents`
 the same way.
 
-Because `invocation_events` is not filtered by author, a sub-agent's tool
-responses appear in the *root* invocation's data too. `dfo_translator` runs as
-a `single_turn` sub-agent wrapped as one of `dfo_planner`'s own tools
-(`google.adk.tools.agent_tool`), so its `translate` call happens inside the
-same runner invocation as the planner's turn and carries the sub-agent's own
-name as `author` -- `harness-pair-v1`'s cases rely on exactly this to see the
-translator's response from a turn where the planner, not the translator, is
-nominally being scored, stating their expectation under the `translate`
-name the sub-agent's own trace carries.
-
 Registered as a custom metric (`google/adk/evaluation/eval_config.py`):
 declare it under `criteria` (`{"workflow_outcome": 1.0}`) and under
 `custom_metrics` (`{"workflow_outcome": {"code_config": {"name":
@@ -102,8 +85,8 @@ declare it under `criteria` (`{"workflow_outcome": 1.0}`) and under
 (`google/adk/evaluation/custom_metric_evaluator.py:31-42`) imports that dotted
 path with `importlib.import_module`, which needs `evals/agents` on `sys.path`
 to resolve `harness_translator_v1` as a top-level package -- the `__init__.py`
-of every set that turns it on (`harness_translator_v1`, `harness_pair_v1`,
-`harness_planner_v2`) inserts it for exactly this.
+of every set that turns it on (`harness_pair_v1`, `harness_planner_v2`,
+`harness_planner_skills_v1`) inserts it for exactly this.
 """
 
 from __future__ import annotations
@@ -119,9 +102,8 @@ from google.genai import types as genai_types
 # The tools whose response a case may state an expectation on. A
 # `tool_responses` entry naming anything else is not an expectation this
 # metric scores -- `test_eval_sets.py` imports this to refuse such a turn.
-# `translate` is the translator's one model-facing tool; it drives
-# `propose_operations` and `return_to_planner` itself as plain Python calls
-# and returns their outcome, `ok` or `referred`, as its own response.
+# `translate` is the planner's tool that runs translation; it answers `ok` or
+# the referral translation stopped on.
 SCORED_TOOLS = (
     "propose_plan",
     "reject_plan",
@@ -132,9 +114,6 @@ SCORED_TOOLS = (
 # not the case's: see `matches_subset`.
 _UNORDERED_KEYS = frozenset({"sources"})
 
-# The `translate` outcome that hedges each of the two a case can state an
-# expectation on: see `_hedged`.
-_OPPOSITE_TRANSLATE_OUTCOME = {"ok": "referred", "referred": "ok"}
 
 # The default threshold, used only when a `test_config.json` names this
 # metric in `criteria` with a bare float rather than a `BaseCriterion`.
@@ -237,6 +216,15 @@ def _by_name(
     return (preferred or matching)[-1]
 
 
+def _is_referral(response: genai_types.FunctionResponse) -> bool:
+    """Whether `response` is a `translate` referral: the one answer naming a `kind`."""
+    return (
+        response.name == "translate"
+        and isinstance(response.response, dict)
+        and "kind" in response.response
+    )
+
+
 def _answered_by(response: genai_types.FunctionResponse, name: str, *outcomes: str) -> bool:
     """Whether `response` is `name`'s own answer, carrying one of `outcomes`."""
     if response.name != name or not isinstance(response.response, dict):
@@ -259,14 +247,11 @@ def _hedged(
 ) -> bool:
     """Whether `actual_responses` covers itself alongside the outcome `expected` wants.
 
-    A mapping case (`translate` expecting `ok`) is hedged by a `translate`
-    that also answered `referred`; a referral case (`translate` expecting
-    `referred`) is hedged by a `translate` that also answered `ok`. `ok` and
-    `referred` are the only two outcomes a case ever names for `translate`
-    (`needs_decision` is neither), so checking for the one outcome opposite
-    the one `expected` states finds exactly this pair and nothing else -- a
-    call the tool refused answers with some other outcome, wrote nothing,
-    and hedges nothing, the same as it always did. A reject case is hedged
+    A case expecting `translate` to answer `ok` is hedged by a `translate`
+    that also answered a referral (`_is_referral`); a referral case is
+    hedged by a `translate` that also answered `ok`. A call the tool refused
+    answers with a problem, which names no `kind`, wrote nothing, and hedges
+    nothing. A reject case is hedged
     by an accepted `submit_plan`: `submit_plan` answering `ok` declares the
     plan ready for the user's answer, and an agent cannot both do that and
     record a rejection on the same turn. A `submit_plan` the tool refused --
@@ -277,8 +262,10 @@ def _hedged(
     is keyed on, not a way to have it both ways.
     """
     match expected.name:
-        case "translate" if opposite := _OPPOSITE_TRANSLATE_OUTCOME.get(_outcome(expected)):
-            return any(_answered_by(r, "translate", opposite) for r in actual_responses)
+        case "translate" if _outcome(expected) == "ok":
+            return any(_is_referral(r) for r in actual_responses)
+        case "translate" if _is_referral(expected):
+            return any(_answered_by(r, "translate", "ok") for r in actual_responses)
         case "reject_plan":
             return any(_answered_by(r, "submit_plan", "ok") for r in actual_responses)
         case _:

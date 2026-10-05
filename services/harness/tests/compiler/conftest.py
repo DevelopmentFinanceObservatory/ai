@@ -50,6 +50,21 @@ GET_DATA_PARAMETERS: dict[str, Any] = {
             "maxItems": MAX_RESOLVED_STAT_VAR_DCIDS,
         },
         "place_types": {"type": "boolean", "default": False},
+        "breakdown": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "code_system": {"type": "string", "minLength": 1},
+                        "level": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["code_system", "level"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ],
+            "default": None,
+        },
     },
     "required": ["spec_id"],
     "additionalProperties": False,
@@ -85,6 +100,26 @@ GROWTH_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# A unit pin: a unit ref, or a converted unit's `{currency, prices, base_year}`
+# object, as analysis-mcp's `PinnedUnit` declares it.
+_PINNED_UNIT_PARAMETER: dict[str, Any] = {
+    "anyOf": [
+        {"type": "string"},
+        {
+            "type": "object",
+            "properties": {
+                "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+                "prices": {"enum": ["current", "constant"]},
+                "base_year": {"type": "integer"},
+            },
+            "required": ["currency", "prices"],
+            "additionalProperties": False,
+        },
+        {"type": "null"},
+    ],
+    "default": None,
+}
+
 COMPARE_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -92,8 +127,8 @@ COMPARE_PARAMETERS: dict[str, Any] = {
         "right_frame_ref": {"anyOf": [FRAME_REF_PARAMETER, {"type": "null"}], "default": None},
         "left_entity": {"anyOf": [FRAME_REF_PARAMETER, {"type": "null"}], "default": None},
         "right_entity": {"anyOf": [FRAME_REF_PARAMETER, {"type": "null"}], "default": None},
-        "left_unit": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
-        "right_unit": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+        "left_unit": _PINNED_UNIT_PARAMETER,
+        "right_unit": _PINNED_UNIT_PARAMETER,
     },
     "required": ["frame_ref"],
     "additionalProperties": False,
@@ -217,7 +252,7 @@ def tool_schema() -> Callable[..., ToolSchema]:
 
 @pytest.fixture
 def schemas(tool_schema: Callable[..., ToolSchema]) -> dict[str, ToolSchema]:
-    """An eight-tool surface: retrieval, then the seven analysis verbs the compiler maps."""
+    """A nine-tool surface: retrieval, then the eight analysis verbs the compiler maps."""
     return {
         "get_data": tool_schema(
             server="data-mcp",
@@ -241,6 +276,9 @@ def schemas(tool_schema: Callable[..., ToolSchema]) -> dict[str, ToolSchema]:
         ),
         "filter": tool_schema(
             name="filter", description="Filter rows by predicate.", parameters=FILTER_PARAMETERS
+        ),
+        "sum_of": tool_schema(
+            name="sum_of", description="Add two sides.", parameters=COMPARE_PARAMETERS
         ),
     }
 

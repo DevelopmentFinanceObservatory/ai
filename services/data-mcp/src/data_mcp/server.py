@@ -43,6 +43,7 @@ from data_mcp.get_skill_file_tool import get_skill_file
 from data_mcp.get_skill_tool import get_skill
 from data_mcp.manifest import ARTIFACT_URI_TEMPLATE
 from data_mcp.resolve_definition_tool import resolve_definition
+from data_mcp.result_bound import ResultBoundMiddleware
 from data_mcp.settings import Settings
 from data_mcp.skills_resources import SkillsProvider
 from data_mcp.sources_tool import sources
@@ -115,6 +116,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
 mcp = FastMCP(name="data-mcp", lifespan=_lifespan, auth=BearerTokenVerifier())
 mcp.add_middleware(LangfuseSessionMiddleware())
 mcp.add_middleware(LangfuseToolIoMiddleware())
+mcp.add_middleware(ResultBoundMiddleware())
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

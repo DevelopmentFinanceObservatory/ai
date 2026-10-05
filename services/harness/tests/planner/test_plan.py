@@ -6,7 +6,7 @@ import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from planner.operations import (
@@ -45,6 +45,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FixedField,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -54,8 +55,12 @@ from planner.plan import (
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
+    SumOfRequirement,
     Unit,
+    UnsupportedOperation,
+    UnsupportedPlanError,
     cut_user_text,
+    frame_shapes,
     load_plan,
     plan_revision,
 )
@@ -78,6 +83,7 @@ from planner.records import (
     TaggedModel,
     ValueThreshold,
 )
+from planner.shapes import TimeLabel
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -112,6 +118,15 @@ def _plan(decision: Decision, **overrides: Any) -> Plan:
     return Plan(**(fields | overrides))
 
 
+def _unsupported_operation(exc: ValidationError) -> UnsupportedOperation | None:
+    """The operation an `UnsupportedPlanError` behind `exc` names, or `None` for a malformed draft."""
+    for error in exc.errors():
+        cause = error.get("ctx", {}).get("error")
+        if isinstance(cause, UnsupportedPlanError):
+            return cause.operation
+    return None
+
+
 def _at(plan: Plan, status: PlanStatus) -> Plan:
     """Place `plan` at `status` directly, for tests about what a status permits."""
     return plan.model_copy(update={"status": status})
@@ -124,9 +139,9 @@ def _every_kind_plan(decision: Decision) -> Plan:
     and also feeds `rank_a` (rank, among='population', reducing the decade to
     one value per entity -- `decision` has to cite `fixes.among='population'`
     for `rank_a`'s population claim to validate). `dataset_b` feeds
-    `filtered_b` (filter). `joined` (join), `share_a` (share_of) and
-    `comparison_a` (comparison) each read both `totals_a` and `filtered_b`;
-    `comparison_a` is terminal.
+    `filtered_b` (filter). `joined` (join), `share_a` (share_of),
+    `comparison_a` (comparison) and `sum_a` (sum_of) each read both
+    `totals_a` and `filtered_b`; `comparison_a` is terminal.
     """
     dataset_a = DatasetRequirement(
         id="dataset_a",
@@ -185,6 +200,12 @@ def _every_kind_plan(decision: Decision) -> Plan:
         left=RequirementSide(input_id="totals_a"),
         right=RequirementSide(input_id="filtered_b"),
     )
+    sum_a = SumOfRequirement(
+        id="sum_a",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="totals_a"),
+        right=RequirementSide(input_id="filtered_b"),
+    )
     return _plan(
         decision,
         evidence_requirements=[
@@ -197,6 +218,7 @@ def _every_kind_plan(decision: Decision) -> Plan:
             joined,
             share_a,
             comparison_a,
+            sum_a,
         ],
     )
 
@@ -641,7 +663,7 @@ def test_a_pinned_source_citing_no_decision_is_still_refused(
     requirement: RequirementFactory,
 ) -> None:
     with pytest.raises(
-        ValidationError, match="cites no decision that fixes that same source_spec_id"
+        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
     ):
         Plan(
             question="Show me Kenya's external debt service.",
@@ -774,6 +796,17 @@ def test_comparison_sides_must_differ() -> None:
         )
 
 
+def test_sum_of_sides_must_read_different_requirements() -> None:
+    # Two entities of one series are an aggregate's to total; a sum adds two sources.
+    with pytest.raises(ValidationError, match="its sides read different requirements"):
+        SumOfRequirement(
+            id="total",
+            decision_ids=["measure"],
+            left=RequirementSide(input_id="aid", entity="France"),
+            right=RequirementSide(input_id="aid", entity="Germany"),
+        )
+
+
 def test_share_of_sides_must_differ() -> None:
     with pytest.raises(ValidationError, match="numerator and denominator must differ"):
         ShareOfRequirement(
@@ -859,8 +892,169 @@ def test_nothing_may_read_a_comparison(
         group_by=(GroupBy.PERIOD,),
     )
 
-    with pytest.raises(ValidationError, match="feeds nothing further"):
+    with pytest.raises(ValidationError) as refused:
         _plan(decision(), evidence_requirements=[dataset, agg, comparison, reads_comparison])
+    assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
+
+
+def test_a_sum_of_feeds_a_further_calculation_as_one_series(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    bilateral = requirement(id="bilateral", period=Period(start=2010, end=2024))
+    multilateral = requirement(
+        id="multilateral",
+        measure="imputed multilateral aid",
+        period=Period(start=2011, end=2023),
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=bilateral.id),
+        right=RequirementSide(input_id=multilateral.id),
+    )
+    growth = GrowthRequirement(
+        id="growth",
+        decision_ids=["measure"],
+        input_id=total.id,
+        window_start=2012,
+        window_end=2022,
+    )
+
+    plan = _plan(
+        decision(),
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[bilateral, multilateral, total, growth],
+    )
+
+    shape = frame_shapes(plan.evidence_requirements)[total.id]
+    assert shape.roles == ()
+    assert shape.measures == 1
+    assert shape.period == Period(start=2011, end=2023)
+
+
+def test_a_calculation_the_question_states_outright_cites_no_decision(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # A total the question asks for, or the instruction prescribes, is not a
+    # choice weighed among alternatives, so its requirement cites nothing.
+    dataset = requirement()
+    total = AggregateRequirement(
+        id="total", input_id=dataset.id, reduction=Reduction.SUM, group_by=(GroupBy.PERIOD,)
+    )
+
+    plan = _plan(decision(), status=PlanStatus.DRAFT, evidence_requirements=[dataset, total])
+
+    assert plan.requirement("total").decision_ids == ()
+
+
+def test_a_draft_names_exactly_the_fields_a_decision_fixes() -> None:
+    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields)
+
+
+@pytest.mark.parametrize("multilateral_start", [2010, 2011])
+def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_first(
+    decision: DecisionFactory, requirement: RequirementFactory, multilateral_start: int
+) -> None:
+    # Both sides over the question's own period, added year by year, then
+    # the sum's one series totalled by an aggregate grouped by entity. The
+    # sum_of keeps the years both report, so the plan holds whatever year
+    # one source lacks without moving either period.
+    bilateral = requirement(id="bilateral", period=Period(start=2010, end=2024))
+    multilateral = requirement(
+        id="multilateral",
+        measure="imputed multilateral aid",
+        period=Period(start=multilateral_start, end=2024),
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=bilateral.id),
+        right=RequirementSide(input_id=multilateral.id),
+    )
+    span = AggregateRequirement(
+        id="span", input_id=total.id, reduction=Reduction.SUM, group_by=(GroupBy.ENTITY,)
+    )
+
+    plan = _plan(
+        decision(),
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[bilateral, multilateral, total, span],
+    )
+
+    shape = frame_shapes(plan.evidence_requirements)[span.id]
+    assert shape.time is TimeLabel.SPAN
+    assert shape.roles == ()
+    assert shape.period == Period(start=multilateral_start, end=2024)
+
+
+@pytest.mark.parametrize(
+    ("multilateral_start", "refused"), [(2011, None), (2012, "add the two yearly series")]
+)
+def test_a_total_of_two_sources_over_a_span_sums_each_sides_years_first(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    multilateral_start: int,
+    refused: str | None,
+) -> None:
+    # Each side's years summed first, then the two totals added: the two
+    # spans match only over one stated period, and a sum_of over spans that
+    # differ is refused naming the order that holds, the yearly series
+    # added first.
+    bilateral = requirement(id="bilateral", period=Period(start=2011, end=2024))
+    multilateral = requirement(
+        id="multilateral",
+        measure="imputed multilateral aid",
+        period=Period(start=multilateral_start, end=2024),
+    )
+    totals = [
+        AggregateRequirement(
+            id=f"{side.id}_total",
+            decision_ids=["measure"],
+            input_id=side.id,
+            reduction=Reduction.SUM,
+            group_by=(GroupBy.ENTITY,),
+        )
+        for side in (bilateral, multilateral)
+    ]
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=totals[0].id),
+        right=RequirementSide(input_id=totals[1].id),
+    )
+    requirements = [bilateral, multilateral, *totals, total]
+
+    if refused is not None:
+        with pytest.raises(ValidationError, match=refused):
+            _plan(decision(), answer_mode=AnswerMode.COMPUTED, evidence_requirements=requirements)
+        return
+    plan = _plan(decision(), answer_mode=AnswerMode.COMPUTED, evidence_requirements=requirements)
+
+    shape = frame_shapes(plan.evidence_requirements)[total.id]
+    assert shape.time is TimeLabel.SPAN
+    assert shape.period == Period(start=2011, end=2024)
+
+
+def test_a_sum_of_side_holding_a_share_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    bilateral = requirement(id="bilateral")
+    multilateral = requirement(id="multilateral", measure="imputed multilateral aid")
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=bilateral.id),
+        denominator=RequirementSide(input_id=multilateral.id),
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=share.id),
+        right=RequirementSide(input_id=multilateral.id),
+    )
+
+    with pytest.raises(ValidationError, match="does not add up"):
+        _plan(decision(), evidence_requirements=[bilateral, multilateral, share, total])
 
 
 def test_a_computed_plan_rejects_an_unread_dataset_requirement(
@@ -871,8 +1065,9 @@ def test_a_computed_plan_rejects_an_unread_dataset_requirement(
     # requirement nothing reads leaves the plan without one.
     unread = requirement()
 
-    with pytest.raises(ValidationError, match="unread dataset requirements"):
+    with pytest.raises(ValidationError, match="unread dataset requirements") as refused:
         _plan(decision(), answer_mode=AnswerMode.COMPUTED, evidence_requirements=[unread])
+    assert _unsupported_operation(refused.value) is None
 
 
 def test_a_series_plan_accepts_a_lone_dataset_requirement(
@@ -966,11 +1161,12 @@ def test_a_comparison_reading_a_join_is_rejected(
         right=RequirementSide(input_id=agg_a.id),
     )
 
-    with pytest.raises(ValidationError, match=r"feeds nothing further.*\('joined', 'join'\)"):
+    with pytest.raises(ValidationError) as refused:
         _plan(
             decision(),
             evidence_requirements=[dataset_a, dataset_b, agg_a, agg_b, joined, comparison],
         )
+    assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
 
 
 def test_growth_window_must_fit_the_upstream_dataset_period(
@@ -1020,10 +1216,11 @@ def test_a_growth_reading_a_join_is_rejected(
         window_end=2100,
     )
 
-    with pytest.raises(ValidationError, match=r"feeds nothing further.*\('joined', 'join'\)"):
+    with pytest.raises(ValidationError) as refused:
         _plan(
             decision(), evidence_requirements=[dataset_a, dataset_b, agg_a, agg_b, joined, growth]
         )
+    assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
 
 
 def test_a_growth_window_is_checked_through_a_share_of(
@@ -1684,11 +1881,12 @@ def test_a_requirement_reading_a_join_is_rejected(
         id="joined", decision_ids=["measure"], left_id=agg_a.id, right_id=agg_b.id
     )
 
-    with pytest.raises(ValidationError, match=r"feeds nothing further.*\('joined', 'join'\)"):
+    with pytest.raises(ValidationError) as refused:
         _plan(
             decision(),
             evidence_requirements=[dataset_a, dataset_b, agg_a, agg_b, joined, _rank(joined.id)],
         )
+    assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
 
 
 # --- The frame-shape walk (planner.shapes, driven from requirements) -----------
@@ -1775,7 +1973,7 @@ def test_among_population_with_no_decision_fixing_it_fails(
 ) -> None:
     dataset = requirement()
 
-    with pytest.raises(ValidationError, match=r"cites no decision whose fixes\.among"):
+    with pytest.raises(ValidationError, match="cites no decision whose `fixes` names `among`"):
         _plan(
             decision(),  # fixes=None
             evidence_requirements=[
@@ -1821,7 +2019,9 @@ def test_denominator_scope_pooled_with_no_decision_fixing_it_fails(
         denominator_scope=DenominatorScope.POOLED,
     )
 
-    with pytest.raises(ValidationError, match=r"cites no decision whose fixes\.denominator_scope"):
+    with pytest.raises(
+        ValidationError, match="cites no decision whose `fixes` names `denominator_scope`"
+    ):
         _plan(decision(), evidence_requirements=[numerator, denominator, share])
 
 
@@ -2842,7 +3042,7 @@ def test_a_pinned_source_needs_a_decision_that_fixes_it(
     # `decision()`'s default carries no `fixes` at all, so citing it pins
     # nothing -- regardless of who resolved it.
     with pytest.raises(
-        ValidationError, match="cites no decision that fixes that same source_spec_id"
+        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
     ):
         _plan(
             decision(),
@@ -2867,7 +3067,7 @@ def test_a_pin_needs_a_decision_that_fixes_that_exact_source(
     pinned = requirement(decision_ids=["measure", "source"], source_spec_id=_PIN)
 
     with pytest.raises(
-        ValidationError, match="cites no decision that fixes that same source_spec_id"
+        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
     ):
         _plan(
             decision(),
@@ -3550,7 +3750,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Eight requirements, the four predicates a filter carries, and the eight
+    # Nine requirements, the four predicates a filter carries, and the nine
     # operations a plan's `translation` holds.
     definitions = Plan.model_json_schema()["$defs"]
     tagged = {
@@ -3559,7 +3759,7 @@ def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> 
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 20
+    assert len(tagged) == 22
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 

@@ -34,6 +34,7 @@ from planner.plan import (
     Plan,
     RankRequirement,
     ShareOfRequirement,
+    SumOfRequirement,
 )
 from planner.records import (
     DenominatorScope,
@@ -118,7 +119,7 @@ def datasets_of(requirement: EvidenceRequirement, plan: Plan) -> tuple[DatasetRe
         requirement, (AggregateRequirement, GrowthRequirement, RankRequirement, FilterRequirement)
     ):
         return datasets_of(plan.requirement(requirement.input_id), plan)
-    if isinstance(requirement, ComparisonRequirement):
+    if isinstance(requirement, ComparisonRequirement | SumOfRequirement):
         return datasets_of(plan.requirement(requirement.left.input_id), plan) + datasets_of(
             plan.requirement(requirement.right.input_id), plan
         )
@@ -161,7 +162,8 @@ def narrowing_step(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequ
     alone keep every row of each period they keep, and a share_of keeps its
     numerator's rows unless that side narrows to one entity, so the walk
     goes on through each one's input. Every other step drops rows: a filter
-    on entities or values, a rank with a `limit`, a comparison and a join.
+    on entities or values, a rank with a `limit`, a comparison, a sum_of and
+    a join.
     """
     current = requirement
     while not isinstance(current, DatasetRequirement):

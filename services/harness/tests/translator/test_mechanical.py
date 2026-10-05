@@ -3,15 +3,15 @@
 `build_translation` is exercised first, on its own: the claim under test is
 that it is a pure, deterministic function of a plan's own requirements (plus
 the sources discovery found), never a fresh choice. `run_translate` is then
-driven end to end through `translator.agent.build_translator_core`, against
+driven end to end through `translator.tool.build_translator_core`, against
 an `McpSurface` combining the shared canned `data_server` (data-mcp's
 `search`/`describe`, so `discover_source` answers stay under this suite's
 control) with the real `get_data` tool object (`data_mcp.server`, added onto
 the same server so its capability schema matches production and
 `propose_operations` compiles for real) and the real `analysis_mcp` app
 (every verb's own real capability schema). Nothing here calls `get_data`:
-`translator.agent`'s module docstring states the translator never wraps it
-either, so only its schema, never its implementation, has to be real.
+`translator.tool`'s module docstring states translation retrieves no
+observations, so only its schema, never its implementation, has to be real.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
+from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefinitionStore
@@ -71,6 +72,7 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Period,
+    PinSource,
     Plan,
     PlanStatus,
     RankRequirement,
@@ -79,29 +81,43 @@ from planner.plan import (
     ShareOfRequirement,
     plan_revision,
     save_dropped_seeds,
+    save_pin_sources,
     save_plan,
     save_seeded_sources,
 )
 from planner.records import DenominatorScope, EntityIn, GroupBy, RankAmong, RankDirection
-from planner.tool_results import ProblemCode
+from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import SelectedSource
 from pydantic import Field as PydanticField
 from translator import mechanical
-from translator.agent import build_translator_core, create_translator_agent
-from translator.discovery import DiscoveryRecord, load_log, requirement_revision, save_log
+from translator.discovery import (
+    DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
+    DiscoveryRecord,
+    load_log,
+    requirement_revision,
+    save_log,
+)
 from translator.mechanical import (
     _BUILDERS,
     TranslatorCore,
-    _load_pending,
     _operation_for,
     _unsupported_requirement,
     build_translation,
     run_translate,
 )
-from translator.referral import Referral, ReferralKind, load_referral, save_referral
+from translator.referral import (
+    OUTCOME_OF,
+    Referral,
+    ReferralKind,
+    clear_referral,
+    load_referral,
+    save_referral,
+)
+from translator.tool import build_translate_tool, build_translator_core
 
 from ..bounded_seeds import fullest_described_seed, read_seed
 from ..data_mcp_definitions import SearchStub, search_api
+from .conftest import _spec
 from .test_model_facing_tool_results import _ENVELOPE_KEYS, _flat_keys
 
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -336,7 +352,7 @@ def test_build_translation_names_an_unread_dataset_requirement_its_own_terminal(
 # --- run_translate: the whole loop, no model turn --------------------------
 
 
-async def test_run_translate_compiles_a_clean_plan_with_no_pending_judgement(
+async def test_run_translate_compiles_a_clean_plan(
     draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
 ) -> None:
     context = context_holding(draft())
@@ -399,77 +415,20 @@ class _ScriptedLlm(BaseLlm):
         )
 
 
-async def test_a_clean_plan_costs_the_translators_model_exactly_one_generation(
-    draft: DraftFactory, combined_surface: McpSurface
-) -> None:
-    """A clean plan's only model call closes the turn.
-
-    `translate` drives the whole loop as code and never touches a model
-    (`translator.mechanical` imports nothing from
-    `google.genai`/`google.adk.models`), and the generation that would decide
-    to call it never reaches the model either: `_before_translator_model`
-    answers that generation with `translate`'s own call. Asserted on the
-    translator's own scripted model's call count, so a reintroduced
-    generation fails here even where the result stays correct.
-    """
-    plan = draft()
-    translator = create_translator_agent(
-        model_name="m", surface=combined_surface, mode="single_turn"
-    )
-    translator.model = _ScriptedLlm(script=['{"outcome": "ok"}'])
-    root_llm = _ScriptedLlm(script=[[("dfo_translator", {"request": "irrelevant here"})]])
-    root = LlmAgent(name="root", model=root_llm, sub_agents=[translator])
-    session_service = InMemorySessionService()
-    await session_service.create_session(app_name="app", user_id="u", session_id="s")
-    session = await session_service.get_session(app_name="app", user_id="u", session_id="s")
-    assert session is not None
-    save_plan(cast("Any", session.state), plan)
-    runner = Runner(agent=root, app_name="app", session_service=session_service)
-    async for _event in runner.run_async(
-        user_id="u",
-        session_id="s",
-        new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
-    ):
-        pass
-
-    translator_llm = cast("_ScriptedLlm", translator.model)
-    assert len(translator_llm.captured_requests) == 1
-    (response,) = [
-        part.function_response
-        for part in translator_llm.captured_requests[0].contents[-1].parts
-        if part.function_response
-    ]
-    assert response.name == "translate"
-
-
 def _last_function_response(request: Any) -> Any:
     """The function response the model's next turn would read, from `request`."""
     (response,) = [p.function_response for p in request.contents[-1].parts if p.function_response]
     return response
 
 
-def _retype_the_referral_translate_reported(request: Any) -> list[tuple[str, dict[str, Any]]]:
-    """Close as a model does: hand `translate`'s own `referral` back through `set_model_response`."""
-    referral = _last_function_response(request).response["referral"]
-    return [("set_model_response", {"response": referral})]
+async def _planner_reads(plan: Plan, surface: McpSurface) -> dict[str, Any]:
+    """Call `translate` from an agent's turn; return what that agent's next generation reads.
 
-
-async def _planner_reads(
-    plan: Plan,
-    surface: McpSurface,
-    *,
-    translator_script: list[Any],
-) -> dict[str, Any]:
-    """Run the translator as the planner's sub-agent; return what the planner's next turn reads.
-
-    The translator's model follows `translator_script`; the planner's model
-    calls `dfo_translator` once. The plan is written into the session at
-    creation, so `translate` finds it.
+    The agent's model calls `translate` once, with no arguments. The plan is
+    written into the session at creation, so `translate` finds it.
     """
-    translator = create_translator_agent(model_name="m", surface=surface, mode="single_turn")
-    translator.model = _ScriptedLlm(script=translator_script)
-    root_llm = _ScriptedLlm(script=[[("dfo_translator", {"request": "irrelevant here"})]])
-    root = LlmAgent(name="root", model=root_llm, sub_agents=[translator])
+    root_llm = _ScriptedLlm(script=[[("translate", {})]])
+    root = LlmAgent(name="root", model=root_llm, tools=[build_translate_tool(surface=surface)])
     session_service = InMemorySessionService()
     await session_service.create_session(
         app_name="app",
@@ -487,7 +446,7 @@ async def _planner_reads(
 
     assert len(root_llm.captured_requests) == 2
     response = _last_function_response(root_llm.captured_requests[1])
-    assert response.name == "dfo_translator"
+    assert response.name == "translate"
     return cast("dict[str, Any]", response.response)
 
 
@@ -507,43 +466,28 @@ def _ranking_plan(
     )
 
 
-# Referral-shaped, but naming no requirement: what `Referral` refused before
-# `Referred` accepted the wire shape.
-_FABRICATED: dict[str, Any] = {"kind": "no_data", "reason": "guess"}
-
-_RANK_THEN_REFER: list[Any] = [
-    [("translate", {})],
-    [("translate", {"requirement_id": "gdp_gtm", "choice": SPEC_OTHER, "rationale": "closer"})],
-    _retype_the_referral_translate_reported,
-]
-
-
-async def test_a_referral_the_model_hands_back_reaches_the_planner_with_its_candidates(
+async def test_a_referral_reaches_the_caller_with_its_outcome_and_candidates(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
     combined_surface: McpSurface,
 ) -> None:
-    """The model closes with the `referral` `translate` answered, candidates and all.
+    """`translate` answers with the referral itself, its `outcome` on top.
 
-    That payload renders each candidate as `compact_source` does (`measures`,
-    entities without a `ref`), which is not the `SelectedSource` shape
-    `Referral.candidates` validates, so the closing turn cannot be checked
-    against `Referral`. The planner still has to read the referral, with
-    its candidates, rather than an `Error running sub-agent` string.
+    Each candidate renders as `compact_source` does, with the `spec_id` the
+    requirement may pin.
     """
     plan = _ranking_plan(requirement, derived_requirement, decision, measure="aid disbursed")
 
-    answer = await _planner_reads(plan, combined_surface, translator_script=_RANK_THEN_REFER)
+    answer = await _planner_reads(plan, combined_surface)
 
-    assert "result" not in answer, answer
+    assert answer["outcome"] == "choice_required"
     assert answer["kind"] == "source_ambiguous"
     assert answer["requirement_id"] == "gdp_gtm"
     assert {c["spec_id"] for c in answer["candidates"]} == {SPEC_OTHER, SPEC_THIRD}
-    assert answer["recommendation"] == {"spec_id": SPEC_OTHER, "rationale": "closer"}
 
 
-async def test_a_no_data_referral_reaches_the_planner_with_its_nearest_sources_unnamed(
+async def test_a_no_data_referral_reaches_the_caller_with_its_nearest_sources_unnamed(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
@@ -551,79 +495,24 @@ async def test_a_no_data_referral_reaches_the_planner_with_its_nearest_sources_u
 ) -> None:
     plan = _ranking_plan(requirement, derived_requirement, decision, measure="nearly aid")
 
-    answer = await _planner_reads(
-        plan,
-        combined_surface,
-        translator_script=[[("translate", {})], _retype_the_referral_translate_reported],
-    )
+    answer = await _planner_reads(plan, combined_surface)
 
-    assert "result" not in answer, answer
+    assert answer["outcome"] == "invalid_input"
     assert answer["kind"] == "no_data"
     assert answer["no_data_reason"] == "no_observations"
     (nearest,) = answer["candidates"]
     assert "spec_id" not in nearest
 
 
-async def test_the_recorded_referral_is_what_the_planner_reads_whatever_the_model_typed(
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    decision: DecisionFactory,
-    combined_surface: McpSurface,
-) -> None:
-    """A model that garbles its closing turn cannot change which referral the planner acts on."""
-    plan = _ranking_plan(requirement, derived_requirement, decision, measure="aid disbursed")
-    garbled = [("set_model_response", {"response": {"kind": "no_data", "reason": "guess"}})]
-
-    answer = await _planner_reads(
-        plan,
-        combined_surface,
-        translator_script=[*_RANK_THEN_REFER[:2], garbled],
-    )
-
-    assert answer["kind"] == "source_ambiguous"
-    assert answer["requirement_id"] == "gdp_gtm"
-    assert len(answer["candidates"]) == 2
-
-
-@pytest.mark.parametrize(
-    "translator_script",
-    [
-        pytest.param(
-            [[("translate", {})], [("set_model_response", {"response": _FABRICATED})]],
-            id="after_a_clean_compile",
-        ),
-        pytest.param(
-            [[("set_model_response", {"response": _FABRICATED})]], id="without_calling_translate"
-        ),
-    ],
-)
-async def test_a_referral_no_translate_call_recorded_never_reaches_the_planner(
-    draft: DraftFactory, combined_surface: McpSurface, translator_script: list[Any]
-) -> None:
-    """With nothing recorded, only `Compiled` may close the turn.
-
-    `Referred` carries none of `Referral`'s cross-field rules (this one names
-    no requirement), so accepting it would hand the planner a referral no
-    code produced. The closing turn fails instead, and the planner reads the
-    sub-agent error rather than the invented referral.
-    """
-    answer = await _planner_reads(draft(), combined_surface, translator_script=translator_script)
-
-    assert "kind" not in answer, answer
-    assert str(answer.get("result", "")).startswith("Error running sub-agent"), answer
-
-
-async def test_a_compiled_plan_closes_on_the_outcome_alone(
+async def test_a_compiled_plan_answers_the_outcome_alone(
     draft: DraftFactory, combined_surface: McpSurface
 ) -> None:
-    answer = await _planner_reads(
-        draft(),
-        combined_surface,
-        translator_script=[
-            [("translate", {})],
-            [("set_model_response", {"response": {"outcome": "ok"}})],
-        ],
-    )
+    """The version, revision and warnings are `submit_plan`'s to answer, and
+    the sources and steps are on the approval card, so the caller reads
+    `ok` and nothing else."""
+    plan = draft()
+
+    answer = await _planner_reads(plan, combined_surface)
 
     assert answer == {"outcome": "ok"}
 
@@ -667,7 +556,7 @@ async def test_run_translate_compiles_a_two_level_derived_chain(
     ]
 
 
-async def test_run_translate_refers_an_ambiguous_requirement_after_ranking(
+async def test_run_translate_closes_an_ambiguous_requirement_on_its_candidates(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
@@ -677,11 +566,9 @@ async def test_run_translate_refers_an_ambiguous_requirement_after_ranking(
     """A Guatemala-shaped plan: one requirement resolves `definite`, the other `candidates`.
 
     `population_gtm` resolves clean, `gdp_gtm` comes back with two
-    candidates and no pin -- `run_translate` stops there for the one
-    judgement it still asks a model to make, and the referral it eventually
-    raises carries the model's own `choice` and `rationale` as a
-    recommendation, never a pick this loop made itself (`discover_source`'s
-    own answer already forbids that).
+    candidates and no pin. The one `translate` call closes on a
+    `choice_required` referral carrying both, each with the spec_id and
+    coverage the planner chooses by, and nothing ranks them.
     """
     population = requirement(id="population_gtm", measure="population total")
     population_total = derived_requirement(id="population_total", input_id="population_gtm")
@@ -695,95 +582,27 @@ async def test_run_translate_refers_an_ambiguous_requirement_after_ranking(
     )
     context = context_holding(plan)
 
-    needs_decision = await run_translate(context, core=core)
-
-    assert needs_decision["outcome"] == "needs_decision", needs_decision
-    assert needs_decision["judgement"] == "candidate_ranking"
-    assert needs_decision["requirement_id"] == "gdp_gtm"
-    candidate_ids = {c["spec_id"] for c in needs_decision["candidates"]}
-    assert candidate_ids == {SPEC_OTHER, SPEC_THIRD}
-    # Each candidate is described, not just named -- describe ran from code.
-    assert all(c["definition"] for c in needs_decision["candidates"])
-    assert needs_decision["decisions"], "the decisions citing gdp_gtm ride along, unrequested"
-
-    referred = await run_translate(
-        context,
-        core=core,
-        requirement_id="gdp_gtm",
-        choice=SPEC_OTHER,
-        rationale="closer to the ask",
-    )
+    referred = await run_translate(context, core=core)
 
     assert referred["outcome"] == "referred", referred
     referral = referred["referral"]
-    assert referral["kind"] == "source_ambiguous"
-    recommendation = referral["recommendation"]
-    assert recommendation["spec_id"] == SPEC_OTHER
-    assert recommendation["rationale"] == "closer to the ask"
-
-
-async def test_run_translate_refuses_a_ranking_answer_naming_an_unshown_candidate(
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    decision: DecisionFactory,
-    core: TranslatorCore,
-    context_holding: ContextHolding,
-) -> None:
-    gdp = requirement(id="gdp_gtm", measure="aid disbursed")
-    gdp_total = derived_requirement(id="gdp_total", input_id="gdp_gtm")
-    plan = Plan(
-        question="aid to guatemala",
-        decisions=[decision()],
-        evidence_requirements=[gdp, gdp_total],
-        status=PlanStatus.DRAFT,
+    assert (referral["kind"], referral["outcome"], referral["requirement_id"]) == (
+        "source_ambiguous",
+        "choice_required",
+        "gdp_gtm",
     )
-    context = context_holding(plan)
-    await run_translate(context, core=core)
-
-    result = await run_translate(
-        context, core=core, requirement_id="gdp_gtm", choice=SPEC_KENYA, rationale="r"
-    )
-
-    assert result["outcome"] == "invalid_input"
-    assert result["code"] == "invalid_arguments"
-
-
-async def test_run_translate_refuses_a_ranking_answer_with_no_pending_judgement(
-    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
-) -> None:
-    context = context_holding(draft())
-
-    result = await run_translate(
-        context, core=core, requirement_id="annual_debt_service", choice=SPEC_KENYA, rationale="r"
-    )
-
-    assert result["outcome"] == "invalid_input"
-    assert result["code"] == "no_pending_judgement"
+    assert {c["spec_id"] for c in referral["candidates"]} == {SPEC_OTHER, SPEC_THIRD}
+    assert all(c["coverage_window"] for c in referral["candidates"])
+    assert "recommendation" not in referral
 
 
 async def test_run_translate_refers_a_timed_out_search_as_discovery_unavailable(
     draft: DraftFactory, context_holding: ContextHolding
 ) -> None:
-    """A `search` that never reaches the server must not end `translate` on
-    a `needs_decision` no `translate` argument can answer -- `_resume` has
-    only `NO_PENDING_JUDGEMENT` to offer any `requirement_id`/`choice`/
-    `decision_id` a model might guess, since `_discover_one` saves no
-    pending judgement for this shape at all.
-
-    Nor may it end on `discover_source`'s own raw refusal handed back
-    unwrapped: the translator's `output_schema` is `Compiled | Referral`
-    (`translator.agent.create_translator_agent`), and a raw problem dict
-    matches neither, so the model would have no legal shape to close the
-    turn on either way -- confirmed directly against
-    `test_a_closing_turn_that_does_not_match_the_schema_hard_fails`
-    (`test_agent.py`), which shows ADK's `process_llm_agent_output` raises on
-    exactly that mismatch, caught only as an opaque "Error running sub-agent"
-    the planner cannot act on structurally.
-
-    `run_translate` raises a real `discovery_unavailable` referral
-    itself, mechanically, so `translate`'s own result is already the
-    schema-conforming `Referral` the model only has to restate -- the same
-    shape every other stopping path in this loop already produces.
+    """A `search` that never reaches the server ends `translate` on a
+    transient `discovery_unavailable` referral, the same typed shape every
+    other stopping path produces, and never on `discover_source`'s own raw
+    refusal handed back unwrapped.
     """
     unreachable = McpSurface(sources={"data-mcp": "http://127.0.0.1:9/mcp"})
     core = build_translator_core(surface=unreachable)
@@ -797,6 +616,38 @@ async def test_run_translate_refers_a_timed_out_search_as_discovery_unavailable(
     assert referral["requirement_id"] == "annual_debt_service"
     assert "could not call 'search'" in referral["reason"]
     assert load_referral(context.state).kind is ReferralKind.DISCOVERY_UNAVAILABLE
+
+
+async def test_a_budget_spent_on_timed_out_searches_stays_a_transient_referral(
+    draft: DraftFactory, context_holding: ContextHolding
+) -> None:
+    # Each transient referral is retried, and each retry spends one search
+    # on the same revision, until the requirement's share of the budget is
+    # gone. The refusals that follow name the outage, not a plan too big,
+    # and are marked so the planner entry ends on them.
+    unreachable = McpSurface(sources={"data-mcp": "http://127.0.0.1:9/mcp"})
+    core = build_translator_core(surface=unreachable)
+    plan = draft()
+    context = context_holding(plan)
+    retried = [
+        (await run_translate(context, core=core))["referral"]
+        for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT)
+    ]
+
+    spent = [(await run_translate(context, core=core))["referral"] for _ in range(2)]
+
+    assert ["budget_spent" in r for r in retried] == [False] * len(retried)
+    for referral in spent:
+        assert (
+            referral["kind"],
+            referral["outcome"],
+            referral["requirement_id"],
+            referral["budget_spent"],
+        ) == ("discovery_unavailable", "transient", "annual_debt_service", True)
+    assert (
+        load_log(context.state).requirement_calls(plan_revision(plan), "annual_debt_service")
+        == DISCOVERY_CALL_BUDGET_PER_REQUIREMENT
+    )
 
 
 async def test_run_translate_refers_a_search_that_finds_a_dropped_dataset_as_seed_dropped(
@@ -1245,7 +1096,9 @@ async def test_a_seed_copy_search_answers_for_good_is_referred_as_a_fact_about_t
 
     assert search_calls == []
     assert result["outcome"] == "referred", result
-    referral = Referral.model_validate(result["referral"])
+    payload = dict(result["referral"])
+    assert payload.pop("outcome") == OUTCOME_OF[kind]
+    referral = Referral.model_validate(payload)
     assert referral.kind is kind
     assert referral.requirement_id == "annual_debt_service"
     assert "over 2010 to 2023" in referral.reason
@@ -1289,7 +1142,9 @@ async def test_a_seed_copy_data_mcp_cannot_store_is_referred_as_discovery_unavai
         set_definition_store(None)
 
     assert result["outcome"] == "referred", result
-    referral = Referral.model_validate(result["referral"])
+    payload = dict(result["referral"])
+    assert payload.pop("outcome") == Outcome.TRANSIENT
+    referral = Referral.model_validate(payload)
     assert referral.kind is ReferralKind.DISCOVERY_UNAVAILABLE
     assert referral.requirement_id == "annual_debt_service"
     assert "the definition store is unreachable" in referral.reason
@@ -1302,9 +1157,9 @@ async def test_run_translate_refuses_an_unmodeled_requirement_kind_rather_than_r
     context_holding: ContextHolding,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A requirement kind no builder covers refers the plan back, the same
-    way `requirement_unmeetable` already does for a source no operation can
-    use -- never a bare `KeyError` out of `build_translation`.
+    """A requirement kind no builder covers refers the plan back as a
+    capability gap, `no_operation_covers` with an `unsupported` outcome --
+    never a bare `KeyError` out of `build_translation`.
 
     `JoinRequirement` is dropped from `_BUILDERS` for this test alone, since
     every kind `planner.plan` actually defines is covered today; this is
@@ -1328,7 +1183,7 @@ async def test_run_translate_refuses_an_unmodeled_requirement_kind_rather_than_r
 
     assert result["outcome"] == "referred", result
     referral = result["referral"]
-    assert referral["kind"] == "requirement_unmeetable"
+    assert (referral["kind"], referral["outcome"]) == ("no_operation_covers", "unsupported")
     assert referral["requirement_id"] == "joined"
     unsupported = _unsupported_requirement(plan)
     assert unsupported is not None
@@ -1362,68 +1217,11 @@ async def test_run_translate_refuses_the_unmodeled_kind_before_any_discovery_cal
     assert search_calls == []
 
 
-async def test_run_translate_settles_an_unmet_capability_judgement_with_a_decision_id(
-    draft: DraftFactory, context_holding: ContextHolding
-) -> None:
-    """`_compile_failure_action`'s own `no_capability` branch names `needs=
-    ("decision_id",)`: `run_translate` cannot supply it on its own, so it
-    pauses for the model's judgement, the same as candidate ranking pauses
-    for the model's choice, and settles once the model answers with a
-    `decision_id` -- naming `NO_OPERATION_COVERS` where the pending
-    judgement said to, not a kind the caller gets to pick.
-    """
-    referred_with: dict[str, object] = {}
-
-    async def discover_source(**kwargs: object) -> dict[str, object]:
-        del kwargs
-        return {"outcome": "ok", "status": "definite", "sources": [{"spec_id": SPEC_KENYA}]}
-
-    async def propose_operations(*, translation: object, tool_context: Any) -> dict[str, object]:
-        del translation, tool_context
-        return {
-            "outcome": "invalid_input",
-            "code": "compile_failed",
-            "message": "no operation covers this",
-            "action": {
-                "call": "return_to_planner",
-                "arguments": {"kind": "no_operation_covers", "reason": "no tool implements this"},
-                "needs": ["decision_id"],
-            },
-        }
-
-    def return_to_planner(**kwargs: object) -> dict[str, object]:
-        referred_with.update(kwargs)
-        return {
-            "outcome": "referred",
-            "referral": {"kind": kwargs["kind"], "reason": kwargs["reason"]},
-        }
-
-    core = TranslatorCore(
-        discover_source=discover_source,
-        propose_operations=propose_operations,
-        return_to_planner=return_to_planner,
-        surface=None,  # type: ignore[arg-type]
-    )
-    context = context_holding(draft())
-
-    needs_decision = await run_translate(context, core=core)
-
-    assert needs_decision["outcome"] == "needs_decision"
-    assert needs_decision["judgement"] == "unmet_capability"
-    assert needs_decision["decisions"], "the plan's decisions ride along for the model to pick from"
-
-    referred = await run_translate(context, core=core, decision_id="measure")
-
-    assert referred["outcome"] == "referred", referred
-    assert referred_with["kind"] == "no_operation_covers"
-    assert referred_with["decision_id"] == "measure"
-
-
 async def test_run_translate_gives_up_after_max_rounds(
     draft: DraftFactory, context_holding: ContextHolding
 ) -> None:
     """A `propose_operations` that keeps naming the same `discover_source`
-    retry forever is bounded by `MAX_ROUNDS`, not left to loop."""
+    retry forever is bounded by `MAX_ROUNDS`, and ends as an internal failure."""
 
     async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
         del tool_context
@@ -1446,24 +1244,155 @@ async def test_run_translate_gives_up_after_max_rounds(
             },
         }
 
+    referred: list[dict[str, object]] = []
+
     def return_to_planner(**kwargs: object) -> dict[str, object]:
-        raise AssertionError(
-            "never reached: the retry table keeps pointing back at discover_source"
-        )
+        referred.append(kwargs)
+        return {"outcome": "referred"}
 
     core = TranslatorCore(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
-        surface=None,  # type: ignore[arg-type]
     )
     context = context_holding(draft())
 
+    await run_translate(context, core=core)
+
+    (stop,) = referred
+    assert stop["kind"] is ReferralKind.INTERNAL_FAILURE
+    assert "4" in str(stop["reason"])
+
+
+def _compile_failure_core(
+    core: TranslatorCore, failures: list[dict[str, object]]
+) -> TranslatorCore:
+    """`core` with a definite source for every requirement and a
+    `propose_operations` answering each of `failures` in turn, keeping the
+    real `return_to_planner`."""
+
+    async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return _ok_answer(requirement_id, SPEC_KENYA)
+
+    answers = iter(failures)
+
+    async def propose_operations(*, translation: object, tool_context: Any) -> dict[str, object]:
+        del translation, tool_context
+        return next(answers)
+
+    return dataclasses.replace(
+        core, discover_source=discover_source, propose_operations=propose_operations
+    )
+
+
+def _needs_repair(code: str) -> dict[str, object]:
+    return {
+        "outcome": "invalid_input",
+        "code": "compile_failed",
+        "message": "did not compile",
+        "action": {
+            "call": "return_to_planner",
+            "arguments": {
+                "kind": "requirement_needs_repair",
+                "requirement_id": "annual_debt_service",
+                "reason": "r",
+                "constraint": code,
+                "repair": "name the entity",
+            },
+        },
+        "detail": {"issues": [{"code": code, "reason": "r"}], "warnings": []},
+    }
+
+
+async def test_a_translation_failing_the_same_way_again_is_referred_as_repeated(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    """The guard keys on the translation plus its issue codes, in session
+    state: the second identical failure, after `propose_plan` cleared the
+    first referral, is marked `repeated`; a different issue on the same
+    translation is not."""
+    core = _compile_failure_core(
+        core,
+        [
+            _needs_repair("entity_required"),
+            _needs_repair("entity_required"),
+            _needs_repair("rank_axis_required"),
+        ],
+    )
+    context = context_holding(draft())
+
+    first = await run_translate(context, core=core)
+    clear_referral(context.state)
+    second = await run_translate(context, core=core)
+    clear_referral(context.state)
+    other = await run_translate(context, core=core)
+
+    assert (first["referral"]["outcome"], first["referral"]["repeated"]) == (
+        "invalid_input",
+        False,
+    )
+    assert second["referral"]["repeated"] is True
+    assert other["referral"]["repeated"] is False
+    assert len(context.state[mechanical.COMPILE_FAILURES_STATE_KEY]) == 2
+
+
+async def test_a_transient_failure_is_retried_and_may_repeat_unmarked(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    """A pending transient referral is retried, never restated: the second
+    `translate` call on the unchanged plan reaches the surface again."""
+    unavailable = {
+        "outcome": "refused",
+        "code": "surface_unavailable",
+        "message": "the tool surface could not be listed",
+    }
+    failures = [unavailable, unavailable]
+    proposed: list[object] = []
+    core = _compile_failure_core(core, failures)
+    propose = core.propose_operations
+
+    async def counting(*, translation: object, tool_context: Any) -> dict[str, object]:
+        proposed.append(translation)
+        return await propose(translation=translation, tool_context=tool_context)
+
+    core = dataclasses.replace(core, propose_operations=counting)
+    context = context_holding(draft())
+
+    first = await run_translate(context, core=core)
+    second = await run_translate(context, core=core)
+
+    assert len(proposed) == 2
+    for result in (first, second):
+        assert result["referral"]["kind"] == "surface_unavailable"
+        assert result["referral"]["outcome"] == "transient"
+        assert result["referral"]["repeated"] is False
+    assert mechanical.COMPILE_FAILURES_STATE_KEY not in context.state
+
+
+async def test_a_pending_referral_is_answered_again_without_translating(
+    draft: DraftFactory,
+    core: TranslatorCore,
+    context_holding: ContextHolding,
+    search_calls: list[dict[str, Any]],
+) -> None:
+    """The plan has not changed since it was referred, so `translate` restates
+    the referral instead of reaching the same stop through discovery."""
+    context = context_holding(draft())
+    pending = Referral(
+        kind=ReferralKind.REQUIREMENT_NEEDS_REPAIR,
+        reason="r",
+        requirement_id="annual_debt_service",
+        constraint=CompileIssueCode.ENTITY_REQUIRED,
+        repair="name the entity",
+    )
+    save_referral(context.state, pending)
+
     result = await run_translate(context, core=core)
 
-    assert result["outcome"] == "needs_decision"
-    assert result["judgement"] == "unmet_capability"
-    assert "4" in result["reason"]
+    assert result["outcome"] == "referred", result
+    assert load_referral(context.state) == pending
+    assert search_calls == []
 
 
 # --- _resolve_dataset_sources: a settled requirement is not re-spent -------
@@ -1516,7 +1445,6 @@ def _spying_core(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
-        surface=None,  # type: ignore[arg-type]
     )
 
 
@@ -1563,6 +1491,51 @@ async def test_a_settled_requirement_is_not_rediscovered_on_a_later_round(
     assert result["outcome"] == "ok", result
     assert len(captured) == 1
     assert _retrieved_spec_id(captured[0], requirement.id) == SPEC_OTHER
+
+
+@pytest.mark.parametrize(("entity", "compiles"), [("Kenya", True), ("Ghana", False)])
+async def test_a_reused_block_whose_entities_miss_the_requirement_is_refused_at_compile(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    pinning_decision: PinningDecisionFactory,
+    core: TranslatorCore,
+    context_holding: ContextHolding,
+    search_calls: list[dict[str, Any]],
+    entity: str,
+    compiles: bool,
+) -> None:
+    """Reuse checks no entity: compiling refuses a shown block resolving
+    another country than the Kenya requirement names (the evidence check's
+    `entity_missing`), and the requirement is referred back as unmeetable.
+    The Kenya row is the control, compiled from the same block with no search."""
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[requirement(source_spec_id=SPEC_KENYA), derived_requirement()],
+        )
+    )
+    block = _spec(
+        SPEC_KENYA,
+        f"debt service paid by {entity}",
+        coverage={
+            "kind": "exact",
+            "has_data": True,
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+        entities=[{"role": "recipient", "label": entity, "ref": "country/X"}],
+    )
+    save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
+
+    result = await run_translate(context, core=core)
+
+    assert search_calls == []
+    if compiles:
+        assert result["outcome"] == "ok", result
+    else:
+        assert result["outcome"] == "referred", result
+        assert result["referral"]["kind"] == ReferralKind.REQUIREMENT_UNMEETABLE.value
+        assert result["referral"]["requirement_id"] == "annual_debt_service"
 
 
 async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
@@ -1775,13 +1748,13 @@ async def test_unsettled_requirements_discover_concurrently(
     assert peak_in_flight == 2
 
 
-async def test_a_later_requirements_judgement_wins_over_an_earlier_ones_resolution(
+async def test_a_later_requirements_stop_wins_over_an_earlier_ones_resolution(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
     context_holding: ContextHolding,
 ) -> None:
-    """`req_b`'s `needs_decision` is what `run_translate` returns, in requirement order,
+    """`req_b`'s stop is what `run_translate` returns, in requirement order,
     even though `req_b`'s own call answers before `req_a`'s slower one resolves.
     """
     plan = _two_requirement_plan(requirement, derived_requirement, decision)
@@ -1793,18 +1766,23 @@ async def test_a_later_requirements_judgement_wins_over_an_earlier_ones_resoluti
             await asyncio.sleep(0.05)
             return _ok_answer(requirement_id, SPEC_KENYA)
         # Answers at once, with no action and no single source: the shape
-        # `_discover_one` cannot resolve on its own, so it stops on a
-        # `needs_decision` rather than guessing.
+        # `_discover_one` cannot resolve on its own, so it stops on an
+        # internal failure rather than guessing.
         return {"outcome": "candidates", "requirement_id": requirement_id}
 
     captured: list[Translation] = []
-    core = _spying_core(discover_source=discover_source, captured=captured)
+    referred: list[dict[str, object]] = []
+    core = dataclasses.replace(
+        _spying_core(discover_source=discover_source, captured=captured),
+        return_to_planner=lambda **kwargs: referred.append(kwargs) or {"outcome": "referred"},
+    )
 
     result = await run_translate(context, core=core)
 
-    assert result["outcome"] == "needs_decision", result
-    assert result["judgement"] == "unmet_capability"
-    assert result["requirement_id"] == "req_b"
+    assert result["outcome"] == "referred", result
+    (stop,) = referred
+    assert stop["kind"] is ReferralKind.INTERNAL_FAILURE
+    assert "'req_b'" in str(stop["reason"])
     assert not captured
 
 
@@ -1852,7 +1830,6 @@ async def test_a_stop_on_the_first_requirement_leaves_the_seconds_record_in_the_
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=return_to_planner,
-        surface=None,  # type: ignore[arg-type]
     )
 
     result = await run_translate(context, core=core)
@@ -1918,7 +1895,6 @@ async def test_two_referrals_settle_only_the_first_ones_requirement(
         discover_source=discover_source,
         propose_operations=propose_operations,
         return_to_planner=_spying_return_to_planner(calls),
-        surface=None,  # type: ignore[arg-type]
     )
 
     result = await run_translate(context, core=core)
@@ -1933,40 +1909,36 @@ async def test_two_referrals_settle_only_the_first_ones_requirement(
     assert referral.requirement_id == "req_a"
 
 
-async def test_two_ambiguities_settle_only_the_first_ones_pending_judgement(
+async def test_two_ambiguities_refer_only_the_first_ones_candidates(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
     source: SourceFactory,
+    core: TranslatorCore,
     context_holding: ContextHolding,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`req_a` and `req_b` both answer `source_ambiguous`. Only `req_a`'s --
-    the first in requirement order -- is ever settled: `_begin_candidate_ranking`
-    runs once, for `req_a`, and the pending judgement saved to state names
-    `req_a` and its own candidates, never whichever of the two sibling
-    `discover_source` calls happened to settle last.
+    the first in requirement order -- is referred, carrying `req_a`'s own
+    candidates, never whichever of the two sibling `discover_source` calls
+    happened to settle last.
     """
     plan = _two_requirement_plan(requirement, derived_requirement, decision)
-    first = cast(DatasetRequirement, plan.requirement("req_a"))
-    second = cast(DatasetRequirement, plan.requirement("req_b"))
     context = context_holding(plan)
-    _seed_settled(
-        context,
-        plan,
-        first,
-        source(spec_id=SPEC_OTHER, stat_vars=()),
-        status=DiscoveryStatus.CANDIDATES,
-        spec_ids=(SPEC_OTHER,),
-    )
-    _seed_settled(
-        context,
-        plan,
-        second,
-        source(spec_id=SPEC_THIRD, stat_vars=()),
-        status=DiscoveryStatus.CANDIDATES,
-        spec_ids=(SPEC_THIRD,),
-    )
+    for requirement_id, spec_ids in (
+        ("req_a", (SPEC_OTHER, SPEC_THIRD)),
+        ("req_b", (SPEC_KENYA, SPEC_THIRD)),
+    ):
+        ambiguous = cast(DatasetRequirement, plan.requirement(requirement_id))
+        record = DiscoveryRecord(
+            revision=plan_revision(plan),
+            tool="search",
+            requirement_id=ambiguous.id,
+            requirement_key=requirement_revision(ambiguous),
+            status=DiscoveryStatus.CANDIDATES,
+            spec_ids=spec_ids,
+        )
+        candidates = tuple(source(spec_id=spec_id, stat_vars=()) for spec_id in spec_ids)
+        save_log(context.state, load_log(context.state).with_record(record, candidates))
 
     async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:
         del tool_context
@@ -1975,41 +1947,26 @@ async def test_two_ambiguities_settle_only_the_first_ones_pending_judgement(
                 "call": "return_to_planner",
                 "arguments": {
                     "kind": "source_ambiguous",
+                    "requirement_id": requirement_id,
                     "reason": f"{requirement_id} is ambiguous",
                 },
             }
         }
 
-    def return_to_planner(**kwargs: object) -> dict[str, object]:
-        raise AssertionError(f"not exercised: {kwargs!r} -- both requirements pause for a decision")
-
     async def propose_operations(**kwargs: object) -> dict[str, object]:
-        raise AssertionError(f"not exercised: {kwargs!r} -- both requirements pause for a decision")
+        raise AssertionError(f"not exercised: {kwargs!r} -- a referral stops the loop first")
 
-    core = TranslatorCore(
-        discover_source=discover_source,
-        propose_operations=propose_operations,
-        return_to_planner=return_to_planner,
-        surface=None,  # type: ignore[arg-type]
+    core = dataclasses.replace(
+        core, discover_source=discover_source, propose_operations=propose_operations
     )
-
-    ranking_calls: list[str] = []
-    original_begin_ranking = mechanical._begin_candidate_ranking
-
-    async def spying_begin_ranking(*args: Any, **kwargs: Any) -> dict[str, object]:
-        ranking_calls.append(cast(str, kwargs["requirement_id"]))
-        return await original_begin_ranking(*args, **kwargs)
-
-    monkeypatch.setattr(mechanical, "_begin_candidate_ranking", spying_begin_ranking)
 
     result = await run_translate(context, core=core)
 
-    assert result["outcome"] == "needs_decision", result
-    assert result["judgement"] == "candidate_ranking"
-    assert result["requirement_id"] == "req_a"
-    assert ranking_calls == ["req_a"], ranking_calls
-
-    pending = _load_pending(context.state)
-    assert pending is not None
-    assert pending.requirement_id == "req_a"
-    assert pending.candidate_spec_ids == (SPEC_OTHER,)
+    assert result["outcome"] == "referred", result
+    assert result["referral"]["requirement_id"] == "req_a"
+    referral = load_referral(context.state)
+    assert referral is not None
+    assert (referral.requirement_id, [c.spec_id for c in referral.candidates]) == (
+        "req_a",
+        [SPEC_OTHER, SPEC_THIRD],
+    )

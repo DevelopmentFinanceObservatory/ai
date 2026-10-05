@@ -1,7 +1,7 @@
 {
   "eval_set_id": "harness-translator-v1",
   "name": "harness-translator-v1",
-  "description": "Eleven eval cases for the translator agent, covering the judgements the compiler cannot make: which operation carries a requirement out, that a source comes from discovery, when to refer a plan back rather than propose something that happens to compile, and -- from PR 2 -- which of a rank's or a share_of's new fields (among, axis, per_period, denominator_scope, change) a proposal has to repeat from the plan it translates. Each case seeds the session with the DRAFT plan the planner would have left behind, through session_input.state, because the translator's tools read the plan from state -- every dataset requirement states an explicit \"kind\" and every calculation the plan needs is its own typed derived requirement, per the plan schema. Discovery runs against a canned data-mcp stand-in whose search answers are fixed per ask, so a case's outcome turns on the translator rather than on live data. Two metrics score every case: rubric_based_tool_use_quality_v1, which judges behaviour a judge model reads the trace for, and workflow_outcome, a custom metric that asserts the compiled outcome in code -- the operation kind, requirement binding, selected source, and terminal result for a mapping case, or the referral's kind and requirement for a referral case. See evals/README.md for the run commands, test_config.json for the criteria, and outcome_metric.py for what workflow_outcome checks and why.",
+  "description": "Eleven translation cases: which operation carries a requirement out, that a source comes from discovery, when a plan is referred back rather than compiled, and which of a rank's or a share_of's fields (among, axis, per_period, denominator_scope, change) an operation repeats from the plan. Each case seeds the session with the DRAFT plan the planner leaves behind, through session_input.state, and states in tool_responses the outcome the translator's core reaches on it: the compiled steps and selected sources for a mapping case, or the referral's kind and requirement for a referral case. Discovery runs against the canned data-mcp stand-in in discovery_stub.py, whose search answers are fixed per ask. Translation runs no model, so no agent scores this set: services/harness/tests/test_eval_outcomes.py drives every case through the translator's core functions and checks each outcome with outcome_metric.matches_subset.",
   "eval_cases": [
     {
       "eval_id": "maps-an-annual-total-onto-aggregate",
@@ -46,25 +46,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "maps-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "maps-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and an aggregate operation grouped by period carries out its aggregate requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -111,25 +93,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "growth-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "growth-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a growth operation over the decision's own window carries out its growth requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -176,25 +140,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "compares-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "compares-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and one retrieval serving both sides of the comparison requirement carries it out, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -247,25 +193,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "per-head-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "per-head-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers both this plan's dataset requirements definitely, and a share_of operation dividing debt service by population carries out its requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -303,25 +231,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "constant-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "constant-no-accepted-proposal",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did every call the agent made to `translate` return an outcome other than `ok`? This property always applies and is never inapplicable. No operation restates a series in another year's prices, so this plan cannot compile as the requirement states it; a call that returns `ok` means the requirement was altered or the constant-price decision ignored."
-              },
-              "description": "The requirement is the planner's to change, with the user; a `translate` call that reports `ok` on this plan means the constant-price ask was quietly dropped."
-            }
-          ]
+          }
         }
       ]
     },
@@ -359,25 +269,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "ambiguous-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "ambiguous-answers-the-ranking-with-a-valid-choice",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Once a `translate` call answered `needs_decision` for a `candidate_ranking` judgement on `annual_aid`, did the agent call `translate` again with `requirement_id` `annual_aid`, a `choice` naming one of the candidate `spec_id`s that call's own response listed, and a non-empty `rationale`? This property always applies and is never inapplicable. A run that leaves the judgement unanswered, that never calls `translate` a second time, that answers with a `choice` no candidate response named, or that omits a `rationale`, fails this property."
-              },
-              "description": "Ranking the candidates is the one judgement `translate` still leaves to the model; the source itself still goes to the user, since `translate`'s own `referred` answer carries the ranking forward as a recommendation rather than a pick the translator makes."
-            }
-          ]
+          }
         }
       ]
     },
@@ -426,25 +318,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "named-rank-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "named-rank-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a filter narrowing to Kenya, Ghana and Nigeria followed by a rank carries out this plan's requirements, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -490,25 +364,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "population-rank-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "population-rank-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a rank among all debtor countries carries out its rank requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -554,25 +410,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "absolute-growth-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "absolute-growth-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a growth operation stated in absolute dollars carries out its growth requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -624,25 +462,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "keyed-share-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "keyed-share-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers both this plan's dataset requirements definitely, and a share_of operation keyed to each country carries out its requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     },
@@ -694,25 +514,7 @@
                 }
               }
             ]
-          },
-          "rubrics": [
-            {
-              "rubric_id": "rank-series-calls-translate",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
-              },
-              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
-            },
-            {
-              "rubric_id": "rank-series-compiles-without-referral",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a rank followed by a filter to Kenya and a growth over that series carries out this plan's requirements, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
-              },
-              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
-            }
-          ]
+          }
         }
       ]
     }

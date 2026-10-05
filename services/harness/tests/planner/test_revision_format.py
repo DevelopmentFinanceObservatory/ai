@@ -4,7 +4,9 @@
 2563638 serialised them, each beside the revisions that code computed: the
 scripted plan with a decision that fixes its reduction (`aggregate`), and a
 population rank compiled against the tool schemas the servers declared at
-that commit (`rank`). `fixtures/revision_base_fields.json` lists every field
+that commit (`rank`). It also holds the scripted plan with a decline
+(`declined`), as the code at d8fd80b serialised it before `Decline` gained
+`ask_ref`. `fixtures/revision_base_fields.json` lists every field
 of every model a plan holds at that commit, the base revision format. A field
 outside that list carries `common.hashed_fields.HASHED_WHEN_SET`, which keeps it
 out of the hash while it holds its default.

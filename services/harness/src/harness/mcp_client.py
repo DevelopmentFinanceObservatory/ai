@@ -112,8 +112,11 @@ from harness.conversation import current_conversation_caller, current_conversati
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
     Lineage,
+    ProvenanceInput,
     ProvenanceStore,
+    SumOfSides,
     data_artifact,
+    manifest_with_stat_vars,
     merged_manifest,
     retrieval_frame_ref,
     summed_stat_var_count,
@@ -125,9 +128,9 @@ from harness.tool_contracts import (
     REFUSAL_ORIGIN_SERVICE,
     ResolverError,
     _float_or_none,
-    graph_envelope,
     harness_refusal,
     platform_trace_id_of,
+    resolver_digest,
 )
 
 logger = logging.getLogger(__name__)
@@ -357,36 +360,7 @@ class McpResolver:
             raise ResolverError(
                 f"search succeeded but carried no envelope under _meta[{SEARCH_ENVELOPE_META_KEY!r}]"
             )
-        digest = graph_envelope(envelope)
-        # `graph_envelope` reduces the raw envelope to `spec_id` alone.
-        # `harness.planner_seam` needs the `definite` part's own `spec`
-        # block whole, to build a pinned requirement's source from it with
-        # no second `search` call (`translator.discovery.discover_source`).
-        # `spec_block` is `None` on every other status, matching
-        # `graph_envelope`'s own `spec_id`.
-        raw_parts = envelope.get("parts") or []
-        raw_part = raw_parts[0] if raw_parts else {}
-        digest["spec_block"] = raw_part.get("spec") if digest.get("status") == "definite" else None
-        # Every part's own block, for a caller that fetches each part
-        # (`harness.orchestrator_tools`); and what the
-        # envelope says of itself beyond its parts: its `kind` (dfo-apis
-        # #1039: a resolution, a catalogue, or a declined question; absent
-        # today, so a resolution). The skills it names for `get_skill` are
-        # `graph_envelope`'s own `skills`.
-        for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
-            summary["spec_block"] = (
-                part.get("spec") if summary.get("status") == "definite" else None
-            )
-            # A candidate's own block too, keyed by its spec_id, so a candidate
-            # the caller picks is fetched as a family or a single series the
-            # same way a definite part is.
-            summary["candidate_blocks"] = {
-                spec["spec_id"]: spec
-                for spec in (part.get("candidates") or {}).get("specs") or []
-                if spec.get("spec_id")
-            }
-        digest["kind"] = envelope.get("kind") or "resolution"
-        return digest
+        return resolver_digest(envelope)
 
 
 class McpExecutor:
@@ -569,7 +543,7 @@ class McpExecutor:
             await self._get_data_clients.release(client)
         if result.is_error:
             return _refusal_outcome(result.structured_content, fallback_text=_result_text(result))
-        manifest = result.structured_content or {}
+        manifest = await manifest_with_stat_vars(result.structured_content or {})
         ref = retrieval_frame_ref(manifest)
         self._provenance.put(
             conversation=current_conversation_id.get(),
@@ -675,6 +649,45 @@ class McpExecutor:
             for ref in refs
         ]
 
+    async def _sum_of_indicators(
+        self,
+        refs: list[str],
+        *,
+        lineage: Lineage,
+        family: Mapping[str, dict[str, str]],
+        sides: SumOfSides,
+    ) -> dict[str, dict[str, str]]:
+        """The indicator row for each `sum_of` ref among `refs`, named by what it adds.
+
+        A side's name is its retrievals' indicator names: a summed family's
+        from `family`, any other StatVar's from `describe`. A sum whose side
+        rests on a retrieval missing from `lineage` gets no row.
+        """
+        members = {(member.spec_id, member.content_version): member for member in lineage}
+        rows: dict[str, dict[str, str]] = {}
+        for ref in refs:
+            if ref not in sides:
+                continue
+            names: list[str] = []
+            for side in sides[ref]:
+                side_members = [members.get(key) for key in side]
+                if not side_members or None in side_members:
+                    break
+                side_refs = [
+                    stat_var
+                    for member in side_members
+                    if member is not None
+                    for stat_var in _member_stat_vars(member)
+                ]
+                side_rows = await self._indicators_for(side_refs, named=family)
+                names.append(" and ".join(dict.fromkeys(row["name"] for row in side_rows)))
+            else:
+                rows[ref] = {
+                    "name": " plus ".join(names),
+                    "description": "The two added together for each year both report.",
+                }
+        return rows
+
     async def _describe_into_cache(self, refs: list[str]) -> None:
         """Describe `refs` in concurrent batches, filling `_indicator_cache`
         as each batch lands. A batch that fails leaves its unresolved refs
@@ -778,8 +791,9 @@ class McpExecutor:
 
         The indicators listed are the StatVars the chart draws
         (`_drawn_stat_vars`), a summed family's ref named as dfo-apis names
-        it (`_family_indicators`). `indicator_count` counts the StatVars of the
-        frame the card draws from: the count the step that produced the
+        it (`_family_indicators`) and a `sum_of` result's ref by the two
+        sides it adds (`_sum_of_indicators`). `indicator_count` counts the
+        StatVars of the frame the card draws from: the count the step that produced the
         frame declared (`ProvenanceStore.stat_var_count`), or, for a
         retrieval's frame held without one, the StatVars its manifest
         summed or, for an unsummed one, resolved.
@@ -820,9 +834,19 @@ class McpExecutor:
             )
             return None
         manifest = merged_manifest(lineage)
-        indicators = await self._indicators_for(
-            _drawn_stat_vars(platform_facts), named=_family_indicators(lineage)
+        drawn = _drawn_stat_vars(platform_facts)
+        family = _family_indicators(lineage)
+        sums = await self._sum_of_indicators(
+            drawn,
+            lineage=lineage,
+            family=family,
+            sides=self._provenance.sum_of_sides(
+                conversation=current_conversation_id.get(),
+                spec_id=frame_ref.get("spec_id"),
+                content_version=frame_ref.get("content_version"),
+            ),
         )
+        indicators = await self._indicators_for(drawn, named={**family, **sums})
         return {
             "component_id": component_id,
             "revision": revision,
@@ -996,6 +1020,10 @@ def _wire_fact_summary(
     window = platform_facts.get("window") or _drawn_window(component)
     if window.get("start") and window.get("end"):
         summary["window"] = {"start": str(window["start"]), "end": str(window["end"])}
+    if defaults := platform_facts.get("defaults"):
+        summary["defaults"] = [
+            {"pointer": str(entry["pointer"]), "detail": str(entry["detail"])} for entry in defaults
+        ]
     return summary
 
 
@@ -1030,6 +1058,14 @@ def _family_indicators(lineage: Lineage) -> dict[str, dict[str, str]]:
             "description": f"A total over {count} indicators." if count is not None else "",
         }
     return rows
+
+
+def _member_stat_vars(member: ProvenanceInput) -> list[str]:
+    """The StatVar refs a retrieval's frame carries: its family ref when
+    summed (`_family_indicators`), else the StatVars its manifest resolved."""
+    if member.spec_id is not None and summed_stat_var_count(member.manifest) is not None:
+        return [f"dcid:{member.spec_id}"]
+    return _manifest_stat_vars(member.manifest)
 
 
 def _drawn_stat_vars(platform_facts: dict[str, Any]) -> list[str]:

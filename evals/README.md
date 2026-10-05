@@ -13,17 +13,16 @@ so this suite ships its own runner. Same two-lane split: its deterministic contr
 layer runs in CI, its judged layer never does. See `evals/studio/README.md`.
 
 `evals/agents/dfo_analyst_graph/` holds no eval set. It is the whole system as
-one `adk web` app -- the same graph, MCP toolsets and context cache
-`harness.server.create_app` serves -- so a real turn's events can be read in
+one `adk web` app -- the same graph, MCP toolsets and context-cache setting
+(implicit by default) `harness.server.create_app` serves -- so a real turn's events can be read in
 the web UI. `just adk-web` runs it.
 
 ## Run it
 
 ```
 just eval-planner      # 1a. score harness-planner-v2
-just eval-translator   # 1b. score harness-translator-v1
-just eval-pair         # 1c. score harness-pair-v1
-just eval-planner-skills  # 1d. score harness-planner-skills-v1
+just eval-pair         # 1b. score harness-pair-v1
+just eval-planner-skills  # 1c. score harness-planner-skills-v1
 just eval-web          # 2.  read the results at http://127.0.0.1:8000
 ```
 
@@ -46,7 +45,7 @@ it at a reachable platform (the dev deployment, or a local one) before starting
 `harness-planner-skills-v1` asks whether the planner loads the skill a
 question needs before it drafts, and leaves alone the skills it does not.
 Its agent is the planner as the harness graph builds it, with a tool surface
-and `question_fixed=True`, except that the translator is left out, so a case
+and `question_fixed=True`, except that `translate` is left out, so a case
 ends at `propose_plan`. It carries `get_skill` and `get_skill_file`, and the
 surface behind them is `skill_surface.SkillSurface`: six skills with the
 dfo-skills catalogue's own ids and descriptions and short fixed bodies,
@@ -172,9 +171,7 @@ discover-then-compile loop (`{"name": "translate", "args": {}}`): the loop
 itself, including every `discover_source` call inside it, runs as code, not
 as a model turn, so nothing about it is the model's own words. It is wrong for
 `propose_plan`, whose arguments are the model's own drafted decisions and
-requirements, and for a second `translate` call answering a `candidate_ranking`
-judgement, whose `rationale` is the model's own prose. Expecting those means
-asserting prose the model invents fresh each run, and the case then fails for
+requirements. Expecting those means asserting prose the model invents fresh each run, and the case then fails for
 reasons unrelated to the behavior you set out to check. (`test_a_set_configuring_the_trajectory_metric_has_at_least_one_turn_with_tool_uses`
 in `test_eval_sets.py` catches the case where a set turns
 `tool_trajectory_avg_score` on but never actually states one of these.)
@@ -243,9 +240,9 @@ sets here want opposite things.
 `harness-planner-v2`'s `adversarial-no-invented-tools` judges invocations only,
 because a planner that names a tool anywhere is wrong and the property would
 otherwise conflate that with reaching for one.
-`harness-translator-v1`'s `ambiguous-answers-the-ranking-with-a-valid-choice`
-judges the payload, because the `requirement_id`, `choice` and `rationale` a
-second `translate` call carries *is* the output being scored. Each says which
+`harness-pair-v1`'s `pair-states-evidence-requirements` judges the payload,
+because the `evidence_requirements` a `propose_plan` call carries *is* the
+output being scored. Each says which
 it means in its own text.
 
 One habit catches all three. Read the rationale alongside the score. A pass whose
@@ -272,16 +269,18 @@ of measure, which the planner has no way to earn. Its tools as
 `propose_plan`, `reject_plan` and `submit_plan`, and
 `submit_plan` only declares a compiled plan ready for whatever approves and
 runs it elsewhere. Nothing in `planner` fetches or computes a figure.
-`harness-pair-v1` adds a fifth, `dfo_translator`, and still none of them returns a number: the
-translator authors tool calls, it does not run them.
-
-The translator's own tool, as `harness-translator-v1` builds it, is
-`translate`. It drives `discover_source` and `propose_operations` itself, as
-plain code: `discover_source` reads metadata, never observations;
+`harness-pair-v1` adds a fifth, `translate`, and still none of them returns a
+number. `translate` drives `discover_source` and `propose_operations` as plain
+code: `discover_source` reads metadata, never observations;
 `propose_operations` authors a translation for the compiler to check, never
 calls a data or analysis tool itself. Grading either surface against a real
 figure the agent could not have produced is the same mistake as grading the
 planner's choice of measure.
+
+Translation runs no model, so it has no eval set of its own. The cases in
+`evals/agents/harness_translator_v1/harness-translator-v1.evalset.json` are the
+fixtures `services/harness/tests/test_eval_outcomes.py` drives through the
+translator's core functions in CI.
 
 Before writing a case that grades the substance of an answer, check the agent's
 tool surface for the ability to produce one. Methodology and data
@@ -289,24 +288,21 @@ judgment belong in a separate set, against a service that can reach data.
 
 ### Score the model your service runs
 
-Each `agent.py` reads its model from `planner.settings.AgentSettings`: the
-planner from `planner_model_name`, the translator from `translator_model_name`,
-the same fields the deployed service reads, each overridable by its own env var.
-Hardcode a model here and you are scoring something the deployed service may not
-be running. Both fields pin a concrete version rather than a floating alias, so a
-score that moves between two runs is something you changed rather than a model
-repointed underneath you.
+Each `agent.py` reads its model from `planner.settings.AgentSettings`'s
+`planner_model_name`, the field the deployed service reads, overridable by
+`PLANNER_MODEL_NAME`. Hardcode a model here and you are scoring something the
+deployed service may not be running. The field pins a concrete version rather
+than a floating alias, so a score that moves between two runs is something you
+changed rather than a model repointed underneath you.
 
 ### Assert the compiled outcome in code, not just a rubric
 
 Rubrics judge behaviour a judge model reads off the trace: did discovery run
-first, was a call made at all. None of them can assert on the *shape* of what
-`translate` actually produced: a rubric asking "is there an aggregate
-operation" can pass on a translation that also retrieves the wrong
-requirement, or proposes a spurious extra step the rubric never asked about.
-Nor can a rubric on the planner's side tell whether any
+first, was a call made at all. None of them can assert on what `translate`
+actually answered: a rubric asking whether the plan was translated can pass on
+a `translate` call that came back referred. Nor can a rubric tell whether any
 `propose_plan` was accepted, or whether a revision amended the plan rather
-than starting a fresh one. All three sets close that gap with a custom
+than starting a fresh one. Every set that scores the planner closes that gap with a custom
 metric, `workflow_outcome`
 (`evals/agents/harness_translator_v1/outcome_metric.py`), registered like
 this in a set's `test_config.json`:
@@ -327,11 +323,9 @@ ADK has no way to assert on session state: the compiled `Workflow` lives in
 expectation the same way `tool_uses` states one, on the turn itself, but under
 `intermediate_data.tool_responses`: a `FunctionResponse` naming one of the
 tools the metric scores (`SCORED_TOOLS` in the module: `propose_plan`,
-`reject_plan`, `translate`): `translate` with the
-`outcome`, `steps` (by `tool` name, in order) and `sources` (by `spec_id`, in
-any order: the compiler sorts them canonically and a case should not have to
-know how) a mapping case should produce, or with the `referral` a referral
-case should leave; `propose_plan` with `outcome: ok` on a planner turn, and
+`reject_plan`, `translate`): `translate` with `outcome: ok` for a plan that
+has to compile, or with the referral's `outcome`, `kind` and `requirement_id`
+for one that has to come back referred; `propose_plan` with `outcome: ok` on a planner turn, and
 `version: 2` on a turn that has to amend rather than start over. The metric
 finds the actual response of that same name (the last one carrying the
 `outcome` the case states, so a further call the tool refused after the
@@ -341,8 +335,7 @@ operation id the model chose, or `reason` prose, never enters the comparison.
 A turn also fails when the agent hedged: a reject case that also had
 `submit_plan` answer `ok` -- an agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translate`-scored turn
-has nothing to hedge against either: `ok` and `referred` are two outcomes of
-the same call, not two tools whose answers could disagree.
+hedges the same way when `translate` answered both `ok` and a referral on it.
 
 A set that turns `workflow_outcome` on has to state this expectation, naming
 one of the scored tools, on *every* turn it scores, or that turn is silently
@@ -386,7 +379,7 @@ and the eval set proves the model reaches for them. That is why
 | A case's score moves between identical runs                     | Judge sampling. `num_samples` makes the score an average over independent judgments                                                                                                                                                                                 |
 | A rubric you wrote is missing from the results                  | It was dropped for lacking `"type": "TOOL_USE_QUALITY"`. The case still scored, against the rubrics that remained                                                                                                                                                   |
 | `ModuleNotFoundError: planner` or `translator`                  | Run `just sync`. The agent folders import those packages from the shared `.venv`                                                                                                                                                                                    |
-| `ImportError: Could not import custom metric function from ...` | `evals/agents` is not on `sys.path` when `_get_metric_function` resolves `harness_translator_v1.outcome_metric.workflow_outcome`. Check the set's own `__init__.py` inserts it (`harness_translator_v1`, `harness_pair_v1` and `harness_planner_v2` all do)         |
+| `ImportError: Could not import custom metric function from ...` | `evals/agents` is not on `sys.path` when `_get_metric_function` resolves `harness_translator_v1.outcome_metric.workflow_outcome`. Check the set's own `__init__.py` inserts it (`harness_pair_v1`, `harness_planner_v2` and `harness_planner_skills_v1` all do)     |
 | `workflow_outcome` scores a turn `None` (not evaluated)         | That turn's expected invocation carries no `intermediate_data.tool_responses` entry naming a tool the metric scores. `test_a_set_configuring_workflow_outcome_states_an_expectation_on_every_turn` in `test_eval_sets.py` should have caught this before a paid run |
 
 ## Naming
