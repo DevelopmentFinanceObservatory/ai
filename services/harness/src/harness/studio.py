@@ -44,7 +44,6 @@ from compiler.surface import ToolSurface
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
-from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.agents.run_config import RunConfig
 from google.adk.apps import App
 from google.adk.errors import StaleSessionError
@@ -55,7 +54,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from planner.plan import SEEDS_STATE_KEY, current_earlier_block
+from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorded_identity
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
@@ -552,24 +551,10 @@ class StudioRunner:
             else None
         )
         workflow = create_workflow(self.recorder, self.surface_recorder)
-        # One `App` for the whole graph: every agent the graph runs (the
-        # planner, and the orchestrator on its engine) runs as a sub-agent of
-        # the same `workflow` through the same session (`ctx.run_node`), so one
-        # `ContextCacheConfig` here covers them all. Explicit caching is opt-in
-        # (`STUDIO_CONTEXT_CACHE=true`): Gemini's implicit caching is the
-        # default because it needs no create call and matches a prefix across
-        # sessions, while ADK's explicit cache is per session and per agent.
-        # A caller giving no `settings` gets `Settings`' own field defaults.
-        cache_enabled = settings.studio_context_cache if settings is not None else False
-        cache_intervals = settings.studio_cache_intervals if settings is not None else 10
-        context_cache_config = (
-            ContextCacheConfig(cache_intervals=cache_intervals) if cache_enabled else None
-        )
-        app = App(
-            name=resolved_app_name,
-            root_agent=workflow,
-            context_cache_config=context_cache_config,
-        )
+        # One `App` for the whole graph. The agents' models cache their
+        # static prompt prefixes themselves, across sessions
+        # (`harness.prefix_cache`).
+        app = App(name=resolved_app_name, root_agent=workflow)
         self.runner = Runner(app=app, session_service=session_service)
 
     async def aclose(self) -> None:
@@ -934,6 +919,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
             current_earlier_block.set(conversation.earlier_block)
+            current_recorded_identity.set(conversation.recorded_identity)
             # The segment lease: claimed on the live state before the claim
             # save below persists it, so the save's own compare-and-swap
             # covers both in one write. `SegmentBusy` means a live segment,
@@ -1320,6 +1306,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
         current_earlier_block.set(conversation.earlier_block)
+        current_recorded_identity.set(conversation.recorded_identity)
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])

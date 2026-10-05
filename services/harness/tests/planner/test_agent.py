@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -31,7 +31,7 @@ from compiler.surface import FixtureSurface
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from google.adk.agents import LlmAgent
-from google.adk.events import Event, RequestInput
+from google.adk.events import Event, EventActions, RequestInput
 from google.adk.features import FeatureName
 from google.adk.features._feature_registry import temporary_feature_override
 from google.adk.planners import BuiltInPlanner
@@ -44,6 +44,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 from google.genai import types
 from harness.graph import _drop_seeds_from_turn
 from harness.planner_seam import PlannerSeam
+from harness.turn_records import RecordedIdentity
 from planner import agent as planner_agent
 from planner.agent import (
     _resolve_intent,
@@ -51,7 +52,7 @@ from planner.agent import (
     create_planner_agent,
     planner_instruction,
 )
-from planner.declaration import SHARED_FIELDS, PlanTool
+from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
 from planner.operations import (
     AggregateOperation,
     RetrieveOperation,
@@ -88,7 +89,9 @@ from planner.plan import (
     ResolvedBy,
     SeededSource,
     UnsupportedOperation,
+    WindowedPin,
     clear_unsupported,
+    current_recorded_identity,
     dropped_seeds,
     is_dataset,
     is_search_pin,
@@ -108,16 +111,19 @@ from planner.plan import (
     seeded_source,
     seeded_sources,
     split_dropped,
+    windowed_pins,
 )
 from planner.records import (
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
+    Identifier,
     Reduction,
     Severity,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
+from pydantic import TypeAdapter
 from translator.referral import OUTCOME_OF, Referral, ReferralKind, load_referral, save_referral
 from translator.tool import build_translate_tool
 
@@ -175,16 +181,17 @@ class _FakeSession:
 class _FakeToolContext:
     """A minimal stand-in for ADK's `ToolContext`.
 
-    `.state` (a plain, mutable mapping) and `.session` (`.events` only) are
-    all `planner.agent`'s tool functions use: none of them gates on a
-    confirmation any more, so none needs `.tool_confirmation` or `.actions`.
-    A tool body that tried to read either would raise `AttributeError`
-    against this stand-in, which is exactly the regression the tests under
-    "Submitting" rely on.
+    `.state` (a plain, mutable mapping), `.session` (`.events` only) and
+    `.actions` (where `submit_plan` ends the run) are all `planner.agent`'s
+    tool functions use: none of them gates on a confirmation any more, so
+    none needs `.tool_confirmation`. A tool body that tried to read it would
+    raise `AttributeError` against this stand-in, which is exactly the
+    regression the tests under "Submitting" rely on.
     """
 
     def __init__(self) -> None:
         self.state: dict[str, str] = {}
+        self.actions = EventActions()
         self.session = _FakeSession()
         self.invocation_id = "turn-1"
 
@@ -449,9 +456,9 @@ def test_submitting_a_plan_asks_for_no_confirmation(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # `submit_plan` gates nothing itself: `_FakeToolContext` carries no
-    # `tool_confirmation` or `actions` attribute at all, so a body that
-    # tried to read either would raise `AttributeError` here rather than
-    # requesting one -- there is nothing left to stub out. What it returns
+    # `tool_confirmation` attribute at all, so a body that tried to read it
+    # would raise `AttributeError` here rather than requesting one. It ends
+    # the planner's run, so no model call follows the submission. What it returns
     # is the record a reviewer needs to judge the plan: version, revision,
     # every decision and requirement in full, the sources, each step's
     # tool with its arguments and bindings, the warnings and the notes.
@@ -474,6 +481,7 @@ def test_submitting_a_plan_asks_for_no_confirmation(
     assert stored is not None
     assert stored.status == PlanStatus.PENDING_APPROVAL
     assert stored.approved_revision is None
+    assert ctx.actions.skip_summarization is True
 
 
 def test_two_plans_differing_only_in_a_reduction_carry_different_revisions(
@@ -3828,6 +3836,136 @@ def test_a_re_pin_to_the_one_source_found_in_place_of_a_stale_pin_needs_no_decis
     assert amended.requirement(dataset.id).decision_ids[-1] == search_pin_slot(POPULATION_SPEC)
 
 
+# --- a pin whose identity a search recorded, over the requirement's period ----------
+
+# Two definitions of Guatemala's GDP, as data-mcp stored them. The first is a
+# search over every year with data, the second the spec_id a later search
+# minted for 1960-2024. They differ only in `requested_window`.
+_GDP_ALL, _GDP_1960_2024 = json.loads(
+    (Path(__file__).parents[1] / "fixtures" / "gdp_guatemala_definitions.json").read_text()
+)
+# The one StatVar the source elected, which Search needs to resolve either.
+_GDP_STAT_VAR = "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+
+
+@pytest.fixture
+def gdp_on_record() -> Iterator[None]:
+    """`_GDP_ALL`'s identity on record, as `harness.studio` sets the lookup for a segment."""
+    recorded = RecordedIdentity(identity=_GDP_ALL["identity"], stat_vars=(_GDP_STAT_VAR,))
+    token = current_recorded_identity.set({_GDP_ALL["spec_id"]: recorded}.get)
+    yield
+    current_recorded_identity.reset(token)
+
+
+def _propose_gdp(
+    tools: dict[str, FunctionTool],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    requirements: RequirementPair,
+    period: Period,
+    *,
+    amends_version: int | None = None,
+) -> dict[str, object]:
+    """Propose `requirements` with the dataset requirement pinning `_GDP_ALL` over `period`."""
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GDP_ALL["spec_id"], "period": period})
+    return tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision]),
+        evidence_requirements=[pinned, derived],
+        amends_version=amends_version,
+        tool_context=ctx,
+    )
+
+
+def _source_pins(plan: Plan | None) -> tuple[str | None, list[str]]:
+    """The dataset requirement's pin and the slot of every decision fixing a source."""
+    assert plan is not None
+    (dataset,) = [
+        item for item in plan.evidence_requirements if isinstance(item, DatasetRequirement)
+    ]
+    slots = [item.slot for item in plan.decisions if item.fixes and item.fixes.source_spec_id]
+    return dataset.source_spec_id, slots
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_propose_plan_pins_a_recorded_identity_over_the_requirements_period(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """An earlier turn's search over every year with data, pinned for 1960-2024, is
+    pinned instead to its identity over 1960-2024. That is the spec_id a fresh
+    search would mint for it, so no search is needed to find it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show(ctx, _GDP_ALL["spec_id"], earlier_turn=True)
+
+    result = _propose_gdp(tools, ctx, decision(), requirements, Period(start=1960, end=2024))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    copied = _GDP_1960_2024["spec_id"]
+    assert copied == "spec_25c18e1a4d45b9f8455974bf3f055da5"
+    plan = load_plan(ctx.state)
+    assert _source_pins(plan) == (copied, [search_pin_slot(copied)])
+    assert plan is not None
+    # Each is a decision `propose_plan` wrote, which the user is not shown.
+    assert all(is_search_pin(item) for item in plan.decisions if item.fixes)
+    assert windowed_pins(ctx.state) == {
+        copied: WindowedPin(
+            spec_id=copied,
+            identity=_GDP_1960_2024["identity"],
+            stat_vars=(_GDP_STAT_VAR,),
+            windowed_from=_GDP_ALL["spec_id"],
+        )
+    }
+    assert SEEDED_SOURCES_STATE_KEY not in ctx.state
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_an_amendment_reasons_about_a_recorded_pin_by_the_spec_id_shown(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A patch that restates the pin of the spec_id the planner was shown moves it
+    over the patch's period, and the copy over the old period is let go."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show(ctx, _GDP_ALL["spec_id"], earlier_turn=True)
+    first = _propose_gdp(tools, ctx, decision(), requirements, Period(start=1960, end=2024))
+    assert first["outcome"] == Outcome.OK.value, first
+
+    second = _propose_gdp(
+        tools,
+        ctx,
+        decision(),
+        requirements,
+        Period(start=2000, end=2024),
+        amends_version=int(first["version"]),
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    copied, _ = windowed_identity(
+        _GDP_ALL["identity"], {"kind": "range", "start_year": 2000, "end_year": 2024}
+    )
+    assert _source_pins(load_plan(ctx.state)) == (copied, [search_pin_slot(copied)])
+    assert list(windowed_pins(ctx.state)) == [copied]
+
+
+def test_propose_plan_keeps_a_pin_with_no_identity_on_record(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """With nothing on record the pin stays as written, for the translator to search."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show(ctx, _GDP_ALL["spec_id"], earlier_turn=True)
+
+    result = _propose_gdp(tools, ctx, decision(), requirements, Period(start=1960, end=2024))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    pin = _GDP_ALL["spec_id"]
+    assert _source_pins(load_plan(ctx.state)) == (pin, [search_pin_slot(pin)])
+    assert windowed_pins(ctx.state) == {}
+
+
 # --- Decisions as the model writes them ---------------------------------------------
 
 
@@ -4339,8 +4477,72 @@ def test_propose_plans_declaration_states_nothing_its_keys_and_required_do_not()
     assert [node for node in nodes if "title" in node] == []
     assert [node for node in nodes if {"type": "null"} in node.get("anyOf", [])] == []
     assert [node for node in nodes if "default" in node and node["default"] in (None, [])] == []
+    assert [
+        node for node in nodes if "const" in node and node.get("default") == node["const"]
+    ] == []
     assert schema["question"]["type"] == "string"
     assert schema["amends_version"]["type"] == "integer"
+
+
+def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() -> None:
+    # Every requirement kind carries an id and `decision_ids`, and a dozen
+    # fields name a requirement or a decision. Each refers to one definition.
+    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    assert declaration is not None
+    schema = declaration.parameters_json_schema
+    assert schema is not None
+    defs = schema["$defs"]
+    identifier = TypeAdapter(Identifier).json_schema()
+
+    patterned = [
+        node for node in _schema_nodes(schema) if node.get("pattern") == identifier["pattern"]
+    ]
+    decision_ids = [
+        model["properties"]["decision_ids"]
+        for model in defs.values()
+        if "decision_ids" in model.get("properties", {})
+    ]
+
+    assert patterned == [defs["Identifier"]]
+    assert defs["Identifier"] == identifier
+    assert defs["DecisionIds"]["items"] == {"$ref": "#/$defs/Identifier"}
+    assert len(decision_ids) == 9
+    assert all(field == {"$ref": "#/$defs/DecisionIds"} for field in decision_ids)
+
+
+def test_an_enum_the_field_describes_carries_no_description_of_its_own() -> None:
+    # The field using each such enum names every value, so the model reads
+    # each value's meaning once, where it writes it.
+    declaration = _tools_by_name()["propose_plan"]._get_declaration()
+    assert declaration is not None
+    schema = declaration.parameters_json_schema
+    assert schema is not None
+    defs = schema["$defs"]
+
+    for name in FIELD_DESCRIBED_ENUMS:
+        using = [
+            field
+            for model in defs.values()
+            for field in model.get("properties", {}).values()
+            if field.get("$ref") == f"#/$defs/{name}"
+        ]
+        assert "description" not in defs[name]
+        assert using, name
+        for field in using:
+            assert all(f"'{value}'" in field["description"] for value in defs[name]["enum"])
+
+
+def test_compacting_refuses_requirement_kinds_that_declare_decision_ids_differently() -> None:
+    ids = {"type": "array", "items": {"type": "string"}}
+    schema = {
+        "$defs": {
+            "One": {"properties": {"decision_ids": ids}},
+            "Other": {"properties": {"decision_ids": ids | {"maxItems": 3}}},
+        }
+    }
+
+    with pytest.raises(ValueError, match="decision_ids"):
+        compact_schema(schema)
 
 
 def test_propose_plan_still_accepts_an_explicit_null_its_declaration_omits(
@@ -4440,6 +4642,8 @@ def test_submit_plan_after_rejection_is_blocked(
     assert result["code"] == ProblemCode.PLAN_REJECTED.value
     assert result["action"]["call"] == "propose_plan"
     assert "summary" not in result
+    # A refusal leaves the run open, so the model reads it and corrects.
+    assert not ctx.actions.skip_summarization
 
 
 @pytest.mark.parametrize("submitted_version", [1, 99], ids=["older", "newer"])
@@ -4594,15 +4798,14 @@ def test_the_summary_carries_nothing_the_plan_record_already_states(
     assert set(result["summary"]) == {"version", "revision", "warnings"}
 
 
-def test_the_instruction_asks_for_no_restatement_of_the_plan() -> None:
-    # The plan card is on the user's screen. A closing turn that retypes every
-    # decision, requirement and step is output tokens spent to produce text
-    # nothing reads.
+def test_the_instruction_asks_for_no_closing_text_after_submitting() -> None:
+    # The plan card is on the user's screen and `submit_plan` ends the run, so
+    # the instruction asks for no closing turn to present the plan.
     instruction = planner_instruction(has_translator=True)
 
     assert "none left out" not in instruction
     assert "each decision by its slot" not in instruction
-    assert "do not restate its" in instruction
+    assert "approval in one" not in instruction
 
 
 def test_the_instruction_has_the_planner_call_translate_with_no_arguments() -> None:
@@ -5161,7 +5364,7 @@ _ASK_DECLINE = Decline(ask=_ASKS[1], code=UnsupportedOperation.CALCULATION_OVER_
             _ASKS,
             [AskAnswer(ask=0, outputs=("bilateral",)), AskAnswer(ask=1, outputs=("joined",))],
             [],
-            ProblemCode.INVALID_PLAN,
+            None,
             None,
             id="output-another-reads",
         ),

@@ -79,10 +79,10 @@ A frame holds at most 250,000 rows. `get_data` returns `over_ceiling` for a larg
 A refusal arrives as a tool result marked as an error. Its text explains the problem and what to do. Structured content carries a `code`, a `retry_mode` and a `fix`. A Studio session asked for French inflation from 2015 to 2024, although the series ended in 2022. The `growth` call returned:
 
 ```text
-growth_gap_year: {'entity_key': {}, 'gap_years': ['2023', '2024'], 'longest_gap_free_window': ['2015', '2022']}
+growth_gap_year: {'window_start': '2015', 'window_end': '2024', 'entity_count': 1, 'missing_start': 0, 'missing_end': 1, 'suggested_window': ['2015', '2022'], 'suggested_window_entities': 1}
 ```
 
-The fix gives 2015 to 2022 as the longest gap-free window.
+Growth reads each series' value in the first and last year of the window, and this series has no 2024 value. The fix suggests 2015 to 2022, a window the series has values at both ends of.
 
 The `retry_mode` tells the model what to do next:
 
@@ -98,7 +98,7 @@ The refusals a reader meets most often:
 - A large retrieval, such as aid from every donor to one country, can take dfo-apis longer than one call allows. `get_data` then returns `operation_still_processing`. The same call made again picks up the same background operation while the data's coverage is unchanged.
 - A mid-size retrieval that dfo-apis runs synchronously, rather than moving to that background path, can still outrun this server's 45-second answer window. `get_data` then returns `service_unavailable`, naming the retrieval as still running upstream and suggesting a narrower scope, such as fewer entities or a shorter window, which finishes faster.
 - `compare` requires a common year and the same unit on both sides. It returns `comparison_periods_disjoint` when periods do not overlap and `cross_frame_unit_mismatch` when units differ.
-- `growth` returns `growth_gap_year` when a window has missing years, as above.
+- `growth` returns `growth_gap_year` when no series has values in both the first and last year of the window, as above. A series missing only one of those years is left out of the result and listed as excluded, and missing years between them never refuse.
 - The server returns `capability_unavailable` with `do_not_retry` for a feature this deployment has disabled.
 
 The ordinary `search` results `no_data` and `unsupported` can resemble refusals. `no_data` means the DFO holds nothing for that part of the question and may suggest nearby series. `unsupported` means the question is outside the DFO's scope and gives the reason.

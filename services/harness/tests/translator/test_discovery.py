@@ -6,6 +6,7 @@ The tools are exercised through the MCP protocol against the canned
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from collections.abc import Callable
@@ -26,6 +27,7 @@ from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefini
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.definition_writes import identity_definition
 from google.adk.tools.function_tool import FunctionTool
+from harness.turn_records import RecordedIdentity
 from planner.plan import (
     PLAN_STATE_KEY,
     SEEDED_SOURCES_STATE_KEY,
@@ -39,12 +41,16 @@ from planner.plan import (
     PlanStatus,
     SeededSource,
     Unit,
+    WindowedPin,
+    current_discovery_time_left,
     current_earlier_block,
+    current_recorded_identity,
     pin_sources,
     plan_revision,
     save_dropped_seeds,
     save_pin_sources,
     save_seeded_sources,
+    save_windowed_pins,
     seeded_sources,
 )
 from planner.records import Period
@@ -1134,6 +1140,92 @@ async def test_a_pin_naming_a_windowed_seed_is_read_from_searchs_answer_for_its_
     assert seeded_sources(context.state)[1] == copy
 
 
+class _SearchAndResolve:
+    """A surface answering `search` from `searching` and `resolve_definition` from `resolving`."""
+
+    def __init__(self, searching: ToolSurface, resolving: DataMcpDefinitions) -> None:
+        self._searching = searching
+        self._resolving = resolving
+
+    async def list_tools(self) -> list[Any]:
+        return await self._searching.list_tools()
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Any,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        chosen = self._resolving if tool.name == "resolve_definition" else self._searching
+        return await chosen.call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+@pytest.mark.parametrize("on_record", ["copy", "identity", None])
+async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_with_no_search(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    on_record: str | None,
+) -> None:
+    # The pin names a dataset over the requirement's period whose identity is
+    # on record: the copy `propose_plan` pinned in place of an earlier
+    # search's dataset over other years, or an earlier search's own identity.
+    # Search's answer for that identity is the source, with no `search`
+    # call and nothing referred back. With nothing on record the pin is
+    # searched for, and a search that does not return it refers it back.
+    answered = _KENYA_OVER["2010-2023"]
+    spec_id = answered["spec_id"]
+    identity = answered["definition"]["identity"]
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=Period(start=2010, end=2023)),
+                derived_requirement(),
+            ],
+        )
+    )
+    stat_vars = ("Var_elected",)
+    recorded = RecordedIdentity(identity=identity, stat_vars=stat_vars)
+    token = current_recorded_identity.set(
+        {spec_id: recorded}.get if on_record == "identity" else None
+    )
+    if on_record == "copy":
+        earlier = _KENYA_OVER["2015-2023"]["spec_id"]
+        copied = WindowedPin(
+            spec_id=spec_id, identity=identity, stat_vars=stat_vars, windowed_from=earlier
+        )
+        save_windowed_pins(context.state, [copied])
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+
+    try:
+        result = await _discover(_SearchAndResolve(surface, resolving), context)
+    finally:
+        current_recorded_identity.reset(token)
+
+    if on_record is None:
+        assert resolving.calls == []
+        assert len(search_calls) == 1
+        assert result["action"]["arguments"]["kind"] == "pinned_source_not_found"
+        return
+    assert search_calls == []
+    assert resolving.calls == [
+        {"spec_id": spec_id, "identity": identity, "stat_vars": list(stat_vars)}
+    ]
+    assert result["status"] == "definite"
+    assert "action" not in result
+    log = load_log(context.state)
+    assert log.records[0].tool == "pin"
+    assert log.sources["annual_debt_service"][spec_id].coverage_window == Period(
+        start=2010, end=2023
+    )
+
+
 class _UnreachableStore:
     """A definition store whose backend cannot be reached."""
 
@@ -2200,6 +2292,48 @@ async def test_an_unreachable_server_is_an_error_that_counts_against_the_budget(
     # A transport failure names no source: nothing it left behind is selectable.
     keys = _requirement_keys(context, "annual_debt_service")
     assert log.selectable(requirement_keys=keys, pinned={}) == {}
+
+
+class _SlowSurface:
+    """A surface whose every call takes far longer than any planner entry has left."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Any,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        del tool, arguments, on_progress
+        self.calls += 1
+        await asyncio.sleep(30)
+        raise AssertionError("the call outlived the planner entry's time")
+
+
+@pytest.mark.parametrize(("time_left", "issued"), [(0.05, 1), (0.0, 0)], ids=["little", "none"])
+async def test_a_search_inside_a_planner_entry_takes_only_the_time_the_entry_has_left(
+    time_left: float, issued: int, draft: DraftFactory, context_holding: ContextHolding
+) -> None:
+    context = context_holding(draft())
+    slow = _SlowSurface()
+    token = current_discovery_time_left.set(lambda: time_left)
+    try:
+        async with asyncio.timeout(5):
+            result = await _discover(slow, context)
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert slow.calls == issued
+    assert result["outcome"] == "refused"
+    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
+    (record,) = load_log(context.state).records
+    assert record.transport_failed is True
 
 
 async def test_the_log_survives_a_round_trip_through_session_state(

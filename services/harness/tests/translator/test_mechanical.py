@@ -49,7 +49,7 @@ from harness.wire import (
     MAX_SEED_TEXT_CHARS,
     MAX_SEEDS,
 )
-from planner.agent import _window_seeded_pins
+from planner.agent import _window_pins
 from planner.operations import (
     FilterOperation,
     JoinOperation,
@@ -65,6 +65,7 @@ from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
+    AskAnswer,
     DatasetRequirement,
     Decision,
     Entity,
@@ -85,7 +86,14 @@ from planner.plan import (
     save_plan,
     save_seeded_sources,
 )
-from planner.records import DenominatorScope, EntityIn, GroupBy, RankAmong, RankDirection
+from planner.records import (
+    DenominatorScope,
+    EntityIn,
+    PlaceLevel,
+    PlaceType,
+    RankAmong,
+    RankDirection,
+)
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import SelectedSource
 from pydantic import Field as PydanticField
@@ -287,8 +295,16 @@ def test_operation_for_copies_every_derived_kind_verbatim(
     assert built == expected
 
 
+@pytest.mark.parametrize(
+    ("answered", "terminal"),
+    [((), ("growth_a",)), (("totals_a",), ("totals_a", "growth_a"))],
+    ids=["leaf", "answered-intermediate"],
+)
 def test_build_translation_covers_a_two_level_derived_chain(
-    requirement: RequirementFactory, decision: DecisionFactory
+    requirement: RequirementFactory,
+    decision: DecisionFactory,
+    answered: tuple[str, ...],
+    terminal: tuple[str, ...],
 ) -> None:
     """`growth_a` reads `totals_a`'s own output, not the dataset directly --
     the chain shape the prototype never exercised. Both operations still
@@ -313,6 +329,8 @@ def test_build_translation_covers_a_two_level_derived_chain(
         question="Kenya's debt service growth",
         decisions=[decision()],
         evidence_requirements=[dataset, totals, growth],
+        asks=["Kenya's debt service and its growth"],
+        answered=[AskAnswer(ask=0, outputs=("growth_a", *answered))],
     )
 
     translation = build_translation(plan, {"dataset_a": SPEC_KENYA})
@@ -320,8 +338,8 @@ def test_build_translation_covers_a_two_level_derived_chain(
     ids = {op.id: op for op in translation.operations}
     assert ids["growth_a"].input == "totals_a"  # reads the aggregate's own operation id
     assert ids["totals_a"].input == "dataset_a"
-    # Only growth_a is terminal: both dataset_a and totals_a feed something.
-    assert translation.terminal == ("growth_a",)
+    # growth_a is the leaf, and totals_a feeds it and is terminal only when an ask names it.
+    assert translation.terminal == terminal
 
 
 def test_build_translation_names_an_unread_dataset_requirement_its_own_terminal(
@@ -711,7 +729,6 @@ async def test_run_translate_compiles_a_seed_whose_sibling_over_other_years_was_
     decision: DecisionFactory,
     pinning_decision: DecisionFactory,
     requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
     core: TranslatorCore,
     search_calls: list[dict[str, Any]],
@@ -720,7 +737,7 @@ async def test_run_translate_compiles_a_seed_whose_sibling_over_other_years_was_
     pins the one the turn still holds, which is honoured from the seeded
     source and compiled: the pin check and the source filter agree. The seed
     leaves its 193 countries open, so the requirement covers every country
-    and the total keeps each one apart."""
+    and a filter keeps the countries."""
     set_definition_store(InMemoryDefinitionStore())
     try:
         block = json.loads(SEEDED_REQUEST_FIXTURE.read_text())["seed_spec"][0]["spec"]
@@ -753,7 +770,12 @@ async def test_run_translate_compiles_a_seed_whose_sibling_over_other_years_was_
                 decisions=[decision(), source_decision],
                 evidence_requirements=[
                     pinned,
-                    derived_requirement(group_by=(GroupBy.ENTITY, GroupBy.PERIOD)),
+                    FilterRequirement(
+                        id="countries",
+                        decision_ids=["measure"],
+                        input_id="annual_debt_service",
+                        predicates=(PlaceLevel(level=PlaceType.COUNTRY),),
+                    ),
                 ],
             )
         )
@@ -891,7 +913,7 @@ async def test_translate_describes_each_seed_once_however_many_requirements_retr
         assert len(requirements) == MAX_SEEDS * per_seed
         # As `propose_plan` records it: each pin moved to the seed over the
         # requirement's period, and a copy for each.
-        plan, copies = _window_seeded_pins(
+        plan, copies, _ = _window_pins(
             draft(decisions=decisions, evidence_requirements=requirements), seeds
         )
         assert len(copies) == MAX_SEEDS * (per_seed if a_period_each else 1)
@@ -959,7 +981,7 @@ def _kenya_seed_pinned_over_2010_to_2023(
         options=[seed.spec_id, "x"],
         chosen=seed.spec_id,
     )
-    plan, copies = _window_seeded_pins(
+    plan, copies, _ = _window_pins(
         draft(
             decisions=[decision(), source_decision],
             evidence_requirements=[pinned, derived_requirement()],

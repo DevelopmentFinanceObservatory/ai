@@ -149,8 +149,9 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, measures, the label, size and digest of the binding its
-    `shape` states, entities, the entity axes it leaves open, unit, provenance, the
-    axes its family varies along -- and the identity document of its
+    `shape` states, entities, the entity axes it leaves open, unit (or that it
+    varies per series), provenance, the axes its family varies along -- and
+    the identity document of its
     `definition` sidecar when the envelope carries one, with whether a
     described identity mints as one StatVar (`pinned_stat_var`).
     A `shape` without `member_count` or `member_digest` leaves them `None`.
@@ -192,6 +193,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
+            unit_per_series=True if unit.get("selection") == "per_series" else None,
             provenance_ref=_text(provenance.get("ref")),
             provenance_label=_text(provenance.get("label")),
             coverage_kind=coverage_kind,

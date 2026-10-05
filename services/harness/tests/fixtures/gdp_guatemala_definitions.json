@@ -1,0 +1,78 @@
+[
+  {
+    "schema_version": 1,
+    "spec_id": "spec_d4ec64fe9c2ca1f51bfe85ba72e4f329",
+    "identity": {
+      "shape": {
+        "kind": "statvar_schema",
+        "stat_type": "measuredValue",
+        "population_type": "EconomicActivity",
+        "measured_property": "amount",
+        "measurement_qualifier": "Nominal"
+      },
+      "slots": [
+        {
+          "binding": {
+            "ref": "GrossDomesticProduction",
+            "state": "value"
+          },
+          "property": "activitySource"
+        },
+        {
+          "binding": {
+            "state": "unbound"
+          },
+          "property": "economicSector"
+        }
+      ],
+      "entities": {
+        "observationAbout": [
+          "country/GTM"
+        ]
+      },
+      "identity_version": "spec1",
+      "requested_window": {
+        "kind": "all"
+      }
+    }
+  },
+  {
+    "schema_version": 1,
+    "spec_id": "spec_25c18e1a4d45b9f8455974bf3f055da5",
+    "identity": {
+      "shape": {
+        "kind": "statvar_schema",
+        "stat_type": "measuredValue",
+        "population_type": "EconomicActivity",
+        "measured_property": "amount",
+        "measurement_qualifier": "Nominal"
+      },
+      "slots": [
+        {
+          "binding": {
+            "ref": "GrossDomesticProduction",
+            "state": "value"
+          },
+          "property": "activitySource"
+        },
+        {
+          "binding": {
+            "state": "unbound"
+          },
+          "property": "economicSector"
+        }
+      ],
+      "entities": {
+        "observationAbout": [
+          "country/GTM"
+        ]
+      },
+      "identity_version": "spec1",
+      "requested_window": {
+        "kind": "range",
+        "end_year": 2024,
+        "start_year": 1960
+      }
+    }
+  }
+]

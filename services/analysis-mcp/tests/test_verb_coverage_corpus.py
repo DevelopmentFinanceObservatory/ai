@@ -670,10 +670,11 @@ async def _run_africa_share_of_chinese_lending_since_2010(
 
 async def _run_kenya_rank_change_since_2010(store: InMemoryMaterialisationStore) -> ToolResult:
     """The motivating per-period-rank chain, over a fixture with a genuine hole:
-    Uganda has no row in 2015. A growth straight off the population-wide rank
-    series refuses on Uganda's own gap year -- the blind spot a fixture with
-    every entity in every period would hide -- so this checks that refusal
-    directly before building the real, filtered chain the question needs."""
+    Uganda has no row in 2011. A growth straight off the population-wide rank
+    series computes every entity, since each holds both endpoint years, and
+    warns about Uganda's interior gap -- the case a fixture with every entity
+    in every period would hide -- so this checks that warning directly before
+    building the real, filtered chain the question needs."""
     frame = _frame(
         [
             _row(stat_var="dcid:AidReceived", reporter="dcid:KEN", year="2010", value=50.0),
@@ -706,11 +707,20 @@ async def _run_kenya_rank_change_since_2010(store: InMemoryMaterialisationStore)
         entity_by=("reporter",),
         change="absolute",
     )
-    assert unfiltered.is_error is True, (
-        "a growth straight off the population-wide rank series was expected to refuse on "
-        "Uganda's own missing 2011 -- a fixture with no hole would hide exactly this"
+    assert unfiltered.is_error is not True
+    unfiltered_frame, unfiltered_trace = await store.get(FrameRef(**_pair(unfiltered)))
+    reporter, value = (unfiltered_frame.columns.index(c) for c in ("reporter", "value"))
+    # Ranks 2010 -> 2012: KEN 2 -> 1, UGA 3 -> 2, TZA 1 -> 3.
+    assert {row[reporter]: row[value] for row in unfiltered_frame.rows} == {
+        "dcid:KEN": -1.0,
+        "dcid:UGA": -1.0,
+        "dcid:TZA": 2.0,
+    }
+    assert not unfiltered_trace.exclusions
+    assert unfiltered_trace.applied_policy.detail["per_entity_coverage"]["reporter=dcid:UGA"] == (
+        pytest.approx(2 / 3)
     )
-    assert unfiltered.structured_content["code"] == "growth_gap_year"
+    assert "1 of 3 entit(y/ies) have no row in some year" in unfiltered.content[0].text
 
     kenya_ref = _pair(
         await filter_verb(

@@ -77,7 +77,7 @@ def _call_deadline_s(client: Client) -> float | None:
     return client._session_kwargs["read_timeout_seconds"]
 
 
-async def test_the_resolver_search_client_carries_its_30s_deadline(
+async def test_the_resolver_search_client_carries_its_capability_row_deadline(
     captured_clients: list[Client],
 ) -> None:
     resolver = McpResolver(settings=Settings(mcp_init_timeout_s=7.0))
@@ -89,7 +89,7 @@ async def test_the_resolver_search_client_carries_its_30s_deadline(
         )
 
     (client,) = captured_clients
-    assert _call_deadline_s(client) == 30.0  # data-mcp `search`'s pinned row
+    assert _call_deadline_s(client) == 60.0  # data-mcp `search`'s pinned row
     assert client._init_timeout == 7.0
 
 

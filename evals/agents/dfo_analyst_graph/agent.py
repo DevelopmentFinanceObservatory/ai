@@ -40,6 +40,7 @@ from harness.agents import build_tool_surface
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph import create_root_workflow
 from harness.mcp_client import McpExecutor, McpResolver
+from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
 from harness.studio import StudioRunner
@@ -111,6 +112,7 @@ def build_runner(settings: Settings | None = None) -> StudioRunner:
     # `build_generative_nodes`' planner, so the two compile against one set
     # of schemas read once, exactly as `create_app` does.
     tool_surface = build_tool_surface(settings=resolved)
+    prefix_cache = PrefixCache() if resolved.studio_prefix_cache else None
     return StudioRunner(
         create_workflow=lambda recorder, surface_recorder: create_root_workflow(
             resolver=McpResolver(settings=resolved),
@@ -119,6 +121,7 @@ def build_runner(settings: Settings | None = None) -> StudioRunner:
                 settings=resolved,
                 model_name=resolved.model_name,
                 surface=tool_surface,
+                prefix_cache=prefix_cache,
             ),
             recall=make_recall(_store),
             tool_surface=surface_recorder,
@@ -137,10 +140,9 @@ def build_runner(settings: Settings | None = None) -> StudioRunner:
 # once.
 _studio = build_runner()
 
-# The `App` `adk web` serves: the graph with the studio's context-cache setting
-# (implicit caching by default; `ContextCacheConfig` only when
-# `STUDIO_CONTEXT_CACHE=true`), plus the identity plugin. A loader that finds `app` uses it as-is; one that
-# finds only `root_agent` wraps the graph in an `App` of its own and loses both.
+# The `App` `adk web` serves: the graph, plus the identity plugin. A loader
+# that finds `app` uses it as-is; one that finds only `root_agent` wraps the
+# graph in an `App` of its own and loses the plugin.
 app = _studio.runner.app.model_copy(
     update={"plugins": [ConversationIdentity(), *_studio.runner.app.plugins]}
 )

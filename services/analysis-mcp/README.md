@@ -10,7 +10,7 @@ The service registers eight analytical tools.
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `aggregate` | Groups rows by specified dimensions and computes a sum, mean, max, or min reduction, reporting the winning period for max and min |
 | `compare`   | Computes period-aligned values and absolute differences across entities or frames                                                 |
-| `growth`    | Computes the total percentage change across calendar years, `(value_end - value_start) / value_start`, with gap detection         |
+| `growth`    | Computes each entity's change between the window's two endpoint years, excluding and reporting any entity it cannot compute       |
 | `rank`      | Orders entities by observed values or windowed aggregations                                                                       |
 | `share_of`  | Calculates proportional shares between numerator and denominator definitions across time periods                                  |
 | `join`      | Merges two distinct frames on matching time periods and shared role dimensions                                                    |
