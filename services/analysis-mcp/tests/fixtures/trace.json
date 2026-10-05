@@ -1,0 +1,52 @@
+{
+  "upstream_trace": {
+    "applied_window": {
+      "start": "2015",
+      "end": "2020"
+    },
+    "graph_revision": "rev_2026_08_01",
+    "source_revisions": [
+      {
+        "source": "worldbank_ids",
+        "revision": "2026-07-15"
+      }
+    ],
+    "resolved_stat_vars": [
+      {
+        "ref": "dcid:GovernmentRevenue",
+        "roles": ["reporter"],
+        "observation_count": 42
+      }
+    ],
+    "facets": [
+      {
+        "axis": "unit",
+        "ref": "dcid:USDollar",
+        "basis": "declared_default"
+      }
+    ],
+    "normalisations": [],
+    "conversion": null,
+    "frame_grammar_version": "1.0.0",
+    "materialiser_build": "materialise@fixture",
+    "capability_version": "cap_fixture_1"
+  },
+  "frame_content_version": "cv_7f9a1c3e5d8b2604afe9d7c1b3a6f025",
+  "op_spec_hash": "ops_5f58b599f0c12b2fc4741ade793c8cca",
+  "execution_record": {
+    "kind": "op_spec_canonical",
+    "content": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"aggregation\":\"sum\",\"group_by\":[\"reporter\"],\"unit\":null},\"verb\":\"aggregate\"}"
+  },
+  "applied_policy": {
+    "policy_name": null,
+    "realised_coverage_fraction": null,
+    "skipped_row_count": null
+  },
+  "content_version": "ocv_6c52e7c688dec744aebdb9e5fc767de9",
+  "input_content_versions": ["cv_4b825dc642cb6eb9a060e54bf8d69288"],
+  "execution_identity": {
+    "engine_version": "0.2.0",
+    "frame_grammar_version": "1.0.0",
+    "reduction_policy_version": "0.2.0"
+  }
+}

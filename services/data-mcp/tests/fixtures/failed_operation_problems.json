@@ -1,0 +1,234 @@
+{
+  "rows": {
+    "sync": {
+      "type": "/codes/over_ceiling",
+      "title": "Over Ceiling",
+      "status": 422,
+      "detail": "materialised coverage of 120000 rows exceeds the sync materialisation ceiling of 100000 rows (dimensions: ({'role': 'recipient', 'distinct': 150},))",
+      "code": "over_ceiling",
+      "ceiling_kind": "rows",
+      "count": 120000,
+      "cap": 100000,
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    },
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "materialised coverage of 120000 rows exceeds the sync materialisation ceiling of 100000 rows (dimensions: ({'role': 'recipient', 'distinct': 150},))",
+      "code": "operation_failed",
+      "cause": {
+        "code": "over_ceiling",
+        "entities": [],
+        "truncated": false
+      },
+      "ceiling_kind": "rows",
+      "count": 120000,
+      "cap": 100000,
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  },
+  "operation_rows": {
+    "sync": {
+      "type": "/codes/over_ceiling",
+      "title": "Over Ceiling",
+      "status": 422,
+      "detail": "estimated 2500000 row(s) exceeds the async admission ceiling cap=2000000. Narrow the identity (another slot binding, a shorter window) to bring the estimate under the cap.",
+      "code": "over_ceiling",
+      "ceiling_kind": "operation_rows",
+      "count": 2500000,
+      "cap": 2000000,
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    },
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "estimated 2500000 row(s) exceeds the async admission ceiling cap=2000000. Narrow the identity (another slot binding, a shorter window) to bring the estimate under the cap.",
+      "code": "operation_failed",
+      "cause": {
+        "code": "over_ceiling",
+        "entities": [],
+        "truncated": false
+      },
+      "ceiling_kind": "operation_rows",
+      "count": 2500000,
+      "cap": 2000000,
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  },
+  "definition_not_reproducible": {
+    "sync": {
+      "type": "/codes/definition_not_reproducible",
+      "title": "Definition Not Reproducible",
+      "status": 422,
+      "detail": "spec 'spec_abc' binds entity role(s) recipient that 'dcid:sv_x' no longer declares",
+      "code": "definition_not_reproducible",
+      "issues": [
+        {
+          "member": "spec_abc"
+        },
+        {
+          "member": "spec_abc",
+          "axis": "recipient"
+        }
+      ],
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    },
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "spec 'spec_abc' binds entity role(s) recipient that 'dcid:sv_x' no longer declares",
+      "code": "operation_failed",
+      "issues": [
+        {
+          "member": "spec_abc"
+        },
+        {
+          "member": "spec_abc",
+          "axis": "recipient"
+        }
+      ],
+      "cause": {
+        "code": "definition_not_reproducible",
+        "entities": [],
+        "truncated": false
+      },
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  },
+  "rollup_not_summable": {
+    "sync": {
+      "type": "/codes/rollup_not_summable",
+      "title": "Rollup Not Summable",
+      "status": 422,
+      "detail": "groupby axis 'stat_var' refused: column 'provenance' is not homogeneous across the rows this axis would collapse together (values ['dc/s/A', 'dc/s/B'])",
+      "code": "rollup_not_summable",
+      "pointer": "/options/groupby",
+      "issues": [
+        {
+          "pointer": "/options/groupby",
+          "axis": "stat_var"
+        }
+      ],
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    },
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "groupby axis 'stat_var' refused: column 'provenance' is not homogeneous across the rows this axis would collapse together (values ['dc/s/A', 'dc/s/B'])",
+      "code": "operation_failed",
+      "pointer": "/options/groupby",
+      "issues": [
+        {
+          "pointer": "/options/groupby",
+          "axis": "stat_var"
+        }
+      ],
+      "cause": {
+        "code": "rollup_not_summable",
+        "entities": [],
+        "truncated": false
+      },
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  },
+  "facet_not_available": {
+    "sync": {
+      "type": "/codes/facet_not_available",
+      "title": "Facet Not Available",
+      "status": 422,
+      "detail": "member dcid:sv_a has no facet in the requested unit; choose one of the listed",
+      "code": "facet_not_available",
+      "issues": [
+        {
+          "pointer": "/input/scope/facets/0",
+          "member": "dcid:sv_a",
+          "axis": "unit",
+          "alternatives": [
+            {
+              "ref": "USD",
+              "label": "US dollars"
+            },
+            {
+              "ref": "EUR",
+              "label": "Euros"
+            }
+          ],
+          "truncated": false
+        }
+      ],
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    },
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "member dcid:sv_a has no facet in the requested unit; choose one of the listed",
+      "code": "operation_failed",
+      "issues": [
+        {
+          "pointer": "/input/scope/facets/0",
+          "member": "dcid:sv_a",
+          "axis": "unit",
+          "alternatives": [
+            {
+              "ref": "USD",
+              "label": "US dollars"
+            },
+            {
+              "ref": "EUR",
+              "label": "Euros"
+            }
+          ],
+          "truncated": false
+        }
+      ],
+      "cause": {
+        "code": "facet_not_available",
+        "entities": [],
+        "truncated": false
+      },
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  },
+  "legacy_over_ceiling": {
+    "poll": {
+      "type": "/codes/operation_failed",
+      "title": "Operation Failed",
+      "status": 500,
+      "detail": "operation 'op_1' did not complete successfully: over_ceiling",
+      "code": "operation_failed",
+      "cause": {
+        "code": "over_ceiling",
+        "entities": [],
+        "truncated": false
+      },
+      "trace_id": "trace-1",
+      "capability_version": "v1",
+      "retryable": false
+    }
+  }
+}

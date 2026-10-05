@@ -1,0 +1,11 @@
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "session_id": "sess_01j9zc0000",
+  "message": "Make this a log scale and highlight 2021.",
+  "component_ref": {
+    "component_id": "cmp_01j9zc3aqw",
+    "revision": 1,
+    "intent": "edit"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "identity_version": "opcv1",
+  "vectors": [
+    {
+      "name": "single-input-content-version",
+      "description": "a single-input verb's result content_version",
+      "classification": "positive",
+      "input": {
+        "op_spec_hash": "ops_3831620af458a5800f6864a2ccdc2e6e",
+        "input_content_versions": [
+          "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        ],
+        "execution_identity": {
+          "engine_version": "0.1.0",
+          "frame_grammar_version": "1.0.0",
+          "reduction_policy_version": "0.1.0"
+        }
+      },
+      "expected_content_version": "ocv_22fffa0f6a508ceaf38a638a39bbc9ae"
+    },
+    {
+      "name": "two-inputs-order-a",
+      "description": "a two-input verb (join/compare), inputs listed in one order",
+      "classification": "positive",
+      "input": {
+        "op_spec_hash": "ops_3831620af458a5800f6864a2ccdc2e6e",
+        "input_content_versions": [
+          "cv_4b825dc642cb6eb9a060e54bf8d69288",
+          "cv_22222222222222222222222222222222"
+        ],
+        "execution_identity": {
+          "engine_version": "0.1.0",
+          "frame_grammar_version": "1.0.0",
+          "reduction_policy_version": "0.1.0"
+        }
+      },
+      "expected_content_version": "ocv_35f6a226227dcfcfb41c5415bbcc4b8e"
+    },
+    {
+      "name": "two-inputs-order-b-matches",
+      "description": "the same two inputs listed in the opposite order mints the identical token",
+      "classification": "positive",
+      "input": {
+        "op_spec_hash": "ops_3831620af458a5800f6864a2ccdc2e6e",
+        "input_content_versions": [
+          "cv_22222222222222222222222222222222",
+          "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        ],
+        "execution_identity": {
+          "engine_version": "0.1.0",
+          "frame_grammar_version": "1.0.0",
+          "reduction_policy_version": "0.1.0"
+        }
+      },
+      "expected_content_version": "ocv_35f6a226227dcfcfb41c5415bbcc4b8e"
+    },
+    {
+      "name": "duplicate-input-content-version",
+      "description": "the same input content_version listed twice refuses at minting",
+      "classification": "negative",
+      "input": {
+        "op_spec_hash": "ops_3831620af458a5800f6864a2ccdc2e6e",
+        "input_content_versions": [
+          "cv_4b825dc642cb6eb9a060e54bf8d69288",
+          "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        ],
+        "execution_identity": {
+          "engine_version": "0.1.0",
+          "frame_grammar_version": "1.0.0",
+          "reduction_policy_version": "0.1.0"
+        }
+      },
+      "expected_failure_kind": "duplicate_member"
+    }
+  ]
+}

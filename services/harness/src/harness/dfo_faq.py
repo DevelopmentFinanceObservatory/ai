@@ -1,0 +1,70 @@
+"""dfo-faq, the published skill a question about DFO itself is answered from.
+
+Converse's reply (`harness.generative.GeminiConverse`) and the orchestrator's
+`explain_dfo` (`harness.orchestrator_tools`) read it with data-mcp's
+`get_skill`, the tool and id the planner's instruction names
+(`planner.skills`), so all three answer from the one published text.
+`read_dfo_faq` reads it once per question about DFO and holds no copy.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from common.refusal import refusal_code
+from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from planner.skills import DFO_FAQ_SKILL_ID, GET_SKILL
+
+logger = logging.getLogger(__name__)
+
+# The reply when this deployment serves no Skills API or no dfo-faq.
+CANNOT_DESCRIBE_DFO = (
+    "I can't describe the Development Finance Observatory on this deployment, "
+    "because its description is not published here. I can still look up data for you."
+)
+# The reply when the read did not complete, or the reply drafted from it came
+# back empty. Asking again can succeed.
+DFO_FAQ_NOT_READ = (
+    "I couldn't read the description of the Development Finance Observatory just "
+    "now. Please ask again in a moment."
+)
+# Refusals that mean this deployment does not serve dfo-faq at all.
+_NOT_SERVED = frozenset({"capability_unavailable", "skill_not_found"})
+
+
+@dataclass(frozen=True)
+class DfoFaqUnavailable:
+    """dfo-faq could not be read; `reply` is what to say in its place."""
+
+    reply: str
+
+
+async def read_dfo_faq(surface: ToolSurface | None) -> str | DfoFaqUnavailable:
+    """dfo-faq's text as `get_skill` renders it, or why it could not be read.
+
+    A deployment with no surface, no Skills API or no dfo-faq answers
+    `CANNOT_DESCRIBE_DFO`. Any other refusal, or a call that never
+    completed, answers `DFO_FAQ_NOT_READ`, as the planner's skill tools
+    answer a call that did not complete with a sentence and carry on.
+    """
+    if surface is None:
+        return DfoFaqUnavailable(CANNOT_DESCRIBE_DFO)
+    try:
+        result = await surface.call_tool(tool=GET_SKILL, arguments={"skill_id": DFO_FAQ_SKILL_ID})
+    except ToolSurfaceUnavailableError as exc:
+        logger.warning("get_skill(%s) did not complete: %s", DFO_FAQ_SKILL_ID, exc)
+        return DfoFaqUnavailable(DFO_FAQ_NOT_READ)
+    if not result.is_error:
+        return result.text
+    code = refusal_code(result.structured_content)
+    logger.warning("get_skill(%s) refused %s: %s", DFO_FAQ_SKILL_ID, code, result.text)
+    return DfoFaqUnavailable(CANNOT_DESCRIBE_DFO if code in _NOT_SERVED else DFO_FAQ_NOT_READ)
+
+
+__all__ = [
+    "CANNOT_DESCRIBE_DFO",
+    "DFO_FAQ_NOT_READ",
+    "DfoFaqUnavailable",
+    "read_dfo_faq",
+]

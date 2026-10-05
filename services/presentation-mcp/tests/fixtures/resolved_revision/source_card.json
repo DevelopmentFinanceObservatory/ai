@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.8.0",
+  "component_id": "cmp_01j9zc4kv7m4p7q9r1t0",
+  "revision": 1,
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      }
+    ],
+    "execution_ref": null,
+    "sources": [
+      {
+        "id": "src_oecd_dac",
+        "name": "OECD DAC",
+        "url": "https://stats.oecd.org/",
+        "licence": "CC BY 4.0",
+        "retrieved": "2026-06-12"
+      }
+    ],
+    "freshness": {
+      "data_through": "2024",
+      "last_refreshed": "2026-06-12",
+      "next_expected": "2026-10",
+      "partial_period": false
+    },
+    "warnings": [],
+    "generated_at": "2026-07-14T10:02:00Z",
+    "citation": "OECD DAC via ONE DFO, retrieved 12 June 2026",
+    "refreshed_from": null
+  },
+  "component": {
+    "type": "source_card",
+    "source_refs": [
+      "src_oecd_dac"
+    ]
+  }
+}

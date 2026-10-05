@@ -1,0 +1,13 @@
+Bar chart of Disbursements by recipient for Ethiopia, Ghana and Kenya, 2024 (`cmp_01j9zc3g7km4p7q9r1sx`, revision 1).
+Title, written by the model: Malaria grant disbursements by recipient, 2024
+
+| recipient | Disbursements |
+| --- | --- |
+| Ethiopia | 441.9 |
+| Ghana | 225.3 |
+| Kenya | 305.6 |
+
+Unit: USD millions, constant 2023 prices.
+
+Data through 2024; last refreshed 2026-06-12; next update expected 2026-10.
+Source: OECD DAC via ONE DFO, retrieved 12 June 2026

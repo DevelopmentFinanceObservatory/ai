@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "spec_id": "spec_d76ae772591c93f87a07fffe1fdbc0da",
+  "identity": {
+    "identity_version": "spec1",
+    "shape": {
+      "kind": "statvar_schema",
+      "population_type": "Person",
+      "measured_property": "fertilityRate",
+      "stat_type": "measuredValue"
+    },
+    "slots": [
+      {
+        "property": "gender",
+        "binding": {
+          "state": "value",
+          "ref": "Female"
+        }
+      }
+    ],
+    "entities": {
+      "observationAbout": [
+        "country/KEN"
+      ]
+    },
+    "requested_window": {
+      "kind": "all"
+    }
+  }
+}

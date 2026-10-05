@@ -1,0 +1,76 @@
+{
+  "join_keys": [],
+  "expected_resolved_join_keys": [
+    "reporter"
+  ],
+  "expected_left_dropped_key_count": 0,
+  "expected_right_dropped_key_count": 0,
+  "expected_matched_keys": [
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:FRA"
+        ]
+      ],
+      "time_period": "2022",
+      "left_value": 15942000000.0,
+      "right_value": 2846000000000.0
+    },
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:FRA"
+        ]
+      ],
+      "time_period": "2023",
+      "left_value": 15366000000.0,
+      "right_value": 3030000000000.0
+    },
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:GBR"
+        ]
+      ],
+      "time_period": "2022",
+      "left_value": 15694000000.0,
+      "right_value": 3076000000000.0
+    },
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:GBR"
+        ]
+      ],
+      "time_period": "2023",
+      "left_value": 19073000000.0,
+      "right_value": 3290000000000.0
+    },
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:USA"
+        ]
+      ],
+      "time_period": "2022",
+      "left_value": 55303000000.0,
+      "right_value": 25130000000000.0
+    },
+    {
+      "key": [
+        [
+          "reporter",
+          "dcid:USA"
+        ]
+      ],
+      "time_period": "2023",
+      "left_value": 63575000000.0,
+      "right_value": 26486000000000.0
+    }
+  ]
+}

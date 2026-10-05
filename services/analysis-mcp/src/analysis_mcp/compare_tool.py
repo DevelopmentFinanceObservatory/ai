@@ -1,0 +1,413 @@
+"""The `compare` tool: op-spec in, deterministic engine execution over two
+stored-frame slices, a `{spec_id, content_version}` pair and a trace out.
+
+Flow mirrors `aggregate_tool.aggregate`: parse/validate the op-spec ->
+resolve the left `frame_ref` via the shared `analysis_mcp.frame_ref_resolution`
+helpers, and the right `right_frame_ref` too when it names a different
+result (left alone stands for "two slices of one frame_ref" -- see
+`analysis_mcp.engine.compare`'s own docstring) -> run the engine
+(`analysis_mcp.engine.compare.run_compare`), translating each of its typed
+exceptions to its own refusal -> mint identity, build the trace, write the
+store under the result's own pair -> render the digest. Every typed failure this
+function itself anticipates is returned via `to_tool_result`, never raised.
+An exception outside that set would escape this function; `server.py`'s
+registration-site wrapper is the backstop that turns it into an
+`internal_error` refusal instead of a raw traceback reaching the wire;
+this backstop complements the typed handling below rather than replacing it.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastmcp.tools import ToolResult
+from pydantic import Field
+
+from analysis_mcp.digest import render_compare_digest
+from analysis_mcp.engine.common import (
+    FacetHeterogeneousError,
+    UnitHeterogeneousError,
+    UnitNotPresentError,
+    UnknownEntityColumnError,
+)
+from analysis_mcp.engine.compare import (
+    CompareAmbiguousSliceError,
+    CompareFacetMismatchError,
+    CompareNonFiniteResultError,
+    CompareUnitMismatchError,
+    CompareUnitUnboundError,
+    ComparisonPeriodsDisjointError,
+    run_compare,
+)
+from analysis_mcp.frame_ref_resolution import (
+    canonical_entity_binding,
+    derive_frame_content_version,
+    derived_marker_detail,
+    holds_input_rows,
+    input_content_version,
+    merge_derived_markers,
+    merged_time,
+    read_derived_marker,
+    resolve_input_frames,
+)
+from analysis_mcp.identity import canonicalize_op_spec
+from analysis_mcp.op_spec import CompareOpSpec, PinnedUnit
+from analysis_mcp.settings import Settings
+from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.tool_pipeline import (
+    build_op_spec_or_refusal,
+    dedupe_input_content_versions,
+    exclusions_for_trace,
+    mint_identity_or_refusal,
+    store_result_and_render,
+)
+from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
+from analysis_mcp.units import unit_json
+
+# Every typed exception `run_compare` can raise maps to exactly one
+# refusal by `_refusal_for_engine_error` below. `comparison_periods_disjoint`,
+# `cross_frame_unit_mismatch`, `cross_frame_unit_unbound`, and
+# `cross_frame_facet_mismatch` are compare-specific; the rest reuse
+# `aggregate`'s existing refusal factories directly.
+_EngineError = (
+    CompareAmbiguousSliceError
+    | ComparisonPeriodsDisjointError
+    | CompareUnitMismatchError
+    | CompareUnitUnboundError
+    | CompareFacetMismatchError
+    | CompareNonFiniteResultError
+    | UnitHeterogeneousError
+    | UnitNotPresentError
+    | UnknownEntityColumnError
+    | FacetHeterogeneousError
+)
+
+# `resolve_unit_and_facets`/`validate_entity_columns` (`analysis_mcp.engine.
+# common`), the shared helper both sides resolve through, don't thread a
+# `side` parameter into `UnitHeterogeneousError`/`UnitNotPresentError`/
+# `UnknownEntityColumnError` the way `_slice_by_period` threads its own
+# `side` into `CompareAmbiguousSliceError`. Naming both sides' parameters
+# together is more precise than aggregate's single-sided `unit` vocabulary.
+_LEFT_OR_RIGHT_UNIT = "left_unit or right_unit"
+_LEFT_OR_RIGHT_ENTITY = "left_entity or right_entity"
+
+
+def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
+    """Map one of `run_compare`'s typed exceptions to its refusal.
+
+    `CompareAmbiguousSliceError` reuses `role_ambiguous`: an `entity`
+    binding that fails to narrow a side down to one row per period is, in
+    the same sense `aggregate`'s own refusal already covers, the wrong
+    grouping for what the caller asked -- named columns here are the
+    binding's own keys, empty when the binding itself was empty and the
+    frame's own multiple entities are what's ambiguous. `exc.side` names
+    which of `left_entity` or `right_entity` was at fault.
+    `UnknownEntityColumnError` carries no side, since the shared helper that
+    raises it serves both. `CompareUnitMismatchError`
+    is distinct from `UnitHeterogeneousError` (one frame, many units): here
+    each side resolved cleanly to its own single unit, and it's the pairing
+    across sides that's unsafe, so it gets its own `cross_frame_unit_mismatch`
+    code rather than overloading `unit_heterogeneous`'s message.
+    `CompareUnitUnboundError` is a narrower case of the same cross-side
+    pairing: one side's own rows leave `unit` unbound entirely rather than
+    resolving to a second, differing unit, so it gets its own
+    `cross_frame_unit_unbound` code instead of `cross_frame_unit_mismatch`'s
+    "two resolved units differ" phrasing. `CompareFacetMismatchError` is the
+    identical cross-side shape applied to a facet axis instead of `unit`
+    (`cross_frame_facet_mismatch`), distinct from `FacetHeterogeneousError`
+    (one side's own slice internally heterogeneous on an axis).
+    `CompareNonFiniteResultError` reuses `non_finite_result`, the same
+    overflow discipline `aggregate` and `growth` already carry.
+    """
+    # An if/elif chain with one assignment and one return, rather than one
+    # early return per branch, matching `aggregate_tool._refusal_for_engine_error`'s
+    # own shape (which the workspace's `PLR0911` complexity gate requires).
+    if isinstance(exc, CompareAmbiguousSliceError):
+        refusal = ToolRefusal.role_ambiguous(
+            parameter=f"{exc.side}_entity", columns=list(exc.entity), available=list(exc.available)
+        )
+    elif isinstance(exc, UnknownEntityColumnError):
+        refusal = ToolRefusal.role_ambiguous(
+            parameter=_LEFT_OR_RIGHT_ENTITY,
+            columns=list(exc.columns),
+            available=list(exc.available),
+        )
+    elif isinstance(exc, ComparisonPeriodsDisjointError):
+        refusal = ToolRefusal.comparison_periods_disjoint(
+            left_periods=list(exc.left_periods), right_periods=list(exc.right_periods)
+        )
+    elif isinstance(exc, CompareUnitMismatchError):
+        refusal = ToolRefusal.cross_frame_unit_mismatch(
+            left_label="left",
+            left_unit=exc.left_unit,
+            right_label="right",
+            right_unit=exc.right_unit,
+        )
+    elif isinstance(exc, CompareUnitUnboundError):
+        refusal = ToolRefusal.cross_frame_unit_unbound(
+            unbound_label=exc.unbound_side,
+            bound_label=exc.bound_side,
+            bound_unit=exc.bound_unit,
+        )
+    elif isinstance(exc, CompareFacetMismatchError):
+        refusal = ToolRefusal.cross_frame_facet_mismatch(
+            left_label="left",
+            right_label="right",
+            axis=exc.axis,
+            left_ref=exc.left_ref,
+            right_ref=exc.right_ref,
+        )
+    elif isinstance(exc, CompareNonFiniteResultError):
+        refusal = ToolRefusal.non_finite_result(
+            group_key={"time_period": exc.time_period}, aggregation="delta"
+        )
+    elif isinstance(exc, UnitNotPresentError):
+        refusal = ToolRefusal.unit_not_present(
+            parameter=_LEFT_OR_RIGHT_UNIT, pinned_unit=exc.pinned_unit, units=list(exc.units)
+        )
+    elif isinstance(exc, UnitHeterogeneousError):
+        refusal = ToolRefusal.unit_heterogeneous(
+            parameter=_LEFT_OR_RIGHT_UNIT, units=list(exc.units)
+        )
+    else:
+        refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
+    return refusal
+
+
+@holds_input_rows
+async def compare(
+    frame_ref: Annotated[
+        dict[str, str],
+        Field(
+            description=(
+                "The left side's {spec_id, content_version} pair, naming a materialised "
+                "frame or a prior verb result. Obtained from get_data's or a prior verb's "
+                "own digest -- never invented."
+            )
+        ),
+    ],
+    right_frame_ref: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "The right side's frame_ref pair. Omit to compare two slices of the same "
+                "frame_ref, narrowed by left_entity/right_entity instead."
+            ),
+        ),
+    ] = None,
+    left_entity: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "{role_column: value} narrowing the left side to one entity's own time "
+                "series. Empty when frame_ref already names exactly one entity. Role "
+                "columns only -- stat_var and time_period are not accepted selectors."
+            ),
+        ),
+    ] = None,
+    right_entity: Annotated[
+        dict[str, str] | None,
+        Field(default=None, description="Same as left_entity, for the right side."),
+    ] = None,
+    left_unit: Annotated[
+        PinnedUnit | None,
+        Field(
+            default=None,
+            description=(
+                "Pins the left side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
+                "unit ref or a converted unit's {currency, prices, base_year} object."
+            ),
+        ),
+    ] = None,
+    right_unit: Annotated[
+        PinnedUnit | None,
+        Field(
+            default=None,
+            description=(
+                "Pins the right side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
+                "unit ref or a converted unit's {currency, prices, base_year} object."
+            ),
+        ),
+    ] = None,
+) -> ToolResult:
+    """Compare a value between two slices over their intersected periods.
+
+    Each side is `frame_ref` (or `right_frame_ref`) narrowed by an `entity`
+    binding down to one row per `time_period`. The compared periods are the
+    intersection of what each side actually offers; an empty intersection
+    refuses (`comparison_periods_disjoint`), naming each side's own
+    available periods. `delta` is `right - left` at each intersected
+    period. Use `join` instead to combine two different variables for one
+    entity.
+
+    Args:
+        frame_ref: The left side's frame_ref.
+        right_frame_ref: The right side's frame_ref; omit for two slices of frame_ref.
+        left_entity: Narrows the left side to one entity's series.
+        right_entity: Narrows the right side to one entity's series.
+        left_unit: Pins the left side's unit.
+        right_unit: Pins the right side's unit.
+
+    Returns:
+        A digest: each intersected period's two values and delta, both
+        sides' coverage, and the result's {spec_id, content_version} pair
+        and identity fields. On refusal, a typed error with a
+        machine-readable fix.
+    """
+    op_spec = build_op_spec_or_refusal(
+        lambda: CompareOpSpec(
+            frame_ref=frame_ref,
+            right_frame_ref=right_frame_ref,
+            # `{} if ... is None else ...` avoids a mutable `= {}` default on
+            # the parameter itself (ruff B006). `CompareOpSpec.left_entity`/
+            # `right_entity` use `Field(default_factory=dict)` for the same
+            # "fresh dict per call" guarantee, but that default only resolves
+            # through a schema-validating framework layer -- a caller
+            # invoking this function directly would get the `FieldInfo`
+            # object itself, not the dict it describes.
+            left_entity={} if left_entity is None else left_entity,
+            right_entity={} if right_entity is None else right_entity,
+            left_unit=left_unit,
+            right_unit=right_unit,
+        )
+    )
+    if isinstance(op_spec, ToolResult):
+        return op_spec
+
+    # Both sides in one call, so the call claims both sides' rows before
+    # decoding either (`resolve_input_frames`). With no `right_frame_ref` the
+    # right side is the left frame itself.
+    frame_refs = [op_spec.frame_ref]
+    if op_spec.right_frame_ref is not None:
+        frame_refs.append(op_spec.right_frame_ref)
+    resolved = await resolve_input_frames(frame_refs, settings=Settings())
+    if isinstance(resolved, ToolResult):
+        return resolved
+    left, right = resolved[0], resolved[-1]
+    left_frame, left_trace = left.frame, left.trace
+    right_frame, right_trace = right.frame, right.trace
+    left_cv = input_content_version(left_trace)
+    input_content_versions = (
+        [left_cv]
+        if op_spec.right_frame_ref is None
+        else dedupe_input_content_versions(left_cv, input_content_version(right_trace))
+    )
+
+    # `left_entity`/`right_entity` are canonicalised (key order sorted)
+    # before the engine runs -- see `frame_ref_resolution.canonical_entity_
+    # binding`'s own docstring; the same "execution order must match the
+    # order identity was minted from" discipline `aggregate_tool.aggregate`
+    # already applies to `group_by`.
+    try:
+        result = run_compare(
+            left_frame,
+            right_frame,
+            left_entity=canonical_entity_binding(op_spec.left_entity),
+            right_entity=canonical_entity_binding(op_spec.right_entity),
+            left_pinned_unit=op_spec.left_unit,
+            right_pinned_unit=op_spec.right_unit,
+        )
+    except (
+        CompareAmbiguousSliceError,
+        ComparisonPeriodsDisjointError,
+        CompareUnitMismatchError,
+        CompareUnitUnboundError,
+        CompareFacetMismatchError,
+        CompareNonFiniteResultError,
+        UnitNotPresentError,
+        UnitHeterogeneousError,
+        UnknownEntityColumnError,
+        FacetHeterogeneousError,
+    ) as exc:
+        return to_tool_result(_refusal_for_engine_error(exc))
+
+    identity = mint_identity_or_refusal(op_spec, input_content_versions=input_content_versions)
+    if isinstance(identity, ToolResult):
+        return identity
+    op_spec_hash, execution_identity, content_version = identity
+
+    # The output frame's own `stat_var` (set above by `run_compare`) always
+    # carries the left side's -- when a period's right-side `stat_var`
+    # differs, the delta is a movement between two different StatVars
+    # labelled as if it were one, so `compare` sets its own
+    # `inherited_stat_var` marker in that case (unset when both sides agree,
+    # which is honest as-is). Merged with whichever informational marker
+    # either side already carries (`growth`'s or `share_of`'s own
+    # `dimensionless`/`inherited_stat_var`) via `merge_derived_markers` and
+    # routed through `derived_marker_detail` so neither side's own marker is
+    # silently dropped from this call's own output (see
+    # `frame_ref_resolution.derived_marker_detail`'s own docstring).
+    detail: dict[str, object] = {
+        "left_periods": list(result.left_periods),
+        "right_periods": list(result.right_periods),
+        "intersected_periods": list(result.intersected_periods),
+        "left_coverage_fraction": result.left_coverage_fraction,
+        "right_coverage_fraction": result.right_coverage_fraction,
+        "right_resolved_unit": unit_json(result.right_resolved_unit),
+        "right_resolved_facets": {
+            selection.axis: selection.ref for selection in result.right_facet_selections
+        },
+    }
+    own_inherited_stat_var = any(
+        comparison.left_stat_var != comparison.right_stat_var
+        for comparison in result.period_comparisons
+    )
+    derived = derived_marker_detail(
+        inherited=merge_derived_markers(
+            read_derived_marker(left_trace), read_derived_marker(right_trace)
+        ),
+        inherited_stat_var=own_inherited_stat_var,
+    )
+    if derived is not None:
+        detail["derived"] = derived
+
+    # `compare` sets no interval of its own: `delta` is a single subtraction
+    # of two already-finite floats.
+    time_fact = merged_time(own_interval=None, inherited=[left, right])
+
+    # The left side's own upstream_trace is carried forward -- the same
+    # "left is the reference" choice `run_compare`'s own output frame
+    # already makes for stat_var/unit/facets. Both sides' own lineage is
+    # bound into `content_version` via `input_content_versions` above, and
+    # carried onto the trace's own `input_content_versions` field verbatim.
+    output_trace = Trace(
+        upstream_trace=left_trace.upstream_trace,
+        frame_content_version=derive_frame_content_version(
+            frame=result.frame, upstream_trace=left_trace.upstream_trace
+        ),
+        op_spec_hash=op_spec_hash,
+        execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
+        applied_policy=AppliedPolicy(
+            policy_name="compare_intersect_periods",
+            realised_coverage_fraction=min(
+                result.left_coverage_fraction, result.right_coverage_fraction
+            ),
+            skipped_row_count=0,
+            resolved_unit=unit_json(result.left_resolved_unit),
+            resolved_facets={
+                selection.axis: selection.ref for selection in result.left_facet_selections
+            },
+            detail=detail,
+        ),
+        exclusions=exclusions_for_trace(result.exclusions),
+        time=time_fact,
+        content_version=content_version,
+        input_content_versions=input_content_versions,
+        execution_identity=execution_identity,
+    )
+
+    return await store_result_and_render(
+        frame=result.frame,
+        trace=output_trace,
+        digest=lambda: render_compare_digest(
+            result=result,
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+            derived=derived,
+            exclusions=output_trace.exclusions,
+            time=output_trace.time,
+        ),
+    )

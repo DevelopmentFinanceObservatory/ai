@@ -1,0 +1,9 @@
+{
+  "frame_ref": {
+    "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+    "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+  },
+  "verb": "aggregate",
+  "group_by": ["reporter"],
+  "aggregation": "sum"
+}

@@ -1,0 +1,183 @@
+{
+  "entries": [
+    {
+      "question": "What was Nigeria's GDP from 2021 to 2023?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-weo-002",
+      "verb_chain": [
+        "aggregate"
+      ]
+    },
+    {
+      "question": "How much total ODA did Kenya receive in 2022?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-001",
+      "verb_chain": [
+        "aggregate"
+      ]
+    },
+    {
+      "question": "What were total ODA disbursements to Nigeria from 2019 to 2023 by year?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-014",
+      "verb_chain": [
+        "aggregate"
+      ]
+    },
+    {
+      "question": "What is Uganda's total external debt in 2024?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-ids-009",
+      "verb_chain": [
+        "aggregate"
+      ]
+    },
+    {
+      "question": "What were total disbursements to Kenya in 2022 across all flow types?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-017",
+      "verb_chain": [
+        "aggregate"
+      ]
+    },
+    {
+      "question": "How did ODA to Rwanda change from 2020 to 2022?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-004",
+      "verb_chain": [
+        "growth"
+      ]
+    },
+    {
+      "question": "How did Kenya's current account balance as % of GDP change from 2022 to 2023?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-weo-006",
+      "verb_chain": [
+        "growth"
+      ]
+    },
+    {
+      "question": "How much ODA in loans did Uganda receive in 2021?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-013",
+      "verb_chain": [
+        "filter",
+        "aggregate"
+      ]
+    },
+    {
+      "question": "How much private grant funding did Ethiopia receive in 2022?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-012",
+      "verb_chain": [
+        "filter",
+        "aggregate"
+      ]
+    },
+    {
+      "question": "What was technical cooperation ODA to Ghana per year from 2021 to 2023?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-011",
+      "verb_chain": [
+        "filter",
+        "aggregate"
+      ]
+    },
+    {
+      "question": "What were Kenya's net PPG financial flows in 2024? (disbursements minus repayments)",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-ids-026",
+      "verb_chain": [
+        "compare"
+      ]
+    },
+    {
+      "question": "What is Kenya's current IMF debt sustainability risk rating?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-dsa-001",
+      "uncovered": true,
+      "uncovered_reason": "A categorical rating lookup, not a numeric StatVar observation the engine can group, compare, or reduce -- no verb in the closed set operates over anything but row values in a Frame."
+    },
+    {
+      "question": "Compare debt sustainability ratings for Kenya, Ghana, and Zambia",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-dsa-013",
+      "uncovered": true,
+      "uncovered_reason": "The word \"compare\" names a verb, but this compares categorical ratings across three entities, not `compare`'s own right-minus-left delta between two numeric time-series slices."
+    },
+    {
+      "question": "Which countries are rated 'In debt distress' by the IMF in this dataset?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-dsa-014",
+      "uncovered": true,
+      "uncovered_reason": "A category lookup over DSA metadata rather than a Frame's own value column -- filter's CategoryMatchPredicate presumes a materialised value-bearing Frame already exists for the entity set in question, which a ratings roster is not."
+    },
+    {
+      "question": "Note: China does not report ODA data to OECD DAC. What should the agent say if asked about Chinese ODA flows?",
+      "source": "mcp-prototype/tests/regression/regression_cases.json#syn-crs-019",
+      "uncovered": true,
+      "uncovered_reason": "A data-availability and refusal-framing question, not a computation over an already-materialised frame."
+    },
+    {
+      "question": "What share of total DAC-donor ODA disbursed in 2022 did the United States account for?",
+      "source": "invented",
+      "verb_chain": [
+        "share_of"
+      ]
+    },
+    {
+      "question": "What share of Sub-Saharan Africa's total ODA receipts did Ethiopia account for in 2023?",
+      "source": "invented",
+      "verb_chain": [
+        "share_of"
+      ]
+    },
+    {
+      "question": "Show the USA's ODA disbursements alongside its GNI for 2022 and 2023 in one table.",
+      "source": "invented",
+      "verb_chain": [
+        "join"
+      ]
+    },
+    {
+      "question": "Which of France, Germany, and Japan disbursed the most ODA in 2023?",
+      "source": "invented",
+      "verb_chain": [
+        "rank"
+      ]
+    },
+    {
+      "question": "Which were the top 2 ODA donors in 2023?",
+      "source": "invented",
+      "verb_chain": [
+        "rank"
+      ]
+    },
+    {
+      "question": "Among donors whose 2023 ODA disbursements exceeded $20 billion, rank them from highest to lowest.",
+      "source": "invented",
+      "verb_chain": [
+        "filter",
+        "rank"
+      ]
+    },
+    {
+      "question": "List every observation in the USA's ODA disbursement series worth more than $50 billion.",
+      "source": "invented",
+      "verb_chain": [
+        "filter"
+      ]
+    },
+    {
+      "question": "Rank donors by their share of official development assistance to health.",
+      "source": "invented",
+      "verb_chain": [
+        "share_of",
+        "rank"
+      ]
+    },
+    {
+      "question": "How has Africa's share of Chinese lending changed since 2010, in percentage points?",
+      "source": "invented",
+      "verb_chain": [
+        "share_of",
+        "growth"
+      ]
+    },
+    {
+      "question": "How has Kenya's rank among aid recipients changed since 2010?",
+      "source": "invented",
+      "verb_chain": [
+        "rank",
+        "filter",
+        "growth"
+      ]
+    }
+  ]
+}

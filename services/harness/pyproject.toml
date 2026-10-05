@@ -1,0 +1,85 @@
+[project]
+name = "harness"
+version = "0.1.0"
+description = "Agentic loop for the DFO site's chat+canvas: Google ADK + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor and orchestrator (see tool.uv.build-backend below)."
+requires-python = ">=3.13"
+dependencies = [
+    "analysis_mcp",
+    "asyncpg>=0.30",
+    "cloud-sql-python-connector[asyncpg]>=1.15",
+    "common",
+    "data_mcp",
+    # `compiler.compile` reads the frame grammar's column names, and
+    # `compiler.evidence` runs its Arrow kernels over the series-statistics table.
+    "dfo-spec-kit-frame-grammar",
+    "fastapi>=0.139.1",
+    "fastmcp>=4.0.10,<5",
+    "google-adk[db]==2.10.0",
+    # harness.server builds its loopback self-check client on httpx2, and
+    # executor.run classifies httpx2 transport errors.
+    "httpx2>=2.13.0",
+    # Validates a compiled step's arguments against the tool's own JSON
+    # Schema, in compiler.arguments.
+    "jsonschema>=4.26.0",
+    # fastmcp and google-adk both constrain this; pinned explicitly rather
+    # than trusting transitive resolution, since ADK 2.10.0 is the release
+    # that widened its own bound to admit mcp 2.x.
+    "mcp>=2.2.0",
+    "presentation_mcp",
+    # `compiler.evidence` and `executor.run` hold the series-statistics table.
+    "pyarrow>=18.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.14.2",
+    # Canonical JSON for `planner.plan.plan_revision`, the hash that identifies
+    # what a user approved.
+    "rfc8785>=0.1.4",
+    # harness.session_store builds its own async engine; the asyncio extra
+    # carries greenlet on every platform, which the bare package omits on
+    # arm64 macOS.
+    "sqlalchemy[asyncio]>=2",
+    "uvicorn>=0.51.0",
+]
+
+[project.scripts]
+harness-server = "harness.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+# planner (the plan record and the Planner Agent), compiler (the workflow
+# build), translator (the Translator Agent), executor (the run) and
+# orchestrator (the Orchestrator Agent) live at src/planner/, src/compiler/,
+# src/translator/, src/executor/ and src/orchestrator/, top-level modules
+# alongside src/harness/, so they ship on harness's own dependencies, tests,
+# and CI.
+[tool.uv.build-backend]
+module-name = ["harness", "planner", "compiler", "translator", "executor", "orchestrator"]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2
+
+[tool.uv.sources]
+analysis_mcp = { workspace = true }
+common = { workspace = true }
+data_mcp = { workspace = true }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/frame-grammar" }
+presentation_mcp = { workspace = true }

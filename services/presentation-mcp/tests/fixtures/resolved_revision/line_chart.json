@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.8.0",
+  "component_id": "cmp_01j9zc3aqwm4p7q9r1sv",
+  "revision": 1,
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      }
+    ],
+    "execution_ref": null,
+    "sources": [
+      {
+        "id": "src_oecd_dac",
+        "name": "OECD DAC",
+        "url": "https://stats.oecd.org/",
+        "licence": "CC BY 4.0",
+        "retrieved": "2026-06-12"
+      }
+    ],
+    "freshness": {
+      "data_through": "2024",
+      "last_refreshed": "2026-06-12",
+      "next_expected": "2026-10",
+      "partial_period": false
+    },
+    "warnings": [],
+    "generated_at": "2026-07-14T10:02:00Z",
+    "citation": "OECD DAC via ONE DFO, retrieved 12 June 2026",
+    "refreshed_from": null
+  },
+  "component": {
+    "type": "line_chart",
+    "title": {
+      "text": "Malaria grant disbursements to Ethiopia",
+      "authorship": "model"
+    },
+    "series": [
+      {
+        "id": "eth_malaria_disbursements",
+        "label": "Ethiopia",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "constant",
+          "base_year": 2023
+        },
+        "source_ref": "src_oecd_dac",
+        "points": [
+          {
+            "period": "2015",
+            "value": 412.3
+          },
+          {
+            "period": "2016",
+            "value": 455.1
+          },
+          {
+            "period": "2017",
+            "value": 431.8
+          },
+          {
+            "period": "2018",
+            "status": "missing"
+          },
+          {
+            "period": "2019",
+            "value": 410.0
+          },
+          {
+            "period": "2020",
+            "value": 398.2
+          },
+          {
+            "period": "2021",
+            "value": 405.6
+          },
+          {
+            "period": "2022",
+            "value": 420.1
+          },
+          {
+            "period": "2023",
+            "value": 433.7
+          },
+          {
+            "period": "2024",
+            "value": 441.9
+          }
+        ]
+      }
+    ],
+    "x_axis": {
+      "window": {
+        "start": "2015",
+        "end": "2024"
+      }
+    },
+    "y_axis": {
+      "label": "Disbursements",
+      "scale": "linear",
+      "range": {
+        "min": 390,
+        "max": 460
+      }
+    }
+  }
+}

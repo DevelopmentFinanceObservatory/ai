@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.8.0",
+  "component_id": "cmp_01j9zc3xy9m4p7q9r1sy",
+  "revision": 1,
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      }
+    ],
+    "execution_ref": null,
+    "sources": [
+      {
+        "id": "src_oecd_dac",
+        "name": "OECD DAC",
+        "url": "https://stats.oecd.org/",
+        "licence": "CC BY 4.0",
+        "retrieved": "2026-06-12"
+      }
+    ],
+    "freshness": {
+      "data_through": "2024",
+      "last_refreshed": "2026-06-12",
+      "next_expected": "2026-10",
+      "partial_period": false
+    },
+    "warnings": [],
+    "generated_at": "2026-07-14T10:02:00Z",
+    "citation": "OECD DAC via ONE DFO, retrieved 12 June 2026",
+    "refreshed_from": null
+  },
+  "component": {
+    "type": "table",
+    "title": {
+      "text": "Malaria grant disbursements by recipient",
+      "authorship": "model"
+    },
+    "columns": [
+      {
+        "key": "recipient",
+        "label": "recipient"
+      },
+      {
+        "key": "period",
+        "label": "Period"
+      },
+      {
+        "key": "value",
+        "label": "Value"
+      }
+    ],
+    "rows": [
+      {
+        "series_id": "eth_malaria_disbursements",
+        "dimensions": {
+          "recipient": "Ethiopia"
+        },
+        "period": "2023",
+        "source_ref": "src_oecd_dac",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "constant",
+          "base_year": 2023
+        },
+        "value": 433.7
+      },
+      {
+        "series_id": "eth_malaria_disbursements",
+        "dimensions": {
+          "recipient": "Ethiopia"
+        },
+        "period": "2024",
+        "source_ref": "src_oecd_dac",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "constant",
+          "base_year": 2023
+        },
+        "value": 441.9
+      },
+      {
+        "series_id": "gha_malaria_disbursements",
+        "dimensions": {
+          "recipient": "Ghana"
+        },
+        "period": "2023",
+        "source_ref": "src_oecd_dac",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "constant",
+          "base_year": 2023
+        },
+        "value": 210.5
+      },
+      {
+        "series_id": "gha_malaria_disbursements",
+        "dimensions": {
+          "recipient": "Ghana"
+        },
+        "period": "2024",
+        "source_ref": "src_oecd_dac",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "constant",
+          "base_year": 2023
+        },
+        "value": 225.3
+      }
+    ]
+  }
+}

@@ -1,0 +1,61 @@
+[project]
+name = "presentation_mcp"
+version = "0.1.0"
+description = "Presentation MCP: presentation-layer tooling for the DFO chat+canvas surface."
+requires-python = ">=3.13"
+dependencies = [
+    "common",
+    # `dfo_frame_grammar.Frame`/`grammar` constants: reading a materialised
+    # `ops_`/`ocv_` frame back out of the shared store and rendering it as
+    # the `role_keys`/`rows` pair dfo-apis' publish door re-renders itself
+    # (`presentation_mcp.frame_publish`). Mirrors data-mcp's and
+    # analysis-mcp's own pair of entries for the same package.
+    "dfo-spec-kit",
+    "dfo-spec-kit-frame-grammar",
+    "fastmcp[apps]>=4.0.10,<5",
+    # `chart_image` measures label widths from the vendored fonts' advance widths.
+    "fonttools>=4.66.1",
+    "httpx2>=2.13.0",
+    "opentelemetry-api>=1.42",
+    # Prefab renders write_component and describe_component as an MCP App
+    # (`presentation_mcp.app_view`). The package is pre-1.0 and breaks
+    # between minors, so it is pinned exactly.
+    "prefab-ui==0.20.2",
+    "pydantic-settings>=2.14.2",
+    # `chart_image` rasterises its SVG with resvg. The package is pre-1.0, so
+    # a minor release may change its API, and the cap holds it to 0.5.
+    "resvg-py>=0.5.0,<0.6",
+]
+
+[project.scripts]
+presentation-mcp = "presentation_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2
+
+[tool.uv.sources]
+common = { workspace = true }
+dfo-spec-kit = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/spec-kit" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/frame-grammar" }

@@ -1,0 +1,7 @@
+{
+  "kind": "interrupt.response",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "interrupt_id": "elc_2f6f2f9d31d84b7c",
+  "decision": "skip"
+}

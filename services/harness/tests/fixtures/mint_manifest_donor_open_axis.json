@@ -1,0 +1,2690 @@
+{
+  "comment": "dfo-apis POST /api/datasets for education aid to Kenya from every donor, 1990-2024, posted with the 113 StatVars Search elected and summed by time_period: the manifest as served, and the first three rows of its series-statistics artifact as data_mcp.series_statistics reads them. Search's block for the same part states the open donor side as role_axis_facts role 'origin'; the series statistics name each entity's role by declared property, and coverage.dimensions states each property's flow axis.",
+  "manifest": {
+    "schema_version": 1,
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_b1d96bc4c8d3bb377f96b8fed43dddef",
+      "identity": {
+        "shape": {
+          "kind": "statvar_schema",
+          "stat_type": "measuredValue",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "binding": {
+              "state": "unbound"
+            },
+            "property": "crsCooperationModality"
+          },
+          {
+            "binding": {
+              "ref": "CRSPurposeCode110",
+              "state": "value"
+            },
+            "property": "crsPurpose"
+          },
+          {
+            "binding": {
+              "state": "unbound"
+            },
+            "property": "crsTypeOfFinance"
+          },
+          {
+            "binding": {
+              "ref": "CRSTypeOfFlow10",
+              "state": "value"
+            },
+            "property": "crsTypeOfFlow"
+          },
+          {
+            "binding": {
+              "state": "unbound"
+            },
+            "property": "dac2aAidType"
+          },
+          {
+            "binding": {
+              "ref": "Disbursement",
+              "state": "value"
+            },
+            "property": "financialFlowType"
+          },
+          {
+            "binding": {
+              "ref": "Gross",
+              "state": "value"
+            },
+            "property": "nettingBasis"
+          }
+        ],
+        "entities": {
+          "destination": [
+            "country/KEN"
+          ]
+        },
+        "identity_version": "spec1",
+        "requested_window": {
+          "kind": "range",
+          "end_year": 2024,
+          "start_year": 1990
+        }
+      }
+    },
+    "content_version": "cv_4ec9627605db62bcc37512d70884ff02",
+    "coverage": {
+      "rows": 796,
+      "dimensions": [
+        {
+          "label": "financingProvider",
+          "count": 55,
+          "axis": "origin"
+        },
+        {
+          "label": "financingRecipient",
+          "count": 1,
+          "axis": "destination"
+        },
+        {
+          "label": "years",
+          "count": 35
+        }
+      ],
+      "window": {
+        "kind": "range",
+        "origin": "query",
+        "end_year": 2024,
+        "start_year": 1990
+      }
+    },
+    "citation": {
+      "text": "OECD Creditor Reporting System (CRS)",
+      "sources": [
+        {
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "label": "OECD Creditor Reporting System (CRS)",
+          "license": "OECD Terms and Conditions",
+          "url": "https://data-explorer.oecd.org/vis?tm=crs&pg=0&snb=30&df[ds]=dsDisseminateFinalDMZ&df[id]=DSD_CRS%40DF_CRS&df[ag]=OECD.DCD.FSD&df[vs]=1.6&isAvailabilityDisabled=false&page=0",
+          "source": {
+            "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd",
+            "label": "Organisation for Economic Co-operation and Development (OECD)"
+          },
+          "data_commons": {
+            "id": "dfo",
+            "label": "Development Finance Observatory"
+          }
+        }
+      ]
+    },
+    "trace": {
+      "facets": [
+        {
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "axis": "provenance",
+          "basis": "deployment_fallback",
+          "default_policy": "dfo/facet-policy/most-observations",
+          "selection_reason": "sole_candidate",
+          "dispatch_facet_id": "3734627990144800868",
+          "default_policy_version": "1"
+        },
+        {
+          "ref": "CurrencyUSD",
+          "axis": "unit",
+          "basis": "deployment_fallback",
+          "default_policy": "dfo/facet-policy/most-observations",
+          "selection_reason": "sole_candidate",
+          "dispatch_facet_id": "3734627990144800868",
+          "default_policy_version": "1"
+        }
+      ],
+      "mint_facets": [
+        {
+          "ref": "provenance/OECDCreditorReportingSystem",
+          "axis": "provenance",
+          "basis": "declared_default"
+        },
+        {
+          "ref": "CurrencyUSD",
+          "axis": "unit",
+          "basis": "declared_default"
+        }
+      ],
+      "applied_window": {
+        "kind": "range",
+        "origin": "query",
+        "end_year": 2024,
+        "start_year": 1990
+      },
+      "graph_revision": "unavailable:dfo-dcp-revision-endpoint-absent",
+      "normalisations": [],
+      "code_index_stamp": {
+        "exported_at": "2026-10-01T21:44:27Z",
+        "content_hash": "013da10075c80a9b556f3093e23fc312c72dfea33255b7df4416322b487ab436",
+        "graph_endpoint": "https://dfo-dev-dc-datacommons-service-zms5lj4zhq-nn.a.run.app"
+      },
+      "source_revisions": [],
+      "capability_version": "dset_ea964b77ec3ca365",
+      "materialiser_build": "unknown",
+      "resolved_stat_vars": [
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 20
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 37
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 10
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 50
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 48
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 11
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 29
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 7
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 7
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 39
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 65
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 19
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 19
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB031_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB032_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB033_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 9
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 7
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 8
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 10
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 5
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 6
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 14
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB03_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 6
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 3
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB04_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 140
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 228
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 84
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 35
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 233
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 141
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 22
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 72
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 17
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 13
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 88
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 182
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 88
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityC01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 60
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 39
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 16
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 5
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 6
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 52
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 26
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 13
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 7
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 34
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 31
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 9
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 28
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 28
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 25
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 11
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 33
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 9
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11250_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 22
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 40
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 62
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityD02_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 20
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 13
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 10
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 6
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11232_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 7
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 282
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 15
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 94
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityE02_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityG01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityH01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 74
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 77
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 20
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 3
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 98
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 52
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 15
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 49
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 66
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 112
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 27
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance210_CRSCooperationModalityC01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 21
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 23
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 23
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 23
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityA02_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityB03_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityB04_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 35
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 12
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 12
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 27
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 16
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11231_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 23
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11260_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 28
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 59
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 45
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityC01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 24
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSCooperationModalityE01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 8
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11130_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11220_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11230_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11240_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11330_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance421_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance422_CRSCooperationModalityE01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 1
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11120_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11182_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11320_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 2
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSCooperationModalityC01_CRSPurposeCode11430_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance510_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance520_CRSCooperationModalityC01_CRSPurposeCode11110_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        },
+        {
+          "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance520_CRSCooperationModalityC01_CRSPurposeCode11420_Nominal",
+          "roles": [
+            "financingProvider",
+            "financingRecipient"
+          ],
+          "observation_count": 0
+        }
+      ],
+      "family_member_count": 257,
+      "family_member_digest": "a0ca4074c375020a45dd0a572174b89f53f2282f3e9dfa93d88eb7a793cd3cd3",
+      "frame_grammar_version": "1.0.0",
+      "origin_catalogue_build_id": "20261001T160047Z-f18695b2"
+    },
+    "warnings": [
+      {
+        "code": "stat_vars_summed",
+        "severity": "info",
+        "message": "The series sums observations from more than one StatVar in the requested family, and carries the family's reference as its stat_var. 113 StatVars were summed into dcid:spec_b1d96bc4c8d3bb377f96b8fed43dddef.",
+        "contributing_member_count": 113,
+        "stat_var_ref": "dcid:spec_b1d96bc4c8d3bb377f96b8fed43dddef",
+        "stat_var_label": "education, official development assistance"
+      },
+      {
+        "code": "processing_level_undeclared",
+        "severity": "info",
+        "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
+      },
+      {
+        "code": "revision_unavailable",
+        "severity": "info",
+        "message": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
+      }
+    ],
+    "artifacts": [
+      {
+        "artifact_digest": "sha256:ecd27d8c771c3eea377afe3595474eeb61fd32b9a00a5446defa3340d3aace39",
+        "rendering": {
+          "format": "parquet",
+          "bundle": false,
+          "groupby": {
+            "by": [
+              "time_period"
+            ],
+            "op": "sum"
+          }
+        },
+        "bytes": 9488,
+        "media_type": "application/vnd.apache.parquet",
+        "created_at": "2026-10-02T05:20:53.126937+00:00",
+        "tier": "working",
+        "url": "http://127.0.0.1:44462/p1-working/sha256:ecd27d8c771c3eea377afe3595474eeb61fd32b9a00a5446defa3340d3aace39",
+        "url_expires_at": "2026-10-02T05:35:53.126937+00:00"
+      },
+      {
+        "artifact_digest": "sha256:0f33f417c4567deec176dc0df59f21005460626a06f25b3a783ea7189d15f407",
+        "rendering": {
+          "statistics": "series"
+        },
+        "bytes": 8809,
+        "media_type": "application/vnd.apache.parquet",
+        "created_at": "2026-10-02T05:20:53.177429+00:00",
+        "tier": "working",
+        "url": "http://127.0.0.1:44462/p1-working/sha256:0f33f417c4567deec176dc0df59f21005460626a06f25b3a783ea7189d15f407",
+        "url_expires_at": "2026-10-02T05:35:53.177429+00:00"
+      }
+    ],
+    "series_count": 55,
+    "output_options": {
+      "capability_version": "dset_ea964b77ec3ca365",
+      "columns": [
+        {
+          "name": "stat_var",
+          "kind": "grain",
+          "droppable": false,
+          "distinct": 113
+        },
+        {
+          "name": "financingProvider",
+          "kind": "role",
+          "droppable": false,
+          "distinct": 55
+        },
+        {
+          "name": "financingRecipient",
+          "kind": "role",
+          "droppable": false,
+          "distinct": 1
+        },
+        {
+          "name": "time_period",
+          "kind": "grain",
+          "droppable": false,
+          "distinct": 35
+        },
+        {
+          "name": "value",
+          "kind": "value",
+          "droppable": true
+        },
+        {
+          "name": "unit",
+          "kind": "unit",
+          "droppable": false,
+          "distinct": 1
+        },
+        {
+          "name": "measurementMethod",
+          "kind": "facet",
+          "droppable": true,
+          "distinct": 1
+        },
+        {
+          "name": "provenance",
+          "kind": "facet",
+          "droppable": false,
+          "distinct": 1
+        },
+        {
+          "name": "status",
+          "kind": "status",
+          "droppable": true
+        }
+      ],
+      "formats": [
+        {
+          "name": "csv",
+          "state": "available"
+        },
+        {
+          "name": "xlsx",
+          "state": "available"
+        },
+        {
+          "name": "parquet",
+          "state": "available"
+        }
+      ],
+      "bundle": {
+        "state": "available"
+      },
+      "enrichments": [
+        {
+          "column": "financingProvider",
+          "field": "iso3",
+          "token": "financingProvider_iso3",
+          "state": "partial",
+          "reason": "enrichment_unavailable",
+          "coverage": {
+            "entities": 55,
+            "covered": 43
+          },
+          "missing": [
+            {
+              "ref": "AfricanDevelopmentFund",
+              "label": "African Development Fund"
+            },
+            {
+              "ref": "EuropeanUnionInstitutions",
+              "label": "European Union institutions"
+            },
+            {
+              "ref": "InternationalCentreForGeneticEngineeringAndBiotechnology",
+              "label": "International Centre for Genetic Engineering and Biotechnology"
+            },
+            {
+              "ref": "InternationalDevelopmentAssociation",
+              "label": "International Development Association"
+            },
+            {
+              "ref": "InternationalLabourOrganization",
+              "label": "International Labour Organization"
+            },
+            {
+              "ref": "InternationalTradeCentre",
+              "label": "International Trade Centre"
+            },
+            {
+              "ref": "IslamicDevelopmentBank",
+              "label": "Islamic Development Bank"
+            },
+            {
+              "ref": "OPECFundForInternationalDevelopment",
+              "label": "The OPEC Fund for International Development"
+            },
+            {
+              "ref": "UnitedNationsChildrensFund",
+              "label": "United Nations Children's Fund"
+            },
+            {
+              "ref": "UnitedNationsDevelopmentProgramme",
+              "label": "United Nations Development Programme"
+            }
+          ],
+          "truncated": true
+        },
+        {
+          "column": "financingProvider",
+          "field": "iso2",
+          "token": "financingProvider_iso2",
+          "state": "partial",
+          "reason": "enrichment_unavailable",
+          "coverage": {
+            "entities": 55,
+            "covered": 43
+          },
+          "missing": [
+            {
+              "ref": "AfricanDevelopmentFund",
+              "label": "African Development Fund"
+            },
+            {
+              "ref": "EuropeanUnionInstitutions",
+              "label": "European Union institutions"
+            },
+            {
+              "ref": "InternationalCentreForGeneticEngineeringAndBiotechnology",
+              "label": "International Centre for Genetic Engineering and Biotechnology"
+            },
+            {
+              "ref": "InternationalDevelopmentAssociation",
+              "label": "International Development Association"
+            },
+            {
+              "ref": "InternationalLabourOrganization",
+              "label": "International Labour Organization"
+            },
+            {
+              "ref": "InternationalTradeCentre",
+              "label": "International Trade Centre"
+            },
+            {
+              "ref": "IslamicDevelopmentBank",
+              "label": "Islamic Development Bank"
+            },
+            {
+              "ref": "OPECFundForInternationalDevelopment",
+              "label": "The OPEC Fund for International Development"
+            },
+            {
+              "ref": "UnitedNationsChildrensFund",
+              "label": "United Nations Children's Fund"
+            },
+            {
+              "ref": "UnitedNationsDevelopmentProgramme",
+              "label": "United Nations Development Programme"
+            }
+          ],
+          "truncated": true
+        },
+        {
+          "column": "financingProvider",
+          "field": "label",
+          "token": "financingProvider_label",
+          "state": "available",
+          "coverage": {
+            "entities": 55,
+            "covered": 55
+          },
+          "missing": [],
+          "truncated": false
+        },
+        {
+          "column": "financingRecipient",
+          "field": "iso3",
+          "token": "financingRecipient_iso3",
+          "state": "available",
+          "coverage": {
+            "entities": 1,
+            "covered": 1
+          },
+          "missing": [],
+          "truncated": false
+        },
+        {
+          "column": "financingRecipient",
+          "field": "iso2",
+          "token": "financingRecipient_iso2",
+          "state": "available",
+          "coverage": {
+            "entities": 1,
+            "covered": 1
+          },
+          "missing": [],
+          "truncated": false
+        },
+        {
+          "column": "financingRecipient",
+          "field": "label",
+          "token": "financingRecipient_label",
+          "state": "available",
+          "coverage": {
+            "entities": 1,
+            "covered": 1
+          },
+          "missing": [],
+          "truncated": false
+        }
+      ],
+      "pivots": [
+        {
+          "index": "stat_var",
+          "columns": "financingProvider",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "time_period",
+              "distinct": 35
+            }
+          ]
+        },
+        {
+          "index": "stat_var",
+          "columns": "time_period",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "financingProvider",
+              "distinct": 55
+            }
+          ]
+        },
+        {
+          "index": "financingProvider",
+          "columns": "stat_var",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "time_period",
+              "distinct": 35
+            }
+          ]
+        },
+        {
+          "index": "financingProvider",
+          "columns": "time_period",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "stat_var",
+              "distinct": 113
+            }
+          ]
+        },
+        {
+          "index": "time_period",
+          "columns": "stat_var",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "financingProvider",
+              "distinct": 55
+            }
+          ]
+        },
+        {
+          "index": "time_period",
+          "columns": "financingProvider",
+          "state": "unavailable",
+          "reason": "pivot_not_unique",
+          "varying": [
+            {
+              "column": "stat_var",
+              "distinct": 113
+            }
+          ]
+        }
+      ],
+      "groupby": {
+        "state": "available",
+        "axes": [
+          {
+            "name": "crsCooperationModality"
+          },
+          {
+            "name": "crsPurpose"
+          },
+          {
+            "name": "crsTypeOfFinance"
+          },
+          {
+            "name": "crsTypeOfFlow"
+          }
+        ]
+      }
+    },
+    "series_coverage_stamp": "05e8f5d15c9fae955b0902c185005979"
+  },
+  "series_statistics": [
+    {
+      "stat_var": "dcid:spec_b1d96bc4c8d3bb377f96b8fed43dddef",
+      "entities": [
+        {
+          "role": "financingProvider",
+          "ref": "AfricanDevelopmentFund"
+        },
+        {
+          "role": "financingRecipient",
+          "ref": "country/KEN"
+        }
+      ],
+      "facet": "{\"provenance\":\"provenance/OECDCreditorReportingSystem\",\"unit\":\"CurrencyUSD\"}",
+      "observations": 23,
+      "first_value": 0.0,
+      "latest_value": 11584940.0,
+      "minimum_value": 0.0,
+      "maximum_value": 24355560.0,
+      "first_period": "2001",
+      "latest_period": "2024",
+      "minimum_period": "2001",
+      "maximum_period": "2012",
+      "change_absolute": 11584940.0,
+      "change_percent": null
+    },
+    {
+      "stat_var": "dcid:spec_b1d96bc4c8d3bb377f96b8fed43dddef",
+      "entities": [
+        {
+          "role": "financingProvider",
+          "ref": "EuropeanUnionInstitutions"
+        },
+        {
+          "role": "financingRecipient",
+          "ref": "country/KEN"
+        }
+      ],
+      "facet": "{\"provenance\":\"provenance/OECDCreditorReportingSystem\",\"unit\":\"CurrencyUSD\"}",
+      "observations": 26,
+      "first_value": 412540.0,
+      "latest_value": 5635590.0,
+      "minimum_value": 86870.0,
+      "maximum_value": 5635590.0,
+      "first_period": "1996",
+      "latest_period": "2024",
+      "minimum_period": "2001",
+      "maximum_period": "2024",
+      "change_absolute": 5223050.0,
+      "change_percent": 1266.0711688563533
+    },
+    {
+      "stat_var": "dcid:spec_b1d96bc4c8d3bb377f96b8fed43dddef",
+      "entities": [
+        {
+          "role": "financingProvider",
+          "ref": "InternationalCentreForGeneticEngineeringAndBiotechnology"
+        },
+        {
+          "role": "financingRecipient",
+          "ref": "country/KEN"
+        }
+      ],
+      "facet": "{\"provenance\":\"provenance/OECDCreditorReportingSystem\",\"unit\":\"CurrencyUSD\"}",
+      "observations": 3,
+      "first_value": 49910.0,
+      "latest_value": 16220.0,
+      "minimum_value": 16220.0,
+      "maximum_value": 49910.0,
+      "first_period": "2021",
+      "latest_period": "2023",
+      "minimum_period": "2023",
+      "maximum_period": "2021",
+      "change_absolute": -33690.0,
+      "change_percent": -67.50150270486877
+    }
+  ]
+}

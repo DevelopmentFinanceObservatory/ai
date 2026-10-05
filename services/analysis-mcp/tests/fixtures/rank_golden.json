@@ -1,0 +1,44 @@
+{
+  "rank_by": ["reporter"],
+  "aggregation": "sum",
+  "window_start": "2021",
+  "window_end": "2023",
+  "expected_overall_coverage_fraction": 1.0,
+  "expected_entity_ranks": [
+    {
+      "entity_key": [["reporter", "dcid:USA"]],
+      "value": 166683000000.0,
+      "rank": 1,
+      "row_count": 3,
+      "coverage_fraction": 1.0
+    },
+    {
+      "entity_key": [["reporter", "dcid:DEU"]],
+      "value": 104986000000.0,
+      "rank": 2,
+      "row_count": 3,
+      "coverage_fraction": 1.0
+    },
+    {
+      "entity_key": [["reporter", "dcid:JPN"]],
+      "value": 54734000000.0,
+      "rank": 3,
+      "row_count": 3,
+      "coverage_fraction": 1.0
+    },
+    {
+      "entity_key": [["reporter", "dcid:GBR"]],
+      "value": 50455000000.0,
+      "rank": 4,
+      "row_count": 3,
+      "coverage_fraction": 1.0
+    },
+    {
+      "entity_key": [["reporter", "dcid:FRA"]],
+      "value": 46784000000.0,
+      "rank": 5,
+      "row_count": 3,
+      "coverage_fraction": 1.0
+    }
+  ]
+}

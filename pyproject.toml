@@ -1,0 +1,133 @@
+[project]
+name = "dfo-ai-workspace"
+version = "0.1.0"
+description = "AI layer for ONE Campaign's Development Finance Observatory (DFO): agent harness and MCP services."
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "services/*"]
+
+[dependency-groups]
+dev = [
+    # Exercises a real DatabaseSessionService over sqlite+aiosqlite in the
+    # harness session_store and studio tests, standing in for the deployed
+    # Postgres backend without a live database.
+    "aiosqlite>=0.20",
+    "ruff>=0.15.0",
+    "ty>=0.0.59",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=7.1.0",
+    "pre-commit>=4.6.0",
+    # starlette.testclient imports httpx2 first and falls back to httpx with a
+    # deprecation warning; the fallback is slated for removal. data-mcp also
+    # imports httpx2 directly, as the client it wraps around dfo-apis, so this
+    # pin serves both a workspace-wide test dependency and a service one.
+    "httpx2>=2.13.0",
+    # In-memory span exporter for asserting data-mcp's call/attempt spans in
+    # tests. Otherwise present only as a langfuse transitive.
+    "opentelemetry-sdk>=1.42",
+    # Validates data-mcp's search tool request against the published Search
+    # API JSON Schema in its contract test. Otherwise present only as an mcp
+    # transitive.
+    "jsonschema>=4.26.0",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",      # pycodestyle, pyflakes
+    "I",                 # isort
+    "N",                 # pep8-naming
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "C4",                # comprehensions
+    "SIM",               # simplify
+    "PL",                # pylint
+    "RUF",               # ruff-specific
+    "ERA",               # eradicate (commented-out code)
+    "PERF",              # perflint
+    "ANN",               # flake8-annotations (require type hints on public APIs)
+]
+
+ignore = [
+    "E501",     # Line length (formatter handles)
+    "PLR0913",  # Too many arguments
+    "PLR0912",  # Too many branches
+    "PLR0914",  # Too many locals
+    "PLR0915",  # Too many statements
+    "PLR2004",  # Magic values
+    "ANN401",   # Allow `Any` in typed signatures
+]
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests don't need annotations or pylint-complexity gates. The glob covers
+# this workspace's nested per-package test dirs, e.g. packages/common/tests/
+# and services/harness/tests/, not a single top-level tests/ dir.
+"**/tests/**/*.py" = ["ANN", "PLR2004"]
+# Notebooks: don't require annotations; allow REPL-style patterns.
+"**/*.ipynb" = ["ANN", "F401", "F811", "E402"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ty.environment]
+python-version = "3.13"
+
+# Single root-level pytest config so the whole workspace's tests collect and
+# run in one invocation (`uv run pytest` from repo root). Without
+# --import-mode=importlib, pytest's default "prepend" import mode collides on
+# same-named test modules across packages/services (e.g. test_settings.py
+# exists in packages/common, services/harness, and services/data-mcp) with
+# no __init__.py to disambiguate them, causing an "import file mismatch"
+# error at collection time.
+#
+# consider_namespace_packages handles the other half of that problem. Two
+# service directories carry a tests/__init__.py (data-mcp, presentation-mcp)
+# so that their own test files can use relative imports for shared local
+# helpers. Every service directory has a hyphen in its name, so
+# --import-mode=importlib's package walk stops there and both directories'
+# packages resolve to the same dotted name, "tests". Without this option,
+# whichever service's tests import first wins that name in sys.modules, and
+# the other service's same-named test modules (test_server.py, ...) are
+# collected but never actually run. Their nodeids re-execute the first
+# service's test functions. consider_namespace_packages lets pytest keep
+# walking past the hyphenated directory as a PEP 420 namespace package, so
+# each resolves to a distinct dotted name
+# ("services.data-mcp.tests.test_server" vs.
+# "services.presentation-mcp.tests.test_server").
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/common/tests",
+    "services/harness/tests",
+    "services/data-mcp/tests",
+    "services/analysis-mcp/tests",
+    "services/presentation-mcp/tests",
+]
+python_files = ["test_*.py"]
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
+asyncio_mode = "auto"
+# A test still running after faulthandler_timeout seconds dumps every thread's
+# stack and ends the run. The slowest test takes about 3 seconds. pytest
+# disarms the timer for the rest of a test once it has failed, so a hang in a
+# failed test's teardown runs on to CI's timeout-minutes instead.
+faulthandler_timeout = 120
+faulthandler_exit_on_timeout = true

@@ -1,0 +1,1408 @@
+{
+  "suite": "harness-studio-v1",
+  "description": "Studio surface eval: wire-contract adherence (mechanical, every case) and agent behavior (rubric-judged, live cases). Run with evals/studio/run.py; see evals/studio/readme.md.",
+  "cases": [
+    {
+      "id": "scripted-direct-fetch",
+      "modes": [
+        "scripted"
+      ],
+      "repeat_identical": true,
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "blocks": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-plan-approve",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "comprehensive overview of life expectancy in Kenya",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            },
+            "min_components": 1,
+            "blocks": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-plan-amend",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "comprehensive overview of life expectancy in Kenya",
+          "plan_decision": "amend",
+          "amend_note": "only the most recent decade",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_version": 2
+            },
+            "min_components": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-plan-reject",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "comprehensive overview of life expectancy in Kenya",
+          "plan_decision": "reject",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-refused-step-closes-after-one-replan",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "comprehensive misnamed analysis of life expectancy in Kenya",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 2,
+              "max_version": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-elicitation-answer",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "something ambiguous about life expectancy",
+          "elicitation_decision": "answer",
+          "expect": {
+            "terminal": "done",
+            "elicitation": {
+              "min_options": 2,
+              "allow_free_text": true,
+              "skippable": true
+            },
+            "min_components": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-elicitation-free-text",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "something ambiguous about life expectancy",
+          "elicitation_decision": "answer",
+          "elicitation_text": "the standard reading is fine",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-elicitation-skip",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "something ambiguous about life expectancy",
+          "elicitation_decision": "skip",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-no-data",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "there is nothing measured about this",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-withheld-card-is-not-blamed-on-the-canvas",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "a withheld card",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0,
+            "message_contains": [
+              "withheld"
+            ],
+            "message_excludes": [
+              "declined",
+              "canvas"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-service-refusal-names-the-chart-rules",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "a rejected card",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0,
+            "message_contains": [
+              "chart rules"
+            ],
+            "message_excludes": [
+              "canvas",
+              "constraint_violation",
+              "comparable_units_required"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-unstamped-refusal-blames-nobody",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "an unstamped card",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0,
+            "message_contains": [
+              "could not be added"
+            ],
+            "message_excludes": [
+              "platform",
+              "canvas",
+              "internal_error"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-stream-fatal-error",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "fail to fetch life expectancy",
+          "expect": {
+            "terminal": "error",
+            "error_code": "capability_unavailable"
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-edit-rename",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "blocks": 1
+          }
+        },
+        {
+          "message": "rename this card to Kenya longevity",
+          "component_ref": {
+            "from_turn": 0,
+            "intent": "edit"
+          },
+          "expect": {
+            "terminal": "done",
+            "revised": {
+              "changed_contains": [
+                "title"
+              ]
+            },
+            "blocks": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-edit-recreate-type",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "blocks": 1
+          }
+        },
+        {
+          "message": "make it a bar chart",
+          "component_ref": {
+            "from_turn": 0,
+            "intent": "edit"
+          },
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "component_types": [
+              "bar_chart"
+            ],
+            "blocks": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-autoadd-off-then-add",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "auto_add": false,
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "blocks": 0
+          }
+        },
+        {
+          "operations": [
+            {
+              "op": "add",
+              "component_id": {
+                "from_turn": 0
+              }
+            }
+          ],
+          "expect": {
+            "status": 200,
+            "blocks": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-composition-ops-and-conflict",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "blocks": 1
+          }
+        },
+        {
+          "operations": [
+            {
+              "op": "pin",
+              "component_id": {
+                "from_turn": 0
+              }
+            },
+            {
+              "op": "set_card_meta",
+              "component_id": {
+                "from_turn": 0
+              },
+              "meta": {
+                "subtitle": "eval subtitle"
+              }
+            }
+          ],
+          "expect": {
+            "status": 200,
+            "blocks": 1
+          }
+        },
+        {
+          "operations": [
+            {
+              "op": "remove",
+              "component_id": {
+                "from_turn": 0
+              }
+            }
+          ],
+          "expected_revision": 1,
+          "expect": {
+            "status": 409,
+            "error": "edit_conflict"
+          }
+        },
+        {
+          "operations": [
+            {
+              "op": "unpin",
+              "component_id": {
+                "from_turn": 0
+              }
+            }
+          ],
+          "expect": {
+            "status": 200,
+            "blocks": 1
+          }
+        },
+        {
+          "operations": [
+            {
+              "op": "remove",
+              "component_id": {
+                "from_turn": 0
+              }
+            }
+          ],
+          "expect": {
+            "status": 200,
+            "blocks": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-two-entity-compare",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "compare life expectancy in Guatemala and Nigeria",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "max_components": 1,
+            "blocks": 1,
+            "fact_summary_contains": [
+              "guatemala",
+              "nigeria"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-add-entity-to-the-chart",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "blocks": 1
+          }
+        },
+        {
+          "message": "add Guatemala to the chart",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "max_components": 1,
+            "blocks": 1,
+            "fact_summary_contains": [
+              "kenya",
+              "guatemala"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "scripted-seeded-turn-plans-from-the-search-result",
+      "modes": [
+        "scripted"
+      ],
+      "turns": [
+        {
+          "message": "top 5 donors of education aid to Kenya",
+          "seed_spec": [
+            {
+              "spec": {
+                "spec_id": "spec_8069bafb664321e47b5e48efe675b5b8",
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_8069bafb664321e47b5e48efe675b5b8",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "measured_property": "educationAid"
+                    },
+                    "entities": {
+                      "destination": [
+                        "country/KEN"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                },
+                "resolved": {
+                  "rendered_sentence": "Education aid to Kenya from every donor",
+                  "headline": {
+                    "year": 2024,
+                    "year_named": false,
+                    "observations": 242,
+                    "series": 242
+                  },
+                  "coverage": {
+                    "kind": "breadth",
+                    "has_data": true,
+                    "dimensions": [
+                      {
+                        "label": "donors",
+                        "count": 55
+                      }
+                    ]
+                  },
+                  "stat_vars": {
+                    "items": [
+                      {
+                        "ref": "Amount_EducationAid_Donor",
+                        "slot_values": []
+                      }
+                    ]
+                  }
+                }
+              },
+              "operations": [
+                {
+                  "verb": "rank",
+                  "phrase": "top 5 donors",
+                  "over": "origin"
+                }
+              ]
+            }
+          ],
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            },
+            "min_components": 1,
+            "step_tools": [
+              "receive_seeds"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-direct-fetch",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Nigeria",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "blocks": 1,
+            "fact_summary_contains": [
+              "nigeria"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "direct-interpretation",
+          "property": "The created component's fact summary is about life expectancy in Nigeria — the indicator measures life expectancy and the place is Nigeria. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "direct-honest-narration",
+          "property": "The final message describes only what the fact summaries and step results show; it does not promise actions that never happened, claim analysis that was not run, or state facts absent from the evidence. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-plan-approve",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "give me a comprehensive overview of health spending in Kenya",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            },
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "plan-legible-steps",
+          "property": "Every step in the proposed plan has a human-readable label describing real work (not a bare tool name like 'get_data'), and the plan as a whole plausibly serves a comprehensive overview of health spending in Kenya. This property always applies."
+        },
+        {
+          "id": "plan-narration-matches-execution",
+          "property": "The final message reflects what the executed steps actually produced; if any step failed, the message does not present its output as delivered. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-plan-amend-honesty",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "give me a comprehensive overview of inflation in France",
+          "plan_decision": "amend",
+          "amend_note": "only cover the years since 2015",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_version": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "amend-honest-handling",
+          "property": "The amendment ('only the years since 2015') is either genuinely reflected in the revised plan's steps, or explicitly declined with a stated reason in the plan's decisions or the narration. Silently ignoring the amendment — a v2 plan identical in substance with no acknowledgment anywhere — is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "amend-window-truthfulness",
+          "property": "If the data delivered covers a wider period than the requested 2015-onward window, the final message acknowledges the actual window rather than implying the request was met. If the delivered window matches the request, answer yes."
+        }
+      ]
+    },
+    {
+      "id": "live-ambiguity-should-elicit",
+      "modes": [
+        "live"
+      ],
+      "xfail": "silent-over-resolution: the agent resolves ambiguous questions to one reading without asking; elicitation has never fired live. Retire this marker when clarify triggers on real candidate sets.",
+      "turns": [
+        {
+          "message": "spending in Kenya",
+          "expect": {
+            "elicitation": {
+              "min_options": 2
+            },
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "ambiguity-surfaced",
+          "property": "The agent surfaced the ambiguity of 'spending' (government? health? education? consumer?) to the user — via a clarifying question or an explicit statement of which reading it chose and why — instead of silently picking one. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-identity-bug-fails-safe",
+      "modes": [
+        "live"
+      ],
+      "note": "Premised on the upstream identity-reproduction bug (docs/upstream-asks.md #4). When ONE fixes it this case FAILS — that is the signal to retire it and expect a real resolve instead.",
+      "turns": [
+        {
+          "message": "population of Ghana",
+          "expect": {
+            "terminal": "error",
+            "error_code": "capability_unavailable"
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-rank-three-countries-fails-safe",
+      "modes": [
+        "live"
+      ],
+      "note": "Same upstream premise as live-identity-bug-fails-safe, on the 3-part rank spec (trace tr_a2f3729c66804396).",
+      "turns": [
+        {
+          "message": "rank Kenya, Uganda and Tanzania by life expectancy",
+          "expect": {
+            "terminal": "error",
+            "error_code": "capability_unavailable"
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-rank-limit-named-donors",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "top 3 of the United States, Germany, Japan, France, the United Kingdom and Canada by ODA disbursed in 2023",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "plan": {
+              "min_steps": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "rank-limit-plan-states-three",
+          "property": "The approved plan's rank step keeps the top 3 (its rank states a limit of 3), and the created component is a bar chart or a table. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "rank-limit-card-holds-three",
+          "property": "The component holds exactly three donors, or more only when the final message says the third place is shared. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "rank-limit-narration-states-the-cut",
+          "property": "The final message says three of the six named donors were kept. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "rank-limit-shows-amounts",
+          "property": "The values the component and the final message show are the donors' measured ODA amounts, not rank positions such as 1, 2 and 3. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-rank-limit-bottom",
+      "modes": [
+        "live"
+      ],
+      "note": "The identity failure in docs/upstream-asks.md section 4 is per spec: it fails the three-country Kenya, Uganda and Tanzania rank spec (live-rank-three-countries-fails-safe). This five-country spec is a different one and has not been run on dev, so the xfail covers it failing the same way. An XPASS means it resolves, and the marker retires.",
+      "xfail": "spec-identity: this five-country life expectancy spec may meet the per-spec identity failure in docs/upstream-asks.md section 4 on dev; retire this marker on XPASS.",
+      "turns": [
+        {
+          "message": "which 2 of Kenya, Uganda, Tanzania, Rwanda and Ethiopia have the lowest life expectancy",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "rank-limit-bottom-plan",
+          "property": "The approved plan's rank orders lowest first and keeps two places (its rank states a limit of 2). This property always applies and is never inapplicable."
+        },
+        {
+          "id": "rank-limit-bottom-card",
+          "property": "The component holds two countries, or more only when the final message says the second place is shared. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-refusal-plain-language",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "spending in Kenya",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "refusal-plain",
+          "property": "The final message is plain language a non-technical user understands: it says the question could not be answered as asked and invites different phrasing, or offers the alternative readings in plain words. It contains NO internal jargon — no cosine or similarity scores, spec ids, status codes, or raw diagnostic strings pasted verbatim. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-followup-after-refusal",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "how much does Kenya spend on its military?",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "ok, then just show me life expectancy there instead",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "fact_summary_contains": [
+              "kenya"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "refusal-thread-carries",
+          "property": "The second turn resolved 'there' to Kenya — the country named in the first turn — and produced life expectancy for Kenya, whatever the first turn's outcome was. Asking which country, or producing a different country, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-no-data-honest-close",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "unemployment rate in Middle Earth",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "blocks": 0
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "nodata-honest",
+          "property": "The final message plainly says the data is not available or the place is not covered; it does not claim anything was added to the canvas, does not invent figures, and does not dump raw parser or system internals at the user. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-followup-canvas-digest",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        },
+        {
+          "message": "now show the same for Uganda",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "fact_summary_contains": [
+              "uganda"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "followup-resolved-concretely",
+          "property": "The second turn resolved 'the same' to life expectancy in Uganda specifically — its component and narration are about Uganda's life expectancy, not Kenya's again and not a no-data dead end. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-canvas-question",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        },
+        {
+          "message": "what is on my canvas right now?",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "activity_steps": 0
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "canvas-answer-grounded",
+          "property": "The answer to 'what is on my canvas' names the existing card (life expectancy in Kenya) and describes it from its stored facts; it does not run a new data search, deny the canvas has content, or invent cards that are not there. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-canvas-empty-question",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "what's on my canvas?",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "empty-canvas-honest",
+          "property": "The answer says the canvas is empty (nothing on it yet); it does not describe nonexistent cards and does not fall into a data search that ends in a confusing no-data message. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-edit-rename",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "blocks": 1
+          }
+        },
+        {
+          "message": "rename this card to 'Kenya: living longer'",
+          "component_ref": {
+            "from_turn": 0,
+            "intent": "edit"
+          },
+          "expect": {
+            "terminal": "done",
+            "revised": {
+              "changed_contains": [
+                "title"
+              ]
+            },
+            "blocks": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "edit-rename-is-revision",
+          "property": "The rename was applied as a revision of the existing card (same component, incremented revision, title changed to the requested text or a close variant) and the narration says what was done in one plain sentence. This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-edit-type-switch",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "blocks": 1
+          }
+        },
+        {
+          "message": "turn this into a bar chart",
+          "component_ref": {
+            "from_turn": 0,
+            "intent": "edit"
+          },
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "component_types": [
+              "bar_chart"
+            ],
+            "blocks": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "edit-type-switch-recreates",
+          "property": "The type change produced a new bar-chart component carrying the same subject (life expectancy in Kenya), and the canvas still shows exactly one card for it (the old card replaced, not duplicated alongside). This property always applies."
+        }
+      ]
+    },
+    {
+      "id": "live-headline-stat",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "what is Kenya's latest life expectancy figure? just the headline number",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "headline-form-fits-ask",
+          "property": "A single-number ask produced a single stat-style card (a stat_card, not a multi-series chart) and the narration leads with that one figure. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-analytical-depth",
+      "modes": [
+        "live"
+      ],
+      "xfail": "thin-analytical-depth: narration stays at fact recitation on some runs; retire when the final message speaks to the change or the comparison on consecutive runs.",
+      "turns": [
+        {
+          "message": "give me a comprehensive analysis of how life expectancy in Kenya has changed since 1990, and compare the trend with Tanzania",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 3
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "depth-analysis-steps",
+          "property": "The approved plan contains at least one genuine analysis step beyond fetching (a growth, change, comparison, or windowed computation), and the final message says something about the CHANGE or the COMPARISON — not merely each country's start and end values restated. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-change-question-states-the-change",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much did life expectancy in Kenya change between 2000 and 2020?",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "change-stated-not-skipped",
+          "property": "The final message states the change in life expectancy in Kenya between 2000 and 2020 — a difference or a growth figure — rather than only restating the raw start and end values with no stated change. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-refused-step-recovers-in-one-round",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "give me a comprehensive comparison of how life expectancy has grown in Kenya and Tanzania since 1990",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 2,
+              "max_version": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "refused-step-honest-close",
+          "property": "If any step listed on the plan card failed to run, the final message names that step and says why in plain language, and the user was shown at most one plan card after their approval. Steps labelled 'Describe the frame' or 'Create a canvas component' belong to the presentation phase, not the plan, and are outside this property. If every plan step ran, the final message states the growth comparison. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-memory-beyond-canvas",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "for this session I care about Uganda specifically. what's on my canvas?",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "show life expectancy for the country I mentioned",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "fact_summary_contains": [
+              "uganda"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "memory-carries-statement",
+          "property": "The second turn resolved 'the country I mentioned' to Uganda, based on the first turn's statement. Producing data for a different country, asking which country with no reference to the earlier statement, or a no-data dead end is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-compare-two-indicators-presents-a-card",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "compare population and GDP in Guatemala",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-compare-two-indicators-card-holds-both-series",
+      "modes": [
+        "live"
+      ],
+      "xfail": "platform-defect: the dev platform's table builder fails on a null unit label and a chart over both series is refused for mixed units, so a card holding both series cannot be created; retire this marker when the platform builds it.",
+      "turns": [
+        {
+          "message": "compare population and GDP in Guatemala",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "fact_summary_contains": [
+              "population",
+              "gdp"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "live-route-reply-greeting",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "hi",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "activity_steps": 0,
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "greeting-answered-as-conversation",
+          "property": "The reply greets the user and says what the assistant can help with. Saying it could not identify a measure or subject, or treating 'hi' as a data request, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-reply-thanks",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "thanks, that's helpful",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "activity_steps": 0,
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "thanks-answered-as-conversation",
+          "property": "The reply acknowledges the thanks in a sentence or two. Refusing, or saying it could not identify a measure, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-reply-what-is-dfo",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "what is the Development Finance Observatory?",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "activity_steps": 0,
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "dfo-explained",
+          "property": "The reply explains what the Development Finance Observatory is and what it is for. Saying it could not identify a measure, or answering with data, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-reply-what-can-i-ask",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "what kinds of questions can I ask you?",
+          "expect": {
+            "terminal": "done",
+            "max_components": 0,
+            "activity_steps": 0,
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "question-kinds-explained",
+          "property": "The reply describes the kinds of questions the assistant answers. Saying it could not identify a measure, or answering with data, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-direct-one-measure-two-countries",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "life expectancy in Nigeria and Guatemala",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "no_plan": true,
+            "fact_summary_contains": [
+              "life expectancy",
+              "nigeria",
+              "guatemala"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "two-countries-one-measure",
+          "property": "The cards show life expectancy for both Nigeria and Guatemala, and no other measure. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-direct-published-ratio",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "health spending per person in Kenya",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "no_plan": true,
+            "fact_summary_contains": [
+              "health",
+              "kenya"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "published-ratio-per-person",
+          "property": "The card shows health spending per person (per capita) in Kenya, not total health spending or another measure. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-plan-growth",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "how much has aid to Kenya grown since 2010?",
+          "plan_decision": "reject",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "growth-plan-computes-growth",
+          "property": "The proposed plan computes a change in aid to Kenya over a period starting in 2010, rather than only retrieving the series. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-route-plan-share",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "what share of Kenya's aid comes from the United States?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "share-plan-computes-share",
+          "property": "The proposed plan computes the United States' share of aid to Kenya, rather than only retrieving one series. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-rank-open-place-axis",
+      "modes": [
+        "live"
+      ],
+      "xfail": "upstream-dependency: the plan compiles and is approved, and get_data then refuses entities_unbound, because dev dfo-apis does not mint a spec that leaves observationAbout unbound. dfo-apis PR #1038 mints a spec with an unbound entity. Retire this marker when it is on dev.",
+      "turns": [
+        {
+          "message": "top 10 countries by health spending per person",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 2
+            },
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "open-place-axis-no-stand-in",
+          "property": "The approved plan's dataset requirement names no stand-in entity such as World or Earth and covers every country, and the plan ranks countries. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "open-place-axis-ranks-countries",
+          "property": "The answer ranks several countries, none of them World or Earth, and the final message says how many countries were ranked and which ones it shows. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "live-rank-open-donor-axis",
+      "modes": [
+        "live"
+      ],
+      "xfail": "upstream-dependency: two things block this on dev. Search serves no Slot.summable, so the education-aid family reads as separate StatVars and the rank refuses input_shape_unsupported unless the plan states stat_vars='sum'. Past compile, get_data refuses entities_unbound, because dev dfo-apis does not mint a spec that leaves origin unbound. dfo-apis PR #1038 mints a spec with an unbound entity. Retire this marker when Search serves Slot.summable and PR #1038 is on dev.",
+      "turns": [
+        {
+          "message": "top donors for education aid to Kenya",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 2
+            },
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "open-donor-axis-kenya-is-the-recipient",
+          "property": "Kenya is the recipient in the plan and the answer and is not itself ranked, and the ranked population is donors. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "open-donor-axis-states-the-reduction",
+          "property": "The plan states how each donor's aid across the years is reduced to one figure before donors are ranked, such as a total or a mean. This property always applies and is never inapplicable."
+        }
+      ]
+    }
+  ]
+}

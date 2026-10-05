@@ -1,0 +1,11 @@
+{
+  "shape": "stat_var",
+  "dcid": "dc/topic/MalariaGrantDisbursements",
+  "label": "Malaria grant disbursements",
+  "definition": "Grant disbursements attributed to malaria-focused health programmes.",
+  "roles": ["measure"],
+  "population_type": "FinancialTransaction",
+  "processing_level": null,
+  "facets": null,
+  "sources": null
+}

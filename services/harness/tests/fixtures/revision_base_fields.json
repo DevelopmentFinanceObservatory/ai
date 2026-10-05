@@ -1,0 +1,305 @@
+{
+  "planner.operations.AggregateOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "input",
+    "reduction",
+    "group_by"
+  ],
+  "planner.operations.CompareOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "left",
+    "right"
+  ],
+  "planner.operations.FilterOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "input",
+    "predicates"
+  ],
+  "planner.operations.GrowthOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "input",
+    "window_start",
+    "window_end",
+    "change"
+  ],
+  "planner.operations.JoinOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "left",
+    "right"
+  ],
+  "planner.operations.RankOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "input",
+    "direction",
+    "among",
+    "axis",
+    "reduction",
+    "window_start",
+    "window_end",
+    "per_period"
+  ],
+  "planner.operations.RetrieveOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "spec_id"
+  ],
+  "planner.operations.ShareOfOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "numerator",
+    "denominator",
+    "axis",
+    "denominator_scope"
+  ],
+  "planner.operations.Side": [
+    "input",
+    "entity"
+  ],
+  "planner.operations.Translation": [
+    "operations",
+    "terminal"
+  ],
+  "planner.plan.AggregateRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "input_id",
+    "reduction",
+    "group_by"
+  ],
+  "planner.plan.ComparisonRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "left",
+    "right"
+  ],
+  "planner.plan.Coverage": [
+    "on_missing"
+  ],
+  "planner.plan.DatasetRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "measure",
+    "entities",
+    "period",
+    "frequency",
+    "unit",
+    "source",
+    "source_spec_id",
+    "coverage",
+    "stat_vars"
+  ],
+  "planner.plan.Decision": [
+    "slot",
+    "description",
+    "options",
+    "chosen",
+    "resolved_by",
+    "rationale",
+    "fixes"
+  ],
+  "planner.plan.DecisionFixes": [
+    "period",
+    "unit",
+    "entities",
+    "measure",
+    "source_spec_id",
+    "stat_vars",
+    "reduction",
+    "group_by",
+    "window_start",
+    "window_end",
+    "direction",
+    "predicates",
+    "among",
+    "axis",
+    "denominator_scope",
+    "change",
+    "per_period"
+  ],
+  "planner.plan.Entity": [
+    "name",
+    "role"
+  ],
+  "planner.plan.FilterRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "input_id",
+    "predicates"
+  ],
+  "planner.plan.GrowthRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "input_id",
+    "window_start",
+    "window_end",
+    "change"
+  ],
+  "planner.plan.JoinRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "left_id",
+    "right_id"
+  ],
+  "planner.plan.Plan": [
+    "question",
+    "answer_mode",
+    "decisions",
+    "evidence_requirements",
+    "translation",
+    "workflow",
+    "version",
+    "previous_version",
+    "status",
+    "approved_revision"
+  ],
+  "planner.plan.RankRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "input_id",
+    "direction",
+    "among",
+    "axis",
+    "reduction",
+    "window_start",
+    "window_end",
+    "per_period"
+  ],
+  "planner.plan.RequirementSide": [
+    "input_id",
+    "entity"
+  ],
+  "planner.plan.ShareOfRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "numerator",
+    "denominator",
+    "axis",
+    "denominator_scope"
+  ],
+  "planner.plan.Unit": [
+    "currency",
+    "prices",
+    "base_year"
+  ],
+  "planner.records.EntityIn": [
+    "kind",
+    "names",
+    "role"
+  ],
+  "planner.records.EvidenceIssue": [
+    "code",
+    "severity",
+    "requirement_id",
+    "detail",
+    "found",
+    "required"
+  ],
+  "planner.records.Period": [
+    "start",
+    "end"
+  ],
+  "planner.records.PeriodThreshold": [
+    "kind",
+    "op",
+    "year"
+  ],
+  "planner.records.PlaceLevel": [
+    "kind",
+    "level"
+  ],
+  "planner.records.ValueThreshold": [
+    "kind",
+    "op",
+    "value"
+  ],
+  "planner.workflow.Binding": [
+    "from_step",
+    "output"
+  ],
+  "planner.workflow.EvidenceBinding": [
+    "requirement_id",
+    "step_id",
+    "spec_id"
+  ],
+  "planner.workflow.OpenAxis": [
+    "property",
+    "summable"
+  ],
+  "planner.workflow.OpenEntityAxis": [
+    "column",
+    "member_count"
+  ],
+  "planner.workflow.ResolvedEntity": [
+    "role",
+    "ref",
+    "label"
+  ],
+  "planner.workflow.SelectedSource": [
+    "spec_id",
+    "sentence",
+    "searched_as",
+    "confidence",
+    "has_data",
+    "stat_vars",
+    "stat_var_member_count",
+    "stat_var_truncated",
+    "shape_member_count",
+    "shape_member_digest",
+    "entities",
+    "unit_ref",
+    "unit_label",
+    "provenance_ref",
+    "provenance_label",
+    "coverage_kind",
+    "coverage_window",
+    "identity",
+    "definition",
+    "open_axes",
+    "stat_var_reading",
+    "stat_var_reading_set_by"
+  ],
+  "planner.workflow.ToolId": [
+    "server",
+    "name"
+  ],
+  "planner.workflow.Workflow": [
+    "steps",
+    "sources",
+    "evidence_bindings",
+    "terminal_steps",
+    "warnings"
+  ],
+  "planner.workflow.WorkflowStep": [
+    "id",
+    "operation_id",
+    "tool",
+    "args",
+    "bindings",
+    "implementation_version",
+    "input_schema_hash",
+    "output_schema_hash",
+    "expected_role_keys"
+  ]
+}

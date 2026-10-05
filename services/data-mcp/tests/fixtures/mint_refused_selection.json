@@ -1,0 +1,125 @@
+{
+  "recorded": "dfo-apis at af8c2bde (fix/datasets-probe-unbound-entities), run locally against the dev graph: POST /api/datasets kind spec_id for the Kenya population identity with a StatVar outside its family in resolved_stat_var_dcids. The dev deployment serves this refusal once that commit deploys.",
+  "request": {
+    "kind": "spec_id",
+    "spec_id": "spec_567bf6828e3cc23c7d70e121cc36f2f9",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_567bf6828e3cc23c7d70e121cc36f2f9",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "Person",
+          "measured_property": "count",
+          "stat_type": "measuredValue"
+        },
+        "slots": [
+          {
+            "property": "age",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "armedForcesStatus",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "educationalAttainment",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "employment",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "gender",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "literacyStatus",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "nativity",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "placeOfBirth",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "placeOfResidenceClassification",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "race",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "religion",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "residenceType",
+            "binding": {
+              "state": "unbound"
+            }
+          }
+        ],
+        "entities": {
+          "observationAbout": [
+            "country/KEN"
+          ]
+        },
+        "requested_window": {
+          "kind": "all"
+        }
+      }
+    },
+    "resolved_stat_var_dcids": [
+      "Count_Person",
+      "Count_Household"
+    ]
+  },
+  "response": {
+    "status": 422,
+    "body": {
+      "type": "/codes/member_not_resolvable",
+      "title": "Member Not Resolvable",
+      "status": 422,
+      "detail": "resolved_stat_var_dcids names StatVar(s) the identity does not resolve to: ['Count_Household']",
+      "code": "member_not_resolvable",
+      "issues": [
+        {
+          "pointer": "/input/resolved_stat_var_dcids/1",
+          "member": "Count_Household"
+        }
+      ],
+      "trace_id": "a6d82cffaadb45c183b68a1b0b22b23b",
+      "capability_version": "dset_ea964b77ec3ca365",
+      "retryable": false
+    }
+  }
+}

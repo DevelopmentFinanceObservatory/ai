@@ -1,0 +1,14 @@
+{
+  "window_start": "2017",
+  "window_end": "2020",
+  "entity_by": ["reporter"],
+  "expected_entity_growths": [
+    {
+      "entity_key": [["reporter", "dcid:USA"]],
+      "value_start": 34990000000.0,
+      "value_end": 35575000000.0,
+      "growth_rate": 0.01671906258931123,
+      "realised_coverage_fraction": 1.0
+    }
+  ]
+}

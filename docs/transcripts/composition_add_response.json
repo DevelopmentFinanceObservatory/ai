@@ -1,0 +1,21 @@
+{
+  "composition_id": "cps_80144806e4ac4bbe",
+  "revision": 1,
+  "actor": "user",
+  "blocks": [
+    {
+      "component_id": "cmp_01M3KK9FJWCW8C3EPK0VX8FERA",
+      "revision": 1,
+      "type": "stat_card",
+      "title": "Life Expectancy in Japan",
+      "pinned": false
+    }
+  ],
+  "counts": {
+    "all": 1,
+    "stats": 1,
+    "charts": 0,
+    "tables": 0,
+    "notes": 0
+  }
+}

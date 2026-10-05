@@ -1,0 +1,25 @@
+{
+  "event": "composition.updated",
+  "seq": 5,
+  "manifest": {
+    "composition_id": "cps_01j9zc4frd",
+    "revision": 2,
+    "actor": "model",
+    "blocks": [
+      {
+        "component_id": "cmp_01j9zc3aqw",
+        "revision": 1,
+        "type": "stat_card",
+        "title": "Official aid to Ethiopia, 2021",
+        "pinned": false
+      }
+    ],
+    "counts": {
+      "all": 1,
+      "stats": 1,
+      "charts": 0,
+      "tables": 0,
+      "notes": 0
+    }
+  }
+}

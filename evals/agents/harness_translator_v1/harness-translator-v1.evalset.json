@@ -1,0 +1,720 @@
+{
+  "eval_set_id": "harness-translator-v1",
+  "name": "harness-translator-v1",
+  "description": "Eleven eval cases for the translator agent, covering the judgements the compiler cannot make: which operation carries a requirement out, that a source comes from discovery, when to refer a plan back rather than propose something that happens to compile, and -- from PR 2 -- which of a rank's or a share_of's new fields (among, axis, per_period, denominator_scope, change) a proposal has to repeat from the plan it translates. Each case seeds the session with the DRAFT plan the planner would have left behind, through session_input.state, because the translator's tools read the plan from state -- every dataset requirement states an explicit \"kind\" and every calculation the plan needs is its own typed derived requirement, per the plan schema. Discovery runs against a canned data-mcp stand-in whose search answers are fixed per ask, so a case's outcome turns on the translator rather than on live data. Two metrics score every case: rubric_based_tool_use_quality_v1, which judges behaviour a judge model reads the trace for, and workflow_outcome, a custom metric that asserts the compiled outcome in code -- the operation kind, requirement binding, selected source, and terminal result for a mapping case, or the referral's kind and requirement for a referral case. See evals/README.md for the run commands, test_config.json for the criteria, and outcome_metric.py for what workflow_outcome checks and why.",
+  "eval_cases": [
+    {
+      "eval_id": "maps-an-annual-total-onto-aggregate",
+      "note": "The seeded plan asks for one figure per year, and states that as an explicit aggregate requirement citing the time_grain decision. `translate` discovers the debt-service source, retrieves it once, and compiles an aggregate over it grouped by period entirely as code, in one call; the workflow_outcome metric pins that exact shape. No trajectory expectation: `translate` takes no arguments on a clean run, so there is no model-authored prose for IN_ORDER matching to compare.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much did Kenya spend servicing its external debt each year since 2015?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"time_grain\",\"description\":\"The period each reported figure covers.\",\"options\":[\"annual totals\",\"quarterly totals\"],\"chosen\":\"annual totals\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for a figure per year.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"time_grain\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"time_grain\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.aggregate"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "maps-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "maps-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and an aggregate operation grouped by period carries out its aggregate requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-window-onto-growth",
+      "note": "The seeded plan asks for the total change between two years and states that as an explicit growth requirement citing the change_basis decision, with the window the decision states. The right operation is growth over the retrieved series with that window; the requirement's period is that window, so the compiler accepts it, and workflow_outcome pins the exact shape.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much did Kenya's debt service change between 2015 and 2023?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"change_basis\",\"description\":\"How the change over the window is expressed.\",\"options\":[\"total change from 2015 to 2023\",\"average annual change\"],\"chosen\":\"total change from 2015 to 2023\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for the change across the whole window.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"change_basis\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2023},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"growth\",\"id\":\"debt_service_growth\",\"decision_ids\":[\"change_basis\"],\"input_id\":\"annual_debt_service\",\"window_start\":2015,\"window_end\":2023}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.growth"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "growth-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "growth-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a growth operation over the decision's own window carries out its growth requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "compares-two-entities",
+      "note": "One requirement names both countries and states an explicit comparison requirement citing the comparison decision, with sides narrowed to each entity. So one retrieval serves both sides and the compare operation names each side by the entity's name as the requirement states it. The compiler writes the column and value bindings from what discovery resolved; the model writes only names, and workflow_outcome pins the exact shape.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How does Kenya's annual debt service compare with Ghana's?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"comparison\",\"description\":\"Which two entities are set against each other.\",\"options\":[\"Kenya against Ghana\",\"Kenya against the regional median\"],\"chosen\":\"Kenya against Ghana\",\"resolved_by\":\"user\",\"rationale\":\"The user asked about Ghana.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"comparison\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"comparison\",\"id\":\"kenya_vs_ghana\",\"decision_ids\":[\"comparison\"],\"left\":{\"input_id\":\"annual_debt_service\",\"entity\":\"Kenya\"},\"right\":{\"input_id\":\"annual_debt_service\",\"entity\":\"Ghana\"}}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.compare"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "compares-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "compares-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and one retrieval serving both sides of the comparison requirement carries it out, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-per-head-figure-onto-share_of",
+      "note": "share_of divides one series by another, so a per-head figure is carried out, not referred: the seeded plan states debt-service and population dataset requirements plus a share_of requirement citing the normalisation decision (numerator debt, denominator population). The canned discovery answers population definitively, so nothing stops a full proposal; workflow_outcome pins the exact shape. This case used to be a referral (refers-a-per-head-requirement) before share_of existed as an operation kind.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How does Kenya's debt service compare per head of population?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"normalisation\",\"description\":\"How to express the figure so it is comparable across countries.\",\"options\":[\"per head of population\",\"share of government revenue\"],\"chosen\":\"per head of population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for a per-head figure.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":null}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"share_of\",\"id\":\"debt_service_per_head\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null}}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.share_of"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    },
+                    {
+                      "spec_id": "spec_99999999999999999999999999999999"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "per-head-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "per-head-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers both this plan's dataset requirements definitely, and a share_of operation dividing debt service by population carries out its requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "refers-a-constant-price-requirement",
+      "note": "The requirement asks for constant 2015 prices and no operation restates a series in another year's prices, so the compiler refuses the requirement as unmeetable whatever is proposed. The correct outcome is a referral: either requirement_unmeetable naming the requirement, or no_operation_covers naming the price_basis decision, since the instruction lists a restatement in another year's prices among the things no operation performs. Proposing first and referring on the compiler's issue is acceptable. workflow_outcome pins requirement_unmeetable specifically, since that is the outcome the model-free reachability test in test_eval_outcomes.py confirms the compiler always reports first.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much did Kenya spend servicing its external debt each year since 2015, in constant 2015 dollars?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"price_basis\",\"description\":\"Whether figures are in current or constant prices.\",\"options\":[\"current prices\",\"constant 2015 USD\"],\"chosen\":\"constant 2015 USD\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for real terms.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"price_basis\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"constant\",\"base_year\":2015},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "referred",
+                  "referral": {
+                    "kind": "requirement_unmeetable",
+                    "requirement_id": "annual_debt_service"
+                  }
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "constant-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "constant-no-accepted-proposal",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did every call the agent made to `translate` return an outcome other than `ok`? This property always applies and is never inapplicable. No operation restates a series in another year's prices, so this plan cannot compile as the requirement states it; a call that returns `ok` means the requirement was altered or the constant-price decision ignored."
+              },
+              "description": "The requirement is the planner's to change, with the user; a `translate` call that reports `ok` on this plan means the constant-price ask was quietly dropped."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "refers-when-discovery-finds-several-sources",
+      "note": "The seeded requirement asks about aid disbursements, for which the canned search answers with two candidate sources, and states an aggregate requirement reading it so the plan is otherwise valid. Which source to use is methodological, so the correct outcome is a source_ambiguous referral carrying the candidates; picking one and proposing is the failure.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much aid did Kenya receive each year since 2015?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as aid received.\",\"options\":[\"gross disbursements\",\"commitments\"],\"chosen\":\"gross disbursements\",\"resolved_by\":\"planner_default\",\"rationale\":\"Disbursements are what actually arrived.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_aid\",\"decision_ids\":[\"measure\"],\"measure\":\"aid disbursements received\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"recipient\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_aid\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "referred",
+                  "referral": {
+                    "kind": "source_ambiguous",
+                    "requirement_id": "annual_aid"
+                  }
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "ambiguous-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "ambiguous-answers-the-ranking-with-a-valid-choice",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Once a `translate` call answered `needs_decision` for a `candidate_ranking` judgement on `annual_aid`, did the agent call `translate` again with `requirement_id` `annual_aid`, a `choice` naming one of the candidate `spec_id`s that call's own response listed, and a non-empty `rationale`? This property always applies and is never inapplicable. A run that leaves the judgement unanswered, that never calls `translate` a second time, that answers with a `choice` no candidate response named, or that omits a `rationale`, fails this property."
+              },
+              "description": "Ranking the candidates is the one judgement `translate` still leaves to the model; the source itself still goes to the user, since `translate`'s own `referred` answer carries the ranking forward as a recommendation rather than a pick the translator makes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-named-rank-onto-rank-with-a-narrowing-filter",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"Which of Kenya, Ghana and Nigeria pays the most in debt service?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"rank_scope\",\"description\":\"Whether the ranking compares only the named countries or every debtor the source holds.\",\"options\":[\"the three named countries only\",\"every debtor the source holds\"],\"chosen\":\"the three named countries only\",\"resolved_by\":\"user\",\"rationale\":\"The user named exactly three countries to compare.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"},{\"name\":\"Nigeria\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"filter\",\"id\":\"named_only\",\"decision_ids\":[\"rank_scope\"],\"input_id\":\"annual_debt_service\",\"predicates\":[{\"kind\":\"entity_in\",\"names\":[\"Kenya\",\"Ghana\",\"Nigeria\"],\"role\":\"debtor\"}]},{\"kind\":\"rank\",\"id\":\"ranking\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"input_id\":\"named_only\",\"direction\":\"highest_first\",\"among\":\"named\",\"axis\":\"debtor\",\"reduction\":\"mean\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.filter"
+                    },
+                    {
+                      "tool": "analysis-mcp.rank"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "named-rank-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "named-rank-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a filter narrowing to Kenya, Ghana and Nigeria followed by a rank carries out this plan's requirements, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-population-rank-onto-rank-with-its-decision",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"Where does Kenya rank among all debtor countries in debt service paid?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"rank_scope\",\"description\":\"Whether the ranking compares only Kenya or every debtor the source holds.\",\"options\":[\"Kenya alone\",\"every debtor the source holds\"],\"chosen\":\"every debtor the source holds\",\"resolved_by\":\"user\",\"rationale\":\"The user asked where Kenya ranks among every debtor, not Kenya alone.\",\"fixes\":{\"among\":\"population\"}}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"rank\",\"id\":\"ranking\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"input_id\":\"annual_debt_service\",\"direction\":\"highest_first\",\"among\":\"population\",\"axis\":\"debtor\",\"reduction\":\"mean\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.rank"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "population-rank-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "population-rank-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a rank among all debtor countries carries out its rank requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-an-absolute-window-onto-growth",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much did Kenya's debt service change between 2015 and 2023, in dollars rather than percent?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"change_basis\",\"description\":\"Whether the change is read as a percentage rate or a dollar difference.\",\"options\":[\"a percentage rate\",\"an absolute dollar difference\"],\"chosen\":\"an absolute dollar difference\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for dollars, not percent.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"change_basis\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2023},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"growth\",\"id\":\"debt_service_change\",\"decision_ids\":[\"change_basis\"],\"input_id\":\"annual_debt_service\",\"window_start\":2015,\"window_end\":2023,\"change\":\"absolute\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.growth"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "absolute-growth-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "absolute-growth-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a growth operation stated in absolute dollars carries out its growth requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-keyed-share-onto-share_of",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"What is Kenya's and Ghana's debt service as a share of their own population, each?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"normalisation\",\"description\":\"Whether each country's debt service is shared against its own population or a pooled one.\",\"options\":[\"per head of population overall\",\"each country's own share of its own population\"],\"chosen\":\"each country's own share of its own population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for each country's own figure, not a pooled one.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"normalisation\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"share_of\",\"id\":\"debt_share\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null},\"axis\":\"debtor\",\"denominator_scope\":\"per_axis\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.share_of"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    },
+                    {
+                      "spec_id": "spec_99999999999999999999999999999999"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "keyed-share-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "keyed-share-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers both this plan's dataset requirements definitely, and a share_of operation keyed to each country carries out its requirement, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-kenyas-rank-series-onto-rank-filter-growth",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How has Kenya's debt-service rank changed since 2015?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"rank_scope\",\"description\":\"Whether the ranking compares only Kenya or every debtor the source holds.\",\"options\":[\"Kenya alone\",\"every debtor the source holds\"],\"chosen\":\"every debtor the source holds\",\"resolved_by\":\"user\",\"rationale\":\"The question asks how Kenya's own position among every debtor has moved.\",\"fixes\":{\"among\":\"population\"}},{\"slot\":\"change_basis\",\"description\":\"Whether the rank change is read as a percentage rate or a difference in places.\",\"options\":[\"a percentage rate\",\"an absolute difference in places\"],\"chosen\":\"an absolute difference in places\",\"resolved_by\":\"user\",\"rationale\":\"A rank moves by places, not by a percentage.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"rank\",\"id\":\"ranking\",\"decision_ids\":[\"measure\",\"rank_scope\"],\"input_id\":\"annual_debt_service\",\"direction\":\"highest_first\",\"among\":\"population\",\"axis\":\"debtor\",\"per_period\":true,\"window_start\":2015,\"window_end\":2024},{\"kind\":\"filter\",\"id\":\"kenya_only\",\"decision_ids\":[\"rank_scope\"],\"input_id\":\"ranking\",\"predicates\":[{\"kind\":\"entity_in\",\"names\":[\"Kenya\"],\"role\":\"debtor\"}]},{\"kind\":\"growth\",\"id\":\"rank_change\",\"decision_ids\":[\"change_basis\"],\"input_id\":\"kenya_only\",\"window_start\":2015,\"window_end\":2024,\"change\":\"absolute\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.rank"
+                    },
+                    {
+                      "tool": "analysis-mcp.filter"
+                    },
+                    {
+                      "tool": "analysis-mcp.growth"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "rank-series-calls-translate",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call `translate`? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing in the agent's prose are not invocations. If `translate` does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "rank-series-compiles-without-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the agent's calls to `translate`, did at least one return `outcome` `ok`, and did none return `outcome` `referred`? This property always applies and is never inapplicable. Discovery answers this plan's one dataset requirement definitely, and a rank followed by a filter to Kenya and a growth over that series carries out this plan's requirements, so `translate` compiles this plan without needing the model's judgement. A run that never reaches `ok`, or that reports a referral, fails this property."
+              },
+              "description": "A translator that discovers and then gives up, or that reports a referral this plan does not call for, has left the plan a draft."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

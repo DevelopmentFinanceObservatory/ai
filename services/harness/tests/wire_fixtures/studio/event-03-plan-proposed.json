@@ -1,0 +1,86 @@
+{
+  "event": "plan.proposed",
+  "seq": 1,
+  "interrupt_id": "approve",
+  "plan_version_id": "plan_01j9ze2k7c",
+  "version": 1,
+  "title": "Research Plan",
+  "steps": [
+    {
+      "id": "s1",
+      "label": "Identify health sector codes in OECD CRS",
+      "description": "Resolve the health sector grouping to CRS purpose codes.",
+      "args": {
+        "sector": "health"
+      }
+    },
+    {
+      "id": "s2",
+      "label": "Fetch Ethiopia disbursements, 2016–2024",
+      "description": "Pull disbursements for the matched codes.",
+      "args": {
+        "country": "ETH",
+        "start_year": 2016,
+        "end_year": 2024,
+        "price_basis": "constant",
+        "base_year": 2023
+      }
+    },
+    {
+      "id": "s3",
+      "label": "Compare pre- and post-2021 levels",
+      "description": "Compute the period change on observed points only.",
+      "args": {
+        "split_year": 2021
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "question": "Disbursements or commitments?",
+      "chosen": "Disbursements",
+      "alternatives": [
+        "Commitments",
+        "Both"
+      ],
+      "reason": "The question asks what actually fell, which is cash out the door.",
+      "resolved_by": "default"
+    },
+    {
+      "id": "d2",
+      "question": "Current or constant prices?",
+      "chosen": "Constant 2023 USD",
+      "alternatives": [
+        "Current USD"
+      ],
+      "reason": "A multi-year comparison across 2016–2024 needs inflation held still.",
+      "resolved_by": "default"
+    }
+  ],
+  "actions": [
+    "approve",
+    "amend",
+    "reject"
+  ],
+  "requirements": [
+    {
+      "id": "req1",
+      "kind": "dataset",
+      "sentence": "Health sector disbursements to Ethiopia, 2016–2024, constant 2023 USD.",
+      "decision_ids": [
+        "d1",
+        "d2"
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "op1",
+      "kind": "period_change",
+      "requirement_id": "req1",
+      "sentence": "Compare the average level before and after 2021."
+    }
+  ],
+  "revision": "rev_01j9ze2k7c"
+}

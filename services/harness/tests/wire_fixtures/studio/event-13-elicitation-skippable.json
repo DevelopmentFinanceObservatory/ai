@@ -1,0 +1,23 @@
+{
+  "event": "elicitation.request",
+  "seq": 4,
+  "interrupt_id": "elc_2f6f2f9d31d84b7c",
+  "question": "Which reading of \"health aid\" did you mean?",
+  "input": "single_select",
+  "options": [
+    {
+      "id": "spec_0d8d471f00000000",
+      "label": "Health ODA disbursements (OECD CRS)"
+    },
+    {
+      "id": "spec_1e9e582f11111111",
+      "label": "Government health expenditure (WDI)"
+    }
+  ],
+  "allow_free_text": true,
+  "skippable": true,
+  "progress": {
+    "completed": 1,
+    "total": 2
+  }
+}

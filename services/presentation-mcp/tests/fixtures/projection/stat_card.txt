@@ -1,0 +1,8 @@
+Stat card of Malaria grant disbursements to Ethiopia, 2024 (`cmp_01j9zc3tk2m4p7q9r1sw`, revision 1).
+Title, written by the model: Malaria grants to Ethiopia
+
+Value: **441.9** USD millions, constant 2023 prices, 2024.
+Change: +1.89% (percent change, 2023 to 2024).
+
+Data through 2024; last refreshed 2026-06-12; next update expected 2026-10.
+Source: OECD DAC via ONE DFO, retrieved 12 June 2026

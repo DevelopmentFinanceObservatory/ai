@@ -1,0 +1,276 @@
+{
+  "cases": [
+    {
+      "id": "candidates_1",
+      "status": "candidates",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 225,
+      "envelope_chars": 795
+    },
+    {
+      "id": "candidates_12",
+      "status": "candidates",
+      "spec_count": 12,
+      "rendered_spec_count": 6,
+      "digest_chars": 1028,
+      "envelope_chars": 5072
+    },
+    {
+      "id": "candidates_2",
+      "status": "candidates",
+      "spec_count": 2,
+      "rendered_spec_count": 2,
+      "digest_chars": 385,
+      "envelope_chars": 1222
+    },
+    {
+      "id": "candidates_24",
+      "status": "candidates",
+      "spec_count": 24,
+      "rendered_spec_count": 6,
+      "digest_chars": 1028,
+      "envelope_chars": 9700
+    },
+    {
+      "id": "candidates_3",
+      "status": "candidates",
+      "spec_count": 3,
+      "rendered_spec_count": 3,
+      "digest_chars": 520,
+      "envelope_chars": 1560
+    },
+    {
+      "id": "candidates_4",
+      "status": "candidates",
+      "spec_count": 4,
+      "rendered_spec_count": 4,
+      "digest_chars": 683,
+      "envelope_chars": 1990
+    },
+    {
+      "id": "candidates_5",
+      "status": "candidates",
+      "spec_count": 5,
+      "rendered_spec_count": 5,
+      "digest_chars": 822,
+      "envelope_chars": 2332
+    },
+    {
+      "id": "candidates_6",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 984,
+      "envelope_chars": 2761
+    },
+    {
+      "id": "candidates_6_skills_1",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 1199,
+      "envelope_chars": 3135
+    },
+    {
+      "id": "candidates_6_skills_12",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 1883,
+      "envelope_chars": 5974
+    },
+    {
+      "id": "candidates_6_skills_5",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 1864,
+      "envelope_chars": 4259
+    },
+    {
+      "id": "candidates_6_skills_6",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 1882,
+      "envelope_chars": 4476
+    },
+    {
+      "id": "candidates_6_truncated",
+      "status": "candidates",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 1028,
+      "envelope_chars": 2760
+    },
+    {
+      "id": "definite_1",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 663,
+      "envelope_chars": 2442
+    },
+    {
+      "id": "definite_1_fat",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 286,
+      "envelope_chars": 12727
+    },
+    {
+      "id": "definite_1_lean",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 286,
+      "envelope_chars": 1067
+    },
+    {
+      "id": "definite_1_long_sentence",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 729,
+      "envelope_chars": 2574
+    },
+    {
+      "id": "definite_2",
+      "status": "definite",
+      "spec_count": 2,
+      "rendered_spec_count": 2,
+      "digest_chars": 1290,
+      "envelope_chars": 4189
+    },
+    {
+      "id": "definite_3",
+      "status": "definite",
+      "spec_count": 3,
+      "rendered_spec_count": 3,
+      "digest_chars": 1908,
+      "envelope_chars": 6052
+    },
+    {
+      "id": "definite_6",
+      "status": "definite",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 3652,
+      "envelope_chars": 11450
+    },
+    {
+      "id": "definite_6_warned",
+      "status": "definite",
+      "spec_count": 6,
+      "rendered_spec_count": 6,
+      "digest_chars": 4017,
+      "envelope_chars": 12479
+    },
+    {
+      "id": "definite_many_axes",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 781,
+      "envelope_chars": 4230
+    },
+    {
+      "id": "definite_stat_vars_50",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 446,
+      "envelope_chars": 3845
+    },
+    {
+      "id": "no_data_bare",
+      "status": "no_data",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 61,
+      "envelope_chars": 413
+    },
+    {
+      "id": "no_data_bare_fat",
+      "status": "no_data",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 61,
+      "envelope_chars": 14228
+    },
+    {
+      "id": "no_data_elected_stat_vars",
+      "status": "no_data",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 96,
+      "envelope_chars": 507
+    },
+    {
+      "id": "no_data_flagged",
+      "status": "no_data",
+      "spec_count": 2,
+      "rendered_spec_count": 2,
+      "digest_chars": 407,
+      "envelope_chars": 1619
+    },
+    {
+      "id": "no_data_nearest_5",
+      "status": "no_data",
+      "spec_count": 5,
+      "rendered_spec_count": 2,
+      "digest_chars": 321,
+      "envelope_chars": 2454
+    },
+    {
+      "id": "no_data_unresolved",
+      "status": "no_data",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 60,
+      "envelope_chars": 384
+    },
+    {
+      "id": "unsupported_fat_definition",
+      "status": "unsupported",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 286,
+      "envelope_chars": 11635
+    },
+    {
+      "id": "unsupported_long_detail",
+      "status": "unsupported",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 286,
+      "envelope_chars": 797
+    },
+    {
+      "id": "unsupported_short",
+      "status": "unsupported",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 72,
+      "envelope_chars": 544
+    },
+    {
+      "id": "unsupported_unit_axis",
+      "status": "unsupported",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 173,
+      "envelope_chars": 598
+    },
+    {
+      "id": "unsupported_warnings_filtered",
+      "status": "unsupported",
+      "spec_count": 0,
+      "rendered_spec_count": 0,
+      "digest_chars": 330,
+      "envelope_chars": 1047
+    }
+  ]
+}

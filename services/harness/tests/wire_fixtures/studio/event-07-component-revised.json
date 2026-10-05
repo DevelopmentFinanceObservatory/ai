@@ -1,0 +1,32 @@
+{
+  "event": "component.revised",
+  "seq": 6,
+  "component_id": "cmp_01j9zc3aqw",
+  "revision": 2,
+  "changed": [
+    "scale"
+  ],
+  "fact_summary": {
+    "component_id": "cmp_01j9zc3aqw",
+    "revision": 2,
+    "series": [
+      {
+        "id": "eth_official_aid",
+        "label": "Ethiopia",
+        "point_count": 9
+      }
+    ],
+    "indicators": [
+      {
+        "id": "BX.GRT.EXTA.CD.DT",
+        "name": "Grants, Excluding Technical Cooperation (current US$)",
+        "description": "Grants are legally binding commitments with no repayment requirement."
+      }
+    ],
+    "attribution": {
+      "label": "World Bank IDS · 1 indicator",
+      "source_count": 1,
+      "indicator_count": 1
+    }
+  }
+}

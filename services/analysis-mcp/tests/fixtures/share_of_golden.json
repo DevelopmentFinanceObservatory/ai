@@ -1,0 +1,30 @@
+{
+  "numerator_entity": {
+    "reporter": "dcid:USA"
+  },
+  "denominator_entity": {
+    "reporter": "dcid:USA"
+  },
+  "expected_numerator_periods": [
+    "2022",
+    "2023"
+  ],
+  "expected_denominator_periods": [
+    "2022",
+    "2023"
+  ],
+  "expected_period_shares": [
+    {
+      "time_period": "2022",
+      "numerator_value": 55303000000.0,
+      "denominator_value": 25130000000000.0,
+      "share": 0.002200676482292081
+    },
+    {
+      "time_period": "2023",
+      "numerator_value": 63575000000.0,
+      "denominator_value": 26486000000000.0,
+      "share": 0.002400324699841426
+    }
+  ]
+}

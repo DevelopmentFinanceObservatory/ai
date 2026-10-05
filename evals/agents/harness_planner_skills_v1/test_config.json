@@ -1,0 +1,18 @@
+{
+  "criteria": {
+    "skills_loaded_before_plan": 1.0,
+    "workflow_outcome": 1.0
+  },
+  "custom_metrics": {
+    "skills_loaded_before_plan": {
+      "code_config": {
+        "name": "harness_planner_skills_v1.skill_metric.skills_loaded_before_plan"
+      }
+    },
+    "workflow_outcome": {
+      "code_config": {
+        "name": "harness_translator_v1.outcome_metric.workflow_outcome"
+      }
+    }
+  }
+}
