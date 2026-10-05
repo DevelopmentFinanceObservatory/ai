@@ -20,6 +20,7 @@ from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ConfigDict, Field
 
 from data_mcp.client_holder import get_client
+from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import IdentityMismatch, StoredDefinition
 from data_mcp.definition_writes import put_definitions, stored_definition
 from data_mcp.digest import render_answer, render_digest
@@ -44,6 +45,13 @@ _MAX_RAW_QUERY_CHARS = 2000
 # of up to six candidates at about 1.2 KB an item, so 36 such blocks would
 # pass it.
 MAX_STAT_VAR_ITEMS = 200
+
+# The wall-clock budget for one call to the Search API's resolve route, retries
+# included. It sits above `Settings.upstream_read_timeout_s` (50 s, itself above
+# dfo-apis' 45 s search deadline) and below the harness's 60 s `search` call
+# timeout (`compiler.capabilities`), so a slow search ends here with dfo-apis' own
+# refusal or a typed transport refusal before the harness gives up on it.
+SEARCH_CALL_BUDGET_S = 55.0
 
 # The time phrases the parsed door binds. A phrase outside these draws a
 # `time_text_not_parsed` warning, so the `time` description lists them.
@@ -305,6 +313,11 @@ def _unusable_envelope(exc: Exception) -> ToolResult:
     )
 
 
+def _call_deadline() -> CallDeadline:
+    """The deadline for one resolve call: a retry starts only while time remains on it."""
+    return CallDeadline.after(SEARCH_CALL_BUDGET_S)
+
+
 async def resolve_and_register(wire: Mapping[str, Any]) -> dict[str, Any] | ToolResult:
     """POST `wire` to the Search API's resolve route and register every definition its envelope carries.
 
@@ -316,7 +329,11 @@ async def resolve_and_register(wire: Mapping[str, Any]) -> dict[str, Any] | Tool
     client = get_client()
     try:
         response = await client.request(
-            "POST", "/api/search/resolve", route="/api/search/resolve", json=wire
+            "POST",
+            "/api/search/resolve",
+            route="/api/search/resolve",
+            json=wire,
+            deadline=_call_deadline(),
         )
     except UpstreamError as exc:
         return to_tool_result(from_upstream_error(exc))

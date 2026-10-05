@@ -1,4 +1,4 @@
-"""`run_growth`: the gap-year policy, the growth-rate formula, determinism
+"""`run_growth`: the endpoint policy, the growth-rate formula, determinism
 (order perturbation), and every refusal condition.
 """
 
@@ -16,7 +16,8 @@ from analysis_mcp.engine.common import (
 )
 from analysis_mcp.engine.growth import (
     GrowthAmbiguousEntityError,
-    GrowthGapYearError,
+    GrowthChange,
+    GrowthEndpointsMissingError,
     GrowthNonFiniteResultError,
     run_growth,
 )
@@ -73,21 +74,142 @@ def test_golden_worked_growth_matches_the_committed_fixture() -> None:
     assert actual == golden["expected_entity_growths"]
 
 
-# Declared policy: refuse across a gap year ---------------------------------
+# Declared policy: read the two endpoint years ---------------------------------
 
 
-def test_policy_gap_year_inside_the_window_refuses() -> None:
-    """The declared policy: a gap year inside the window is a break,
-    refused -- not skipped, not silently computed across. This test
-    fails if that policy ever changes to "skip" or "compute across"."""
+def test_policy_gap_year_inside_the_window_computes_and_warns() -> None:
+    """A gap year between the endpoints leaves the growth defined. It lowers
+    the entity's coverage and adds a warning, and never refuses."""
     frame = time_series_with_gap_year_frame()
 
-    with pytest.raises(GrowthGapYearError) as exc_info:
-        run_growth(frame, window_start="2017", window_end="2022", entity_by=("reporter",))
+    result = run_growth(frame, window_start="2017", window_end="2022", entity_by=("reporter",))
 
-    assert exc_info.value.gap_years == ("2021",)
-    assert exc_info.value.longest_gap_free_window == ("2017", "2020")
-    assert exc_info.value.entity_key == {"reporter": "dcid:USA"}
+    (growth,) = result.entity_growths
+    assert (growth.value_start, growth.value_end) == (34_990_000_000.0, 55_303_000_000.0)
+    assert growth.realised_coverage_fraction == pytest.approx(5 / 6)
+    assert result.observed_periods == ("2017", "2018", "2019", "2020", "2022")
+    assert any(warning.startswith("1 of 1 entit(y/ies)") for warning in result.warnings)
+    assert all(record.reason != "endpoint_missing" for record in result.exclusions.records)
+
+
+_DONORS = tuple(f"dcid:Donor{index:02d}" for index in range(77))
+_YEARS = tuple(str(year) for year in range(2016, 2024))
+
+
+def _donor_frame(missing: dict[str, set[str]]) -> Frame:
+    """77 donors over 2016-2023, each lacking the years `missing` names."""
+    return _frame(
+        [
+            _row(reporter=donor, year=year, value=float(index + 1) * (1 + int(year) - 2016))
+            for index, donor in enumerate(_DONORS)
+            for year in _YEARS
+            if year not in missing.get(donor, set())
+        ]
+    )
+
+
+def test_many_entities_compute_where_both_endpoints_exist_and_exclude_the_rest() -> None:
+    """Ten donors lack interior years, four lack 2016 and three lack 2023.
+    The 70 donors holding both endpoints are computed, and the seven others
+    are listed as `endpoint_missing`."""
+    missing = {donor: {"2018", "2020"} for donor in _DONORS[:10]}
+    missing |= {donor: {"2016"} for donor in _DONORS[70:74]}
+    missing |= {donor: {"2023", "2019"} for donor in _DONORS[74:]}
+
+    result = run_growth(
+        _donor_frame(missing), window_start="2016", window_end="2023", entity_by=("reporter",)
+    )
+
+    computed = {dict(growth.entity_key)["reporter"] for growth in result.entity_growths}
+    assert computed == set(_DONORS[:70])
+    assert result.frame.num_rows == 70
+    reporter = result.frame.columns.index("reporter")
+    assert {row[reporter] for row in result.frame.rows} == set(_DONORS[:70])
+    (record,) = result.exclusions.records
+    assert record.reason == "endpoint_missing"
+    assert record.entities == {"reporter": _DONORS[70:]}
+    assert record.row_count == 4 * 7 + 3 * 6
+    assert any(warning.startswith("10 of 70 entit(y/ies)") for warning in result.warnings)
+    gapped = {
+        dict(growth.entity_key)["reporter"]: growth.realised_coverage_fraction
+        for growth in result.entity_growths
+        if growth.realised_coverage_fraction < 1.0
+    }
+    assert gapped == dict.fromkeys(_DONORS[:10], 6 / 8)
+
+
+def _holding(years_by_donor: dict[str, set[str]]) -> dict[str, set[str]]:
+    """The `missing` map for donors holding only the years given."""
+    return {donor: set(_YEARS) - years for donor, years in years_by_donor.items()}
+
+
+_EARLY = {"2017", "2018", "2019"}
+_LATE = {"2020", "2021", "2022"}
+
+
+@pytest.mark.parametrize(
+    ("window_start", "missing", "expected"),
+    [
+        pytest.param(
+            "2016",
+            {
+                **{donor: {"2016"} for donor in _DONORS[:40]},
+                **{donor: {"2023", "2017"} for donor in _DONORS[40:]},
+            },
+            (77, 40, 37, ("2018", "2022"), 77),
+            id="years-every-entity-holds",
+        ),
+        pytest.param(
+            "2017",
+            {
+                **{donor: {"2017"} for donor in _DONORS[:76]},
+                _DONORS[76]: set(_YEARS[1:]),
+            },
+            (77, 77, 1, ("2018", "2023"), 76),
+            id="an-entity-with-no-row-in-the-window-is-left-out-of-the-suggestion",
+        ),
+        pytest.param(
+            "2016",
+            _holding(
+                {
+                    **dict.fromkeys(_DONORS[:40], _EARLY),
+                    **dict.fromkeys(_DONORS[40:76], _LATE),
+                    _DONORS[76]: {"2019", *_LATE},
+                }
+            ),
+            (77, 77, 77, ("2019", "2022"), 1),
+            id="no-shared-years-falls-back-to-the-widest-span",
+        ),
+        pytest.param(
+            "2016",
+            _holding({**dict.fromkeys(_DONORS[:40], _EARLY), **dict.fromkeys(_DONORS[40:], _LATE)}),
+            (77, 77, 77, ("2017", "2019"), 40),
+            id="equally-wide-spans-take-the-first-entity",
+        ),
+    ],
+)
+def test_no_entity_with_both_endpoints_refuses_counting_every_entity(
+    window_start: str, missing: dict[str, set[str]], expected: tuple[object, ...]
+) -> None:
+    """The refusal counts every entity, including one with no row inside
+    the window, and suggests a window at least one entity holds both ends
+    of."""
+    with pytest.raises(GrowthEndpointsMissingError) as exc_info:
+        run_growth(
+            _donor_frame(missing),
+            window_start=window_start,
+            window_end="2023",
+            entity_by=("reporter",),
+        )
+
+    error = exc_info.value
+    assert (
+        error.entity_count,
+        error.missing_start,
+        error.missing_end,
+        error.suggested_window,
+        error.suggested_window_entities,
+    ) == expected
 
 
 def test_policy_growth_rate_is_total_percent_change_not_cagr() -> None:
@@ -221,10 +343,9 @@ def test_empty_entity_by_treats_the_whole_frame_as_one_entity() -> None:
 
 def test_rows_outside_the_window_are_reported_as_an_outside_window_exclusion() -> None:
     """`time_series_with_gap_year_frame`'s own seven years (2017-2020,
-    2022-2024, 2021 missing): a window of 2022-2024 is gap-free on its own,
-    so the call succeeds, and the four years outside it (2017-2020) are
-    dropped before the gap-year check ever runs -- reported here, not just
-    silently narrowed away."""
+    2022-2024, 2021 missing): a window of 2022-2024 drops the four years
+    outside it (2017-2020), reported here, not just silently narrowed
+    away."""
     frame = time_series_with_gap_year_frame()
     result = run_growth(frame, window_start="2022", window_end="2024", entity_by=("reporter",))
     assert len(result.entity_growths) == 1
@@ -258,25 +379,60 @@ def test_ambiguous_entity_refuses_when_entity_by_does_not_disambiguate() -> None
         run_growth(frame, window_start="2020", window_end="2020", entity_by=())
 
 
-def test_zero_base_refuses_non_finite() -> None:
-    frame = _frame([_row(year="2020", value=0.0), _row(year="2021", value=100.0)])
+@pytest.mark.parametrize("start", [0.0, -100.0], ids=["zero-base", "sign-crossing-base"])
+def test_an_undefined_base_on_the_only_entity_refuses_non_finite(start: float) -> None:
+    frame = _frame([_row(year="2020", value=start), _row(year="2021", value=100.0)])
     with pytest.raises(GrowthNonFiniteResultError) as exc_info:
         run_growth(frame, window_start="2020", window_end="2021", entity_by=("reporter",))
-    assert exc_info.value.reason == "zero or sign-crossing base"
+    error = exc_info.value
+    assert (error.entity_count, error.zero_or_sign_crossing_base, error.non_finite) == (1, 1, 0)
 
 
-def test_sign_crossing_base_refuses_non_finite() -> None:
-    frame = _frame([_row(year="2020", value=-100.0), _row(year="2021", value=100.0)])
-    with pytest.raises(GrowthNonFiniteResultError) as exc_info:
-        run_growth(frame, window_start="2020", window_end="2021", entity_by=("reporter",))
-    assert exc_info.value.reason == "zero or sign-crossing base"
+_HUGE = 1.7e308
 
 
-def test_no_rows_at_all_in_window_refuses_gap_year() -> None:
+@pytest.mark.parametrize(
+    ("change", "bad_values", "reason"),
+    [
+        pytest.param("relative", (0.0, 5.0), "zero_or_sign_crossing_base", id="zero-base"),
+        pytest.param("relative", (-1.0, 5.0), "zero_or_sign_crossing_base", id="sign-crossing"),
+        pytest.param("absolute", (-_HUGE, _HUGE), "non_finite", id="overflow"),
+    ],
+)
+def test_an_entity_with_no_finite_growth_is_excluded_and_the_rest_compute(
+    change: GrowthChange, bad_values: tuple[float, float], reason: str
+) -> None:
+    frame = _frame(
+        [
+            _row(reporter="dcid:GBR", year="2020", value=bad_values[0]),
+            _row(reporter="dcid:GBR", year="2021", value=bad_values[1]),
+            _row(reporter="dcid:USA", year="2020", value=10.0),
+            _row(reporter="dcid:USA", year="2021", value=15.0),
+        ]
+    )
+    result = run_growth(
+        frame,
+        window_start="2020",
+        window_end="2021",
+        entity_by=("reporter",),
+        change=change,
+    )
+    assert [dict(growth.entity_key) for growth in result.entity_growths] == [
+        {"reporter": "dcid:USA"}
+    ]
+    assert result.frame.num_rows == 1
+    assert [
+        (record.reason, record.row_count, record.entities) for record in result.exclusions.records
+    ] == [(reason, 2, {"reporter": ("dcid:GBR",)})]
+
+
+def test_no_rows_at_all_in_window_refuses_endpoints_missing() -> None:
     frame = time_series_with_gap_year_frame()
-    with pytest.raises(GrowthGapYearError) as exc_info:
+    with pytest.raises(GrowthEndpointsMissingError) as exc_info:
         run_growth(frame, window_start="2099", window_end="2100", entity_by=("reporter",))
-    assert exc_info.value.gap_years == ("2099", "2100")
+    error = exc_info.value
+    assert (error.entity_count, error.missing_start, error.missing_end) == (1, 1, 1)
+    assert (error.suggested_window, error.suggested_window_entities) == ((), 0)
 
 
 def test_multiple_stat_vars_refuse_stat_var_unresolved() -> None:
@@ -385,8 +541,7 @@ def test_absolute_overflow_still_refuses_non_finite() -> None:
     between two extreme-magnitude opposite-signed floats can itself
     overflow to a non-finite value, even though the zero/sign-crossing
     refusal does not apply to absolute change."""
-    huge = 1.7e308
-    frame = _frame([_row(year="2020", value=-huge), _row(year="2021", value=huge)])
+    frame = _frame([_row(year="2020", value=-_HUGE), _row(year="2021", value=_HUGE)])
     with pytest.raises(GrowthNonFiniteResultError) as exc_info:
         run_growth(
             frame,
@@ -395,7 +550,8 @@ def test_absolute_overflow_still_refuses_non_finite() -> None:
             entity_by=("reporter",),
             change="absolute",
         )
-    assert exc_info.value.reason == "overflow"
+    error = exc_info.value
+    assert (error.entity_count, error.zero_or_sign_crossing_base, error.non_finite) == (1, 0, 1)
 
 
 def test_pinned_unit_narrows_before_resolving_facets() -> None:

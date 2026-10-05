@@ -1,0 +1,288 @@
+{
+  "question": "Put Guatemala's GDP and population in the same table and divide GDP by population for Guatemala from 1960 to 2024",
+  "asks": [
+    "Table combining Guatemala's GDP and population from 1960 to 2024",
+    "Guatemala's GDP divided by population from 1960 to 2024"
+  ],
+  "readings": [
+    {
+      "text": "gross domestic product",
+      "status": "definite",
+      "spec_id": "spec_d4ec64fe9c2ca1f51bfe85ba72e4f329",
+      "sentence": "Guatemala's GDP, 1960 to 2024. Current US dollars \u00b7 World Development Indicators.",
+      "window": {
+        "start": 1960,
+        "end": 2024,
+        "source": "coverage"
+      },
+      "coverage_kind": "exact",
+      "requested_window_kind": "all",
+      "roles": [
+        "observationAbout"
+      ],
+      "warnings": [
+        {
+          "code": "time_window_defaulted"
+        }
+      ]
+    },
+    {
+      "text": "population",
+      "status": "definite",
+      "spec_id": "spec_5bac1eefdfa3ac465dc72bc8a5fc07db",
+      "sentence": "Guatemala's total population, 1960 to 2024. World Development Indicators.",
+      "window": {
+        "start": 1960,
+        "end": 2024,
+        "source": "coverage"
+      },
+      "coverage_kind": "exact",
+      "requested_window_kind": "all",
+      "roles": [
+        "observationAbout"
+      ],
+      "warnings": [
+        {
+          "code": "time_window_defaulted"
+        }
+      ]
+    },
+    {
+      "text": "gross domestic product per capita",
+      "status": "definite",
+      "spec_id": "spec_6f1fb5c052357f7b02483e059cb05bd9",
+      "sentence": "Guatemala's GDP per capita, 1960 to 2024. Current US dollars \u00b7 World Development Indicators.",
+      "window": {
+        "start": 1960,
+        "end": 2024,
+        "source": "coverage"
+      },
+      "coverage_kind": "exact",
+      "requested_window_kind": "all",
+      "roles": [
+        "observationAbout"
+      ],
+      "warnings": [
+        {
+          "code": "query_qualifier_dropped"
+        },
+        {
+          "code": "time_window_defaulted"
+        }
+      ]
+    }
+  ],
+  "canvas_digest": {
+    "blocks": [
+      {
+        "component_id": "cmp_01M46ACS1TDRZ5C72ZG0X4K0RW",
+        "type": "table",
+        "title": "Guatemala's population, 1960\u20132024",
+        "entities": [
+          "Guatemala"
+        ],
+        "revision": 1,
+        "variable": [
+          "Total population"
+        ],
+        "fact_summary": {
+          "indicators": [
+            {
+              "id": "dcid:Count_Person",
+              "name": "Total population",
+              "description": "mp=count,pt=Person"
+            }
+          ],
+          "attribution": {
+            "label": "World Development Indicators \u00b7 1 indicator(s)",
+            "source_count": 1,
+            "indicator_count": 1
+          },
+          "shared_coordinates": {
+            "stat_var": "dcid:Count_Person",
+            "provenance": "dc/base/WorldDevelopmentIndicators",
+            "observationAbout": "country/GTM"
+          },
+          "series": [
+            {
+              "id": "s_d1e55da752516c9d",
+              "last": 18400000.0,
+              "first": 4060000.0,
+              "label": "Guatemala",
+              "point_count": 65
+            }
+          ]
+        }
+      },
+      {
+        "component_id": "cmp_01M46ACSAPEYAG5KDPMVFZ9M1K",
+        "time": "1960-2024",
+        "type": "line_chart",
+        "title": "Guatemala's population, 1960\u20132024",
+        "entities": [
+          "Guatemala"
+        ],
+        "revision": 1,
+        "variable": [
+          "Total population"
+        ],
+        "fact_summary": {
+          "window": {
+            "end": "2024",
+            "start": "1960"
+          },
+          "indicators": [
+            {
+              "id": "dcid:Count_Person",
+              "name": "Total population",
+              "description": "mp=count,pt=Person"
+            }
+          ],
+          "attribution": {
+            "label": "World Development Indicators \u00b7 1 indicator(s)",
+            "source_count": 1,
+            "indicator_count": 1
+          },
+          "shared_coordinates": {
+            "stat_var": "dcid:Count_Person",
+            "provenance": "dc/base/WorldDevelopmentIndicators",
+            "observationAbout": "country/GTM"
+          },
+          "series": [
+            {
+              "id": "s_d1e55da752516c9d",
+              "last": 18400000.0,
+              "first": 4060000.0,
+              "label": "Guatemala",
+              "point_count": 65
+            }
+          ]
+        }
+      },
+      {
+        "component_id": "cmp_01M46ACSHS4H0PRQTA3S1QGVBQ",
+        "type": "table",
+        "title": "Guatemala's GDP, 1960\u20132024",
+        "entities": [
+          "Guatemala"
+        ],
+        "revision": 1,
+        "variable": [
+          "Nominal gross domestic product"
+        ],
+        "fact_summary": {
+          "indicators": [
+            {
+              "id": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+              "name": "Nominal gross domestic product",
+              "description": "mq=Nominal,mp=amount,pt=EconomicActivity,activitySource=GrossDomesticProduction"
+            }
+          ],
+          "attribution": {
+            "label": "World Development Indicators \u00b7 1 indicator(s)",
+            "source_count": 1,
+            "indicator_count": 1
+          },
+          "shared_coordinates": {
+            "unit": "USDollar",
+            "stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+            "provenance": "dc/base/WorldDevelopmentIndicators",
+            "observationAbout": "country/GTM"
+          },
+          "series": [
+            {
+              "id": "s_70d7431c2ee4e924",
+              "last": 113000000000.0,
+              "first": 1040000000.0,
+              "label": "Guatemala",
+              "point_count": 65
+            }
+          ]
+        }
+      },
+      {
+        "component_id": "cmp_01M46ACSRMHCPF9KT96XZM32BV",
+        "time": "1960-2024",
+        "type": "line_chart",
+        "title": "Guatemala's GDP, 1960\u20132024",
+        "entities": [
+          "Guatemala"
+        ],
+        "revision": 1,
+        "variable": [
+          "Nominal gross domestic product"
+        ],
+        "fact_summary": {
+          "window": {
+            "end": "2024",
+            "start": "1960"
+          },
+          "indicators": [
+            {
+              "id": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+              "name": "Nominal gross domestic product",
+              "description": "mq=Nominal,mp=amount,pt=EconomicActivity,activitySource=GrossDomesticProduction"
+            }
+          ],
+          "attribution": {
+            "label": "World Development Indicators \u00b7 1 indicator(s)",
+            "source_count": 1,
+            "indicator_count": 1
+          },
+          "shared_coordinates": {
+            "unit": "USDollar",
+            "stat_var": "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",
+            "provenance": "dc/base/WorldDevelopmentIndicators",
+            "observationAbout": "country/GTM"
+          },
+          "series": [
+            {
+              "id": "s_70d7431c2ee4e924",
+              "last": 113000000000.0,
+              "first": 1040000000.0,
+              "label": "Guatemala",
+              "point_count": 65
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "conversation_digest": {
+    "turns": [
+      {
+        "user": "make me a table comparing guatemala's population to its gdp",
+        "assistant": "Data for Guatemala's total population and GDP are reported by the World Development Indicators covering 1960 to 2024:\n\n* **Total population**: Rose from 4.06 million in 1960 to 18.4 million in 2024.\n* **GDP (current US dollars)**: Rose from 1.04 billion US dollars in 1960 to 113 billion US dollars in 2024.\n\nTables and line charts displaying both series over the full 1960\u20132024 period have been added to the canvas.",
+        "cards": [
+          {
+            "type": "table",
+            "title": "Guatemala's population, 1960\u20132024",
+            "action": "created",
+            "component_id": "cmp_01M46ACS1TDRZ5C72ZG0X4K0RW"
+          },
+          {
+            "type": "line_chart",
+            "title": "Guatemala's population, 1960\u20132024",
+            "action": "created",
+            "window": "1960-2024",
+            "component_id": "cmp_01M46ACSAPEYAG5KDPMVFZ9M1K"
+          },
+          {
+            "type": "table",
+            "title": "Guatemala's GDP, 1960\u20132024",
+            "action": "created",
+            "component_id": "cmp_01M46ACSHS4H0PRQTA3S1QGVBQ"
+          },
+          {
+            "type": "line_chart",
+            "title": "Guatemala's GDP, 1960\u20132024",
+            "action": "created",
+            "window": "1960-2024",
+            "component_id": "cmp_01M46ACSRMHCPF9KT96XZM32BV"
+          }
+        ]
+      }
+    ],
+    "total_turns": 1
+  }
+}

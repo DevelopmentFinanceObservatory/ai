@@ -7,7 +7,10 @@ span of more than one real period (`Observation`/`Interval`).
 engine (`analysis_mcp.engine`): `narrow_and_resolve`'s unit narrowing
 (`unit_unbound`, `unit_not_selected`) and entity narrowing
 (`entity_not_selected`), `growth`'s and `rank`'s window filters
-(`outside_window`), `filter`'s predicate loop (`predicate`), `join`'s
+(`outside_window`), `growth`'s entities lacking a row in either endpoint
+year (`endpoint_missing`), with a zero or sign-crossing base under a relative
+change (`zero_or_sign_crossing_base`), or overflowing to a non-finite value
+(`non_finite`), `filter`'s predicate loop (`predicate`), `join`'s
 unmatched-key sets (`unmatched_key`), `compare`'s unintersected periods
 (`period_unmatched`), and `rank`'s limit (`beyond_limit`). A heterogeneous
 facet always refuses

@@ -37,12 +37,12 @@ def test_get_data_carries_its_180s_capability_row() -> None:
     assert _call_deadline_s(client) == 180.0
 
 
-def test_search_and_describe_carry_their_30s_capability_row() -> None:
+def test_search_and_describe_carry_their_capability_rows() -> None:
     policy = McpTimeoutPolicy(settings=Settings())
 
-    for tool in ("search", "describe"):
+    for tool, deadline_s in (("search", 60.0), ("describe", 30.0)):
         client = policy.client("http://data-mcp.internal/mcp", auth=None, caller=None, tool=tool)
-        assert _call_deadline_s(client) == 30.0, tool
+        assert _call_deadline_s(client) == deadline_s, tool
 
 
 def test_a_tool_with_no_capability_row_gets_the_general_default() -> None:

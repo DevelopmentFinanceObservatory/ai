@@ -295,11 +295,12 @@ class SumOfOpSpec(_SlicePairOpSpec):
 
 
 class GrowthOpSpec(_OpSpecBase):
-    """`growth`'s own gap-year policy parameters.
+    """`growth`'s own endpoint policy parameters.
 
     `window_start`/`window_end` are whole calendar years (`YYYY`) -- the
-    gap-year policy (`analysis_mcp.engine.growth`'s own docstring) reasons
-    over the integer calendar span between them, so both are pinned to that
+    endpoint policy (`analysis_mcp.engine.growth`'s own docstring) reads each
+    entity's rows in those two years and counts coverage over the integer
+    calendar span between them, so both are pinned to that
     format at the schema layer rather than the general `time_period` grammar
     (which also allows `YYYY-MM`/`YYYY-MM-DD`).
 

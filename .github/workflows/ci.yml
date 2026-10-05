@@ -1,13 +1,18 @@
 name: CI
 
 on:
+  # One run on the merged tree after each merge into dev. main moves either by
+  # fast-forward to a dev commit that already ran here or through a pull
+  # request whose own run tested the merge, so main has no push trigger.
   push:
-    branches: [dev, main]
+    branches: [dev]
   pull_request:
     branches: [dev, main, "toolkit/**"]
     # `edited` catches a stacked PR's base retargeting, which emits only that
     # event. Without it, required checks would hang on "Expected".
-    types: [opened, synchronize, reopened, edited]
+    # `ready_for_review` starts the run when a draft is marked ready; the jobs
+    # skip while the pull request is a draft.
+    types: [opened, synchronize, reopened, edited, ready_for_review]
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ jobs:
     # ran it here before it was synced.
     if: >-
       github.repository_owner == 'ONEcampaign' &&
+      github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
     env:
@@ -91,6 +97,7 @@ jobs:
     # ran it here before it was synced.
     if: >-
       github.repository_owner == 'ONEcampaign' &&
+      github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
     # The suite takes about three minutes. faulthandler_timeout in
@@ -145,6 +152,7 @@ jobs:
     # ran it here before it was synced.
     if: >-
       github.repository_owner == 'ONEcampaign' &&
+      github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
     steps:

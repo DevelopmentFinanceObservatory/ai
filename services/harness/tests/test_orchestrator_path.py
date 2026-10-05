@@ -35,6 +35,7 @@ from harness.graph import (
     ORCHESTRATOR_UNAVAILABLE_KEY,
     GenerativeNodes,
     _ask_status,
+    _partial_result,
     _stopped_steps,
     create_root_workflow,
 )
@@ -875,3 +876,275 @@ async def test_step_summaries_reach_the_agent_without_frame_references_or_operat
         "Retrieved life expectancy for Kenya.\n\nSource: World Bank.\n\nCoverage 1960-2023."
         in body["step_summaries"]
     )
+
+
+class TwoAsksPlanner(ScriptedPlannerModel):
+    """`ScriptedPlannerModel` whose plan answers the brief's first ask with the
+    retrieval and its second with the aggregate that reads it, so the
+    retrieval is a terminal step another step reads, declining `declined`.
+    Records each refusal it is handed."""
+
+    def __init__(self, declined: tuple[Decline, ...] = ()) -> None:
+        self.declined = declined
+        self.refusals: list[dict[str, Any] | None] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.refusals.append(kwargs.get("refusal"))
+        plan = Plan.model_validate((await super().__call__(**kwargs))["plan"])
+        assert plan.translation is not None and plan.workflow is not None
+        series, mean = (requirement.id for requirement in plan.evidence_requirements)
+        terminal = tuple(step.id for step in plan.workflow.steps)
+        plan = plan.model_copy(
+            update={
+                "asks": load_asks(kwargs["ctx"].state),
+                "answered": (
+                    AskAnswer(ask=0, outputs=(series,)),
+                    AskAnswer(ask=1, outputs=(mean,)),
+                ),
+                "declined": self.declined,
+                "translation": plan.translation.model_copy(update={"terminal": terminal}),
+                "workflow": plan.workflow.model_copy(update={"terminal_steps": terminal}),
+            }
+        )
+        return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
+
+
+class _AggregateRefusingSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `aggregate` refuses with a code no replan reaches."""
+
+    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+        if kwargs["tool"].name != "aggregate":
+            return await super().call_tool(**kwargs)
+        refusal = {
+            "code": "growth_gap_year",
+            "retry_mode": "do_not_retry",
+            "message": "no entity reports both endpoint years",
+            "fix": {},
+        }
+        return ToolCallResult(is_error=True, structured_content=refusal, text="refused")
+
+
+class _EmptyAggregateSurface(ScriptedSurface):
+    """`ScriptedSurface` whose `aggregate` matches no rows, a stop the graph replans."""
+
+    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+        result = await super().call_tool(**kwargs)
+        if kwargs["tool"].name != "aggregate":
+            return result
+        return result.model_copy(
+            update={"structured_content": {**(result.structured_content or {}), "rows": 0}}
+        )
+
+
+_TWO_ASKS = ["Kenya's life expectancy each year", "the mean across the period"]
+# The first ask answered in part: its history computed, its forecast declined.
+_FORECAST = Decline(
+    ask="its forecast to 2030", code=UnsupportedOperation.NO_OPERATION_COVERS, ask_ref=0
+)
+_IN_PART = pytest.mark.parametrize("declined", [(), (_FORECAST,)], ids=["whole", "in_part"])
+
+
+def _first_ask(declined: tuple[Decline, ...]) -> tuple[dict[str, Any], str]:
+    """The first ask's `not_computed` entry under `declined`, and the ask as
+    the charted sentence names it."""
+    if not declined:
+        return {}, json.dumps(_TWO_ASKS[0])
+    reason = plan_display.DECLINE_REASONS[_FORECAST.code]
+    return (
+        {"not_computed": {"part": _FORECAST.ask, "reason": reason}},
+        f"{json.dumps(_TWO_ASKS[0])} except {json.dumps(_FORECAST.ask)}, "
+        f"not computed because {reason}",
+    )
+
+
+async def _approved_two_asks(
+    surface: ScriptedSurface, planner: TwoAsksPlanner | None = None
+) -> tuple[ScriptLlm, TwoAsksPlanner]:
+    """Run the two-asks brief, approving every plan the planner drafts."""
+    planner = planner or TwoAsksPlanner()
+    runner, model = _runner(
+        _call("plan", brief="Kenya's life expectancy and its mean", asks=_TWO_ASKS),
+        types.Part.from_text(text="Handed to the planner."),
+        types.Part.from_text(text="Answered."),
+        planner=planner,
+        tool_surface=surface,
+        executor=_describes,
+    )
+    await _session(runner)
+    events = await _run(runner, types.UserContent("Kenya's life expectancy?"))
+    while any(c.name == "adk_request_input" for e in events for c in e.get_function_calls()):
+        approval = _pause(events)
+        approve = create_request_input_response(
+            approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
+        )
+        events = await _run(runner, types.Content(role="user", parts=[approve]))
+    return model, planner
+
+
+def _hand_back(model: ScriptLlm) -> tuple[str, dict[str, Any]]:
+    text = _texts(model.requests[-1])
+    return text, json.loads(next(line for line in text.split("\n") if line.startswith('{"frames"')))
+
+
+async def test_a_terminal_step_another_step_reads_comes_back_on_an_accepted_plan():
+    model, _ = await _approved_two_asks(ScriptedSurface())
+
+    _, body = _hand_back(model)
+    series, mean = (frame["frame"] for frame in body["frames"])
+    assert body["asks"] == [
+        {
+            "ask": _TWO_ASKS[0],
+            "answered_by": [{"step": "retrieve", "status": "data", "frame": series}],
+        },
+        {"ask": _TWO_ASKS[1], "answered_by": [{"step": "totals", "status": "data", "frame": mean}]},
+    ]
+
+
+@_IN_PART
+async def test_a_failed_plan_hands_back_the_terminal_frames_it_finished(
+    declined: tuple[Decline, ...],
+):
+    model, _ = await _approved_two_asks(_AggregateRefusingSurface(), TwoAsksPlanner(declined))
+
+    text, body = _hand_back(model)
+    (series,) = (frame["frame"] for frame in body["frames"])
+    failed = {"status": "failed", "failed_at": "totals", "code": "growth_gap_year"}
+    not_computed, charted = _first_ask(declined)
+    assert body["asks"] == [
+        {
+            "ask": _TWO_ASKS[0],
+            "answered_by": [{"step": "retrieve", "status": "data", "frame": series}],
+            **not_computed,
+        },
+        {"ask": _TWO_ASKS[1], "answered_by": [{"step": "totals", **failed}]},
+    ]
+    assert f"can be charted: {charted}." in text
+    assert f"Not computed: {json.dumps(_TWO_ASKS[1])}." in text
+
+
+async def test_a_failed_plan_hands_back_no_step_that_is_only_read():
+    """The retrieval finished, but only the refused aggregate answers an ask."""
+    runner, model = _runner(
+        _call("plan", brief="Kenya's life expectancy", asks=["Kenya's mean life expectancy"]),
+        types.Part.from_text(text="Handed to the planner."),
+        types.Part.from_text(text="It could not be computed."),
+        planner=AskingPlanner(),
+        tool_surface=_AggregateRefusingSurface(),
+        executor=_describes,
+    )
+    await _session(runner)
+    approval = _pause(await _run(runner, types.UserContent("Kenya's life expectancy?")))
+    approve = create_request_input_response(
+        approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
+    )
+    await _run(runner, types.Content(role="user", parts=[approve]))
+
+    _, body = _hand_back(model)
+    assert body["frames"] == []
+    assert body["failed_step"]["step_id"] == "totals"
+
+
+async def test_a_replan_names_the_asks_the_failed_run_computed():
+    _, planner = await _approved_two_asks(_EmptyAggregateSurface())
+
+    refusal = planner.refusals[-1]
+    assert refusal is not None
+    assert refusal["computed_asks"] == [0]
+
+
+class _RefusingReplanner(TwoAsksPlanner):
+    """`TwoAsksPlanner` that refuses to draft again once a run has stopped."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("refusal") is None:
+            return await super().__call__(**kwargs)
+        self.refusals.append(kwargs["refusal"])
+        return {"refused": {"text": "no plan avoids the empty mean", "final": False}}
+
+
+class _RetrievalRefusingOnReplanSurface(_EmptyAggregateSurface):
+    """`_EmptyAggregateSurface` whose second `get_data` call refuses, so the
+    replanned run stops before any ask is computed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.retrievals = 0
+
+    async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+        if kwargs["tool"].name == "get_data":
+            self.retrievals += 1
+            if self.retrievals > 1:
+                refusal = {
+                    "code": "growth_gap_year",
+                    "retry_mode": "do_not_retry",
+                    "message": "refused on the replan",
+                    "fix": {},
+                }
+                return ToolCallResult(is_error=True, structured_content=refusal, text="refused")
+        return await super().call_tool(**kwargs)
+
+
+@_IN_PART
+async def test_a_planner_refusal_after_a_stopped_run_hands_back_the_asks_it_computed(
+    declined: tuple[Decline, ...],
+):
+    model, planner = await _approved_two_asks(
+        _EmptyAggregateSurface(), _RefusingReplanner(declined)
+    )
+
+    text, body = _hand_back(model)
+    (series,) = (frame["frame"] for frame in body["frames"])
+    not_computed, charted = _first_ask(declined)
+    assert planner.refusals[-1] is not None
+    assert body["asks"] == [
+        {
+            "ask": _TWO_ASKS[0],
+            "answered_by": [{"step": "retrieve", "status": "data", "frame": series}],
+            **not_computed,
+            "earlier_plan": True,
+        }
+    ]
+    assert "The planner could not make a plan: no plan avoids the empty mean" in text
+    assert f"can be charted: {charted}." in text
+
+
+@_IN_PART
+async def test_a_replanned_run_that_stops_earlier_keeps_the_asks_the_first_run_computed(
+    declined: tuple[Decline, ...],
+):
+    model, _ = await _approved_two_asks(
+        _RetrievalRefusingOnReplanSurface(), TwoAsksPlanner(declined)
+    )
+
+    text, body = _hand_back(model)
+    (series,) = (frame["frame"] for frame in body["frames"])
+    failed = {"status": "failed", "failed_at": "retrieve", "code": "growth_gap_year"}
+    not_computed, charted = _first_ask(declined)
+    assert body["failed_step"]["step_id"] == "retrieve"
+    assert body["asks"] == [
+        {
+            "ask": _TWO_ASKS[0],
+            "answered_by": [{"step": "retrieve", "status": "data", "frame": series}],
+            **not_computed,
+            "earlier_plan": True,
+        },
+        {"ask": _TWO_ASKS[1], "answered_by": [{"step": "totals", **failed}]},
+    ]
+    assert f"can be charted: {charted}." in text
+    assert f"Not computed: {json.dumps(_TWO_ASKS[1])}." in text
+
+
+@pytest.mark.parametrize(
+    ("status", "charted"), [({"status": "data"}, True), ({"status": "empty"}, False)]
+)
+def test_a_partial_result_offers_to_chart_only_frames_that_hold_series(
+    status: dict[str, str], charted: bool
+):
+    asks = [{"ask": "the mean", "answered_by": [{"step": "totals", **status, "frame": "f1"}]}]
+
+    text = _partial_result(asks, frames=True)
+
+    assert ('can be charted: "the mean".' in text) is charted
+    assert (
+        'holds no series or cannot be drawn, as each step\'s status says: "the mean".' in text
+    ) is not charted

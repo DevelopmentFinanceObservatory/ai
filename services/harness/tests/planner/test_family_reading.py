@@ -174,7 +174,7 @@ def test_which_sectors_received_the_most_aid_in_kenya_ranks_each_sector_s_total(
     sector = RoleDimension(role="sector", requirement_id="aid_to_kenya", breakdown=True)
     assert shapes["aid_to_kenya"].roles == (
         RoleDimension(role="recipient", requirement_id="aid_to_kenya"),
-        RoleDimension(role="donor", requirement_id="aid_to_kenya"),
+        RoleDimension(role="donor", requirement_id="aid_to_kenya", open=True),
         sector,
     )
     assert shapes["aid_to_kenya"].measures == 1

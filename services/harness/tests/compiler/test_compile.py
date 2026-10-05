@@ -23,8 +23,10 @@ the only one.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable, Sequence
 from itertools import permutations
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -34,6 +36,7 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import ToolSchema
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
+from planner.agent import _synthesize_source_decisions
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -56,6 +59,7 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
+    DecisionDraft,
     DecisionFixes,
     Entity,
     EvidenceRequirement,
@@ -69,6 +73,7 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
+    settle_decisions,
 )
 from planner.records import (
     DenominatorScope,
@@ -91,6 +96,8 @@ from planner.workflow import (
     ResolvedEntity,
     SelectedSource,
 )
+from pydantic import TypeAdapter
+from translator.mechanical import build_translation
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -1673,14 +1680,13 @@ def test_a_terminal_that_is_not_an_operation_is_reported(
     assert Code.UNKNOWN_TERMINAL in _codes(result)
 
 
-def test_a_terminal_another_operation_reads_is_reported(
+def test_a_terminal_another_operation_reads_compiles(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
 ) -> None:
-    # `positive` is named as an answer and read by `totals`: both the answer
-    # and an intermediate, so its frame would leak into the run's results.
+    # `positive` answers an ask and `totals` reads it, so it is both terminal and read.
     positive = (ValueThreshold(op="gt", value=0),)
     filter_req = FilterRequirement(
         id="positive",
@@ -1702,9 +1708,9 @@ def test_a_terminal_another_operation_reads_is_reported(
         ),
     )
 
-    assert _codes(result) == [Code.TERMINAL_IS_READ]
-    assert result.issues[0].operation_id == "positive"
-    assert "'totals'" in result.issues[0].reason
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.terminal_steps == ("positive", "totals")
 
 
 def test_a_translation_that_stops_at_the_retrieval_compiles(
@@ -2124,51 +2130,99 @@ def test_a_side_naming_its_entity_narrows_a_wider_source(
     assert result.workflow.steps[-1].args == {"numerator_entity": {"destination": "country/KEN"}}
 
 
-def test_a_whole_side_reading_a_filter_that_narrowed_the_source_is_not_reported(
+def _whole_side_of(kind: str, filtered: str) -> tuple[EvidenceRequirement, Operation]:
+    """A `kind` requirement and its operation reading `filtered` as a whole side against GDP."""
+    plan_whole, plan_gdp = (
+        RequirementSide(input_id=filtered),
+        RequirementSide(input_id="annual_gdp"),
+    )
+    whole, gdp = Side(input=filtered), Side(input="gdp")
+    if kind == "compare":
+        return (
+            ComparisonRequirement(
+                id="gap", decision_ids=["measure"], left=plan_whole, right=plan_gdp
+            ),
+            CompareOperation(id="gap", requirement_id="gap", left=whole, right=gdp),
+        )
+    if kind == "sum_of":
+        return (
+            SumOfRequirement(id="gap", decision_ids=["measure"], left=plan_whole, right=plan_gdp),
+            SumOfOperation(id="gap", requirement_id="gap", left=whole, right=gdp),
+        )
+    return (
+        ShareOfRequirement(
+            id="gap", decision_ids=["measure"], numerator=plan_gdp, denominator=plan_whole
+        ),
+        ShareOfOperation(id="gap", requirement_id="gap", numerator=gdp, denominator=whole),
+    )
+
+
+_THREE_DESTINATIONS = (
+    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
+    ResolvedEntity(role="destination", ref="country/UGA", label="Uganda"),
+)
+
+
+@pytest.mark.parametrize("kind", ["compare", "sum_of", "share_of"])
+@pytest.mark.parametrize(
+    ("named", "kept", "required"),
+    [
+        (("Kenya", "Ghana"), ("Kenya",), False),
+        (("Kenya", "Ghana"), ("Kenya", "Ghana"), True),
+        (("Kenya", "Ghana", "Uganda"), ("Kenya", "Ghana"), True),
+    ],
+    ids=["one_kept", "two_kept", "two_of_three_kept"],
+)
+def test_a_whole_side_reading_a_filter_counts_the_entities_it_kept(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
     wide_source: SourceFactory,
+    kind: str,
+    named: tuple[str, ...],
+    kept: tuple[str, ...],
+    required: bool,
 ) -> None:
-    # The filter keeps Kenya's rows, so the side pools nothing: what it reads
-    # is the filtered frame, not the two-country frame the retrieval produced.
-    kenya_only = (EntityIn(names=("Kenya",)),)
+    # The side reads the filtered frame. Keeping Kenya alone leaves one
+    # series, keeping two leaves two that the side would pool, and the issue
+    # names those two.
+    predicates = (EntityIn(names=kept),)
     filtered = FilterRequirement(
-        id="kenya_only",
-        decision_ids=["measure"],
-        input_id="annual_debt_service",
-        predicates=kenya_only,
+        id="kept", decision_ids=["measure"], input_id="annual_debt_service", predicates=predicates
+    )
+    debt = requirement(
+        decision_ids=["measure", "comparison"],
+        entities=[Entity(name=name, role="debtor") for name in named],
     )
     gdp = requirement(id="annual_gdp", measure="gross domestic product")
-    share = ShareOfRequirement(
-        id="share",
-        decision_ids=["measure"],
-        numerator=RequirementSide(input_id="kenya_only"),
-        denominator=RequirementSide(input_id="annual_gdp"),
+    derived, operation = _whole_side_of(kind, "kept")
+    comparison_decision = decision(
+        slot="comparison",
+        options=["Kenya against the others", "Kenya on its own"],
+        chosen="Kenya against the others",
     )
-    plan = _draft([decision()], [requirement(), filtered, gdp, share])
+    plan = _draft([decision(), comparison_decision], [debt, filtered, gdp, derived])
     filter_op = FilterOperation(
-        id="kenya_only", requirement_id="kenya_only", input="debt", predicates=kenya_only
-    )
-    share_op = ShareOfOperation(
-        id="share",
-        requirement_id="share",
-        numerator=Side(input="kenya_only"),
-        denominator=Side(input="gdp"),
+        id="kept", requirement_id="kept", input="debt", predicates=predicates
     )
     retrieve_gdp = _retrieve(id="gdp", requirement_id="annual_gdp", spec_id=SPEC_OTHER)
 
     result = build(
         plan,
-        _translation(_retrieve(), retrieve_gdp, filter_op, share_op, terminal=["share"]),
+        _translation(_retrieve(), retrieve_gdp, filter_op, operation, terminal=["gap"]),
         discovered={
-            "annual_debt_service": wide_source(),
-            "annual_gdp": source(spec_id=SPEC_OTHER),
+            "annual_debt_service": wide_source(entities=_THREE_DESTINATIONS),
+            "annual_gdp": source(spec_id=SPEC_OTHER, stat_vars=("GrossDomesticProduct",)),
         },
     )
 
-    assert result.ok, result.issues
+    pooling = [issue for issue in result.issues if issue.code is Code.ENTITY_REQUIRED]
+    assert bool(pooling) is required, result.issues
+    assert result.ok is not required, result.issues
+    if required:
+        assert f"{list(kept)!r}; say which" in pooling[0].reason
 
 
 def test_an_aggregate_grouping_by_entity_keeps_a_wider_sources_entities_apart(
@@ -2406,6 +2460,47 @@ def test_a_whole_side_from_a_requirement_with_several_entities_is_reported(
     )
 
     assert _codes(result) == [Code.ENTITY_REQUIRED]
+
+
+@pytest.mark.parametrize(
+    ("denominator", "required"), [("totals", False), ("debt", True)], ids=["total", "both"]
+)
+def test_a_whole_side_over_a_total_of_several_entities_reads_one_series(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    wide_source: SourceFactory,
+    denominator: str,
+    required: bool,
+) -> None:
+    # Kenya's share of its and Ghana's debt service. The aggregate by period
+    # has summed the two debtors into one series, which a whole side reads
+    # as it is. Read before the aggregate, the side would pool them.
+    share = ShareOfRequirement(
+        id="gap",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
+        denominator=RequirementSide(
+            input_id="annual_totals" if denominator == "totals" else "annual_debt_service"
+        ),
+    )
+    plan = _two_country_plan(decision, requirement, share, derived_requirement())
+    operation = ShareOfOperation(
+        id="gap",
+        requirement_id="gap",
+        numerator=Side(input="debt", entity="Kenya"),
+        denominator=Side(input=denominator),
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), _aggregate(), operation, terminal=["gap"]),
+        discovered={"annual_debt_service": wide_source()},
+    )
+
+    assert (Code.ENTITY_REQUIRED in _codes(result)) is required
+    assert result.ok is not required, result.issues
 
 
 def test_comparing_a_side_with_itself_is_reported(
@@ -2963,6 +3058,107 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
     assert [found for found in _codes(result) if found in unit_codes] == [code]
     if code is Code.FRAME_UNIT_FORMS_DIFFER:
         assert result.issues[0].requirement_id == "annual_debt_service"
+
+
+def _two_sided(
+    verb: str, requirement: RequirementFactory
+) -> tuple[list[EvidenceRequirement], Translation]:
+    """Debt service set against GDP by `verb`, each read by its own retrieval."""
+    sides = (
+        RequirementSide(input_id="annual_debt_service"),
+        RequirementSide(input_id="annual_gdp"),
+    )
+    debt, gdp = Side(input="debt"), Side(input="gdp")
+    derived: EvidenceRequirement
+    operation: Operation
+    if verb == "share_of":
+        derived = ShareOfRequirement(
+            id="two", decision_ids=["measure"], numerator=sides[0], denominator=sides[1]
+        )
+        operation = ShareOfOperation(
+            id="two", requirement_id="two", numerator=debt, denominator=gdp
+        )
+    elif verb == "compare":
+        derived = ComparisonRequirement(
+            id="two", decision_ids=["measure"], left=sides[0], right=sides[1]
+        )
+        operation = CompareOperation(id="two", requirement_id="two", left=debt, right=gdp)
+    else:
+        derived = SumOfRequirement(
+            id="two", decision_ids=["measure"], left=sides[0], right=sides[1]
+        )
+        operation = SumOfOperation(id="two", requirement_id="two", left=debt, right=gdp)
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="gdp", requirement_id="annual_gdp", spec_id=SPEC_OTHER),
+        operation,
+        terminal=["two"],
+    )
+    gdp_requirement = requirement(id="annual_gdp", measure="gross domestic product")
+    return [requirement(), gdp_requirement, derived], translation
+
+
+# A definition whose unit request names its currency by entity role: a
+# currency per row, which no unit known ahead covers.
+_PER_ROW_UNIT = {
+    "unit_ref": "CurrencyUSD",
+    "identity": {
+        "facets": {
+            "unit": {
+                "state": "value",
+                "request": {"currency": {"role": "origin"}, "prices": "current"},
+            }
+        }
+    },
+}
+
+
+@pytest.mark.parametrize("verb", ["share_of", "compare", "sum_of"])
+@pytest.mark.parametrize(
+    ("left_source", "right_source", "unbound"),
+    [
+        pytest.param({}, {"unit_ref": None}, "annual_gdp", id="right-declares-no-unit"),
+        pytest.param({"unit_ref": None}, {}, "annual_debt_service", id="left-declares-no-unit"),
+        pytest.param({"unit_ref": None}, {"unit_ref": None}, None, id="neither-declares-a-unit"),
+        pytest.param({}, {}, None, id="both-in-one-unit"),
+        pytest.param({}, _PER_ROW_UNIT, None, id="a-currency-per-row-is-left-to-run-time"),
+        pytest.param(
+            {},
+            {"unit_ref": None, "unit_per_series": True},
+            None,
+            id="a-unit-per-series-is-left-to-run-time",
+        ),
+    ],
+)
+def test_a_side_declaring_no_unit_against_one_in_a_unit_is_refused_before_running(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    verb: str,
+    left_source: dict[str, Any],
+    right_source: dict[str, Any],
+    unbound: str | None,
+) -> None:
+    # compare, share_of and sum_of each refuse exactly one unit-less side
+    # (`cross_frame_unit_unbound`), and pair two unit-less sides.
+    requirements, translation = _two_sided(verb, requirement)
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**left_source),
+            "annual_gdp": source(spec_id=SPEC_OTHER, stat_vars=("Gdp",), **right_source),
+        },
+    )
+
+    if unbound is None:
+        assert result.ok, result.issues
+        return
+    assert [(i.code, i.operation_id, i.requirement_id) for i in result.issues] == [
+        (Code.FRAME_UNIT_UNBOUND, "two", unbound)
+    ]
 
 
 def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_then_the_years(
@@ -4084,43 +4280,52 @@ def test_a_rank_over_a_donor_family_the_plan_reads_summed_asks_for_the_sum(
     assert rank.expected_role_keys == _frame_role_columns(["origin"])
 
 
-def test_grouping_by_entity_over_an_open_axis_writes_its_column(
+def test_grouping_by_entity_over_an_open_axis_naming_no_entity_is_refused(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
-    place_scope_block: dict[str, Any],
+    source: SourceFactory,
 ) -> None:
-    open_place = source_from_spec_block(place_scope_block)
-    by_country = AggregateRequirement(
-        id="by_country",
+    # Each donor's education aid with no donor named. A group by entity keeps
+    # the named parties and sums the open `origin`, so it would keep nothing.
+    # The plan's own aggregate groups by period, since `planner.plan` refuses
+    # the group by entity on the same rule; the operation alone states it.
+    every_donor = DatasetRequirement(
+        id="aid",
         decision_ids=["measure"],
-        input_id="health",
-        reduction=Reduction.MEAN,
-        group_by=(GroupBy.ENTITY,),
+        measure="education aid",
+        across="donor",
+        period=Period(start=2015, end=2024),
     )
-    plan = _draft([decision()], [_every_country(), by_country])
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    plan = _draft([decision()], [every_donor, total])
 
     result = build(
         plan,
         _translation(
-            RetrieveOperation(id="fetch", requirement_id="health", spec_id=open_place.spec_id),
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
             _aggregate(
-                id="by_country",
-                requirement_id="by_country",
-                input="fetch",
-                reduction=Reduction.MEAN,
-                group_by=(GroupBy.ENTITY,),
+                id="total", requirement_id="total", input="fetch", group_by=(GroupBy.ENTITY,)
             ),
-            terminal=["by_country"],
+            terminal=["total"],
         ),
-        discovered={"health": open_place},
+        discovered={
+            "aid": source(
+                entities=(), open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),)
+            )
+        },
     )
 
-    assert result.ok, result.issues
-    assert result.workflow is not None
-    assert result.workflow.steps[-1].args == {
-        "aggregation": "mean",
-        "group_by": ["observationAbout"],
-    }
+    refusals = [i for i in result.issues if i.code is Code.INPUT_SHAPE_UNSUPPORTED]
+    assert [i.operation_id for i in refusals] == ["total"]
+    assert "sums its open ['donor'] away, and this input names no entity" in refusals[0].reason
+    assert "group by period alone" in refusals[0].reason
+    assert result.workflow is None
 
 
 def test_a_rank_over_a_one_member_scope_is_refused(
@@ -4302,6 +4507,7 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
                 entities=(
                     ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya"),
                 ),
+                unit_ref=open_place.unit_ref,
             ),
             "health": open_place,
         },
@@ -4517,3 +4723,187 @@ def test_a_keyed_share_over_an_open_axis_is_entity_required(
     for issue in result.issues:
         assert "covers every 'donor' and names none of them" in issue.reason
         assert "so the side cannot say which it reads" in issue.reason
+
+
+# --- An aggregate over an open axis -------------------------------------------------
+
+# The two CRS sources the recorded DRC plans pin (`propose_plan_drc_aid.json`),
+# aid to the DRC from the United States and from every donor.
+SPEC_US_TO_DRC = "spec_459728244c8b0efeaf933157d9dc1ce3"
+SPEC_EVERY_DONOR_TO_DRC = "spec_2cdf1c28095aa2918dc7039705ada64b"
+DRC = ResolvedEntity(
+    role="destination", ref="country/COD", label="Democratic Republic of the Congo"
+)
+UNITED_STATES = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+_DRC_PLANS = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "propose_plan_drc_aid.json").read_text()
+)
+
+
+def _drc_sources(source: SourceFactory) -> dict[str, SelectedSource]:
+    """The sources the plans pin: the US flow bound both sides, every donor's open on `origin`."""
+    return {
+        "us_disbursements": source(
+            spec_id=SPEC_US_TO_DRC, entities=(DRC, UNITED_STATES), stat_vars=("UsOdaToDrc",)
+        ),
+        "all_donors_disbursements": source(
+            spec_id=SPEC_EVERY_DONOR_TO_DRC,
+            entities=(DRC,),
+            open_entity_axes=(OpenEntityAxis(column="origin", member_count=77),),
+            stat_vars=("OdaToDrc",),
+        ),
+    }
+
+
+def _replayed(arguments: dict[str, Any]) -> Plan:
+    """The draft `propose_plan` records from `arguments`, each pinned source settled by a search."""
+    requirements = TypeAdapter(list[EvidenceRequirement]).validate_python(
+        arguments["evidence_requirements"]
+    )
+    drafts = TypeAdapter(list[DecisionDraft]).validate_python(arguments["decisions"])
+    decisions, requirements = _synthesize_source_decisions(
+        settle_decisions(drafts, requirements),
+        requirements,
+        previous=None,
+        settled_spec_ids={SPEC_US_TO_DRC, SPEC_EVERY_DONOR_TO_DRC},
+    )
+    # An amendment states no question, so the plan keeps the first draft's.
+    return Plan(
+        question=_DRC_PLANS["plan_v1"]["question"],
+        answer_mode=arguments["answer_mode"],
+        decisions=decisions,
+        evidence_requirements=requirements,
+        asks=_DRC_PLANS["asks"],
+        answered=arguments["answered"],
+        status=PlanStatus.DRAFT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "total_group_by", "terminal"),
+    [
+        (
+            "plan_v1",
+            ["time_period"],
+            (
+                "us_disbursements_series",
+                "total_disbursements_series",
+                "us_growth",
+                "total_growth",
+                "us_share_window",
+            ),
+        ),
+        (
+            "plan_v3",
+            ["time_period", "destination"],
+            (
+                "us_disbursements_series",
+                "total_disbursements_series",
+                "us_growth",
+                "total_growth",
+                "us_share_window",
+            ),
+        ),
+        (
+            "first_attempt",
+            ["time_period"],
+            (
+                "us_disbursements",
+                "total_disbursements",
+                "us_growth",
+                "total_growth",
+                "us_share",
+                "us_share_window",
+            ),
+        ),
+    ],
+    ids=["plan_v1", "plan_v3", "first_attempt"],
+)
+def test_the_drc_drafts_compile_and_total_every_donor(
+    build: Callable[..., CompileResult],
+    source: SourceFactory,
+    version: str,
+    total_group_by: list[str],
+    terminal: tuple[str, ...],
+) -> None:
+    # The first recorded draft divides the US flow by a total over every
+    # donor, which an aggregate by period has already collapsed to one series,
+    # so a whole side naming no donor reads that one series. The later draft
+    # groups the total by entity too, which keeps the named DRC and still sums
+    # the 77 donors. The attempt before both answers asks with requirements
+    # another reads, the retrieved US flow among them, and each of those is a
+    # terminal too.
+    sources = _drc_sources(source)
+    plan = _replayed(_DRC_PLANS[version])
+    translation = build_translation(
+        plan, {requirement_id: s.spec_id for requirement_id, s in sources.items()}
+    )
+
+    result = build(plan, translation, discovered=sources)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert set(result.workflow.terminal_steps) == set(terminal)
+    (total,) = [step for step in result.workflow.steps if step.id == "total_disbursements"]
+    assert total.args == {"aggregation": "sum", "group_by": total_group_by}
+    assert total.expected_role_keys == _frame_role_columns(total_group_by[1:])
+
+
+@pytest.mark.parametrize(
+    ("named", "across", "open_column", "kept"),
+    [
+        (Entity(name="Democratic Republic of the Congo", role="recipient"), "donor", "origin", DRC),
+        (Entity(name="United States", role="donor"), "recipient", "destination", UNITED_STATES),
+    ],
+    ids=["recipient-named-across-donor", "donor-named-across-recipient"],
+)
+def test_grouping_by_entity_writes_the_named_party_and_sums_the_open_one(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    named: Entity,
+    across: str,
+    open_column: str,
+    kept: ResolvedEntity,
+) -> None:
+    flow = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[named],
+        across=across,
+        period=Period(start=2015, end=2024),
+    )
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+    )
+
+    result = build(
+        _draft([decision()], [flow, total]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            _aggregate(
+                id="total",
+                requirement_id="total",
+                input="fetch",
+                group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
+            ),
+            terminal=["total"],
+        ),
+        discovered={
+            "aid": source(
+                entities=(kept,),
+                open_entity_axes=(OpenEntityAxis(column=open_column, member_count=77),),
+            )
+        },
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    total_step = result.workflow.steps[-1]
+    assert total_step.args == {"aggregation": "sum", "group_by": ["time_period", kept.role]}
+    assert total_step.expected_role_keys == _frame_role_columns([kept.role])

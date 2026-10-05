@@ -45,6 +45,7 @@ from harness.generative import GeminiEdit
 from harness.graph import AGENT_NAME, GenerativeNodes, create_root_workflow
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
+from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
 from harness.scripted import (
     ScriptedCompose,
@@ -454,12 +455,16 @@ def create_app(
         # through a separate `McpSurface`. Opens no connection at construction.
         tool_surface = build_tool_surface(settings=resolved_settings)
         orchestrated = resolved_settings.studio_engine == "orchestrator"
+        # One for the process, shared by the planner and the orchestrator
+        # across every conversation (`harness.prefix_cache`).
+        prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
 
         def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
             generative = build_generative_nodes(
                 settings=resolved_settings,
                 model_name=resolved_settings.model_name,
                 surface=tool_surface,
+                prefix_cache=prefix_cache,
             )
             orchestrator = None
             if orchestrated:
@@ -473,6 +478,7 @@ def create_app(
                     )
                 orchestrator = create_orchestrator_agent(
                     model_name=resolved_settings.model_name,
+                    prefix_cache=prefix_cache,
                     tools=build_orchestrator_tools(
                         resolver=McpResolver(settings=resolved_settings),
                         executor=recorder,

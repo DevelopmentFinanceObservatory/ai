@@ -71,6 +71,7 @@ from .conftest import (
     ScriptedSurface,
     _statistics_artifact,
     ok,
+    refusal,
 )
 
 ManifestFactory = Callable[..., dict[str, Any]]
@@ -343,6 +344,50 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
         assert provenance["citation"] != "unknown"
         assert provenance["sources"][0]["id"] != "unknown"
         assert provenance["freshness"]["last_refreshed"] != _today_utc()
+
+
+async def test_a_stopped_run_links_the_terminal_frame_it_finished_to_its_source(
+    two_source_plan: PlanFactory,
+    manifest_for: Callable[..., dict[str, Any]],
+    source: Callable[..., Any],
+    population_source: Callable[..., Any],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The population branch's aggregate refuses after the debt branch's
+    finished. The stop carries the evidence its finished retrievals
+    recorded, so the debt frame links to its own source as an accepted
+    run's would, and its card keeps that source."""
+    debt_manifest = manifest_for(
+        source(),
+        citation={
+            "text": "World Bank, International Debt Statistics",
+            "sources": [{"ref": "worldbank", "label": "World Bank"}],
+        },
+    )
+    population_manifest = manifest_for(population_source())
+    debt_totals = {**RESULT_FRAME, "spec_id": "ops_" + "6" * 32}
+    store = ProvenanceStore()
+    scripted = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [ok(debt_manifest), ok(population_manifest)],
+            "aggregate": [ok(debt_totals), refusal("growth_gap_year", "do_not_retry")],
+        },
+    )
+    surface = _RecordingSurface(scripted, provenance=store)
+    plan = two_source_plan()
+    assert plan.workflow is not None
+
+    _finished, outcome = await execute_approved_plan(plan, surface=surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.step_id == "population_totals_op"
+    assert [record.step_id for record in outcome.evidence] == ["debt", "pop"]
+    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    (debt,) = (record for record in outcome.completed if record.step_id == "totals")
+    component = await _assemble(store, debt.frame_ref.model_dump())
+    assert component is not None
+    assert component["provenance"]["citation"] == "World Bank, International Debt Statistics"
 
 
 async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> None:

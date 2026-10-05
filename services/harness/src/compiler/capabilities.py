@@ -145,7 +145,10 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         ),
         implementation_version="1",
         input_schema_hash="ff63dcbf60ffd5e16fd55d91ad17520ebca36aa95600b6306572dc7e612408f3",
-        call_timeout_s=30.0,
+        # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
+        # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
+        # 503 or 504 as a typed refusal before this call times out.
+        call_timeout_s=60.0,
     ),
     ToolCapability(
         tool=_data("describe"),
@@ -162,7 +165,9 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         phase=Phase.DISCOVERY,
         implementation_version="1",
         input_schema_hash="3051ccd467a906bdb6bd16e744d756ac5e0aaafa2ddf8c45a60ddff6d1739c91",
-        call_timeout_s=30.0,
+        # The same dfo-apis resolve route as `search`, under the same data-mcp
+        # budget (`data_mcp.search_tool.SEARCH_CALL_BUDGET_S`), so the same timeout.
+        call_timeout_s=60.0,
     ),
     ToolCapability(
         tool=_data("get_data"),
@@ -189,7 +194,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="e5a48166b52d8429bb91744f9c7ed27a4e9b7633a5199b27399aa3f4ef101ce8",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("growth"),
@@ -199,8 +204,8 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `change` parameter.
-        input_schema_hash="5df8ddf49059e6ee34c0372719c4bf66fce33e76c0a6df24f6c2735f0092e97e",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        input_schema_hash="c129982ff5a80313c0d68ca01a54a15e61929da59f8e8e8e5d952cd2d08a6827",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("compare"),
@@ -210,7 +215,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="cfeb33c86ed1db23ec65ca70ee792b81051540e45bfaa7780063b15290096720",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("rank"),
@@ -221,7 +226,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `per_period` and `limit` parameters.
         input_schema_hash="86103f75945bb2c5c03606c77d3249ae42ee7907dfb2b818376f23d67af73471",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("share_of"),
@@ -235,7 +240,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
         input_schema_hash="88a6d4eccdcb1c4a0116b23d49ca87a1f4f4082c88934efa472ad9021fb2deec",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("join"),
@@ -245,7 +250,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="1901fa26209ee959653ed0c2938792655e65f78242963a21df120309840eee24",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
     ToolCapability(
         tool=_analysis("filter"),
@@ -256,7 +261,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_level` predicate and the 21-character period operand.
         input_schema_hash="11fa15d982a856f7d05d7adac23875e5a6e59f1c0ae507a427bbdcdfe77f53c8",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
         empty_is_an_answer=True,
     ),
     ToolCapability(
@@ -267,7 +272,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="13f8348bfeabf177fd65af0ce9ecbaca8368ab143f2bee4e038e6a60f9c03357",
-        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
+        output_schema_hash="9ec3da8b2ee49c757b7044d0764dfbd41cc666b4134f473c88f3e662a68fd750",
     ),
 )
 

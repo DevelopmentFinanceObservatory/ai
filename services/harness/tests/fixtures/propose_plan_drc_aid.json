@@ -1,0 +1,547 @@
+{
+  "comment": "The `propose_plan` arguments the deployed planner sent for \"What effect has the Trump Administration's foreign aid cuts had on overall financing to the DRC?\" (Langfuse trace eeed88ce5fa616a39b8b0016e7771fcf). `asks` are the asks the brief listed. `first_attempt` is the call before `plan_v1`, answering asks 0, 1 and 4 with requirements another requirement reads (`us_disbursements`, `total_disbursements`, `us_share`); a rule that an answer names only a requirement nothing reads refused it, and `plan_v1` copies each through an identity `filter` instead. `plan_v1` is the first draft recorded: the total over every donor is an aggregate by period, the denominator of the US share. `plan_v3` is the draft the planner sent after the compiler refused that share, grouping the total by period and entity. `plan_v3` drops its `amends_version`; each lists every requirement.",
+  "asks": [
+    "US gross ODA disbursements to the Democratic Republic of the Congo each year from 2015 to 2024",
+    "Total gross ODA disbursements across all donors to the Democratic Republic of the Congo each year from 2015 to 2024",
+    "Change in US gross ODA disbursements to the DRC from 2016 to 2020",
+    "Change in total gross ODA disbursements to the DRC from 2016 to 2020",
+    "US share of total gross ODA disbursements to the DRC from 2016 to 2020"
+  ],
+  "first_attempt": {
+    "answered": [
+      {
+        "outputs": [
+          "us_disbursements"
+        ],
+        "ask": 0
+      },
+      {
+        "outputs": [
+          "total_disbursements"
+        ],
+        "ask": 1
+      },
+      {
+        "outputs": [
+          "us_growth"
+        ],
+        "ask": 2
+      },
+      {
+        "outputs": [
+          "total_growth"
+        ],
+        "ask": 3
+      },
+      {
+        "ask": 4,
+        "outputs": [
+          "us_share"
+        ]
+      }
+    ],
+    "declined": [],
+    "question": "US gross ODA disbursements and total gross ODA disbursements to the Democratic Republic of the Congo from 2015 to 2024, examining changes during the Trump administration (2017 to 2021).",
+    "evidence_requirements": [
+      {
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "decision_ids": [],
+        "id": "us_disbursements",
+        "source_spec_id": "spec_459728244c8b0efeaf933157d9dc1ce3",
+        "source": "OECD Creditor Reporting System (CRS)",
+        "measure": "official development assistance",
+        "kind": "dataset",
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          },
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "frequency": "annual",
+        "period": {
+          "start": 2015,
+          "end": 2024
+        }
+      },
+      {
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          }
+        ],
+        "decision_ids": [],
+        "id": "all_donors_disbursements",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "source": "OECD Creditor Reporting System (CRS)",
+        "across": "donor",
+        "source_spec_id": "spec_2cdf1c28095aa2918dc7039705ada64b",
+        "kind": "dataset",
+        "frequency": "annual",
+        "period": {
+          "end": 2024,
+          "start": 2015
+        },
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "measure": "official development assistance"
+      },
+      {
+        "kind": "aggregate",
+        "reduction": "sum",
+        "input_id": "all_donors_disbursements",
+        "group_by": [
+          "period"
+        ],
+        "decision_ids": [],
+        "id": "total_disbursements"
+      },
+      {
+        "window_start": 2016,
+        "id": "us_growth",
+        "change": "relative",
+        "kind": "growth",
+        "decision_ids": [],
+        "window_end": 2020,
+        "input_id": "us_disbursements"
+      },
+      {
+        "window_end": 2020,
+        "id": "total_growth",
+        "kind": "growth",
+        "window_start": 2016,
+        "change": "relative",
+        "input_id": "total_disbursements",
+        "decision_ids": []
+      },
+      {
+        "kind": "share_of",
+        "numerator": {
+          "entity": "United States",
+          "input_id": "us_disbursements"
+        },
+        "decision_ids": [],
+        "denominator": {
+          "input_id": "total_disbursements"
+        },
+        "id": "us_share"
+      },
+      {
+        "input_id": "us_share",
+        "kind": "filter",
+        "id": "us_share_window",
+        "decision_ids": [],
+        "predicates": [
+          {
+            "op": "gte",
+            "kind": "period_threshold",
+            "year": 2016
+          },
+          {
+            "op": "lte",
+            "kind": "period_threshold",
+            "year": 2020
+          }
+        ]
+      }
+    ],
+    "decisions": [],
+    "answer_mode": "computed"
+  },
+  "plan_v1": {
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "us_disbursements_series"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "total_disbursements_series"
+        ]
+      },
+      {
+        "outputs": [
+          "us_growth"
+        ],
+        "ask": 2
+      },
+      {
+        "outputs": [
+          "total_growth"
+        ],
+        "ask": 3
+      },
+      {
+        "outputs": [
+          "us_share_window"
+        ],
+        "ask": 4
+      }
+    ],
+    "question": "US gross ODA disbursements and total gross ODA disbursements to the Democratic Republic of the Congo from 2015 to 2024, examining changes during the Trump administration (2017 to 2021).",
+    "evidence_requirements": [
+      {
+        "id": "us_disbursements",
+        "source": "OECD Creditor Reporting System (CRS)",
+        "decision_ids": [],
+        "kind": "dataset",
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "measure": "official development assistance",
+        "source_spec_id": "spec_459728244c8b0efeaf933157d9dc1ce3",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          },
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "frequency": "annual"
+      },
+      {
+        "id": "all_donors_disbursements",
+        "decision_ids": [],
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          }
+        ],
+        "source_spec_id": "spec_2cdf1c28095aa2918dc7039705ada64b",
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "kind": "dataset",
+        "frequency": "annual",
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "across": "donor",
+        "measure": "official development assistance",
+        "source": "OECD Creditor Reporting System (CRS)"
+      },
+      {
+        "reduction": "sum",
+        "input_id": "all_donors_disbursements",
+        "id": "total_disbursements",
+        "decision_ids": [],
+        "kind": "aggregate",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "decision_ids": [],
+        "kind": "filter",
+        "id": "us_disbursements_series",
+        "input_id": "us_disbursements",
+        "predicates": [
+          {
+            "op": "gte",
+            "kind": "period_threshold",
+            "year": 2015
+          }
+        ]
+      },
+      {
+        "decision_ids": [],
+        "input_id": "total_disbursements",
+        "predicates": [
+          {
+            "year": 2015,
+            "kind": "period_threshold",
+            "op": "gte"
+          }
+        ],
+        "kind": "filter",
+        "id": "total_disbursements_series"
+      },
+      {
+        "window_start": 2016,
+        "window_end": 2020,
+        "id": "us_growth",
+        "decision_ids": [],
+        "kind": "growth",
+        "change": "relative",
+        "input_id": "us_disbursements"
+      },
+      {
+        "id": "total_growth",
+        "input_id": "total_disbursements",
+        "window_start": 2016,
+        "kind": "growth",
+        "window_end": 2020,
+        "change": "relative",
+        "decision_ids": []
+      },
+      {
+        "denominator": {
+          "input_id": "total_disbursements"
+        },
+        "id": "us_share",
+        "kind": "share_of",
+        "numerator": {
+          "input_id": "us_disbursements",
+          "entity": "United States"
+        },
+        "decision_ids": []
+      },
+      {
+        "decision_ids": [],
+        "kind": "filter",
+        "id": "us_share_window",
+        "input_id": "us_share",
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "op": "gte",
+            "year": 2016
+          },
+          {
+            "op": "lte",
+            "year": 2020,
+            "kind": "period_threshold"
+          }
+        ]
+      }
+    ],
+    "answer_mode": "computed",
+    "declined": [],
+    "decisions": []
+  },
+  "plan_v3": {
+    "answer_mode": "computed",
+    "evidence_requirements": [
+      {
+        "frequency": "annual",
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "measure": "official development assistance",
+        "id": "us_disbursements",
+        "source": "OECD Creditor Reporting System (CRS)",
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          },
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "source_spec_id": "spec_459728244c8b0efeaf933157d9dc1ce3",
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "kind": "dataset",
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "decision_ids": []
+      },
+      {
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "measure": "official development assistance",
+        "period": {
+          "end": 2024,
+          "start": 2015
+        },
+        "id": "all_donors_disbursements",
+        "source": "OECD Creditor Reporting System (CRS)",
+        "decision_ids": [],
+        "frequency": "annual",
+        "entities": [
+          {
+            "name": "Democratic Republic of the Congo",
+            "role": "recipient"
+          }
+        ],
+        "source_spec_id": "spec_2cdf1c28095aa2918dc7039705ada64b",
+        "across": "donor",
+        "unit": {
+          "prices": "current",
+          "currency": "USD"
+        },
+        "kind": "dataset"
+      },
+      {
+        "decision_ids": [],
+        "group_by": [
+          "period",
+          "entity"
+        ],
+        "id": "total_disbursements",
+        "reduction": "sum",
+        "input_id": "all_donors_disbursements",
+        "kind": "aggregate"
+      },
+      {
+        "input_id": "us_disbursements",
+        "kind": "filter",
+        "predicates": [
+          {
+            "op": "gte",
+            "kind": "period_threshold",
+            "year": 2015
+          }
+        ],
+        "id": "us_disbursements_series",
+        "decision_ids": []
+      },
+      {
+        "input_id": "total_disbursements",
+        "decision_ids": [],
+        "kind": "filter",
+        "predicates": [
+          {
+            "year": 2015,
+            "kind": "period_threshold",
+            "op": "gte"
+          }
+        ],
+        "id": "total_disbursements_series"
+      },
+      {
+        "window_start": 2016,
+        "decision_ids": [],
+        "id": "us_growth",
+        "change": "relative",
+        "input_id": "us_disbursements",
+        "window_end": 2020,
+        "kind": "growth"
+      },
+      {
+        "decision_ids": [],
+        "input_id": "total_disbursements",
+        "window_end": 2020,
+        "change": "relative",
+        "window_start": 2016,
+        "id": "total_growth",
+        "kind": "growth"
+      },
+      {
+        "id": "us_share",
+        "kind": "share_of",
+        "numerator": {
+          "input_id": "us_disbursements",
+          "entity": "Democratic Republic of the Congo"
+        },
+        "denominator_scope": "per_axis",
+        "denominator": {
+          "input_id": "total_disbursements",
+          "entity": "Democratic Republic of the Congo"
+        },
+        "axis": "recipient",
+        "decision_ids": [
+          "share_scope"
+        ]
+      },
+      {
+        "id": "us_share_window",
+        "decision_ids": [],
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "year": 2016,
+            "op": "gte"
+          },
+          {
+            "year": 2020,
+            "kind": "period_threshold",
+            "op": "lte"
+          }
+        ],
+        "input_id": "us_share",
+        "kind": "filter"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "us_disbursements_series"
+        ]
+      },
+      {
+        "outputs": [
+          "total_disbursements_series"
+        ],
+        "ask": 1
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "us_growth"
+        ]
+      },
+      {
+        "outputs": [
+          "total_growth"
+        ],
+        "ask": 3
+      },
+      {
+        "ask": 4,
+        "outputs": [
+          "us_share_window"
+        ]
+      }
+    ],
+    "declined": [],
+    "decisions": [
+      {
+        "rationale": "The denominator represents total ODA to the DRC, so the share of US aid to DRC is calculated along the recipient axis.",
+        "description": "Calculate US share of total ODA to DRC per recipient axis",
+        "chosen": "per_axis",
+        "resolved_by": "planner_default",
+        "slot": "share_scope",
+        "options": [
+          "per_axis",
+          "pooled"
+        ],
+        "fixes": [
+          "denominator_scope"
+        ]
+      }
+    ]
+  }
+}

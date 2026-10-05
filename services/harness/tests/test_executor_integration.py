@@ -828,13 +828,14 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     _stats_registry: _StatsRegistry,
 ) -> None:
     """The motivating per-period-rank chain, over a fixture with a genuine
-    hole (Uganda has no row in 2011): a growth straight off the
-    population-wide rank series would refuse on Uganda's own gap year,
-    which is exactly the run-time failure the filter between the rank and
-    the growth exists to preempt. A fixture with every entity in every
-    period would pass this test either way and prove nothing -- see
+    hole (Uganda has no row in 2011), so each year's rank positions depend
+    on which entities reported that year. A population-wide change in rank
+    would mix movement with reporting, which is why the plan narrows to
+    Kenya between the rank and the growth. A fixture with every entity in
+    every period would hide that hole. See
     `test_verb_coverage_corpus.py::_run_kenya_rank_change_since_2010` for
-    the direct check of that refusal, against the bare tool functions."""
+    what growth computes straight off the population-wide series, against
+    the bare tool functions."""
 
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _rank_parquet_bytes()

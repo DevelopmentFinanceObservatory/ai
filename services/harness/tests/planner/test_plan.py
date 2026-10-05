@@ -37,6 +37,7 @@ from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
+    AskAnswer,
     ComparisonRequirement,
     Coverage,
     DatasetRequirement,
@@ -1057,16 +1058,28 @@ def test_a_sum_of_side_holding_a_share_is_refused(
         _plan(decision(), evidence_requirements=[bilateral, multilateral, share, total])
 
 
+@pytest.mark.parametrize(
+    "answered",
+    [(), (AskAnswer(ask=0, outputs=("annual_debt_service",)),)],
+    ids=["unanswered", "answered"],
+)
 def test_a_computed_plan_rejects_an_unread_dataset_requirement(
-    decision: DecisionFactory, requirement: RequirementFactory
+    decision: DecisionFactory, requirement: RequirementFactory, answered: tuple[AskAnswer, ...]
 ) -> None:
     # Under answer_mode=computed, a retrieved series carries a reference and
     # statistics, not the figure a computed answer asks for, so a dataset
-    # requirement nothing reads leaves the plan without one.
+    # requirement nothing reads leaves the plan without one, whether or not
+    # an ask names it.
     unread = requirement()
 
     with pytest.raises(ValidationError, match="unread dataset requirements") as refused:
-        _plan(decision(), answer_mode=AnswerMode.COMPUTED, evidence_requirements=[unread])
+        _plan(
+            decision(),
+            answer_mode=AnswerMode.COMPUTED,
+            evidence_requirements=[unread],
+            asks=["Kenya's debt service"] if answered else [],
+            answered=answered,
+        )
     assert _unsupported_operation(refused.value) is None
 
 
@@ -1105,10 +1118,21 @@ def test_a_series_plan_accepts_an_unread_retrieval_beside_a_derived_terminal(
     assert {r.id for r in plan.evidence_requirements} == {dataset.id, derived.id, population.id}
 
 
+@pytest.mark.parametrize(
+    ("narrowed", "entity", "match"),
+    [
+        ("annual_totals", "Nigeria", r"not one of \['Kenya'\]"),
+        ("other_totals", "Kenya", r"carries no entity: it is a total, so the side names none"),
+    ],
+    ids=["unnamed-entity", "total"],
+)
 def test_a_requirement_side_entity_must_name_an_upstream_entity(
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
+    narrowed: str,
+    entity: str,
+    match: str,
 ) -> None:
     dataset = requirement()  # entities=[Entity(name="Kenya", role="debtor")]
     # Grouped by entity too, so its shape keeps the "debtor" role dimension
@@ -1125,11 +1149,11 @@ def test_a_requirement_side_entity_must_name_an_upstream_entity(
     comparison = ComparisonRequirement(
         id="excess",
         decision_ids=["measure"],
-        left=RequirementSide(input_id=agg.id, entity="Nigeria"),
-        right=RequirementSide(input_id=other_agg.id),
+        left=RequirementSide(input_id=narrowed, entity=entity),
+        right=RequirementSide(input_id=({agg.id, other_agg.id} - {narrowed}).pop()),
     )
 
-    with pytest.raises(ValidationError, match=r"not one of \['Kenya'\]"):
+    with pytest.raises(ValidationError, match=match):
         _plan(decision(), evidence_requirements=[dataset, agg, other_agg, comparison])
 
 
@@ -1664,11 +1688,12 @@ def test_a_rank_over_a_requirement_naming_no_place_needs_a_level_first(
         )
 
 
-def test_a_total_across_places_needs_a_level_first_and_a_series_per_place_does_not(
+def test_a_total_across_places_needs_a_level_first_and_a_total_per_place_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     # "Total population": summing every row counts a country beside its own
-    # subdivisions and the world. One total per place sets nothing side by side.
+    # subdivisions and the world. A group by entity keeps only the places the
+    # requirement names, and it names none.
     dataset = _every_place(requirement, period=Period(start=2015, end=2024))
     total = AggregateRequirement(
         id="total",
@@ -1686,8 +1711,8 @@ def test_a_total_across_places_needs_a_level_first_and_a_series_per_place_does_n
     assert plan.requirement("total").input_id == "countries"
 
     per_place = total.model_copy(update={"group_by": (GroupBy.ENTITY,)})
-    plan = _plan(decision(), evidence_requirements=[dataset, per_place])
-    assert plan.requirement("total").group_by == (GroupBy.ENTITY,)
+    with pytest.raises(ValidationError, match=r"'total': .*this input names no entity"):
+        _plan(decision(), evidence_requirements=[dataset, per_place])
 
 
 def test_a_rank_over_each_places_growth_still_needs_a_level(

@@ -474,51 +474,6 @@ def _frame(frames: list[dict[str, Any]], event: str) -> dict[str, Any]:
     return matches[-1]
 
 
-# --- context cache -------------------------------------------------------------
-
-
-def _cache_studio(settings: Settings | None) -> StudioRunner:
-    return StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope()]),
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=_new_session_service(),
-        settings=settings,
-    )
-
-
-def test_context_cache_defaults_off() -> None:
-    assert _cache_studio(None).runner.context_cache_config is None
-    assert _cache_studio(Settings()).runner.context_cache_config is None
-
-
-def test_context_cache_env_opt_in_builds_the_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STUDIO_CONTEXT_CACHE", "true")
-    studio = _cache_studio(Settings())
-    assert studio.runner.context_cache_config is not None
-    assert studio.runner.context_cache_config.cache_intervals == 10
-
-
-def test_context_cache_follows_the_settings_toggle_and_interval() -> None:
-    studio = _cache_studio(Settings(studio_context_cache=True, studio_cache_intervals=25))
-    assert studio.runner.context_cache_config.cache_intervals == 25
-
-    studio = _cache_studio(Settings(studio_context_cache=False))
-    assert studio.runner.context_cache_config is None
-
-
-def test_context_cache_interval_rejects_out_of_range_values() -> None:
-    with pytest.raises(ValueError, match="studio_cache_intervals must be between 1 and 100"):
-        Settings(studio_cache_intervals=0)
-    with pytest.raises(ValueError, match="studio_cache_intervals must be between 1 and 100"):
-        Settings(studio_cache_intervals=101)
-
-
 # --- auth ---------------------------------------------------------------------
 
 
