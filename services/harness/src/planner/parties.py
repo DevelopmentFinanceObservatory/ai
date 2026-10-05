@@ -1,8 +1,10 @@
 """The party words a plan states, and the side of a flow each names.
 
-An entity's `role` and a dataset requirement's `across` are free text the
-planner writes. `flow_side` places a role phrase or a source's role column
-on the giving or the receiving side of a flow. `across_party` reads the
+An entity's `role` is one of `PARTY_ROLES`, which `propose_plan` holds the
+planner to, and a dataset requirement's `across` is free text the planner
+writes. `flow_side` places a role phrase or a source's role column on the
+giving or the receiving side of a flow, and `party_role` reads a role phrase
+as the `PARTY_ROLES` word it stands for. `across_party` reads the
 closed vocabulary `across` accepts, the party an open axis holds whole.
 `planner.plan` checks a requirement's entities against its `across` with
 them, and `compiler.evidence` matches both to a source's columns.
@@ -11,7 +13,7 @@ them, and `compiler.evidence` matches both to a source's columns.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, get_args
 
 # The words a requirement's role phrase or a source's role column may use for
 # each side of a flow, as `search` places them: its role-text lexicon
@@ -54,6 +56,37 @@ _PLACE_NOUNS = frozenset({"country", "economy", "nation", "place"})
 
 FlowSide = Literal["giving", "receiving"]
 Party = Literal["giving", "receiving", "place"]
+
+# The words an entity's `role` may take: one giving and one receiving word for
+# each kind of flow the sources hold. Each is a word of `search`'s role-text
+# lexicon, so a requirement's role reaches `search` as written.
+PartyRole = Literal["donor", "recipient", "creditor", "debtor", "exporter", "importer"]
+PARTY_ROLES: tuple[PartyRole, ...] = get_args(PartyRole)
+
+# The `PARTY_ROLES` word each lexicon word stands for.
+_PARTY_ROLE_OF: dict[str, PartyRole] = {
+    **dict.fromkeys(
+        ("donor", "origin", "from", "provider", "funder", "source", "financingprovider"),
+        "donor",
+    ),
+    **dict.fromkeys(
+        ("recipient", "destination", "to", "beneficiary", "target", "financingrecipient"),
+        "recipient",
+    ),
+    "creditor": "creditor",
+    "lender": "creditor",
+    "debtor": "debtor",
+    "borrower": "debtor",
+    "exporter": "exporter",
+    "importer": "importer",
+}
+
+# The `PARTY_ROLES` words a role column holds, by the column `search` resolves
+# a flow entity under.
+_PARTY_ROLES_OF_COLUMN: dict[str, tuple[PartyRole, ...]] = {
+    "origin": ("donor", "creditor", "exporter"),
+    "destination": ("recipient", "debtor", "importer"),
+}
 
 
 def flow_side(word: str) -> FlowSide | None:
@@ -106,6 +139,32 @@ def place_qualified_party(word: str) -> str | None:
 def role_party(role: str) -> Party | None:
     """The party an entity's `role` phrase names: a side of a flow, the place, or `None`."""
     return flow_side(role) or across_party(role)
+
+
+def party_role(phrase: str) -> PartyRole | None:
+    """The `PARTY_ROLES` word `phrase` stands for, or `None` when it stands for none or several.
+
+    `phrase` is read token by token, each casefolded and taken as written or
+    as its singular, so "Donors", "lender" and "bilateral donor" read as
+    "donor", "creditor" and "donor", and "origin" as "donor". A phrase
+    naming no lexicon word ("country", "guarantor") or two parties
+    ("donor to recipient") stands for none.
+    """
+    roles = {
+        role
+        for token in _tokens(phrase)
+        if (role := _PARTY_ROLE_OF.get(token) or _PARTY_ROLE_OF.get(singular(token)))
+    }
+    return roles.pop() if len(roles) == 1 else None
+
+
+def column_party_roles(column: str) -> str:
+    """A role column in the words an entity's `role` takes for it: `origin` as "donor/creditor/exporter".
+
+    A column that holds no flow party, such as `observationAbout`, is returned as it is.
+    """
+    roles = _PARTY_ROLES_OF_COLUMN.get(column)
+    return "/".join(roles) if roles else column
 
 
 def singular(phrase: str) -> str:

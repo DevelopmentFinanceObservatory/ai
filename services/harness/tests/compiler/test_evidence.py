@@ -549,6 +549,19 @@ def test_a_currency_code_inside_an_underscored_unit_ref_is_seen(
     assert issue.severity is Severity.INFO
 
 
+def test_a_source_unit_label_naming_ppp_is_not_us_dollars(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="current")),
+        evidence_from_source(source(unit_ref="usd", unit_label="PPP, current international $")),
+    )
+
+    (issue,) = errors(issues)
+    assert issue.code is EvidenceIssueCode.UNIT_MISMATCH
+    assert issue.found == "PPP"
+
+
 def test_a_unit_naming_no_recognisable_currency_is_unverified(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
@@ -920,10 +933,17 @@ def test_resolve_entity_returns_the_one_label_match() -> None:
     assert resolve_entity(Entity(name="kenya"), (kenya,)) is kenya
 
 
-def test_resolve_entity_narrows_by_role_column() -> None:
-    debtor = ResolvedEntity(role="debtor", ref="country/KEN-D", label="Kenya")
-    creditor = ResolvedEntity(role="creditor", ref="country/KEN-C", label="Kenya")
-    assert resolve_entity(Entity(name="Kenya", role="debtor"), (debtor, creditor)) is debtor
+@pytest.mark.parametrize(
+    ("role", "columns"),
+    [("debtor", ("debtor", "creditor")), ("donor", ("origin", "destination"))],
+    ids=["column-named-by-role", "column-on-the-role-side"],
+)
+def test_resolve_entity_narrows_by_role_column(role: str, columns: tuple[str, str]) -> None:
+    wanted, other = (
+        ResolvedEntity(role=column, ref=f"country/KEN-{column}", label="Kenya")
+        for column in columns
+    )
+    assert resolve_entity(Entity(name="Kenya", role=role), (wanted, other)) is wanted
 
 
 def test_resolve_entity_returns_none_when_role_cannot_narrow_to_one() -> None:
@@ -1237,6 +1257,62 @@ def test_a_manifest_without_a_unit_is_an_error_when_the_requirement_states_one(
     (issue,) = errors(issues)
     assert issue.code is EvidenceIssueCode.UNIT_UNVERIFIED
     assert issue.severity is Severity.ERROR
+
+
+_MATCHES = ("unit_matches", "info")
+_BASIS_UNSTATED = ("unit_price_basis_unverified", "warning")
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [
+        # Data Commons unit dcids, as dfo-apis serves the CRS and ONE facets.
+        ("CurrencyUSD", [_MATCHES, _BASIS_UNSTATED]),
+        ("dcid:USDollar", [_MATCHES, _BASIS_UNSTATED]),
+        ("CurrencyEUR", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
+        ("ConstantUSD_2021", [_MATCHES, ("unit_price_basis_mismatch", "error")]),
+        # International (PPP) dollars are not US dollars, though the UN's id names USD.
+        ("undata/UNIT_MEASURE-CR_USD_PPP", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
+        ("InternationalDollar", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
+        # A unit named only in its label, bare or as a `{label}`-only facet, reads
+        # as PPP before its `$` maps to USD.
+        (
+            "PPP (constant 2017 international $)",
+            [("unit_mismatch", "error"), ("unit_price_basis_mismatch", "error")],
+        ),
+        ({"label": "International dollars"}, [("unit_mismatch", "error"), _BASIS_UNSTATED]),
+        (
+            {"label": "Purchasing power parity ($)"},
+            [("unit_mismatch", "error"), _BASIS_UNSTATED],
+        ),
+        # The SDG/OECD unit ids state their price basis in `CU` and `CON`.
+        ("SDG_CU_USD_M", [_MATCHES]),
+        ("SDG_CON_2015_USD", [_MATCHES, ("unit_price_basis_mismatch", "error")]),
+        # The field-by-field unit a mint serves when its definition binds the
+        # unit by request.
+        ({"currency": "USD", "prices": "current"}, [_MATCHES]),
+        (
+            {"currency": "USD", "prices": "constant", "base_year": 2021},
+            [_MATCHES, ("unit_price_basis_mismatch", "error")],
+        ),
+        (
+            {"currency": {"role": "destination"}, "prices": "current"},
+            [("unit_unverified", "error"), _BASIS_UNSTATED],
+        ),
+    ],
+)
+def test_a_manifest_unit_is_read_by_its_structure(
+    requirement: RequirementFactory, source: SourceFactory, unit: object, expected: object
+) -> None:
+    series_stats = _series_stats(_stat("DebtServicePaid", facet={"unit": unit}))
+
+    issues = check_evidence(
+        requirement(unit=Unit(currency="USD", prices="current")),
+        evidence_from_manifest(_manifest(), series_stats=series_stats),
+        approved=source(),
+    )
+
+    assert [(issue.code.value, issue.severity.value) for issue in issues] == expected
 
 
 def test_a_manifest_with_no_rows_is_an_error(

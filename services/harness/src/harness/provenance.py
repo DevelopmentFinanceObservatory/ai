@@ -21,7 +21,12 @@ to one member), so a card counts its indicators from that figure
 declared count says: a summed retrieval's frame holds one family ref that
 stands for every StatVar the sum added up, and so does any frame derived
 from it, so that ref counts as those StatVars, each counted once however
-many carried retrievals hold it (`_carried_stat_var_count`).
+many carried retrievals hold it (`_carried_stat_var_count`). A `sum_of`'s
+frame holds one ref of its own, which counts as the distinct StatVars of
+the retrievals under its sides. Both writers
+store a manifest with its whole `trace.resolved_stat_vars`, read back
+first when the `get_data` result left a long one out
+(`manifest_with_stat_vars`).
 
 Scoped per conversation (`harness.conversation.current_conversation_id`),
 like `McpExecutor`'s other per-conversation state. Bounded two ways: an LRU
@@ -47,6 +52,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from data_mcp.stat_var_list import with_stat_var_list
+from fastmcp.exceptions import ResourceError
+
 logger = logging.getLogger(__name__)
 
 # Per-conversation entry ceiling; least-recently-used eviction past it.
@@ -58,6 +66,10 @@ _MAX_MANIFESTS_PER_CONVERSATION = 64
 _MAX_CONVERSATIONS = 256
 
 _FrameKey = tuple[str | None, str | None]
+
+# A `sum_of` result's StatVar ref, mapped to the retrieval frames under its
+# left side and under its right side.
+type SumOfSides = Mapping[str, tuple[tuple[_FrameKey, ...], ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,11 +103,13 @@ type Lineage = tuple[ProvenanceInput, ...]
 
 @dataclass(frozen=True, slots=True)
 class _Entry:
-    """What the store holds for one frame: its lineage, and the distinct
-    StatVars the frame carries when its producing step declared a count."""
+    """What the store holds for one frame: its lineage, the distinct
+    StatVars the frame carries when its producing step declared a count,
+    and the sides of each `sum_of` the frame's run computed."""
 
     lineage: Lineage
     stat_var_count: int | None = None
+    sum_of_sides: SumOfSides | None = None
 
 
 class ProvenanceStore:
@@ -135,6 +149,8 @@ class ProvenanceStore:
         sources: Sequence[_FrameKey],
         stat_var_count: int | None = None,
         carried: Sequence[_FrameKey] = (),
+        summed: Sequence[Sequence[_FrameKey]] = (),
+        sum_of_sides: SumOfSides | None = None,
     ) -> bool:
         """Write the lineage of the frame `(spec_id, content_version)` from the frames in `sources`.
 
@@ -146,7 +162,10 @@ class ProvenanceStore:
         one carries a single family ref standing for the StatVars it sums
         (`summed_stat_var_count`), so the count held with the lineage, and
         read back by `stat_var_count`, counts that ref as those StatVars
-        (`_carried_stat_var_count`).
+        (`_carried_stat_var_count`). `summed` holds one entry per `sum_of`
+        ref the frame carries, the retrievals among `sources` under that
+        sum, and the count takes that ref as their distinct StatVars. `sum_of_sides` is held for
+        `sum_of_sides` to read back.
 
         The lineage is every `sources` lineage flattened in order, with a
         retrieval that appears twice kept once. All-or-nothing: when any
@@ -170,12 +189,17 @@ class ProvenanceStore:
             return False
         if stat_var_count:
             stat_var_count = _carried_stat_var_count(
-                stat_var_count, [members[key] for key in dict.fromkeys(carried) if key in members]
+                stat_var_count,
+                [members[key] for key in dict.fromkeys(carried) if key in members],
+                summed=[
+                    [members[key] for key in dict.fromkeys(under) if key in members]
+                    for under in summed
+                ],
             )
         self._store(
             conversation=conversation,
             key=(spec_id, content_version),
-            entry=_Entry(tuple(members.values()), stat_var_count),
+            entry=_Entry(tuple(members.values()), stat_var_count, sum_of_sides),
         )
         return True
 
@@ -226,6 +250,16 @@ class ProvenanceStore:
         its manifest resolved or summed."""
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
+
+    def sum_of_sides(
+        self, *, conversation: str, spec_id: str | None, content_version: str | None
+    ) -> SumOfSides:
+        """Each `sum_of` result's StatVar ref the run behind the frame
+        `(spec_id, content_version)` computed, with the retrieval frames
+        under its two sides, as `alias` recorded them. Empty when there are
+        none."""
+        entry = self._entry(conversation, (spec_id, content_version))
+        return (entry.sum_of_sides if entry is not None else None) or {}
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""
@@ -339,6 +373,21 @@ def merged_manifest(lineage: Lineage) -> dict[str, Any]:
     return merged
 
 
+async def manifest_with_stat_vars(manifest: dict[str, Any]) -> dict[str, Any]:
+    """`manifest`, a `get_data` result, with the `trace.resolved_stat_vars` the
+    result left out read back (`data_mcp.stat_var_list.with_stat_var_list`).
+
+    A read that fails is logged and `manifest` kept as it is, since a trace
+    that lists no refs leaves `_carried_stat_var_count` the count that never
+    overstates.
+    """
+    try:
+        return await with_stat_var_list(manifest)
+    except ResourceError as exc:
+        logger.warning("provenance: keeping a manifest without its StatVar list: %s", exc)
+        return manifest
+
+
 def summed_stat_var_count(manifest: dict[str, Any]) -> int | None:
     """The StatVars a summed retrieval added into its family total, from
     `get_data`'s `summed_stat_var_count`, or `None` when nothing was summed."""
@@ -346,41 +395,58 @@ def summed_stat_var_count(manifest: dict[str, Any]) -> int | None:
     return count if isinstance(count, int) and not isinstance(count, bool) else None
 
 
-def _carried_stat_var_count(declared: int, carried: Sequence[ProvenanceInput]) -> int:
-    """The distinct StatVars a frame carries, a summed family's ref counted as the StatVars it sums.
+def _carried_stat_var_count(
+    declared: int,
+    carried: Sequence[ProvenanceInput],
+    *,
+    summed: Sequence[Sequence[ProvenanceInput]] = (),
+) -> int:
+    """The distinct StatVars a frame carries, a summed family's ref and a
+    `sum_of`'s ref each counted as the StatVars it stands for.
 
-    `declared` counts the frame's distinct refs, one per summed family, and
-    is the answer when no retrieval in `carried` is summed. A summed
-    retrieval's contributors are the StatVars its trace lists with rows
-    (`_refs_with_rows`), which dfo-apis counts as `summed_stat_var_count`;
-    the frame's other refs, `declared` less one per family, come from its
-    unsummed retrievals. When every family's contributors number its summed
-    count and the other refs number the refs with rows its unsummed
-    retrievals list, the frame carries all of them, and the count is their
-    union, so two families sharing members, or a family beside one of its
-    own members, count each StatVar once.
+    `declared` counts the frame's distinct refs, one per summed family and
+    one per sum, and is the answer when no retrieval in `carried` is summed
+    and `summed` is empty. A summed retrieval's contributors are the
+    StatVars its trace lists with rows (`_refs_with_rows`), which dfo-apis
+    counts as `summed_stat_var_count`. A sum's are the distinct StatVars of
+    the retrievals under it, one of its `summed` entries, each named the
+    same way (`_named_stat_vars`). The frame's other refs, `declared` less
+    one per family and per sum, come from its unsummed retrievals. When
+    every family and every sum names its members and the other refs number
+    the refs with rows its unsummed retrievals list, the frame carries all
+    of them, and the count is their union, so two families sharing members,
+    a family beside one of its own members, or one StatVar summed across two
+    places, count each StatVar once.
 
     Otherwise the members cannot be named, and the count never overstates:
-    each family counts as its summed count and the other refs as one more
-    part, added when every part's trace lists refs and no two parts share
-    one, else the largest part alone.
+    each family counts as its summed count, each sum as the largest count
+    under it, and the other refs as one more part, added when every part's
+    trace lists refs and no two parts share one, else the largest part
+    alone.
     """
-    summed = [
+    families = [
         (member, count)
         for member in carried
         if (count := summed_stat_var_count(member.manifest)) is not None
     ]
-    if not summed:
+    if not families and not summed:
         return declared
     unsummed = [member for member in carried if summed_stat_var_count(member.manifest) is None]
-    others = max(0, declared - len({member.spec_id for member, _ in summed}))
+    others = max(0, declared - len({member.spec_id for member, _ in families}) - len(summed))
     other_refs = frozenset[str]().union(*(_refs_with_rows(member.manifest) for member in unsummed))
-    contributors = [_refs_with_rows(member.manifest) for member, _ in summed]
-    if others == len(other_refs) and all(
-        len(refs) == count for refs, (_, count) in zip(contributors, summed, strict=True)
-    ):
-        return len(other_refs.union(*contributors))
-    parts = [(count, _trace_refs(member.manifest)) for member, count in summed]
+    named = [_named_stat_vars(member) for member, _ in families] + [
+        _named_union(under) for under in summed
+    ]
+    if others == len(other_refs) and all(refs is not None for refs in named):
+        return len(other_refs.union(*(refs for refs in named if refs is not None)))
+    parts = [(count, _trace_refs(member.manifest)) for member, count in families]
+    parts += [
+        (
+            max((summed_stat_var_count(member.manifest) or 1 for member in under), default=1),
+            frozenset[str]().union(*(_trace_refs(member.manifest) for member in under)),
+        )
+        for under in summed
+    ]
     if others:
         parts.append(
             (others, frozenset[str]().union(*(_trace_refs(member.manifest) for member in unsummed)))
@@ -389,6 +455,26 @@ def _carried_stat_var_count(declared: int, carried: Sequence[ProvenanceInput]) -
     if all(listed) and len(frozenset[str]().union(*listed)) == sum(len(refs) for refs in listed):
         return sum(count for count, _ in parts)
     return max(count for count, _ in parts)
+
+
+def _named_stat_vars(member: ProvenanceInput) -> frozenset[str] | None:
+    """The StatVars a retrieval's frame carries, named from its trace: a
+    summed family's contributors when they number its summed count, an
+    unsummed retrieval's refs with rows when it lists any; else `None`."""
+    refs = _refs_with_rows(member.manifest)
+    count = summed_stat_var_count(member.manifest)
+    if count is not None:
+        return refs if len(refs) == count else None
+    return refs or None
+
+
+def _named_union(under: Sequence[ProvenanceInput]) -> frozenset[str] | None:
+    """The distinct StatVars under a sum, or `None` when a retrieval under it
+    cannot be named (`_named_stat_vars`)."""
+    named = [_named_stat_vars(member) for member in under]
+    if not named or any(refs is None for refs in named):
+        return None
+    return frozenset[str]().union(*(refs for refs in named if refs is not None))
 
 
 def _trace_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,11 +1,11 @@
 """Regression: every advertised recovery `Action` is a complete, executable call.
 
-A `return_to_planner` Action's `arguments` carries `reason`, and, for
-`no_operation_covers`, `decision_id`, so a model that calls
+A `return_to_planner` Action's `arguments` carries `reason`, and the
+requirement or repair its kind names, so a caller that calls
 `return_to_planner` with an Action's `arguments` as the whole call is
 accepted rather than hitting an uncaught `TypeError`. This package's own
 design says a tool answers with a typed problem instead of raising
-(`agent.py`'s module docstring).
+(`tool.py`'s module docstring).
 
 One test per Action-producing path drives the tool that produces it, then
 replays the Action exactly as advertised: its `arguments`, plus a value for
@@ -22,6 +22,7 @@ import pytest
 from compiler.compile import compile_plan
 from compiler.sources import DiscoveryStatus
 from compiler.surface import FixtureSurface, McpSurface, ToolSchema
+from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
@@ -32,7 +33,6 @@ from planner.plan import (
     plan_revision,
 )
 from planner.workflow import SelectedSource
-from translator.agent import build_translator_core
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
     DiscoveryRecord,
@@ -41,6 +41,7 @@ from translator.discovery import (
     save_log,
 )
 from translator.mechanical import TranslatorCore
+from translator.tool import build_translator_core
 
 DraftFactory = Callable[..., Plan]
 DecisionFactory = Callable[..., Decision]
@@ -243,6 +244,54 @@ async def test_pinned_source_not_found_action_refers(
     referred = await _replay_action(core, result["action"], context)
 
     assert referred["outcome"] == "referred"
+    # The fresh search answered `definite` with another source: the referral
+    # offers it, so a re-pin to it is one the pending choice accepts.
+    assert [c["spec_id"] for c in referred["referral"]["candidates"]] == [SPEC_KENYA]
+
+
+async def test_pinned_source_not_found_carries_every_stale_pin_of_the_revision(
+    surface: McpSurface,
+    draft: DraftFactory,
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Two pins a moved period left stale: one referral offers each the source
+    # found in its place, so one planner round repairs both.
+    first = requirement(decision_ids=["measure", "first"], source_spec_id=SPEC_OTHER)
+    second = requirement(
+        id="second_debt_service", decision_ids=["measure", "second"], source_spec_id=SPEC_THIRD
+    )
+    context = context_holding(
+        draft(
+            decisions=[
+                decision(),
+                pinning_decision(SPEC_OTHER, slot="first"),
+                pinning_decision(SPEC_THIRD, slot="second"),
+            ],
+            evidence_requirements=[
+                first,
+                second,
+                derived_requirement(),
+                derived_requirement(id="second_totals", input_id="second_debt_service"),
+            ],
+        )
+    )
+    core = _core(surface)
+    await core.discover_source(requirement_id="second_debt_service", tool_context=context)
+    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+
+    referred = await _replay_action(core, result["action"], context)
+
+    referral = referred["referral"]
+    assert referral["requirement_id"] == "annual_debt_service"
+    assert [c["spec_id"] for c in referral["candidates"]] == [SPEC_KENYA]
+    assert [
+        (pin["requirement_id"], [c["spec_id"] for c in pin["candidates"]])
+        for pin in referral["stale_pins"]
+    ] == [("second_debt_service", [SPEC_KENYA])]
 
 
 async def test_pinned_source_not_found_action_carries_the_logs_candidates(
@@ -287,7 +336,9 @@ async def test_requirement_unmeetable_action_refers(
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
     core = _core(FixtureSurface(schemas=real_schemas))
 
-    result = await core.propose_operations(translation=GOOD_TRANSLATION, tool_context=context)
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
     assert result["action"]["arguments"]["kind"] == "requirement_unmeetable"
 
     referred = await _replay_action(core, result["action"], context)
@@ -302,10 +353,9 @@ async def test_no_operation_covers_action_refers(
     source: SourceFactory,
     context_holding: ContextHolding,
 ) -> None:
-    # No row in the production capability table covers any operation kind,
-    # so `_check_capabilities` reports `no_capability` -- the one path
-    # `_compile_failure_action` cannot compute a `decision_id` for, hence
-    # `needs=("decision_id",)` rather than a guessed argument.
+    # No row in the capability table covers any operation kind, so
+    # `_check_capabilities` reports `no_capability`, a capability gap the
+    # action refers as unsupported, naming the requirement.
     context = context_holding(draft())
     source_selected = source()
     _discovered(context, source_selected, status=DiscoveryStatus.DEFINITE)
@@ -316,12 +366,15 @@ async def test_no_operation_covers_action_refers(
     def _compile_with_no_capabilities(**kwargs: Any) -> Any:
         return original_compile_plan(capabilities=(), **kwargs)
 
-    monkeypatch.setattr("translator.agent.compile_plan", _compile_with_no_capabilities)
+    monkeypatch.setattr("translator.tool.compile_plan", _compile_with_no_capabilities)
 
-    result = await core.propose_operations(translation=GOOD_TRANSLATION, tool_context=context)
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
     assert result["action"]["arguments"]["kind"] == "no_operation_covers"
-    assert result["action"]["needs"] == ["decision_id"]
+    assert "needs" not in result["action"]
 
-    referred = await _replay_action(core, result["action"], context, decision_id="measure")
+    referred = await _replay_action(core, result["action"], context)
 
     assert referred["outcome"] == "referred"
+    assert referred["referral"]["outcome"] == "unsupported"

@@ -8,7 +8,7 @@ the model needs to act on has to be in this text: the result's own
 `{spec_id, content_version}` pair, the computed numbers, units, coverage,
 warnings, and trace identity. Each `render_*_digest` function reads only
 its own result dataclass's summary tuples (`GroupSummary`, `EntityGrowth`,
-`PeriodComparison`, `EntityRank`), never `frame.rows`. The frame itself
+`PeriodComparison`, `PeriodSum`, `EntityRank`), never `frame.rows`. The frame itself
 never appears in a digest.
 
 Every list is capped at `_LIST_CAP` entries, following `data_mcp.digest`'s
@@ -42,8 +42,14 @@ from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey
 from analysis_mcp.engine.rank import EntityRank, RankResult
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
+from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.units import unit_name
+
+# The prefixes of the two lines in the identity block every digest ends with.
+# `harness.graph` drops lines starting with either from a plan step's summary.
+FRAME_REFERENCE_PREFIX = "frame reference: spec_id="
+EXECUTION_IDENTITY_PREFIX = "execution_identity: "
 
 # Bounded without starving the model of entries it's likely to need; see the
 # module docstring for which renderers pick by magnitude vs. position.
@@ -161,7 +167,7 @@ _EXCLUSION_REASON_TEXT: dict[str, str] = {
 # `entity_not_selected` and `period_unmatched` are excluded here: a
 # caller's own `entity` binding asked for those rows to go, and an
 # unmatched period already has its own representation on the coverage line
-# (`render_compare_digest`).
+# (`render_compare_digest`, `render_sum_of_digest`).
 _DIGEST_HIDDEN_EXCLUSION_REASONS = frozenset({"entity_not_selected", "period_unmatched"})
 
 # Cap on how many distinct entity names an exclusion line lists before
@@ -342,10 +348,10 @@ def _identity_block(
     and order every other renderer here uses."""
     return "\n".join(
         [
-            f"frame reference: spec_id={op_spec_hash}, content_version={content_version} "
+            f"{FRAME_REFERENCE_PREFIX}{op_spec_hash}, content_version={content_version} "
             "-- pass both to downstream tools. presentation-mcp's write_component accepts "
             "only spec_/cv_ frame references and refuses an ops_/ocv_ pair.",
-            f"execution_identity: {execution_identity.canonical_string()}",
+            f"{EXECUTION_IDENTITY_PREFIX}{execution_identity.canonical_string()}",
         ]
     )
 
@@ -606,6 +612,107 @@ def render_compare_digest(
     )
 
     sections = [header, comparisons_block, coverage_line, unit_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _sum_line(entry: PeriodSum) -> str:
+    return (
+        f"  {entry.time_period}: {_format_number(entry.left_value)} + "
+        f"{_format_number(entry.right_value)} = {_format_number(entry.value)}"
+    )
+
+
+def _left_out_block(result: SumOfResult) -> str:
+    """Each period the sum leaves out, the one side reporting it, named by its
+    StatVar, and that side's value there, capped at `_LIST_CAP` in period order."""
+    left_out = result.left_out
+    if not left_out:
+        return "left out of the sum: none; both sides report every period"
+    measured = {"left": result.left_stat_vars, "right": result.right_stat_vars}
+    shown = left_out[:_LIST_CAP]
+    lines = [
+        f"  {entry.time_period}: not in the sum; only the {entry.side} side "
+        f"({_side_refs(measured[entry.side])}) reports it: {_format_number(entry.value)}"
+        for entry in shown
+    ]
+    block = "\n".join([f"{len(left_out)} period(s) left out of the sum:", *lines])
+    if len(left_out) > len(shown):
+        block += f"\n  ... {len(left_out) - len(shown)} more left out, in period order"
+    return block
+
+
+def _side_refs(refs: Sequence[str]) -> str:
+    """A side's first StatVar ref, and how many more it measured."""
+    if not refs:
+        return "no StatVar"
+    more = f" and {len(refs) - 1} more" if len(refs) > 1 else ""
+    return f"{truncate_value(refs[0])}{more}"
+
+
+def _period_range_text(periods: Sequence[str]) -> str:
+    """`first to last` of sorted `periods`, or the one period alone."""
+    return periods[0] if len(periods) == 1 else f"{periods[0]} to {periods[-1]}"
+
+
+def render_sum_of_digest(
+    *,
+    result: SumOfResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.sum_of.run_sum_of`) into
+    the digest text a successful `sum_of` tool call returns. Each period one
+    side alone reports, which the sum leaves out, is named with that side
+    and its value there, straight after the label, so a reader keeping only
+    the digest's start still has it. The coverage line states the summed
+    span and each side's offered span and coverage."""
+    header = (
+        f"sum_of: {len(result.intersected_periods)} period(s) both sides report "
+        f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
+    )
+    label_line = (
+        f"stat_var {result.stat_var}: sum of "
+        f"{', '.join(truncate_value(ref) for ref in result.left_stat_vars)} and "
+        f"{', '.join(truncate_value(ref) for ref in result.right_stat_vars)}"
+    )
+
+    # Magnitude, not positional, as `render_compare_digest` caps its periods.
+    shown = _capped(result.period_sums, magnitude=lambda entry: entry.value)
+    sums_block = "\n".join(
+        [f"{len(result.period_sums)} summed period(s):", *(_sum_line(entry) for entry in shown)]
+    )
+    sums_block += _truncation_note(shown, len(result.period_sums), selection=_MAGNITUDE_SELECTION)
+
+    coverage_line = (
+        f"sum over {_period_range_text(result.intersected_periods)}, the periods both sides "
+        f"report (left offered {_period_range_text(result.left_periods)}, right "
+        f"{_period_range_text(result.right_periods)}); coverage left "
+        f"{result.left_coverage_fraction:.1%}, right {result.right_coverage_fraction:.1%}"
+    )
+
+    sections = [header, label_line, _left_out_block(result)]
+    sections += [sums_block, coverage_line, f"unit: {_unit_text(result.unit)}"]
     if result.warnings:
         sections.append(
             "\n".join(

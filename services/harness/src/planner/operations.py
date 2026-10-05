@@ -46,6 +46,7 @@ class OperationKind(StrEnum):
     AGGREGATE = "aggregate"
     GROWTH = "growth"
     COMPARE = "compare"
+    SUM_OF = "sum_of"
     RANK = "rank"
     SHARE_OF = "share_of"
     JOIN = "join"
@@ -164,6 +165,20 @@ class CompareOperation(TaggedModel):
     requirement_id: Identifier = Field(description="The requirement this operation carries out.")
     left: Side = Field(description="The side subtracted from `right`.")
     right: Side = Field(description="The side `left` is subtracted from.")
+
+
+class SumOfOperation(TaggedModel):
+    """Add two single-series sides together over the periods both report."""
+
+    kind: Literal[OperationKind.SUM_OF] = Field(
+        default=OperationKind.SUM_OF, description="Tags this operation as a sum of two series."
+    )
+    id: Identifier = Field(
+        description="This operation's name; unique within a translation, so a later operation can cite it as input."
+    )
+    requirement_id: Identifier = Field(description="The requirement this operation carries out.")
+    left: Side = Field(description="One of the two series added together.")
+    right: Side = Field(description="The series added to `left`.")
 
 
 class RankOperation(TaggedModel):
@@ -315,6 +330,7 @@ Operation = Annotated[
     | AggregateOperation
     | GrowthOperation
     | CompareOperation
+    | SumOfOperation
     | RankOperation
     | ShareOfOperation
     | JoinOperation

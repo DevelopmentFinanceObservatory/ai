@@ -1,10 +1,11 @@
 # translator
 
-The Translator Agent turns a plan the planner has drafted into the workflow the
-user approves. It finds the data each evidence requirement needs, proposes the
-operations that carry the plan's decisions out, and has the compiler build and
-check the result. What cannot be carried out goes back to the planner as a typed
-referral rather than being approximated.
+The translator turns a plan the planner has drafted into the workflow the user
+approves, as code behind the planner's `translate` tool. It finds the data
+each evidence requirement needs, proposes the operations that carry the plan's
+decisions out, and has the compiler build and check the result. What cannot be
+carried out goes back to the planner as a typed referral rather than being
+approximated.
 
 `translator` ships inside `harness` as a sibling top-level module
 (`services/harness/src/translator/`), on harness's dependencies, tests, and CI.
@@ -12,52 +13,59 @@ Its tests live in `services/harness/tests/translator/`.
 
 ## What it does
 
-One tool, `translate`, built by `build_translator_tools()` and wired into an
-`LlmAgent` by `create_translator_agent()`. The planner writes the plan to
+One function tool on the planner, `translate`, built by
+`translator.tool.build_translate_tool()` and attached by
+`harness.agents.create_planner_with_translator`. The planner writes the plan to
 session state (`planner.plan.save_plan`, keyed on `PLAN_STATE_KEY`), and
 `translate` reads it back itself (`translator.discovery.current_draft`,
-`planner.plan.load_plan`), so no copy of it crosses the `dfo_translator` tool
-call. That call's `request` string is a free-text instruction -- what the
-planner wants done, not the plan -- which ADK appends as the translator's
-first user turn.
+`planner.plan.load_plan`), so the call takes no arguments.
 
 `translate` runs the whole discover-then-compile loop as code
 (`translator.mechanical.run_translate`): `discover_source` for every dataset
 requirement, then `propose_operations`, following each step's own next
-action, the same order `INSTRUCTION` once walked one model turn at a time.
-None of that costs a model call -- a clean, one-requirement plan compiles in
-0 model calls inside the loop, against 4 translator-side model calls per
-cycle before this loop existed. Calling it answers one of three shapes:
+action. None of that costs a model call. Calling it answers one outcome from a
+closed set:
 
-| Outcome          | Meaning                                                                              |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| `ok`             | The plan compiled; `submit_plan` reads the richer summary off the plan's own record. |
-| `referred`       | Something could not be carried out; a typed `Referral` says what and why.            |
-| `needs_decision` | The loop paused for the one judgement it cannot make on its own -- see below.        |
+| Outcome           | Meaning                                                                        |
+| ----------------- | ------------------------------------------------------------------------------ |
+| `ok`              | The plan compiled; `submit_plan` reads the summary off the plan's own record.  |
+| `choice_required` | Several sources answer a requirement; the referral carries the candidates.     |
+| `invalid_input`   | A requirement the planner repairs or the user amends; the referral says which. |
+| `unsupported`     | No operation or search serves what the requirement asks.                       |
+| `transient`       | A data service did not answer just now; the same plan is worth another try.    |
+| `internal`        | A fault no plan change repairs, logged under the referral's `reference`.       |
 
-The translator keeps exactly one judgement: which of several candidate
-sources best answers a requirement, once `discover_source` finds more than
-one and none is pinned. `translate` stops there and answers
-`needs_decision`/`candidate_ranking`, carrying the candidates (each with its
-own `describe`d definition) and the decisions citing the requirement. The
-model ranks them and calls `translate` again with `requirement_id`, `choice`
-(the candidate's own spec_id) and `rationale`; that answer rides into the
-`source_ambiguous` referral as a `recommendation` for the person who settles
-the choice to read, never a pick `translate` makes on its own --
-`discover_source`'s own answer already forbids that. A `no_operation_covers`
-escalation (a compile issue naming `needs=("decision_id",)`, the one other
-case `_compile_failure_action` cannot resolve alone) is settled the same way,
-with `decision_id` in place of `choice`/`rationale`. A `no_data`/
+Every outcome but `ok` is the typed `Referral` itself, its fields at the top
+of the answer. A plan that is not a translatable draft answers with the
+`ToolProblem` that says so.
+
+When `discover_source` finds more than one source for a requirement and none
+is pinned, `translate` closes on a `source_ambiguous` referral (outcome
+`choice_required`) carrying the candidates as the discovery log recorded
+them. The planner records the choice as a source decision naming one of them,
+or puts the candidates to the user, and the pin settles the requirement on
+the next translation. A `no_data`/
 `unsupported_ask` answer refers straight to the planner instead: no wording
 a model could try reaches an entity, role or unit that never resolved, and
 the planner already re-asks the user with the question in hand.
 
-`describe` is not a tool either: `translate` calls it from code
+Every referral carries an `outcome` from the planner's own `Outcome`
+vocabulary (`translator.referral.OUTCOME_OF`): `choice_required`,
+`invalid_input` for input the planner can repair, `unsupported`, `transient`
+and `internal`. `translator.tool.issue_resolution` maps every
+`CompileIssueCode` to one resolution: discover the source again, refer the
+requirement for repair (naming the `constraint` and the permitted `repair`),
+refer it as unmeetable or unsupported, or close as an `internal_failure`,
+logged under the `reference` the referral carries. The planner seam ends the
+planner's entry on an internal failure. A translation that fails with the
+same issues it failed with before in the session is referred again marked
+`repeated`, and the seam stops the planner's run on it.
+
+`describe` is not a tool of its own: `translate` calls it from code
 (`translator.discovery.fetch_definitions`), immediately before compiling, to
 fetch a genuinely `definite` source's own definition and carry it into the
 approval readback (`planner.workflow.SelectedSource.definition`, rendered by
-`harness.plan_display._sentence_dataset`) -- and again, per candidate, to
-enrich a `candidate_ranking` judgement's own payload. Memoized per
+`harness.plan_display._sentence_dataset`). Memoized per
 requirement, keyed the way `selectable` itself is scoped
 (`requirement_revision`), so a `COMPILE_FAILED` retry within one plan
 revision reads what an earlier call already fetched rather than
@@ -68,11 +76,9 @@ None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
 stays in the harness graph.
 
-The agent reads the tool surface through a `ToolSurface` (`compiler.surface`),
+`translate` reads the tool surface through a `ToolSurface` (`compiler.surface`),
 the same object the compiler checks against, so what it discovers on and what a
-workflow is compiled against are one surface. Built with `mode="single_turn"`,
-ADK wraps it as one tool on the planner, `dfo_translator`; it reads the plan
-from session state and returns one function response.
+workflow is compiled against are one surface.
 
 ## The properties that define done
 
@@ -82,7 +88,7 @@ so no instruction has to forbid them. `describe` is reached only from code,
 at compile time or to enrich a candidate, never by a model call.
 
 **Discovery is bounded, per plan revision.** Every `discover_source` call
-counts against `DISCOVERY_CALL_BUDGET` for the plan *revision* it serves, not
+counts against `DISCOVERY_CALL_BUDGET` for the plan _revision_ it serves, not
 the plan's version number, which a session may share across an amendment,
 and not the session as a whole, which may hold more than one question. The
 call past the budget comes back as `discovery_budget_exhausted`,
@@ -173,8 +179,8 @@ when the issues mean the plan rather than the proposal has to change.
 **Only a draft is translated.** A plan in any other status is refused, as is one
 that states no evidence requirements.
 
-**Every tool returns a typed result.** Nothing answers `{"error": "..."}`.
-Success is `{"outcome": "ok", ...}`; a referral saved is `{"outcome": "referred", "referral": {...}}`; anything else is a `ToolProblem`
+**Every core function returns a typed result.** Nothing answers `{"error": "..."}`.
+Success is `{"outcome": "ok", ...}`; a referral saved is `{"outcome": "referred", "referral": {...}}`, which `translate` answers the planner with as the referral alone; anything else is a `ToolProblem`
 (`planner.tool_results`): a stable `outcome` (`invalid_input`, `state_missing`
 or `refused`), a `code` from one shared vocabulary naming what went wrong, a
 `message`, and, where the next step is known, an `action` (which tool to

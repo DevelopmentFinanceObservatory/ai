@@ -50,6 +50,12 @@ from data_mcp.manifest import (
     WarningModel,
 )
 
+# How the digest's frame reference line and operation poll note begin. Both
+# address a caller handling frame references by hand; `harness.graph` drops
+# lines starting with either from a plan step's summary.
+FRAME_REFERENCE_PREFIX = "Frame: spec_id="
+OPERATION_POLL_PREFIX = "Note: this mint exceeded the synchronous budget"
+
 # At most this many unheld region members are named; the rest are only
 # counted. A region can carry dozens of unheld members (a continent's worth
 # of countries this graph doesn't hold), and naming all of them would let one
@@ -144,6 +150,15 @@ class OperationPollNote:
 
 
 @dataclass(frozen=True, kw_only=True)
+class BreakdownLevel:
+    """The code system and hierarchy level a `get_data(breakdown=...)` mint summed the
+    family within. Built by `get_data_tool.py` from its `Breakdown` argument."""
+
+    code_system: str
+    level: int
+
+
+@dataclass(frozen=True, kw_only=True)
 class _SummedFamily:
     """The family a summed mint added into one series per entity.
 
@@ -180,6 +195,7 @@ def render_get_data_digest(
     series_stats: Sequence[SeriesStatisticsModel] | None = None,
     statistics_fetch_failed: bool = False,
     operation_poll: OperationPollNote | None = None,
+    breakdown: BreakdownLevel | None = None,
 ) -> str:
     """Render `manifest` into the model-facing digest for `get_data`.
 
@@ -227,6 +243,10 @@ def render_get_data_digest(
             here before returning. `None` (the default) renders no note,
             which is every call's outcome except this one -- an ordinary
             synchronous mint never touches `data_mcp.operations` at all.
+        breakdown: Set when this call summed the family within each code of one
+            code system at one hierarchy level. Renders a line after the
+            coverage that names the frame's `stat_var` and
+            `stat_var_<code_system>` columns.
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
@@ -265,6 +285,8 @@ def render_get_data_digest(
         _acknowledgement_line(definition, manifest.coverage, entity_labels, summed=summed),
         _coverage_line(manifest.coverage, definition),
     ]
+    if breakdown is not None:
+        sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
     sections.extend(_warning_lines(shown_coverage))
     sections.append(_frame_reference_line(frame_ref))
     sections.append(_citation_line(manifest.citation))
@@ -289,6 +311,17 @@ def render_get_data_digest(
     if warning_remainder > 0:
         sections.append(f"{warning_remainder} more warning(s) not shown.")
     return "\n\n".join(sections)
+
+
+def _breakdown_line(breakdown: BreakdownLevel, *, spec_id: str) -> str:
+    """How a breakdown frame's columns read: one series per code at the level, entity
+    and year, every row's `stat_var` the family ref."""
+    column = f"stat_var_{breakdown.code_system}"
+    return (
+        f"Summed within each {breakdown.code_system} code at level {breakdown.level}: "
+        f"{column} names the code each row's StatVars roll up to, and stat_var is "
+        f"dcid:{spec_id} on every row."
+    )
 
 
 def _split_coverage_warnings(
@@ -421,7 +454,7 @@ def _window_text(window: Mapping[str, object] | None) -> str:
 
 def _frame_reference_line(frame_ref: FrameRef) -> str:
     return (
-        f"Frame: spec_id={frame_ref.spec_id}, content_version={frame_ref.content_version} "
+        f"{FRAME_REFERENCE_PREFIX}{frame_ref.spec_id}, content_version={frame_ref.content_version} "
         "-- pass both to downstream tools."
     )
 
@@ -462,7 +495,7 @@ def _remint_persist_failed_line() -> str:
 def _operation_poll_line(note: OperationPollNote) -> str:
     attempt_word = "attempt" if note.poll_attempts == 1 else "attempts"
     return (
-        f"Note: this mint exceeded the synchronous budget and ran as a queued operation "
+        f"{OPERATION_POLL_PREFIX} and ran as a queued operation "
         f"({note.operation_id}) -- {note.poll_attempts} poll {attempt_word} over "
         f"{note.elapsed_s:.0f}s before completing. The frame reference above is the same "
         "as any other successful mint."

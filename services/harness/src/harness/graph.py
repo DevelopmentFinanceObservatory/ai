@@ -83,12 +83,15 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Annotated, Any, Literal, Protocol, cast
 
+from analysis_mcp import digest as analysis_digest
 from common.telemetry import record_event, record_span
 from compiler.evidence import errors
 from compiler.frame_columns import FRAME_PARAMETER
-from compiler.sources import source_from_spec_block
+from compiler.sources import posted_stat_vars, source_from_spec_block
 from compiler.surface import ProgressCallback, ProgressReport, ToolSurface
+from data_mcp import get_data_digest
 from data_mcp.settings import Settings as DataMcpSettings
+from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
 from executor.artifacts import declared_shape, parse_manifest
 from executor.classify import (
@@ -117,8 +120,10 @@ from google.adk.agents import LlmAgent
 from google.adk.events import RequestInput
 from google.adk.workflow import START, Edge, Workflow, node
 from google.adk.workflow._errors import NodeInterruptedError
+from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
 from planner.plan import (
+    ASKS_STATE_KEY,
     DROPPED_SEEDS_STATE_KEY,
     SEEDED_SOURCES_STATE_KEY,
     SEEDS_STATE_KEY,
@@ -181,6 +186,7 @@ from harness.tool_contracts import (
     harness_refusal,
     platform_trace_id_of,
 )
+from harness.turn_records import PlanAsk, PlanRecord
 from harness.wire import (
     usable_component,
 )
@@ -230,26 +236,131 @@ ORCHESTRATOR_CALLS_KEY = "orchestrator:calls"  # tool name -> calls this turn
 ORCHESTRATOR_BRIEF_KEY = "orchestrator:brief"  # the planner's question on this engine
 ORCHESTRATOR_ASKED_KEY = "orchestrator:asked"  # the question `ask` is waiting on
 ORCHESTRATOR_READINGS_KEY = "orchestrator:readings"  # spec_id -> a plan step's stat_vars reading
+# Every search part this turn read, oldest first, as `SearchReading` JSON
+# (`harness.turn_records`), failed parts included; `fetch` adds its outcome
+# to the readings of its spec_id.
+ORCHESTRATOR_SEARCHES_KEY = "orchestrator:searches"
+# Every plan this turn ran, oldest first, as `PlanRecord` JSON, written by
+# `plan_done`; `harness.studio` keeps it with the turn's record.
+ORCHESTRATOR_PLAN_RECORDS_KEY = "orchestrator:plan_records"
+# spec_id -> the warnings of the search part that returned it, as `search`
+# stores its block under `ORCHESTRATOR_SPECS_KEY`.
+ORCHESTRATOR_SPEC_WARNINGS_KEY = "orchestrator:spec_warnings"
+# The search readings of the conversation's earlier turns, with the warnings
+# of the spec_ids they name and the spec_ids whose block an earlier turn
+# stored, seeded by `harness.studio` from `ConversationState.
+# prior_ledger_state` on the orchestrator engine; unset when no earlier turn
+# read any. The blocks themselves resolve through `planner.plan.
+# earlier_block`.
+ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
+# spec_id -> the refusal message of a fetch or a plan step that read it and
+# was refused `capability_unavailable` this turn; `fetch` refuses it again
+# without a call.
+ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `_OrchestratorTranslator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # Characters of planner text one hand-back to the orchestrator may carry per
-# field, and characters the plan's step list may take in all.
+# field, and characters the plan record may take. The two recorded plans in
+# `tests/fixtures/turn_records_recorded.json` render whole in 1,347 and 1,638
+# characters. A larger plan folds steps first and loses decisions last
+# (`PlanRecord.render`).
 _HAND_BACK_CAP = 800
-_HAND_BACK_STEPS_CHARS = 4_000
+_PLAN_RECORD_CHARS = 2_000
+# The branch the approval and `ask` interrupts are stamped with. No agent runs
+# on it or under it, so ADK's branch filter keeps the interrupt's payload out
+# of every model request; the browser reads the interrupt off the event stream.
+_INTERRUPT_BRANCH = "dfo_interrupts"
+# Lines of a step summary addressed to a tool caller handling frame references
+# by hand: the frame reference and execution identity a digest ends with, and
+# the note on a mint that ran as a queued operation, by the prefixes their
+# renderers write them with. The orchestrator charts the frames `plan_done`
+# registers under ids and fetches by a step's spec_id.
+_SUMMARY_NOISE = (
+    get_data_digest.FRAME_REFERENCE_PREFIX,
+    get_data_digest.OPERATION_POLL_PREFIX,
+    analysis_digest.FRAME_REFERENCE_PREFIX,
+    analysis_digest.EXECUTION_IDENTITY_PREFIX,
+)
 
 
-def _give_plan_back(ctx: Context) -> None:
+def _interrupt(request: RequestInput) -> Event:
+    """`request` as its interrupt event, on `_INTERRUPT_BRANCH`."""
+    event = create_request_input_event(request)
+    event.branch = _INTERRUPT_BRANCH
+    return event
+
+
+def _without_noise(summary: str) -> str:
+    """`summary` without its `_SUMMARY_NOISE` lines and the blank lines they leave."""
+    kept = "\n".join(line for line in summary.split("\n") if not line.startswith(_SUMMARY_NOISE))
+    return re.sub(r"\n{3,}", "\n\n", kept).strip()
+
+
+def _give_plan_back(ctx: Context) -> bool:
     """The first plan that could not be made or run gives the orchestrator
     its plan call back (`harness.orchestrator_tools.BUDGETS`), for one brief
-    that avoids the failure; a second failure does not. The graph's own
-    replan cap is untouched."""
+    that avoids the failure; a second failure does not. Answers whether it
+    gave the call back. The graph's own replan cap is untouched."""
     calls = dict(ctx.state.get(ORCHESTRATOR_CALLS_KEY) or {})
     if calls.get("plan_given_back"):
-        return
+        return False
     calls["plan"] = 0
     calls["plan_given_back"] = True
     ctx.state[ORCHESTRATOR_CALLS_KEY] = calls
+    return True
+
+
+def _ask_status(
+    ask: PlanAsk,
+    ran: Mapping[str, dict[str, Any]],
+    failed: Mapping[str, Any] | None,
+    stopped: Collection[str],
+) -> dict[str, Any]:
+    """One ask as `plan_done` reports it: declined, with the plain reason, or
+    each step answering it with its status, and for an ask answered in part
+    the part not computed with its reason. `ran` holds each final step that
+    produced a frame. `data` and `empty` name the frame, and `empty` means it
+    holds no series. `not_chartable` gives the reason no view was prepared.
+    A step outside `ran` is `failed` when it is in `stopped` (the failed step
+    and every step whose inputs trace back to it, `_stopped_steps`), naming
+    the failed step (`failed_at`) and its refusal `code`, and `not_run`
+    otherwise."""
+    if ask.declined is not None and not ask.outputs:
+        return {"ask": ask.ask, "declined": plan_display.DECLINE_REASONS[ask.declined]}
+    failure = {"status": "failed"}
+    if failed is not None:
+        failure["failed_at"] = str(failed.get("step_id"))
+        if failed.get("code"):
+            failure["code"] = str(failed["code"])
+    status: dict[str, Any] = {
+        "ask": ask.ask,
+        "answered_by": [
+            {
+                "step": step,
+                **ran.get(step, failure if step in stopped else {"status": "not_run"}),
+            }
+            for step in ask.outputs
+        ],
+    }
+    if ask.declined is not None:
+        status["not_computed"] = {
+            "part": ask.not_computed or ask.ask,
+            "reason": plan_display.DECLINE_REASONS[ask.declined],
+        }
+    return status
+
+
+def _stopped_steps(workflow: PlanWorkflow | None, failed_step: str | None) -> set[str]:
+    """`failed_step` and every step of `workflow` whose bindings trace back to
+    it. Steps are in run order, so one pass sees each step's inputs first."""
+    if failed_step is None:
+        return set()
+    stopped = {failed_step}
+    for step in workflow.steps if workflow is not None else ():
+        if any(binding.from_step in stopped for binding in step.bindings.values()):
+            stopped.add(step.id)
+    return stopped
 
 
 class PendingAsk(BaseModel):
@@ -261,10 +372,12 @@ class PendingAsk(BaseModel):
 
 
 class PendingPlan(BaseModel):
-    """`plan` asked: the workflow runs the plan path on the brief."""
+    """`plan` asked: the workflow runs the plan path on the brief, holding the
+    plan to `asks`, the outputs the user asked for."""
 
     kind: Literal["plan"] = "plan"
     brief: str
+    asks: list[str] = []
 
 
 _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discriminator="kind")])
@@ -423,23 +536,23 @@ def _chosen_stat_vars(ctx: Context) -> tuple[str, ...]:
 def _fetched_stat_vars(ctx: Context, fetched: SeededSource | None) -> tuple[str, ...]:
     """The StatVars `fetch` posts as `get_data`'s `resolved_stat_var_dcids`.
 
-    They are the ones Search elected for the state's `spec_id`, from
-    whichever answer settled it: the seeded source's on a seeded turn; the
-    `definite` block `probe`'s resolver carried (`resolve_envelope`'s
-    `spec_block`), read the way the compiler reads a source
-    (`compiler.sources.source_from_spec_block`), so `fetch` and a plan's
-    retrieve step post the same list; or the chosen candidate's, which
-    `clarify` stored (`_chosen_stat_vars`). Empty when none of those holds
+    They are the ones a plan's retrieve step would post for the state's
+    `spec_id` (`compiler.sources.posted_stat_vars`), from whichever answer
+    settled it: the seeded source's on a seeded turn; the `definite` block
+    `probe`'s resolver carried (`resolve_envelope`'s `spec_block`), read the
+    way the compiler reads a source
+    (`compiler.sources.source_from_spec_block`); or the chosen candidate's,
+    which `clarify` stored (`_chosen_stat_vars`). Empty when none of those holds
     any, or the block cannot be read as a source; `get_data`
     then resolves the family with no StatVars posted.
     """
     if fetched is not None:
-        return fetched.source.stat_vars
+        return posted_stat_vars(fetched.source)
     block = _state_json(ctx, "resolve_envelope", default={}).get("spec_block")
     if not isinstance(block, dict) or block.get("spec_id") != ctx.state.get("spec_id"):
         return _chosen_stat_vars(ctx)
     try:
-        return source_from_spec_block(block).stat_vars
+        return posted_stat_vars(source_from_spec_block(block))
     except ValueError:
         logger.warning("fetch cannot read the searched block's StatVars", exc_info=True)
         return ()
@@ -685,9 +798,10 @@ class PlannerModel(Protocol):
     """Drafts (or redrafts) a compiled plan from the resolve envelope.
 
     Returns `{"plan": <planner.plan.Plan as JSON>, "summary": <approval summary>}`
-    on a draft, or `{"refused": {"text": <plain sentence>}}` when the seam
-    refuses to draft one at all -- today, only `harness.planner_seam.
-    PlannerSeam`'s own `MAX_PLAN_ROUNDS` cap. The node validates a drafted
+    on a draft, or `{"refused": {"text": <plain sentence>, "final": <bool>}}`
+    when the seam ends the entry without one (`harness.planner_seam.
+    PlannerSeam._refused`); `final` says no other plan for the same ask can
+    succeed. The node validates a drafted
     plan itself, so a malformed one fails here rather than at the approve
     gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
     already there is exactly what this call leaves behind. Where that
@@ -722,6 +836,12 @@ class PlannerModel(Protocol):
     left out as not necessarily right for every part (`harness.
     planner_seam.PlannerSeam`). A seam with no use for the distinction,
     scripted mode's included, simply ignores both.
+
+    `readings` is passed on the orchestrator engine only: the search
+    readings of the conversation's earlier turns
+    (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first, which a seam shows its
+    planner where the classic engine shows the envelope.
     """
 
     async def __call__(
@@ -738,6 +858,7 @@ class PlannerModel(Protocol):
         spec_id_elected: bool = False,
         spec_id_elected_label: str | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        readings: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -830,7 +951,11 @@ def _frame_unavailable_reason(refusal: dict[str, Any]) -> str:
 # recognised `origin` gets `_RW_UNKNOWN`, which names nobody.
 # dfo-apis's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
 # whose selection's estimated series count (`_series_estimate`) exceeds this.
-_MAX_SERIES_PER_COMPONENT = 24
+MAX_SERIES_PER_COMPONENT = 24
+# The catalogue grammar's `maxItems` on a `line_chart` select's one array
+# value (the release document's `intent_schemas_tolerant.line_chart`). The
+# platform refuses a longer list as `schema_invalid`.
+LINE_CHART_MAX_VALUES = 8
 # dfo-apis's `facet_dimension_names` (dfo-data-tools' `assembler/frame_view.py`):
 # the facet columns a select may leave unbound. The platform refuses one only
 # when it splits a series, and its estimate counts an unbound facet as 1.
@@ -850,7 +975,7 @@ _RW_NOT_CONFIGURED = "this deployment is not set up to present that kind of resu
 _RW_UNSOURCED = "the card was withheld because no citable source could be tied to this data view"
 _RW_TOO_MANY_SERIES = (
     "the card was withheld because its selection covers more than "
-    f"{_MAX_SERIES_PER_COMPONENT} series, the most one card draws"
+    f"{MAX_SERIES_PER_COMPONENT} series, the most one card draws"
 )
 _RW_INTERNAL = "the assistant could not build the card"
 _RW_UNKNOWN = "the card could not be added"
@@ -1030,12 +1155,13 @@ def _select_binding_ok(
     per-type caps): a select binding a dimension the view does not
     declare; a `stat_card` select that leaves a non-facet plural dimension
     unpinned; for `line_chart` and `bar_chart`, a select that arrays more
-    than one dimension; and for every other type, a select whose
-    `_series_estimate` exceeds `_MAX_SERIES_PER_COMPONENT` (24), the cap
+    than one dimension; a `line_chart` array longer than
+    `LINE_CHART_MAX_VALUES`; and for every other type, a select whose
+    `_series_estimate` exceeds `MAX_SERIES_PER_COMPONENT` (24), the cap
     dfo-apis's assembler enforces although the catalogue grammar's
     `maxItems` allows an array of 30. `table` may array more than one
     dimension; the catalogue grammar restricts the single-array-dimension
-    rule to `line_chart` (cap 8) and `bar_chart`. A non-mapping `select`
+    rule to `line_chart` and `bar_chart`. A non-mapping `select`
     (a model that emitted a JSON array or scalar for select_json)
     is a rejection reason here rather than an `AttributeError` on
     `.items()` -- the parse site in `harness.generative.GeminiCompose`
@@ -1059,17 +1185,41 @@ def _select_binding_ok(
     if type_ == "stat_card":
         reason = _stat_card_binding_reason(select=select, view=view, array_dims=array_dims)
         return _select_invalid(reason) if reason is not None else None
-    if type_ in ("line_chart", "bar_chart") and len(array_dims) > 1:
-        return _select_invalid(
-            f"{type_} select carries array values for more than one dimension: {array_dims}"
-        )
+    array_issue = _chart_array_refusal(type_=type_, select=select, array_dims=array_dims)
+    if array_issue is not None:
+        return array_issue
     series = _series_estimate(select=select, declared=declared)
-    if series > _MAX_SERIES_PER_COMPONENT:
+    if series > MAX_SERIES_PER_COMPONENT:
         return harness_refusal(
             code=_SERIES_LIMIT_EXCEEDED,
             message=(
                 f"{type_} select expands to an estimated {series} series, "
-                f"over the platform's maximum of {_MAX_SERIES_PER_COMPONENT}"
+                f"over the platform's maximum of {MAX_SERIES_PER_COMPONENT}"
+            ),
+        )
+    return None
+
+
+def _chart_array_refusal(
+    *, type_: str, select: dict[str, Any], array_dims: list[str]
+) -> dict[str, Any] | None:
+    """The refusal of a `line_chart` or `bar_chart` select that arrays more
+    than one dimension, or of a `line_chart` array longer than
+    `LINE_CHART_MAX_VALUES`; None for any other select."""
+    if type_ not in ("line_chart", "bar_chart"):
+        return None
+    if len(array_dims) > 1:
+        return _select_invalid(
+            f"{type_} select carries array values for more than one dimension: {array_dims}"
+        )
+    listed = [len(select[name]) for name in array_dims]
+    if type_ == "line_chart" and listed and listed[0] > LINE_CHART_MAX_VALUES:
+        return harness_refusal(
+            code=_SERIES_LIMIT_EXCEEDED,
+            message=(
+                f"line_chart select lists {listed[0]} values on {array_dims[0]!r}, more than "
+                f"the {LINE_CHART_MAX_VALUES} one line_chart draws: list at most "
+                f"{LINE_CHART_MAX_VALUES}, or show them all as a bar_chart or a table"
             ),
         )
     return None
@@ -1477,9 +1627,12 @@ def _upstream_retrievals(
     return result
 
 
-# The argument `join` takes its right side's frame under
-# (`compiler.compile._join_arguments`).
-_JOIN_RIGHT_PARAMETER = "right_frame_ref"
+# The argument `join` and `sum_of` take their right side's frame under
+# (`compiler.compile._join_arguments`, `_two_sided_arguments`).
+_RIGHT_PARAMETER = "right_frame_ref"
+
+# The verbs whose frame carries the StatVars of both sides.
+_CARRIES_BOTH_SIDES = frozenset({"join", "sum_of"})
 
 
 def _carried_retrievals(
@@ -1491,9 +1644,11 @@ def _carried_retrievals(
     """The retrieval step ids whose StatVars `step_id`'s frame carries.
 
     A verb writes the StatVars of the frame bound to `FRAME_PARAMETER`, and
-    `join` also those of its right side. `compare`'s right side and
-    `share_of`'s denominator supply values only, so a frame resting on them
-    carries none of their StatVars. A subset of `_upstream_retrievals`.
+    `join` also those of its right side. `sum_of` writes a StatVar of its
+    own that stands for both sides' StatVars, so it carries both too.
+    `compare`'s right side and `share_of`'s denominator supply values only,
+    so a frame resting on them carries none of their StatVars. A subset of
+    `_upstream_retrievals`.
     """
     if step_id in retrieval_step_ids:
         return frozenset({step_id})
@@ -1501,8 +1656,8 @@ def _carried_retrievals(
     if step is None:
         return frozenset()
     names = [FRAME_PARAMETER]
-    if step.tool.name == "join":
-        names.append(_JOIN_RIGHT_PARAMETER)
+    if step.tool.name in _CARRIES_BOTH_SIDES:
+        names.append(_RIGHT_PARAMETER)
     carried: set[str] = set()
     for name in names:
         if (binding := step.bindings.get(name)) is not None:
@@ -1510,6 +1665,40 @@ def _carried_retrievals(
                 binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
             )
     return frozenset(carried)
+
+
+def _carried_parts(
+    step_id: str,
+    *,
+    steps_by_id: dict[str, WorkflowStep],
+    retrieval_step_ids: frozenset[str],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """The retrieval steps and the `sum_of` steps whose StatVars `step_id`'s frame carries.
+
+    The walk `_carried_retrievals` takes, stopping at each `sum_of`: the
+    frame carries a sum's one StatVar, which stands for every StatVar
+    under its sides, in place of the retrievals beneath it.
+    """
+    if step_id in retrieval_step_ids:
+        return frozenset({step_id}), frozenset()
+    step = steps_by_id.get(step_id)
+    if step is None:
+        return frozenset(), frozenset()
+    if step.tool.name == "sum_of":
+        return frozenset(), frozenset({step_id})
+    names = [FRAME_PARAMETER]
+    if step.tool.name in _CARRIES_BOTH_SIDES:
+        names.append(_RIGHT_PARAMETER)
+    retrievals: set[str] = set()
+    sums: set[str] = set()
+    for name in names:
+        if (binding := step.bindings.get(name)) is not None:
+            found, summed = _carried_parts(
+                binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+            )
+            retrievals |= found
+            sums |= summed
+    return frozenset(retrievals), frozenset(sums)
 
 
 def _link_evidence_to_terminal_frames(
@@ -1536,9 +1725,12 @@ def _link_evidence_to_terminal_frames(
     The frame's lineage names exactly the sources its card rests on. The
     link also carries the distinct StatVars the terminal step declared its
     frame carries (`StepRecord.stat_var_count`), which the card counts its
-    indicators from, and the retrievals whose StatVars the frame carries
-    (`_carried_retrievals`), so a summed family's ref counts as the StatVars
-    it sums.
+    indicators from, and the retrievals and sums whose StatVars the frame
+    carries (`_carried_parts`), each sum with the retrievals under it, so a
+    summed family's ref counts as the StatVars it sums and a sum's ref as the
+    distinct StatVars under its sides. Each `sum_of` step's own StatVar ref goes with every link,
+    beside the retrievals under each of its sides (`_sum_of_sides`), so the
+    card can name that ref by what it adds wherever it is drawn.
 
     All-or-nothing: a frame with no retrieval under it (a workflow defect,
     never a valid one), or one whose retrieval has no `EvidenceRecord`, is
@@ -1556,6 +1748,13 @@ def _link_evidence_to_terminal_frames(
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     stat_var_counts = {record.step_id: record.stat_var_count for record in outcome.steps}
     memo: dict[str, frozenset[str]] = {}
+    sum_of_sides = _sum_of_sides(
+        outcome,
+        steps_by_id=steps_by_id,
+        retrieval_step_ids=retrieval_step_ids,
+        step_order=step_order,
+        memo=memo,
+    )
     for step_id, frame_ref in outcome.results.items():
         sources = sorted(
             _upstream_retrievals(
@@ -1575,7 +1774,7 @@ def _link_evidence_to_terminal_frames(
                 unrecorded or "no retrieval feeds it",
             )
             continue
-        carried = _carried_retrievals(
+        carried, sums = _carried_parts(
             step_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
         )
         link(
@@ -1589,7 +1788,63 @@ def _link_evidence_to_terminal_frames(
                 for source in sources
                 if source in carried
             ],
+            summed_frame_refs=[
+                [
+                    evidence_by_step[source].frame_ref.model_dump()
+                    for source in sources
+                    if source in under
+                ]
+                for under in (
+                    _carried_retrievals(
+                        summed, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+                    )
+                    for summed in sorted(sums, key=step_order.__getitem__)
+                )
+            ],
+            sum_of_sides=sum_of_sides,
         )
+
+
+def _sum_of_sides(
+    outcome: Accepted,
+    *,
+    steps_by_id: dict[str, WorkflowStep],
+    retrieval_step_ids: frozenset[str],
+    step_order: dict[str, int],
+    memo: dict[str, frozenset[str]],
+) -> dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+    """Each `sum_of` step's StatVar ref, with the retrieval frames under its left and right side.
+
+    analysis-mcp writes a sum's rows under `dcid:<its spec_id>`, a ref no
+    graph node describes. A side that reads its left frame again names no
+    `right_frame_ref`, so both sides list the same retrievals.
+    """
+    evidence_by_step = {record.step_id: record for record in outcome.evidence}
+    sides: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    for record in outcome.steps:
+        step = steps_by_id.get(record.step_id)
+        if step is None or step.tool.name != "sum_of":
+            continue
+        left = step.bindings[FRAME_PARAMETER]
+        right = step.bindings.get(_RIGHT_PARAMETER, left)
+        left_refs, right_refs = (
+            [
+                evidence_by_step[source].frame_ref.model_dump()
+                for source in sorted(
+                    _upstream_retrievals(
+                        binding.from_step,
+                        steps_by_id=steps_by_id,
+                        retrieval_step_ids=retrieval_step_ids,
+                        memo=memo,
+                    ),
+                    key=lambda source: step_order[source],
+                )
+                if source in evidence_by_step
+            ]
+            for binding in (left, right)
+        )
+        sides[f"dcid:{record.frame_ref.spec_id}"] = (left_refs, right_refs)
+    return sides
 
 
 # The flow axis a recipient's role column sits on (`get_data`'s coverage
@@ -2596,7 +2851,12 @@ def create_root_workflow(
             interrupt_id=CLARIFY_INTERRUPT,
             message=_with_untold_drops(ctx, "Which reading did you mean?"),
             payload={
-                "candidates": node_input.get("candidates", []),
+                # The StatVars each candidate posts stay in code. The interrupt
+                # reaches models, and a model sees no family's members.
+                "candidates": [
+                    {key: value for key, value in candidate.items() if key != "stat_vars"}
+                    for candidate in node_input.get("candidates", [])
+                ],
                 "warnings": node_input.get("warnings", []),
                 "round": rounds + 1,
                 "max_rounds": MAX_CLARIFY_ROUNDS,
@@ -2726,8 +2986,8 @@ def create_root_workflow(
         defect, refused loudly rather than answered with a different plan
         shape, the same discipline `execute` uses for a missing tool surface.
 
-        A draft can run long -- the pair loads skills, proposes, hands off
-        to the translator, and corrects -- with nothing to show for it until
+        A draft can run long (the planner loads skills, proposes,
+        translates, and corrects) with nothing to show for it until
         this returns. So this node queues each `on_progress` report as it
         arrives and relays the queued reports as their own `Event`s once the
         await settles (see the direct-await discussion below). `execute`,
@@ -2873,6 +3133,19 @@ def create_root_workflow(
                 spec_id_elected=bool(ctx.state.get("spec_id_elected")),
                 spec_id_elected_label=ctx.state.get("spec_id_elected_label"),
                 on_progress=progress.put_nowait,
+                # The classic engine passes no `readings`; its seams render the envelope.
+                **(
+                    {
+                        "readings": [
+                            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get(
+                                "readings", []
+                            ),
+                            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+                        ]
+                    }
+                    if orchestrator
+                    else {}
+                ),
             )
         except NodeInterruptedError:
             # A planner-side ask paused the draft mid-turn, and ADK has
@@ -2929,7 +3202,7 @@ def create_root_workflow(
             if dropped:
                 kept = [seed_name(seed) for seed in envelope.get("seeds") or []]
                 text = unplanned_seeds_text(dropped, kept, text)
-            yield Event(output={"text": text}, route="refused")
+            yield Event(output={"text": text, "final": bool(refused.get("final"))}, route="refused")
             return
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()
@@ -2968,10 +3241,12 @@ def create_root_workflow(
         answer = (ctx.resume_inputs or {}).get(APPROVE_INTERRUPT)
         if not (ctx.state.get("awaiting_approve") and answer is not None):
             ctx.state["awaiting_approve"] = True
-            yield RequestInput(
-                interrupt_id=APPROVE_INTERRUPT,
-                message="Approve this plan before anything is retrieved?",
-                payload=node_input,
+            yield _interrupt(
+                RequestInput(
+                    interrupt_id=APPROVE_INTERRUPT,
+                    message="Approve this plan before anything is retrieved?",
+                    payload=node_input,
+                )
             )
             return
         ctx.state["awaiting_approve"] = False
@@ -3103,6 +3378,7 @@ def create_root_workflow(
                     "frame_ref_steps": [
                         {
                             "step": step_order[step_id],
+                            "step_id": step_id,
                             "tool": outcome.steps[step_order[step_id]].tool.name,
                             "is_final_step": True,
                         }
@@ -3440,15 +3716,30 @@ def create_root_workflow(
         events. Reached from START with the user's message (already in the
         session), and again after `ask` and `plan_done` with text to hand
         back, which goes in as a user message of its own so it is saved
-        with the session and still in view after a later pause."""
+        with the session and still in view after a later pause.
+
+        The hand-back is authored `user` on the agent's branch: ADK quotes an
+        event another author wrote as that agent's data, and an unbranched
+        event reaches every agent, the planner on a later `plan` call
+        included. The author is restored before the agent runs, since a
+        child context inherits it. An event's explicit branch also becomes
+        its node's branch, which ADK hands to every node downstream; the
+        status event that follows the hand-back carries the empty branch,
+        which ADK reads as "clear it", so this node's output and every later
+        node of the turn stay unbranched, as they are before any hand-back."""
         assert orchestrator is not None
         if isinstance(node_input, dict):
-            yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: node_input["status"]})
-            yield Event(
-                content=types.Content(
-                    role="user", parts=[types.Part.from_text(text=node_input["text"])]
+            author, ctx.event_author = ctx.event_author, "user"
+            try:
+                yield Event(
+                    content=types.Content(
+                        role="user", parts=[types.Part.from_text(text=node_input["text"])]
+                    ),
+                    branch=orchestrator.name,
                 )
-            )
+            finally:
+                ctx.event_author = author
+            yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: node_input["status"]}, branch="")
         else:
             yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"})
         answer = await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)
@@ -3474,15 +3765,17 @@ def create_root_workflow(
         asked = ctx.state.get(ORCHESTRATOR_ASKED_KEY)
         if not (asked and answer is not None):
             ctx.state[ORCHESTRATOR_ASKED_KEY] = node_input
-            yield RequestInput(
-                interrupt_id=CLARIFY_INTERRUPT,
-                message=node_input["question"],
-                payload={
-                    "candidates": [
-                        {"spec_id": f"o{index + 1}", "label": option}
-                        for index, option in enumerate(node_input["options"])
-                    ]
-                },
+            yield _interrupt(
+                RequestInput(
+                    interrupt_id=CLARIFY_INTERRUPT,
+                    message=node_input["question"],
+                    payload={
+                        "candidates": [
+                            {"spec_id": f"o{index + 1}", "label": option}
+                            for index, option in enumerate(node_input["options"])
+                        ]
+                    },
+                )
             )
             return
         ctx.state[ORCHESTRATOR_ASKED_KEY] = None
@@ -3506,27 +3799,39 @@ def create_root_workflow(
 
     def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
         """Hand the agent's brief to the planner under the orchestrator's own
-        key, leaving the graph's `question` alone; the planner's first-draft
-        entry is an empty payload."""
+        key, leaving the graph's `question` alone. This call's asks go under
+        `ASKS_STATE_KEY`, cleared when it lists none so no plan is held to an
+        earlier call's asks. The planner's first-draft entry is an empty
+        payload."""
         ctx.state[ORCHESTRATOR_BRIEF_KEY] = node_input["brief"]
+        ctx.state[ASKS_STATE_KEY] = node_input.get("asks") or None
         return {}
 
     async def plan_done(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
         """What the agent reads once its plan has run, or could not be made:
         the final-step frames, described and registered under ids it can
         chart (never an intermediate step's, the rule `compose` applies),
-        the step summaries, the family totals, and what failed, each cut."""
+        the step summaries, the family totals, what failed, each cut, and
+        each ask the brief listed with its outputs' status or its decline
+        (`_ask_status`), then the plan record
+        (`harness.turn_records.PlanRecord`). A step refused
+        `capability_unavailable` marks its spec_id unavailable to `fetch`
+        for the rest of the turn and does not give the plan call back."""
         if "text" in node_input:
-            _give_plan_back(ctx)
+            # A final refusal (an internal or repeated failure, or a question
+            # declined whole) fails the same way for any brief.
+            again = not node_input.get("final") and _give_plan_back(ctx)
             return {
                 "status": "Reading the planner's answer",
                 "text": "The planner could not make a plan: "
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\nAnswer with search and fetch "
-                "where you can, and say plainly what could not be calculated. A brief "
-                "that avoids the problem may be planned once more.",
+                "where you can, and say plainly what could not be calculated."
+                + (" A brief that avoids the problem may be planned once more." if again else ""),
             }
         described: list[tuple[dict[str, Any], dict[str, Any]]] = []
         not_chartable: list[dict[str, Any]] = []
+        # Final step id -> its output's status, as `_ask_status` reports it.
+        ran: dict[str, dict[str, Any]] = {}
         steps = node_input.get("frame_ref_steps", [])
         for ref, step in zip(node_input.get("frame_refs", []), steps, strict=True):
             if not step.get("is_final_step"):
@@ -3534,16 +3839,21 @@ def create_root_workflow(
             view = await executor(tool="describe_frame", args={"frame_ref": ref})
             if view.get("outcome") == "ok":
                 described.append((ref, view.get("view") or {}))
+                empty = (view.get("view") or {}).get("series_count") == 0
+                status = {"status": "empty"} if empty else {"status": "data"}
+                ran[step.get("step_id", "")] = {**status, "frame": frame_id_for(ref)}
             else:
                 # The same closed vocabulary `compose` hands narrate: never
                 # the platform's own text.
                 reason = _frame_unavailable_reason(view.get("refusal") or {})
                 not_chartable.append({"step": step.get("tool"), "reason": reason})
+                ran[step.get("step_id", "")] = {"status": "not_chartable", "reason": reason}
         frames: dict[str, Any] = dict(ctx.state.get(ORCHESTRATOR_FRAMES_KEY) or {})
         result: dict[str, Any] = {
             "frames": register_frames(frames, described),
             "step_summaries": [
-                str(summary)[:_HAND_BACK_CAP] for summary in node_input.get("step_summaries", [])
+                _without_noise(str(summary))[:_HAND_BACK_CAP]
+                for summary in node_input.get("step_summaries", [])
             ],
             "totals": node_input.get("stat_var_totals", []),
         }
@@ -3551,43 +3861,79 @@ def create_root_workflow(
             result["frames_not_chartable"] = not_chartable
         ctx.state[ORCHESTRATOR_FRAMES_KEY] = frames
         failed = node_input.get("failed_step")
+        missing_capability = bool(
+            failed and failed.get("code") == ToolErrorCode.CAPABILITY_UNAVAILABLE.value
+        )
+        record = ""
         raw_plan = ctx.state.get("plan")
         if raw_plan:
-            # The plan's own steps, each with the arguments it ran (a
-            # retrieval's spec_id and reading among them), so the agent can
+            # The plan record names every source by spec_id, so the agent can
             # fetch a part the failure did not touch without searching again,
-            # and `fetch` reads such a spec the way the plan did.
+            # and the readings let `fetch` read such a spec the way the plan
+            # did.
             plan = PlannerPlan.model_validate_json(raw_plan)
             readings = dict(ctx.state.get(ORCHESTRATOR_READINGS_KEY) or {})
-            steps: list[dict[str, Any]] = []
+            unavailable = dict(ctx.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
             for row in plan_display.step_rows(plan):
                 args = cast("dict[str, Any]", row["args"])
                 if args.get("spec_id") and args.get("stat_vars"):
                     readings[args["spec_id"]] = args["stat_vars"]
-                step = {"id": row["id"], "label": row["label"], "args": args}
-                if failed and row["id"] == failed.get("step_id"):
-                    step["status"] = "failed"
-                if len(json.dumps([*steps, step])) > _HAND_BACK_STEPS_CHARS:
-                    break
-                steps.append(step)
+                if (
+                    missing_capability
+                    and args.get("spec_id")
+                    and row["id"] == failed.get("step_id")
+                ):
+                    unavailable[args["spec_id"]] = str(failed.get("message") or "")
             ctx.state[ORCHESTRATOR_READINGS_KEY] = readings
-            result["steps"] = steps
+            ctx.state[ORCHESTRATOR_UNAVAILABLE_KEY] = unavailable
+            plan_record = PlanRecord.from_plan(
+                plan,
+                # A source an earlier turn's search returned is a searched
+                # one too, and keeps its block in that turn's record.
+                searched={
+                    *(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+                    *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
+                },
+                seeded={seeded.source.spec_id for seeded in seeded_sources(ctx.state)},
+                failed_step=failed.get("step_id") if failed else None,
+            )
+            ctx.state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
+                *(ctx.state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),
+                plan_record.model_dump(mode="json"),
+            ]
+            record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
+            if plan_record.asks:
+                stopped = _stopped_steps(plan.workflow, failed.get("step_id") if failed else None)
+                result["asks"] = [
+                    _ask_status(ask, ran, failed, stopped) for ask in plan_record.asks
+                ]
         if failed:
             result["failed_step"] = {
                 key: str(failed[key])[:_HAND_BACK_CAP]
                 for key in ("step_id", "tool", "code", "message", "remedy")
                 if failed.get(key)
             }
-            _give_plan_back(ctx)
-            lead = (
-                "The approved plan stopped at the step marked failed, and its result is "
-                "not available. Some other parts of the question may still be retrievable "
-                "on their own with fetch, by the spec_id a step names: show what can be "
-                "shown, labelled as what it is, never as the derived result; do not repeat "
-                "the failed request unchanged; and say plainly what remains unanswered and "
-                "why, in the user's terms. A brief that avoids the failure may be planned "
-                "once more."
-            )
+            if missing_capability:
+                # No brief avoids a capability the question needs, so the
+                # plan call is not given back.
+                lead = (
+                    "The approved plan stopped at the step marked failed: this deployment "
+                    "cannot do what that step needs, so the part of the question it serves "
+                    "is unavailable. Its data fetched without the refused option, or a chart "
+                    "of other data, does not answer it. Say that this part is unavailable "
+                    "and why, in the user's terms."
+                )
+            else:
+                lead = (
+                    "The approved plan stopped at the step marked failed, and its result is "
+                    "not available. Some other parts of the question may still be "
+                    "retrievable on their own with fetch, by the spec_id a step names: show "
+                    "what can be shown, labelled as what it is, never as the derived "
+                    "result; do not repeat the failed request unchanged; and say plainly "
+                    "what remains unanswered and why, in the user's terms."
+                )
+                if _give_plan_back(ctx):
+                    lead += " A brief that avoids the failure may be planned once more."
         elif not_chartable and not described:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "
@@ -3596,7 +3942,10 @@ def create_root_workflow(
             )
         else:
             lead = "The approved plan ran. Chart its frames and answer."
-        return {"status": "Reading the plan's results", "text": f"{lead}\n{json.dumps(result)}"}
+        return {
+            "status": "Reading the plan's results",
+            "text": f"{lead}\n{json.dumps(result)}{record}",
+        }
 
     converse_n = node(converse, name="converse")
     reply_n = node(reply, name="reply")
@@ -3692,8 +4041,10 @@ __all__ = [
     "AGENT_NAME",
     "APPROVE_INTERRUPT",
     "CLARIFY_INTERRUPT",
+    "LINE_CHART_MAX_VALUES",
     "MAX_CLARIFY_ROUNDS",
     "MAX_REPLANS",
+    "MAX_SERIES_PER_COMPONENT",
     "NO_OPERATIONS_ON_DOWNLOAD",
     "ONE_DATASET_PER_DOWNLOAD",
     "ORCHESTRATOR_BRIEF_KEY",

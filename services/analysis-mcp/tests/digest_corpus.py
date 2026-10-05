@@ -1,7 +1,7 @@
 """A small, committed corpus of every verb's digest-rendering scenarios for
 the budget test (`test_digest_budget.py`), mirroring `data_mcp.tests.
 digest_corpus`'s own shape: named cases, a size ceiling, and named pairs
-proving specific size-regression properties -- scaled down to what seven
+proving specific size-regression properties -- scaled down to what eight
 digest shapes (one tool per verb, no status discriminator) actually need.
 """
 
@@ -20,6 +20,7 @@ from analysis_mcp.digest import (
     render_join_digest,
     render_rank_digest,
     render_share_of_digest,
+    render_sum_of_digest,
 )
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
@@ -28,6 +29,7 @@ from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey, MatchedKeys
 from analysis_mcp.engine.rank import EntityRank, RankResult
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
+from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 
@@ -264,6 +266,56 @@ COMPARE_CASES: tuple[CorpusCase, ...] = (
         id="compare_capped_25_periods",
         kwargs=_compare_digest_kwargs(_compare_result(_period_comparisons(25))),
         render=render_compare_digest,
+    ),
+)
+
+
+# sum_of --------------------------------------------------------------------------
+
+
+def _sum_of_digest_kwargs(count: int, *, left_only: int = 0) -> dict:
+    """`count` summed periods; the left side also offers `left_only` later
+    periods the right lacks, which the coverage line lists."""
+    periods = tuple(f"20{i:02d}" for i in range(count))
+    left_periods = periods + tuple(f"21{i:02d}" for i in range(left_only))
+    fields: dict[str, object] = {
+        "frame": None,
+        "stat_var": "dcid:ops_" + "a" * 32,
+        "left_stat_vars": ("dcid:test_stat_var_left",),
+        "right_stat_vars": ("dcid:test_stat_var_right",),
+        "unit": "dcid:USDollar",
+        "facet_selections": (),
+        "left_facet_selections": (),
+        "right_facet_selections": (),
+        "warnings": (),
+        "left_periods": left_periods,
+        "right_periods": periods,
+        "intersected_periods": periods,
+        "left_coverage_fraction": count / len(left_periods),
+        "right_coverage_fraction": 1.0,
+    }
+    sums = tuple(
+        PeriodSum(time_period=period, left_value=float(i), right_value=2.0 * i, value=3.0 * i)
+        for i, period in enumerate(periods)
+    )
+    return {
+        "result": SumOfResult(period_sums=sums, **fields),
+        "op_spec_hash": "ops_" + "a" * 32,
+        "content_version": "ocv_" + "b" * 32,
+        "execution_identity": _EI,
+    }
+
+
+SUM_OF_CASES: tuple[CorpusCase, ...] = (
+    CorpusCase(
+        id="sum_of_single_period",
+        kwargs=_sum_of_digest_kwargs(1),
+        render=render_sum_of_digest,
+    ),
+    CorpusCase(
+        id="sum_of_capped_25_periods_25_left_only",
+        kwargs=_sum_of_digest_kwargs(25, left_only=25),
+        render=render_sum_of_digest,
     ),
 )
 

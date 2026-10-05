@@ -69,6 +69,13 @@
     "input",
     "entity"
   ],
+  "planner.operations.SumOfOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "left",
+    "right"
+  ],
   "planner.operations.Translation": [
     "operations",
     "terminal"
@@ -80,6 +87,10 @@
     "input_id",
     "reduction",
     "group_by"
+  ],
+  "planner.plan.AskAnswer": [
+    "ask",
+    "outputs"
   ],
   "planner.plan.ComparisonRequirement": [
     "kind",
@@ -132,6 +143,10 @@
     "denominator_scope",
     "change",
     "per_period"
+  ],
+  "planner.plan.Decline": [
+    "ask",
+    "code"
   ],
   "planner.plan.Entity": [
     "name",
@@ -198,10 +213,21 @@
     "axis",
     "denominator_scope"
   ],
+  "planner.plan.SumOfRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "left",
+    "right"
+  ],
   "planner.plan.Unit": [
     "currency",
     "prices",
     "base_year"
+  ],
+  "planner.records.Breakdown": [
+    "dimension",
+    "level"
   ],
   "planner.records.EntityIn": [
     "kind",

@@ -42,7 +42,7 @@ from pydantic import JsonValue
 
 # The frame parameter every analysis tool reads its first (or only) input
 # through. A two-sided tool that leaves its second frame parameter out reads
-# this one on both sides, as `compare` and `share_of` document.
+# this one on both sides, as `compare`, `sum_of` and `share_of` document.
 FRAME_PARAMETER = "frame_ref"
 
 
@@ -172,6 +172,10 @@ _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
         _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
         _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
     ),
+    _analysis("sum_of"): (
+        _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
+        _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
+    ),
     _analysis("share_of"): (
         _ColumnSite("numerator_entity", _Form.KEYS, (FRAME_PARAMETER,)),
         _ColumnSite("denominator_entity", _Form.KEYS, ("denominator_frame_ref",)),
@@ -295,6 +299,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 #   carry the same StatVar under different units or facets.
 # - `filter` keeps a subset of its input's rows.
 # - `compare` writes the rows of its left side's slice, one per period.
+# - `sum_of` writes one series under its own StatVar, one row per period.
 _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None], int | None]] = {
     ToolId(server="data-mcp", name="get_data"): _one_when_summed,
     _analysis("aggregate"): _one_unless_grouped,
@@ -304,6 +309,7 @@ _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None],
     _analysis("join"): _one_per_side,
     _analysis("filter"): _of_the_input,
     _analysis("compare"): _of_the_input,
+    _analysis("sum_of"): _one_stat_var,
 }
 
 

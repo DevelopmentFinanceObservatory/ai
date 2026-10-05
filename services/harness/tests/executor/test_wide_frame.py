@@ -39,6 +39,7 @@ from planner.operations import (
     RetrieveOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
     Translation,
 )
 from planner.plan import (
@@ -58,15 +59,19 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
+    SumOfRequirement,
 )
 from planner.records import (
+    Breakdown,
+    BreakdownDimension,
     DenominatorScope,
     EntityIn,
     PeriodThreshold,
     RankAmong,
     RankDirection,
+    StatVarReading,
 )
-from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
 
 from .conftest import ScriptedSurface, ok
 
@@ -272,7 +277,7 @@ def retrieved(
             "applied_window": None,
             "graph_revision": "rev_2026_10_01",
             "source_revisions": [{"source": "oecd_crs", "revision": "2026-10-01"}],
-            "resolved_stat_vars": [{"ref": "dcid:Oda", "roles": []}],
+            "resolved_stat_vars": [{"ref": f"dcid:{ref}", "roles": []} for ref in source.stat_vars],
             "facets": [{"axis": "unit", "ref": "usd", "basis": "declared_default"}],
         }
         await frame_store.put(
@@ -285,7 +290,7 @@ def retrieved(
         )
         statistics = [
             {
-                "stat_var": "dcid:Oda",
+                "stat_var": f"dcid:{source.stat_vars[0]}",
                 "entities": [
                     {"role": PROVIDER, "ref": provider.ref},
                     {"role": RECIPIENT, "ref": KENYA.ref},
@@ -752,6 +757,120 @@ async def test_a_rank_over_every_donor_the_source_leaves_open_ranks_the_frames_p
     }
 
 
+def _sector_frame(*, spec_id: str, totals: Mapping[tuple[ResolvedEntity, str], float]) -> Frame:
+    """A frame as dfo-apis rolls a family up to sector groups: `stat_var` is the spec's own
+    ref on every row, the role columns are kept, and `stat_var_crsPurpose` names each
+    row's group. A group with no records for a donor has no row, never a zero."""
+    return Frame.build(
+        role_keys=[PROVIDER, RECIPIENT, "stat_var_crsPurpose"],
+        rows=[
+            {
+                "stat_var": f"dcid:{spec_id}",
+                PROVIDER: provider.ref,
+                RECIPIENT: KENYA.ref,
+                "stat_var_crsPurpose": sector,
+                "time_period": "2024",
+                "value": value,
+                "unit": "usd",
+            }
+            for (provider, sector), value in totals.items()
+        ],
+    )
+
+
+async def test_which_sectors_received_the_most_aid_in_kenya_ranks_the_frames_sector_column(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # "Which sectors received the most aid in Kenya in 2024?": the retrieval
+    # sums the family within each top-level purpose code, the aggregate totals
+    # every donor within each sector, and the rank orders the sectors. Neither
+    # donor gave to the production sector, so it has no row and no rank.
+    source = _source(
+        entities=(KENYA,), open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),)
+    ).model_copy(
+        update={
+            "stat_vars": ("OdaHealth", "OdaEducation"),
+            "open_axes": (OpenAxis(property="crsPurpose", summable=True),),
+        }
+    )
+    every_donor = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across="donor",
+        period=Period(start=2024, end=2024),
+        stat_vars=StatVarReading.SEPARATE,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0),
+    )
+    by_sector: dict[str, Any] = {
+        "reduction": Reduction.SUM,
+        "group_by": (GroupBy.PERIOD, GroupBy.BREAKDOWN),
+    }
+    rank: dict[str, Any] = {
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "sector",
+        "limit": 10,
+    }
+    plan = plan_for(
+        [
+            every_donor,
+            AggregateRequirement(
+                id="by_sector", decision_ids=["measure"], input_id="oda", **by_sector
+            ),
+            RankRequirement(
+                id="top", decision_ids=["measure", "population"], input_id="by_sector", **rank
+            ),
+        ],
+        [
+            _RETRIEVE,
+            AggregateOperation(
+                id="by_sector_op", requirement_id="by_sector", input="crs", **by_sector
+            ),
+            RankOperation(id="top_op", requirement_id="top", input="by_sector_op", **rank),
+        ],
+        terminal="top_op",
+        discovered={"oda": source},
+        decisions=[decision(slot="population", fixes=DecisionFixes(among=RankAmong.POPULATION))],
+    )
+    frame = _sector_frame(
+        spec_id=SPEC_CRS,
+        totals={
+            (GERMANY, "Social infrastructure"): 300.0,
+            (FRANCE, "Social infrastructure"): 200.0,
+            (GERMANY, "Economic infrastructure"): 400.0,
+            (FRANCE, "Humanitarian aid"): 50.0,
+        },
+    )
+    surface = surface_for(
+        get_data=[ok(await retrieved(source, frame=frame, providers=(GERMANY, FRANCE)))]
+    )
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    ((_, get_data),) = [call for call in surface.calls if call[0] == "get_data"]
+    assert get_data["breakdown"] == {"code_system": "crsPurpose", "level": 0}
+    assert _analysis_call(surface, "aggregate") == {
+        "aggregation": "sum",
+        "group_by": ["time_period", "stat_var_crsPurpose"],
+    }
+    assert _analysis_call(surface, "rank")["rank_by"] == ["stat_var_crsPurpose"]
+    held = await frame_store.get(outcome.results["top_op"])
+    assert held is not None
+    ranked = held[0].table.to_pylist()
+    assert {row["stat_var_crsPurpose"]: row["value"] for row in ranked} == {
+        "Social infrastructure": 500.0,
+        "Economic infrastructure": 400.0,
+        "Humanitarian aid": 50.0,
+    }
+
+
 async def test_a_growth_keys_each_series_by_the_frames_role_columns(
     plan_for: PlanFactory,
     decision: Callable[..., Decision],
@@ -812,6 +931,64 @@ async def test_a_compare_selects_each_side_by_the_frames_provider_column(
     assert _analysis_call(surface, "compare") == {
         "left_entity": {PROVIDER: "country/DEU"},
         "right_entity": {PROVIDER: "country/FRA"},
+    }
+
+
+async def test_a_sum_of_two_sources_pins_each_sides_unit_and_yields_one_series(
+    plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> None:
+    # Bilateral ODA plus a second source's imputed ODA, each from Germany
+    # to Kenya: each side names its donor to read one series, and the two
+    # are added year by year.
+    bilateral = _source(entities=(GERMANY, KENYA))
+    imputed = _source(spec_id=SPEC_CRS_HEALTH, entities=(GERMANY, KENYA)).model_copy(
+        update={"stat_vars": ("OdaImputed",)}
+    )
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="oda", entity="Germany"),
+        right=RequirementSide(input_id="oda_health", entity="Germany"),
+    )
+    germany_to_kenya = {"donors": ("Germany",)}
+    plan = plan_for(
+        [
+            _requirement(**germany_to_kenya),
+            _requirement(id="oda_health", **germany_to_kenya),
+            total,
+        ],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            SumOfOperation(
+                id="total_op",
+                requirement_id="total",
+                left=Side(input="crs", entity="Germany"),
+                right=Side(input="crs_health", entity="Germany"),
+            ),
+        ],
+        terminal="total_op",
+        discovered={"oda": bilateral, "oda_health": imputed},
+    )
+    results = {
+        SPEC_CRS: await retrieved(bilateral),
+        SPEC_CRS_HEALTH: await retrieved(
+            imputed, frame=_family_frame(stat_vars=("OdaImputed",), providers=_GERMANY_ONLY)
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert outcome.steps[-1].row_count == 24
+    assert outcome.steps[-1].role_keys == ()
+    assert outcome.steps[-1].stat_var_count == 1
+    assert _analysis_call(surface, "sum_of") == {
+        "left_entity": {PROVIDER: "country/DEU"},
+        "right_entity": {PROVIDER: "country/DEU"},
+        "left_unit": "usd",
+        "right_unit": "usd",
     }
 
 
@@ -942,7 +1119,9 @@ async def test_a_period_filter_over_a_family_frame_declares_the_stat_vars_it_kep
     source = _source(entities=_GERMANY_ONLY)
     frame = _family_frame(stat_vars=FAMILY, providers=_GERMANY_ONLY)
     assert _stat_vars(frame) == 3
-    surface = surface_for(get_data=[ok(await retrieved(source, frame=frame))])
+    surface = surface_for(
+        get_data=[ok(await retrieved(source, frame=frame, providers=(GERMANY, FRANCE)))]
+    )
 
     outcome = await _run(_since_2005_plan(plan_for, source), surface)
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.graph import ORCHESTRATOR_STATUS_KEY, STEP_PROGRESS_KEY
+from harness.orchestrator_tools import HANDED_OFF
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import (
     _OrchestratorTranslator,
@@ -104,7 +106,9 @@ def test_text_before_a_tool_call_is_interim_and_the_last_text_is_the_answer():
 def test_text_after_a_hand_off_is_not_shown_until_the_next_run_starts():
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="ask_user", args={"question": "Which Congo?"})
-    taken = types.FunctionResponse(id="call_1", name="ask_user", response={"status": "Recorded."})
+    taken = types.FunctionResponse(
+        id="call_1", name="ask_user", response={"status": "Recorded.", HANDED_OFF: "ask"}
+    )
 
     frames = _frames(
         translator,
@@ -123,12 +127,21 @@ def test_text_after_a_hand_off_is_not_shown_until_the_next_run_starts():
     assert ("Reading your answer", StepStatus.COMPLETE) in _steps(frames)
 
 
-def test_a_tool_that_returned_an_error_is_a_failed_step_with_the_reason():
+@pytest.mark.parametrize(
+    ("answer", "detail"),
+    [
+        ({"error": "search is down"}, "search is down"),
+        ({"refusal": "too big", "code": "over_ceiling"}, "too big"),
+        # A refusal that states no reason still fails its step.
+        ({"refusal": None, "code": "over_ceiling"}, None),
+    ],
+)
+def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_with_the_reason(
+    answer, detail
+):
     translator = _translator()
-    call = types.FunctionCall(id="call_1", name="search", args={"query": "x"})
-    failed = types.FunctionResponse(
-        id="call_1", name="search", response={"error": "search is down"}
-    )
+    call = types.FunctionCall(id="call_1", name="fetch", args={"spec_id": "spec_x"})
+    failed = types.FunctionResponse(id="call_1", name="fetch", response=answer)
 
     frames = _frames(
         translator,
@@ -138,7 +151,7 @@ def test_a_tool_that_returned_an_error_is_a_failed_step_with_the_reason():
 
     assert [(f.status, f.detail) for f in frames if f.event == "activity.step"][:2] == [
         (StepStatus.RUNNING, None),
-        (StepStatus.FAILED, "search is down"),
+        (StepStatus.FAILED, detail),
     ]
 
 
@@ -162,21 +175,36 @@ def test_step_ids_stay_unique_across_the_segments_of_one_turn():
     assert len(ids) == len(set(ids)) == 4
 
 
-def test_a_refused_hand_off_leaves_the_models_text_showing():
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Its budget spent.
+        {"error": "plan has been called 1 time(s) this turn, its limit."},
+        # Its asks past the planner's limits: a refusal, with no "error".
+        {"refusal": "plan recorded nothing: asks lists 7 outputs, more than 6.", "code": "x"},
+    ],
+)
+def test_a_refused_hand_off_leaves_the_models_text_showing(answer):
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="plan", args={"brief": "b"})
-    refused = types.FunctionResponse(id="call_1", name="plan", response={"error": "limit"})
+    refused = types.FunctionResponse(id="call_1", name="plan", response=answer)
 
     frames = _frames(
         translator,
         _event(types.Part(function_call=call)),
         _event(types.Part(function_response=refused)),
         _event(types.Part(text="I cannot plan this; here is what I found."), partial=True),
+        _event(types.Part(text="I cannot plan this; here is what I found.")),
     )
+    closing = translator.finish()
 
     assert [f.text for f in frames if f.event == "message.delta"] == [
         "I cannot plan this; here is what I found."
     ]
+    assert [f.text for f in closing if f.event == "message.complete"] == [
+        "I cannot plan this; here is what I found."
+    ]
+    assert ("Handing the question to the planner", StepStatus.FAILED) in _steps(frames)
 
 
 def test_a_thought_shows_its_latest_heading_while_the_model_thinks():
@@ -242,3 +270,4 @@ def test_tool_call_labels_come_from_the_arguments():
     )
     assert _tool_call_label("plan", {"brief": "b"}) == "Handing the question to the planner"
     assert _tool_call_label("explain_dfo", {}) == "Reading about DFO"
+    assert _tool_call_label("recall", {"part": "plan"}) == "Looking back at an earlier turn"

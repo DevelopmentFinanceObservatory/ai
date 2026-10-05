@@ -26,7 +26,6 @@ from harness.wire import (
     MAX_SEED_ROLES,
     MAX_SEED_SENTENCE_CHARS,
     MAX_SEED_SOURCE_CHARS,
-    MAX_SEED_STAT_VARS,
     MAX_SEED_TEXT_CHARS,
     MAX_TARGET_YEAR,
     Seed,
@@ -162,17 +161,16 @@ def most_entities_under(cap: int, measure: Callable[[int], int]) -> int:
 
 
 def fullest_described_seed(number: int) -> tuple[dict[str, Any], int]:
-    """A seed whose description is as long as `MAX_SEED_SOURCE_CHARS` allows: the
-    StatVars at their bound and as many entities as still fit. Returns it with that count."""
+    """A seed whose description is as long as `MAX_SEED_SOURCE_CHARS` allows: as many
+    entities as fit. It lists no StatVars, which the description counts and never
+    names, so its record stays under `MAX_SEED_RECORD_CHARS`. Returns it with that count."""
 
     def measure(entities: int) -> int:
-        source = source_from_spec_block(
-            bounded_seed(number, entities=entities, stat_vars=MAX_SEED_STAT_VARS)["spec"]
-        )
+        source = source_from_spec_block(bounded_seed(number, entities=entities)["spec"])
         return len(json.dumps(compact_source(source)))
 
     entities = most_entities_under(MAX_SEED_SOURCE_CHARS, measure)
-    return bounded_seed(number, entities=entities, stat_vars=MAX_SEED_STAT_VARS), entities
+    return bounded_seed(number, entities=entities), entities
 
 
 def recorded_seed(number: int, *, entities: int) -> dict[str, Any]:

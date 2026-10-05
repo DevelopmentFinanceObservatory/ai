@@ -162,6 +162,7 @@ from data_mcp.series_statistics import (
     fetch_series_statistics_table,
     find_statistics_artifact,
 )
+from data_mcp.stat_var_list import with_stat_var_list
 from fastmcp.exceptions import ResourceError
 from planner.plan import DatasetRequirement, Plan, PlanStatus, plan_revision
 from planner.workflow import ArtifactKind, EvidenceBinding, SelectedSource, Workflow, WorkflowStep
@@ -1186,10 +1187,13 @@ class _Run:
         # rejects any other pairing before a plan can be approved).
         assert isinstance(requirement, DatasetRequirement)
         try:
-            manifest = parse_manifest(result.structured_content or {})
+            # Membership compares every StatVar the trace lists, so a list the
+            # result left out is read back first; a read that fails refuses.
+            structured = await with_stat_var_list(result.structured_content or {})
+            manifest = parse_manifest(structured)
             series_stats = await self.fetch_series_stats(manifest)
             evidence = evidence_from_manifest(manifest, series_stats=series_stats)
-        except (ArtifactError, ValueError) as exc:
+        except (ArtifactError, ValueError, ResourceError) as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE, str(exc), step_id=step.id
             ) from exc

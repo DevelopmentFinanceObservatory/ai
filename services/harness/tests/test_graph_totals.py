@@ -1,7 +1,8 @@
 """Tests for what `harness.graph` says about a summed family of StatVars.
 
 `_carried_retrievals` picks the retrievals whose StatVars a terminal frame
-carries, which the card counts its indicators from. `_stat_var_totals`
+carries, which the card counts its indicators from, and `_sum_of_sides`
+the retrievals under each side of a sum, which the card names its StatVar by. `_stat_var_totals`
 writes the sentence `narrate` states for each summed family an answer frame
 carries, and `_with_totals` appends it when a draft leaves it out.
 
@@ -19,17 +20,26 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
 from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
-from compiler.surface import McpSurface, ToolSchema
+from compiler.surface import McpSurface, ToolSchema, ToolSurface
 from data_mcp.server import mcp as data_mcp
 from executor.outcomes import Accepted, EvidenceRecord, StepRecord
-from harness.graph import _carried_retrievals, _stat_var_totals, _with_totals
+from harness.conversation import current_conversation_id
+from harness.graph import (
+    _carried_retrievals,
+    _link_evidence_to_terminal_frames,
+    _stat_var_totals,
+    _sum_of_sides,
+    _with_totals,
+)
+from harness.provenance import ProvenanceStore
+from harness.studio_translate import _RecordingSurface
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -598,7 +608,7 @@ def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = No
     )
 
 
-def test_a_join_carries_both_sides_and_a_compare_only_its_left() -> None:
+def test_a_join_or_sum_carries_both_sides_and_a_compare_only_its_left() -> None:
     steps = {
         step.id: step
         for step in (
@@ -613,6 +623,9 @@ def test_a_join_carries_both_sides_and_a_compare_only_its_left() -> None:
                 frame_bindings={"frame_ref": "left", "right_frame_ref": "right"},
             ),
             _step("yearly", "aggregate", frame_bindings={"frame_ref": "compared"}),
+            _step(
+                "summed", "sum_of", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}
+            ),
         )
     }
 
@@ -622,9 +635,181 @@ def test_a_join_carries_both_sides_and_a_compare_only_its_left() -> None:
         )
 
     assert carried("joined") == {"left", "right"}
+    assert carried("summed") == {"left", "right"}
     assert carried("compared") == {"left"}
     assert carried("yearly") == {"left"}
     assert carried("right") == {"right"}
+
+
+def test_a_sums_ref_maps_to_the_retrievals_under_each_side() -> None:
+    """A sum read by an aggregate is named wherever its ref is drawn; a sum of
+    two slices of one frame lists that retrieval on both sides."""
+    workflow_steps = (
+        _step("left", "get_data"),
+        _step("right", "get_data"),
+        _step("summed", "sum_of", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}),
+        _step("yearly", "aggregate", frame_bindings={"frame_ref": "summed"}),
+        _step("one_frame", "sum_of", frame_bindings={"frame_ref": "left"}),
+    )
+    frames = {
+        step.id: FrameRef(spec_id=f"spec_{index:032d}", content_version=f"cv_{index:032d}")
+        for index, step in enumerate(workflow_steps)
+    }
+    outcome = Accepted(
+        revision="r",
+        evidence=tuple(
+            EvidenceRecord(
+                requirement_id=step_id,
+                step_id=step_id,
+                frame_ref=frames[step_id],
+                spec_id=frames[step_id].spec_id,
+                stat_vars=(),
+                window=None,
+                gaps=(),
+                citation="c",
+            )
+            for step_id in ("left", "right")
+        ),
+        steps=tuple(
+            StepRecord(
+                step_id=step.id, tool=step.tool, attempts=1, frame_ref=frames[step.id], digest="d"
+            )
+            for step in workflow_steps
+        ),
+        results={"yearly": frames["yearly"], "one_frame": frames["one_frame"]},
+    )
+
+    sides = _sum_of_sides(
+        outcome,
+        steps_by_id={step.id: step for step in workflow_steps},
+        retrieval_step_ids=frozenset({"left", "right"}),
+        step_order={step.id: index for index, step in enumerate(workflow_steps)},
+        memo={},
+    )
+
+    left, right = (frames[step_id].model_dump() for step_id in ("left", "right"))
+    assert sides == {
+        f"dcid:{frames['summed'].spec_id}": ([left], [right]),
+        f"dcid:{frames['one_frame'].spec_id}": ([left], [left]),
+    }
+
+
+_ODA_FAMILY = tuple(f"ODA_{index}" for index in range(12))
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "terminal", "counted"),
+    [
+        # A twelve-member family summed by its retrieval, plus a singleton.
+        ((_ODA_FAMILY, 12), (("Imputed_ODA",), None), "summed", 13),
+        # A verb over the sum, and a compare whose left side is the sum.
+        ((_ODA_FAMILY, 12), (("Imputed_ODA",), None), "yearly", 13),
+        ((_ODA_FAMILY, 12), (("Imputed_ODA",), None), "compared", 13),
+        # A sum of two slices of the family's one frame.
+        ((_ODA_FAMILY, 12), (("Imputed_ODA",), None), "one_frame", 12),
+        # One StatVar retrieved for two places and summed.
+        ((("ODA",), None), (("ODA",), None), "summed", 1),
+        ((("ODA",), None), (("ODA",), None), "yearly", 1),
+    ],
+)
+def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
+    left: tuple[tuple[str, ...], int | None],
+    right: tuple[tuple[str, ...], int | None],
+    terminal: str,
+    counted: int,
+) -> None:
+    """A sum declares one StatVar of its own; the card counts the distinct
+    StatVars under its two sides, read from each retrieval's trace."""
+    workflow_steps = (
+        _step("left", "get_data"),
+        _step("right", "get_data"),
+        _step("summed", "sum_of", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}),
+        _step("yearly", "aggregate", frame_bindings={"frame_ref": "summed"}),
+        _step(
+            "compared",
+            "compare",
+            frame_bindings={"frame_ref": "summed", "right_frame_ref": "right"},
+        ),
+        _step("one_frame", "sum_of", frame_bindings={"frame_ref": "left"}),
+    )
+    sources = {
+        step_id: SelectedSource(
+            spec_id="spec_" + spec_char * 32,
+            sentence="Aid to Kenya",
+            has_data=True,
+            stat_vars=stat_vars,
+        )
+        for step_id, spec_char, (stat_vars, _) in (("left", "a", left), ("right", "b", right))
+    }
+    frames = {
+        **{step_id: _retrieved(source.spec_id, step_id) for step_id, source in sources.items()},
+        **{step.id: _frame(step.id) for step in workflow_steps[2:]},
+    }
+    store = ProvenanceStore()
+    for step_id, (stat_vars, summed) in (("left", left), ("right", right)):
+        store.put(
+            conversation=current_conversation_id.get(),
+            spec_id=frames[step_id].spec_id,
+            content_version=frames[step_id].content_version,
+            manifest={
+                "trace": {
+                    "resolved_stat_vars": [
+                        {"ref": ref, "observation_count": 5} for ref in stat_vars
+                    ]
+                },
+                "summed_stat_var_count": summed,
+            },
+        )
+    outcome = Accepted(
+        revision="r",
+        evidence=tuple(
+            EvidenceRecord(
+                requirement_id=step_id,
+                step_id=step_id,
+                frame_ref=frames[step_id],
+                spec_id=frames[step_id].spec_id,
+                stat_vars=(),
+                window=None,
+                gaps=(),
+                citation="c",
+            )
+            for step_id in sources
+        ),
+        steps=tuple(
+            StepRecord(
+                step_id=step.id,
+                tool=step.tool,
+                attempts=1,
+                frame_ref=frames[step.id],
+                digest="d",
+                stat_var_count=1,
+            )
+            for step in workflow_steps
+        ),
+        results={terminal: frames[terminal]},
+    )
+    workflow = Workflow(
+        steps=list(workflow_steps),
+        sources=list(sources.values()),
+        evidence_bindings=[
+            EvidenceBinding(requirement_id=step_id, step_id=step_id, spec_id=source.spec_id)
+            for step_id, source in sources.items()
+        ],
+        terminal_steps=[terminal],
+    )
+
+    _link_evidence_to_terminal_frames(
+        _RecordingSurface(cast("ToolSurface", None), provenance=store), outcome, workflow=workflow
+    )
+
+    assert (
+        store.stat_var_count(
+            conversation=current_conversation_id.get(),
+            spec_id=frames[terminal].spec_id,
+            content_version=frames[terminal].content_version,
+        )
+        == counted
+    )
 
 
 def test_a_retrieval_s_source_is_the_one_at_its_binding_s_position() -> None:

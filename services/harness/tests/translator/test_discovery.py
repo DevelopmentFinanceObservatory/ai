@@ -6,6 +6,7 @@ The tools are exercised through the MCP protocol against the canned
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -26,9 +27,6 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.definition_writes import identity_definition
 from google.adk.tools.function_tool import FunctionTool
 from planner.plan import (
-    ENVELOPE_SPEC_BLOCK_STATE_KEY,
-    ENVELOPE_SPEC_STATE_KEY,
-    ENVELOPE_SPEC_WARNINGS_STATE_KEY,
     PLAN_STATE_KEY,
     SEEDED_SOURCES_STATE_KEY,
     SEEDS_STATE_KEY,
@@ -36,12 +34,16 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     Entity,
+    PinSource,
     Plan,
     PlanStatus,
     SeededSource,
     Unit,
+    current_earlier_block,
+    pin_sources,
     plan_revision,
     save_dropped_seeds,
+    save_pin_sources,
     save_seeded_sources,
     seeded_sources,
 )
@@ -218,6 +220,32 @@ async def test_the_ask_reaches_search_in_the_requirements_own_fields(
     ]
 
 
+@pytest.mark.parametrize(
+    ("role", "sent"),
+    [("origin", {"role": "donor"}), ("Lenders", {"role": "creditor"}), ("country", {})],
+    ids=["axis-name", "plural-synonym", "place-noun"],
+)
+async def test_a_stored_role_reaches_search_as_the_party_word_it_stands_for(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    search_calls: list[dict[str, Any]],
+    context_holding: ContextHolding,
+    role: str,
+    sent: dict[str, str],
+) -> None:
+    # `propose_plan` holds a model to the party words; a plan read back from
+    # session state may still carry a word `search`'s lexicon refuses.
+    stored = requirement(entities=[Entity(name="Kenya", role=role)])
+    context = context_holding(draft(evidence_requirements=[stored, derived_requirement()]))
+
+    await _discover(surface, context)
+
+    (call,) = search_calls
+    assert call["parts"][0]["entities"] == [{"text": "Kenya", **sent}]
+
+
 async def test_the_unit_sent_carries_the_price_basis_and_base_year(
     surface: McpSurface,
     draft: DraftFactory,
@@ -313,6 +341,43 @@ def test_a_source_shows_each_open_axis_with_its_member_count() -> None:
     )
 
     assert compact_source(source)["open_entity_axes"] == [{"column": "origin", "members": 55}]
+
+
+@pytest.mark.parametrize(
+    ("stat_vars", "measure_count"),
+    [
+        # A family Search states a member digest for, listed without items.
+        (
+            {"items": [], "member_count": 96, "member_count_exact": True, "truncated": True},
+            "96 StatVars",
+        ),
+        # A recall sample: the members Search confirmed, a floor on the family.
+        (
+            {"member_count": 3, "member_count_exact": False, "truncated": False},
+            "at least 3 StatVars",
+        ),
+        ({"member_count": None, "truncated": False}, "3 StatVars"),
+        ({"member_count": None, "truncated": True}, "at least 3 StatVars"),
+    ],
+    ids=["digest-family", "recall-sample", "listed-whole", "listed-capped"],
+)
+def test_a_source_names_its_measure_counts_its_stat_vars_and_names_none(
+    stat_vars: dict[str, Any], measure_count: str
+) -> None:
+    """A partial list reads to a model as the whole family, so the description
+    counts the StatVars and names the axes they vary along, and no StatVar."""
+    block = copy.deepcopy(_KENYA_OVER["2010-2023"])
+    listed = [item["ref"] for item in block["resolved"]["stat_vars"]["items"]]
+    block["resolved"]["stat_vars"].update(stat_vars)
+    source = source_from_spec_block(block)
+
+    described = compact_source(source)
+
+    assert described["measure"] == block["resolved"]["shape"]["label"]
+    assert described["measure_count"] == measure_count
+    assert described["varies_by"] == [axis.property for axis in source.open_axes]
+    assert described["varies_by"]
+    assert not any(stat_var in json.dumps(described) for stat_var in listed)
 
 
 @pytest.mark.parametrize("open_entity_axes", [(), None])
@@ -616,7 +681,8 @@ def _matching_window() -> dict[str, Any]:
     return {"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}}
 
 
-async def test_a_pin_matching_the_resolve_id_builds_the_source_with_no_search(
+@pytest.mark.parametrize("earlier_turn", [False, True], ids=["this_turn", "an_earlier_turn"])
+async def test_a_pin_of_a_shown_dataset_builds_the_source_with_no_search(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -624,13 +690,13 @@ async def test_a_pin_matching_the_resolve_id_builds_the_source_with_no_search(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    earlier_turn: bool,
 ) -> None:
-    # The pin names the exact id this turn's own resolve settled on
-    # (`ENVELOPE_SPEC_STATE_KEY`), the plan states one dataset requirement,
-    # the resolve carried no blocking warning, and the block's own window
-    # agrees with the requirement's period: the source comes straight from
-    # the resolve's own block (`ENVELOPE_SPEC_BLOCK_STATE_KEY`), with no
-    # `search` call at all.
+    # The pin names a dataset the planner was shown (`PIN_SOURCES_STATE_KEY`)
+    # with no blocking warning, and the block's own window agrees with the
+    # requirement's period: the source comes straight from that block, with
+    # no `search` call at all. An earlier turn's dataset is shown with no
+    # block, and the pin reads the one that turn stored.
     pinned = requirement(source_spec_id=SPEC_KENYA)
     context = context_holding(
         draft(
@@ -638,10 +704,14 @@ async def test_a_pin_matching_the_resolve_id_builds_the_source_with_no_search(
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
-    context.state[ENVELOPE_SPEC_BLOCK_STATE_KEY] = _spec(
-        SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()
-    )
+    block = _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window())
+    if earlier_turn:
+        sources = pin_sources(context.state)
+        sources[SPEC_KENYA] = PinSource(settled=True, earlier_turn=True)
+        save_pin_sources(context.state, sources)
+        current_earlier_block.set({SPEC_KENYA: block}.get)
+    else:
+        _shown(context, SPEC_KENYA, block)
 
     result = await _discover(surface, context)
 
@@ -656,7 +726,50 @@ async def test_a_pin_matching_the_resolve_id_builds_the_source_with_no_search(
     assert log.records[0].tool == "pin"
 
 
-async def test_a_pin_matching_the_resolve_id_still_searches_with_two_dataset_requirements(
+def _shown(context: Any, spec_id: str, block: dict[str, Any] | None, *warnings: str) -> None:
+    """Add `spec_id` to the datasets the planner was shown, with `block` and `warnings`."""
+    sources = pin_sources(context.state)
+    sources[spec_id] = PinSource(block=block, warnings=warnings, settled=True)
+    save_pin_sources(context.state, sources)
+
+
+async def test_two_requirements_pinning_one_shown_dataset_both_search(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Two requirements with different measures pin the same shown dataset:
+    # nothing tells which one the search that returned it was about, so
+    # neither reuses its block and each is confirmed by a fresh search.
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[
+                requirement(source_spec_id=SPEC_KENYA),
+                derived_requirement(),
+                requirement(id="req_b", measure="debt stock", source_spec_id=SPEC_KENYA),
+                derived_requirement(id="calc_b", input_id="req_b"),
+            ],
+        )
+    )
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+    )
+
+    await _discover(surface, context)
+    await _discover(surface, context, requirement_id="req_b")
+
+    assert len(search_calls) == 2
+    assert "pin" not in [record.tool for record in load_log(context.state).records]
+
+
+async def test_two_pins_of_shown_datasets_each_reuse_their_own_block(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -666,39 +779,50 @@ async def test_a_pin_matching_the_resolve_id_still_searches_with_two_dataset_req
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
 ) -> None:
-    # The resolve's own search read one variable. A plan stating two dataset
-    # requirements gives no way to tell which one that search answered, so
-    # the pin still confirms through a fresh `search` rather than reusing
-    # the resolve's block for either one.
-    source_decision = pinning_decision(
-        SPEC_KENYA,
-        slot="source",
-        description="Which source to use.",
-        options=["OECD DAC", "World Bank IDS"],
-        chosen="OECD DAC",
-    )
+    # Two dataset requirements pin two datasets the planner was shown: each
+    # takes its source from its own block, and no discovery search is spent.
     req_b = requirement(
         id="req_b",
         measure="other debt figures",
-        source_spec_id=SPEC_KENYA,
-        decision_ids=["measure", "source"],
+        source_spec_id=SPEC_OTHER,
+        decision_ids=["source_b"],
     )
-    calc_b = derived_requirement(id="calc_b", input_id="req_b")
+    source_b = pinning_decision(
+        SPEC_OTHER,
+        slot="source_b",
+        description="Which debt figures to use.",
+        options=[SPEC_OTHER, "unpinned"],
+        chosen=SPEC_OTHER,
+    )
     context = context_holding(
         draft(
-            decisions=[decision(), source_decision],
-            evidence_requirements=[requirement(), derived_requirement(), req_b, calc_b],
+            decisions=[pinning_decision(SPEC_KENYA), source_b],
+            evidence_requirements=[
+                requirement(source_spec_id=SPEC_KENYA),
+                derived_requirement(),
+                req_b,
+                derived_requirement(id="calc_b", input_id="req_b"),
+            ],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
-    context.state[ENVELOPE_SPEC_BLOCK_STATE_KEY] = _spec(
-        SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+    )
+    _shown(
+        context, SPEC_OTHER, _spec(SPEC_OTHER, "debt stock of Kenya", coverage=_matching_window())
     )
 
-    result = await _discover(surface, context, requirement_id="req_b")
+    first = await _discover(surface, context)
+    second = await _discover(surface, context, requirement_id="req_b")
 
-    assert len(search_calls) == 1
-    assert result["status"] == "definite"
+    assert search_calls == []
+    assert [first["sources"][0]["spec_id"], second["sources"][0]["spec_id"]] == [
+        SPEC_KENYA,
+        SPEC_OTHER,
+    ]
+    assert [record.tool for record in load_log(context.state).records] == ["pin", "pin"]
 
 
 def _two_dataset_context_pinning(
@@ -833,6 +957,31 @@ def test_described_sources_keeps_the_definition_any_retrieval_of_a_dataset_fetch
     assert "also_retrieved_as" not in described
 
 
+@pytest.mark.parametrize(
+    "members",
+    [
+        ({}, {"stat_vars": ("Var_c", "Var_d")}),
+        # Families with a member digest list no StatVar; the digests tell them apart.
+        (
+            {"stat_vars": (), "shape_member_digest": "d1"},
+            {"stat_vars": (), "shape_member_digest": "d2"},
+        ),
+    ],
+    ids=["listed", "digested"],
+)
+def test_described_sources_keeps_apart_sources_that_bind_other_members(
+    members: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    """Two sources with no identity that describe alike are one dataset only
+    when they bind the same members, which the description counts and never names."""
+    debt = _described(SPEC_KENYA, "debt service paid by Kenya", "debt service").model_copy(
+        update=members[0]
+    )
+    other = debt.model_copy(update={"spec_id": SPEC_OTHER, **members[1]})
+
+    assert described_sources([debt, other]) == [compact_source(debt), compact_source(other)]
+
+
 def test_described_sources_of_one_source_is_its_compact_form() -> None:
     source = _described(SPEC_KENYA, "debt service paid by Kenya", "debt service")
 
@@ -955,8 +1104,10 @@ async def test_a_pin_naming_a_windowed_seed_is_read_from_searchs_answer_for_its_
 
     assert result["status"] == "definite"
     recorded = load_log(context.state).sources["req_b"][windowed]
+    # data-mcp lists none of the StatVars of a family Search states a member
+    # digest for, and marks the listing truncated.
     assert recorded == source_from_spec_block(answered).model_copy(
-        update={"searched_as": recorded.searched_as}
+        update={"searched_as": recorded.searched_as, "stat_vars": (), "stat_var_truncated": True}
     )
     assert result["sources"] == [compact_source(recorded)]
     # Search's facts for 2010-2023, where the seed's are for 2015-2023.
@@ -1403,19 +1554,27 @@ async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dro
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
-    context.state[ENVELOPE_SPEC_BLOCK_STATE_KEY] = _spec(
-        SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window()),
+        "time_text_not_parsed",
     )
-    context.state[ENVELOPE_SPEC_WARNINGS_STATE_KEY] = [
-        {"code": "time_text_not_parsed", "severity": "warning", "message": "dropped the time text"}
-    ]
 
     await _discover(surface, context)
 
     assert len(search_calls) == 1
 
 
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        {"kind": "exact", "has_data": True, "window": {"start_year": 2010, "end_year": 2020}},
+        {"kind": "breadth", "has_data": True},
+        {"kind": "bare", "has_data": True},
+    ],
+    ids=["exact-other-window", "breadth", "bare"],
+)
 async def test_a_pin_matching_the_resolve_id_still_searches_over_a_different_period(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
@@ -1424,11 +1583,13 @@ async def test_a_pin_matching_the_resolve_id_still_searches_over_a_different_per
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    coverage: dict[str, Any],
 ) -> None:
-    # The block's own coverage is `exact`, but its window (2010-2020) is not
-    # the requirement's own period (2015-2024, `requirement`'s default): a
-    # source resolved as covering different years is not a source for this
-    # requirement's window, so this falls through to a fresh search.
+    # The block's window is not the requirement's own period (2015-2024,
+    # `requirement`'s default), or the block states no window at all: a
+    # source resolved as covering other years, or years nobody stated, is not
+    # a source for this requirement's window, so this falls through to a
+    # fresh search.
     pinned = requirement(source_spec_id=SPEC_KENYA)
     context = context_holding(
         draft(
@@ -1436,15 +1597,10 @@ async def test_a_pin_matching_the_resolve_id_still_searches_over_a_different_per
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
-    context.state[ENVELOPE_SPEC_BLOCK_STATE_KEY] = _spec(
+    _shown(
+        context,
         SPEC_KENYA,
-        "debt service paid by Kenya",
-        coverage={
-            "kind": "exact",
-            "has_data": True,
-            "window": {"start_year": 2010, "end_year": 2020},
-        },
+        _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=coverage),
     )
 
     await _discover(surface, context)
@@ -1471,8 +1627,7 @@ async def test_a_pin_to_a_different_id_than_the_resolve_still_searches(
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
-    context.state[ENVELOPE_SPEC_BLOCK_STATE_KEY] = _spec(SPEC_KENYA, "debt service paid by Kenya")
+    _shown(context, SPEC_KENYA, _spec(SPEC_KENYA, "debt service paid by Kenya"))
 
     result = await _discover(surface, context)
 
@@ -1500,7 +1655,7 @@ async def test_a_pin_matching_the_resolve_id_with_no_block_falls_back_to_search(
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    context.state[ENVELOPE_SPEC_STATE_KEY] = SPEC_KENYA
+    _shown(context, SPEC_KENYA, None)
 
     result = await _discover(surface, context)
 
@@ -1673,6 +1828,50 @@ async def test_the_budget_stops_the_ninth_call_and_points_at_the_referral(
     assert blocked["action"] == {
         "call": "return_to_planner",
         "arguments": {"kind": "discovery_budget_exhausted", "reason": blocked["message"]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("timed_out", "arguments"),
+    [
+        # An early call timed out, the most recent one was answered.
+        ({1}, {"kind": "discovery_budget_exhausted"}),
+        # The most recent call, on `req_b`, timed out; the refused call is on `req_c`.
+        (
+            {DISCOVERY_CALL_BUDGET - 1},
+            {"kind": "discovery_unavailable", "requirement_id": "req_b", "budget_spent": True},
+        ),
+    ],
+)
+async def test_a_spent_budget_refers_an_outage_only_when_its_last_call_timed_out(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    timed_out: set[int],
+    arguments: dict[str, Any],
+) -> None:
+    context = context_holding(_three_requirement_plan(draft, requirement, derived_requirement))
+    order = ["annual_debt_service", "req_b", "req_c"]
+    log = DiscoveryLog()
+    for i in range(DISCOVERY_CALL_BUDGET):
+        log = log.with_record(
+            DiscoveryRecord(
+                revision=_revision(context),
+                tool="search",
+                requirement_id=order[i % 3],
+                transport_failed=i in timed_out,
+            )
+        )
+    save_log(context.state, log)
+
+    blocked = await _discover(surface, context, requirement_id=order[DISCOVERY_CALL_BUDGET % 3])
+
+    assert blocked["code"] == "budget_exhausted"
+    assert blocked["action"] == {
+        "call": "return_to_planner",
+        "arguments": {**arguments, "reason": blocked["message"]},
     }
 
 
@@ -2104,6 +2303,41 @@ async def test_fetch_definitions_enriches_a_definite_sources_own_definition(
     assert describe_record.tool == "describe"
     assert describe_record.requirement_id == "annual_debt_service"
     assert describe_record.spec_ids == (SPEC_KENYA,)
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        {"stat_vars": ("DebtServicePaid", "DebtServiceDue")},
+        # A described identity that mints a family, though Search lists one member.
+        {"pinned": False},
+    ],
+    ids=["two-listed", "one-listed-unpinned"],
+)
+async def test_fetch_definitions_describes_no_member_of_a_family(
+    surface: McpSurface,
+    draft: DraftFactory,
+    context_holding: ContextHolding,
+    family: dict[str, Any],
+) -> None:
+    """A family's definition would be one member's, which a model would read
+    as the whole family's, so a family source is not described."""
+    context = context_holding(draft())
+    await _discover(surface, context)
+    log = load_log(context.state)
+    source = log.sources["annual_debt_service"][SPEC_KENYA]
+    assert source.stat_vars == ("DebtServicePaid",)
+    family = source.model_copy(update=family)
+
+    pairs = await fetch_definitions(
+        surface,
+        log,
+        revision=_revision(context),
+        requirement_keys={"annual_debt_service": _requirement_key(context)},
+        sources={"annual_debt_service": family},
+    )
+
+    assert pairs == ()
 
 
 async def test_fetch_definitions_reads_the_memo_on_a_second_call_for_the_same_key(

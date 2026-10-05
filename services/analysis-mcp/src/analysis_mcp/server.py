@@ -2,7 +2,7 @@
 
 Holds infrastructure: the FastMCP instance, the `/healthz` liveness route,
 the fixture-store lifespan, and the console-script entry point (settings,
-logging, telemetry, transport). Registers the closed seven-verb set, one
+logging, telemetry, transport). Registers the closed eight-verb set, one
 tool per verb, each under an explicit wire name. `filter` needs the
 explicit name because the Python function backing it cannot be called
 `filter` without shadowing the builtin (see `filter_tool.py`'s own
@@ -10,7 +10,7 @@ docstring).
 
 Refusal policy: every anticipated failure gets its own typed refusal, built
 and returned via `to_tool_result` inside that verb's own tool module (see
-each `*_tool.py`'s own module docstring). Underneath all seven sits the
+each `*_tool.py`'s own module docstring). Underneath all eight sits the
 backstop: `_with_internal_error_backstop` wraps each verb at its
 registration site, so an exception the verb's own typed handling missed
 becomes an `internal_error` refusal instead of a raw traceback crossing the
@@ -18,7 +18,7 @@ MCP wire. Wrapping the verb puts that backstop inside the tool boundary,
 after `fastmcp` has resolved the tool and validated its arguments, which
 leaves a bad argument to report itself as the protocol error it is. An
 unknown tool name is also left to report itself as a protocol error, but
-`_NameUnknownVerbsMiddleware` names the seven registered verbs and points
+`_NameUnknownVerbsMiddleware` names the eight registered verbs and points
 the caller at `tools/list` in that error's text.
 """
 
@@ -61,6 +61,7 @@ from analysis_mcp.rank_tool import rank
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
 from analysis_mcp.settings import Settings
 from analysis_mcp.share_of_tool import share_of
+from analysis_mcp.sum_of_tool import sum_of
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ _register(rank, "rank")
 _register(share_of, "share_of")
 _register(join, "join")
 _register(filter_verb, "filter")
+_register(sum_of, "sum_of")
 
 
 class _NameUnknownVerbsMiddleware(Middleware):

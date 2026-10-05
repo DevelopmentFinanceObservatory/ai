@@ -33,8 +33,14 @@ from data_mcp.operations import ResolvedOperation
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.server import mcp
 from data_mcp.settings import Settings
+from data_mcp.stat_var_list import (
+    MAX_LISTED_STAT_VARS,
+    STAT_VARS_OMITTED_KEY,
+    with_stat_var_list,
+)
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
+from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 
@@ -250,10 +256,8 @@ def _manifest_response(
 def _manifest_response_with_two_artifacts(
     *, spec_id: str, content_version: str = "cv_1"
 ) -> dict[str, Any]:
-    """`_manifest_response`, but with a second, distinct artifact -- two renderings of the
-    same spec, the reachable plural on this path (the collection plural is pinned in
-    `test_manifest.py`, since `get_data` itself refuses `col_` ids).
-    """
+    """`_manifest_response`, but with a second, distinct artifact: a csv rendering
+    another caller stored under the same pair, listed after the requested one."""
     response = _manifest_response(spec_id=spec_id, content_version=content_version)
     second = dict(response["artifacts"][0])
     second["artifact_digest"] = "sha256:" + "2" * 64
@@ -1958,6 +1962,75 @@ async def test_the_result_states_no_frame_shape_when_the_frame_was_not_read(
     assert "stat_var_count" not in result.structured_content
 
 
+def _stat_var_entries(count: int) -> list[dict[str, Any]]:
+    """`count` `trace.resolved_stat_vars` entries shaped as dfo-apis writes them."""
+    prefix = "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSPurposeCode"
+    return [
+        {
+            "ref": f"{prefix}{index:05d}_Nominal",
+            "roles": ["financingProvider", "financingRecipient"],
+            "observation_count": index % 2,
+        }
+        for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("member_count", "omitted"),
+    [
+        (MAX_LISTED_STAT_VARS, False),
+        (MAX_LISTED_STAT_VARS + 1, True),
+        # The Kenya development finance family whose whole list overran one result.
+        (6_310, True),
+    ],
+)
+async def test_a_long_stat_var_list_is_left_out_of_the_result_and_read_back_whole(
+    member_count: int, omitted: bool
+) -> None:
+    stored = _stored_definition()
+    response = _manifest_response(spec_id=stored.spec_id)
+    response["trace"] = {"family_member_count": member_count}
+    response["trace"]["resolved_stat_vars"] = _stat_var_entries(member_count)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(200, json=response)
+        if request.url.path == f"/api/datasets/{stored.spec_id}/cv_1":
+            return httpx2.Response(200, json=response)
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    assert result.is_error is False
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["trace"]["family_member_count"] == member_count
+    assert ("resolved_stat_vars" in structured["trace"]) is not omitted
+    assert structured.get(STAT_VARS_OMITTED_KEY) == (member_count if omitted else None)
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        restored = await with_stat_var_list(structured)
+    assert restored["trace"]["resolved_stat_vars"] == response["trace"]["resolved_stat_vars"]
+    assert STAT_VARS_OMITTED_KEY not in restored
+
+
+async def test_a_snapshot_listing_other_stat_vars_than_the_result_left_out_is_refused() -> None:
+    result = {
+        "definition": {"spec_id": "spec_" + "a" * 32},
+        "content_version": "cv_1",
+        "trace": {},
+        STAT_VARS_OMITTED_KEY: 300,
+    }
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"trace": {"resolved_stat_vars": _stat_var_entries(299)}})
+
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        with pytest.raises(ResourceError):
+            await with_stat_var_list(result)
+
+
 async def test_remint_identity_mismatch_refuses_rather_than_serving_an_unverified_definition() -> (
     None
 ):
@@ -2006,7 +2079,7 @@ async def test_successful_mint_carries_a_text_block_first_then_one_resource_link
     )
 
 
-async def test_two_artifacts_yield_two_distinct_resource_links() -> None:
+async def test_a_sibling_rendering_gets_no_resource_link_and_leaves_the_manifest() -> None:
     stored = _stored_definition()
 
     result = await _call_get_data(
@@ -2016,13 +2089,13 @@ async def test_two_artifacts_yield_two_distinct_resource_links() -> None:
     )
 
     assert result.is_error is False
+    requested = "sha256:" + "1" * 64
     resource_links = [b for b in result.content if isinstance(b, ResourceLink)]
-    assert len(resource_links) == 2
-    uris = {str(link.uri) for link in resource_links}
-    assert uris == {
-        f"dfo://artifact/{stored.spec_id}/cv_1/sha256:" + "1" * 64,
-        f"dfo://artifact/{stored.spec_id}/cv_1/sha256:" + "2" * 64,
-    }
+    assert [str(link.uri) for link in resource_links] == [
+        f"dfo://artifact/{stored.spec_id}/cv_1/{requested}"
+    ]
+    assert result.structured_content is not None
+    assert [a["artifact_digest"] for a in result.structured_content["artifacts"]] == [requested]
 
 
 async def test_no_resource_link_carries_a_signed_url() -> None:
@@ -2506,8 +2579,8 @@ async def test_a_refused_selection_reaches_the_model_naming_the_outsider_at_its_
     assert content["fix"]["remedy"].startswith(
         "A variable search listed for this dataset is no longer one of its members."
     )
-    assert "Count_Household" in content["message"]
-    assert "the StatVars its digest lists" in content["message"]
+    assert "Count_Household" not in content["message"]
+    assert "call get_data with the spec_id it returns." in content["message"]
     assert content["trace_id"] == recorded["response"]["body"]["trace_id"]
 
 
@@ -3462,6 +3535,102 @@ async def test_a_summed_operation_dfo_apis_refuses_returns_rollup_not_summable()
     )
 
 
+# Breakdown rolls a code axis up to one level, gated on the capabilities document
+
+
+_SECTOR_BREAKDOWN = {"code_system": "crsPurpose", "level": 0}
+
+
+def _breakdown_handler(
+    capabilities: dict[str, Any], posted: list[dict[str, Any]], *, spec_id: str
+) -> Handler:
+    """Answer the capabilities read with `capabilities` and record each mint body."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/capabilities":
+            return httpx2.Response(200, json=capabilities)
+        if request.url.path == "/api/datasets":
+            posted.append(json.loads(request.content))
+            return httpx2.Response(200, json=_manifest_response(spec_id=spec_id))
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    return handler
+
+
+async def test_an_advertised_breakdown_posts_a_levels_groupby_and_describes_the_frame() -> None:
+    stored = _stored_definition()
+    posted: list[dict[str, Any]] = []
+    capabilities = {"capability_version": "v1", "groupby_level_axes": ["crsPurpose"]}
+
+    result = await _call_get_data(
+        _breakdown_handler(capabilities, posted, spec_id=stored.spec_id),
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, "breakdown": _SECTOR_BREAKDOWN},
+    )
+
+    assert result.is_error is False
+    assert [body["options"] for body in posted] == [
+        {
+            "format": "parquet",
+            "bundle": False,
+            "groupby": {
+                "by": ["time_period", "crsPurpose"],
+                "op": "sum",
+                "levels": {"crsPurpose": 0},
+            },
+        }
+    ]
+    assert "stat_var_crsPurpose" in text_of(result)
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "arguments", "code", "fix"),
+    [
+        pytest.param(
+            {"capability_version": "v1", "summable_axes": ["crsPurpose"]},
+            {"breakdown": _SECTOR_BREAKDOWN},
+            "capability_unavailable",
+            {"option": "breakdown"},
+            id="not-advertised",
+        ),
+        pytest.param(
+            {"capability_version": "v1", "groupby_level_axes": ["crsPurpose"]},
+            {"breakdown": {"code_system": "crsTypeOfFlow", "level": 0}},
+            "request_invalid",
+            {"pointer": "/breakdown/code_system"},
+            id="code-system-not-rolled-up",
+        ),
+        pytest.param(
+            {"capability_version": "v1", "groupby_level_axes": ["crsPurpose"]},
+            {"breakdown": _SECTOR_BREAKDOWN, "stat_vars": "sum"},
+            "request_invalid",
+            {"pointer": "/stat_vars"},
+            id="beside-sum",
+        ),
+    ],
+)
+async def test_a_breakdown_the_deployment_cannot_serve_refuses_before_any_mint(
+    capabilities: dict[str, Any],
+    arguments: dict[str, object],
+    code: str,
+    fix: dict[str, str],
+) -> None:
+    stored = _stored_definition()
+    posted: list[dict[str, Any]] = []
+
+    result = await _call_get_data(
+        _breakdown_handler(capabilities, posted, spec_id=stored.spec_id),
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, **arguments},
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == code
+    assert fix.items() <= result.structured_content["fix"].items()
+    assert posted == []
+
+
 def _frame_parquet(stat_vars: list[str]) -> bytes:
     """One row per StatVar, so a frame's distinct `stat_var` values tell it apart."""
     table = pa.table(
@@ -3588,6 +3757,79 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
     assert await _distinct_stat_vars(frame_store, summed_ref) == {f"dcid:{stored.spec_id}"}
 
 
+def _breakdown_frame_parquet(*, spec_id: str, sectors: list[str]) -> bytes:
+    """dfo-apis' frame for a `groupby.levels` roll-up: one row per sector, every row's
+    `stat_var` the family ref, and `stat_var_crsPurpose` the sector's label."""
+    table = pa.table(
+        {
+            "stat_var": pa.array([f"dcid:{spec_id}"] * len(sectors), type=pa.string()),
+            "observationAbout": pa.array(["country/KEN"] * len(sectors), type=pa.string()),
+            "stat_var_crsPurpose": pa.array(sectors, type=pa.string()),
+            "time_period": pa.array(["2020"] * len(sectors), type=pa.string()),
+            "value": pa.array([1.5] * len(sectors), type=pa.float64()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A breakdown frame reaches the store under the `content_version` dfo-apis minted
+    for the roll-up, with `stat_var_crsPurpose` as a role column and one StatVar."""
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition()
+    raw = _RawAndSummedMint(spec_id=stored.spec_id)
+    breakdown_cv = "cv_" + "c" * 32
+    breakdown_bytes = _breakdown_frame_parquet(
+        spec_id=stored.spec_id,
+        sectors=["Social infrastructure and services", "Humanitarian aid"],
+    )
+    breakdown_digest = f"sha256:{hashlib.sha256(breakdown_bytes).hexdigest()}"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets/capabilities":
+            return httpx2.Response(200, json={"groupby_level_axes": ["crsPurpose"]})
+        options = json.loads(request.content)["options"]
+        if "groupby" not in options:
+            return raw.handler(request)
+        response = _manifest_response(
+            spec_id=stored.spec_id, content_version=breakdown_cv, artifact_digest=breakdown_digest
+        )
+        response["artifacts"][0]["rendering"] = options
+        return httpx2.Response(200, json=response)
+
+    async def fetch(*, content_version: str, **_kwargs: Any) -> bytes:
+        if content_version == breakdown_cv:
+            return breakdown_bytes
+        return await raw.fetch(content_version=content_version)
+
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    separate, broken_down = await _call_get_data_in_one_process(
+        handler,
+        _StubStore(stored),
+        [
+            {"spec_id": stored.spec_id},
+            {"spec_id": stored.spec_id, "breakdown": _SECTOR_BREAKDOWN},
+        ],
+    )
+
+    assert separate.is_error is False
+    assert broken_down.is_error is False
+    content = broken_down.structured_content
+    assert content is not None
+    assert content["frame_ref"]["content_version"] == breakdown_cv
+    assert content["role_keys"] == ["observationAbout", "stat_var_crsPurpose"]
+    assert content["stat_var_count"] == 1
+    ref = FrameRef(spec_id=stored.spec_id, content_version=breakdown_cv)
+    assert await _distinct_stat_vars(frame_store, ref) == {f"dcid:{stored.spec_id}"}
+
+
 async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3670,8 +3912,10 @@ async def test_a_call_without_place_types_sends_no_columns() -> None:
 class _PlainAndTypedMint:
     """dfo-apis for one place-subject spec: the default columns, or the place-type
     column added when `options.columns` names it, both under one `content_version`
-    (dfo-apis keeps it across renderings), each its own artifact. Records every
-    artifact fetch as `(content_version, artifact_digest)`."""
+    (dfo-apis keeps it across renderings), each its own artifact. Every manifest lists
+    both renderings, the one not requested first, as a done operation lists every
+    rendering stored under its pair. Records every artifact fetch as
+    `(content_version, artifact_digest)`."""
 
     content_version = "cv_" + "c" * 32
 
@@ -3702,14 +3946,18 @@ class _PlainAndTypedMint:
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/datasets"
         is_typed = "columns" in json.loads(request.content)["options"]
-        return httpx2.Response(
-            200,
-            json=_manifest_response(
-                spec_id=self.spec_id,
-                content_version=self.content_version,
-                artifact_digest=self.digest_by_rendering[is_typed],
-            ),
-        )
+        response = _manifest_response(spec_id=self.spec_id, content_version=self.content_version)
+        plain = response["artifacts"][0]
+        renderings = {
+            False: plain["rendering"],
+            True: plain["rendering"] | {"columns": ["observationAbout_type"]},
+        }
+        response["artifacts"] = [
+            plain
+            | {"artifact_digest": self.digest_by_rendering[typed], "rendering": renderings[typed]}
+            for typed in (not is_typed, is_typed)
+        ]
+        return httpx2.Response(200, json=response)
 
     async def fetch(self, *, content_version: str, artifact_digest: str, **_: Any) -> bytes:
         self.fetched.append((content_version, artifact_digest))

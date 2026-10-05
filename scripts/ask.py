@@ -255,6 +255,20 @@ def _render_plan(frame: PlanProposed, console: Console) -> None:
             console.line(
                 console.paint(f"      ({decision.resolved_by.value}: {decision.reason})", "2")
             )
+    if frame.asks:
+        labels = {step.id: step.label for step in frame.steps}
+        console.line(console.paint("  You asked for:", "2"))
+        for ask in frame.asks:
+            answers = "; ".join(labels.get(step, step) for step in ask.answered_by)
+            if ask.declined is None:
+                console.line(f"    - {ask.ask} -> {answers}")
+            elif ask.not_computed is not None:
+                console.line(
+                    f"    - {ask.ask} -> {answers}; not computed: {ask.not_computed} "
+                    f"({ask.declined})"
+                )
+            else:
+                console.line(f"    - {ask.ask} -> not computed: {ask.declined}")
     if frame.requirements:
         console.line(console.paint("  Requirements:", "2"))
         for requirement in frame.requirements:
@@ -615,16 +629,23 @@ async def stream_segment(
     `error` -- the caller tells the two apart, since one is a completed
     answer and the other is a failure the server reported back -- or None
     if the stream closes without reaching any of those.
+
+    Reads the stream to its end before returning. The server holds the
+    conversation until the segment has saved and released it, which is
+    after the pausing frame. The stream's end signals that it has, so an
+    `/interrupt` sent then is not refused as a concurrent request, and the
+    server's release does not run under a client disconnect.
     """
     state = RenderState()
+    ending: PlanProposed | ElicitationRequest | Done | ErrorFrame | None = None
     async with client.stream("POST", path, json=body) as response:
         if response.status_code != 200:
             await response.aread()
             raise StudioError(f"{path} -> HTTP {response.status_code}: {response.text[:300]}")
         async for frame in _read_frames(response, console, waiter, state):
             if isinstance(frame, (PlanProposed, ElicitationRequest, Done, ErrorFrame)):
-                return frame
-    return None
+                ending = frame
+    return ending
 
 
 async def ask(

@@ -158,7 +158,8 @@ foreign-agent relay in the planner's context at exactly zero chars, and
 `test_the_relay_check_measures_a_relay_that_is_there` proves that reading can go non-zero,
 so the zero is a measurement, not a bucket that stopped reading.
 `test_the_cached_prefix_is_stable_across_a_run` holds the planner's static prefix
-byte-identical across a run, which is what keeps its share of the input cached
+byte-identical across a run, which is what Gemini's implicit caching matches across
+requests and what the explicit cache (`STUDIO_CONTEXT_CACHE=true`) fingerprints
 (`google.adk.models.gemini_context_cache_manager`).
 
 A failure here after a bump means ADK changed one of those behaviours. The failing test's

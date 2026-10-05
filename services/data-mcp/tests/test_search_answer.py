@@ -22,7 +22,7 @@ _CAPTURED_BROAD = "resolve_health_spending_broad"
 
 _ANSWER_KEYS = {"status", "parts", "skills", "warnings"}
 _PART_KEYS = {"label", "status", "specs", "warnings"}
-_SPEC_KEYS = {"spec_id", "label", "resolved_stat_var_dcids"}
+_SPEC_KEYS = {"spec_id", "label", "measure", "member_count", "member_count_exact", "varies_by"}
 
 # The answer for a single-part recorded envelope stays well under one kilobyte,
 # a size a model's context takes comfortably.
@@ -109,21 +109,67 @@ def test_an_unsupported_part_offers_no_spec_and_keeps_only_caller_input_warnings
     assert [warning["code"] for warning in part["warnings"]] == ["role_text_not_recognised"]
 
 
-def test_a_spec_carries_the_stat_var_dcids_the_digest_names() -> None:
-    """Capped as the digest caps them, under the `get_data` argument they are passed back as."""
-    items = [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)]
-    envelope = _envelope("definite", spec=_spec(stat_vars=items))
+@pytest.mark.parametrize(
+    ("stat_vars", "facts"),
+    [
+        # A family Search states a member digest for, listed without items.
+        (
+            {"items": [], "member_count": 1_454, "member_count_exact": True, "truncated": True},
+            {"member_count": 1_454, "member_count_exact": True},
+        ),
+        # A recall sample: the members Search confirmed, a floor on the family.
+        (
+            {
+                "items": [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)],
+                "member_count": 5,
+                "member_count_exact": False,
+                "truncated": False,
+            },
+            {"member_count": 5, "member_count_exact": False},
+        ),
+    ],
+    ids=["digest-family", "recall-sample"],
+)
+def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
+    stat_vars: dict[str, Any], facts: dict[str, Any]
+) -> None:
+    """A partial list reads to a model as the whole family, so neither the answer nor
+    the digest names a member StatVar."""
+    spec = _spec(stat_vars=stat_vars["items"])
+    spec["resolved"]["stat_vars"] = stat_vars
+    spec["resolved"]["shape"] = {"label": "population"}
+    spec["resolved"]["slots"] = [
+        {
+            "key": {"property": {"dcid": "gender", "label": "gender"}, "label": "sex"},
+            "binding": {"kind": "unbound"},
+        },
+        {
+            "key": {"property": {"dcid": "age", "label": "age"}, "label": "age"},
+            "binding": {"kind": "value", "value": {"ref": {"dcid": "Years15Onwards"}}},
+        },
+        {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}},
+    ]
+    envelope = _envelope("definite", spec=spec)
 
-    spec = render_answer(envelope)["parts"][0]["specs"][0]
+    answer = render_answer(envelope)["parts"][0]["specs"][0]
+    digest = render_digest(envelope)
 
-    assert spec["resolved_stat_var_dcids"] == ["Count_Person_0", "Count_Person_1", "Count_Person_2"]
-    assert all(dcid in render_digest(envelope) for dcid in spec["resolved_stat_var_dcids"])
+    assert answer == {
+        "spec_id": "spec_1",
+        "label": spec["resolved"]["rendered_sentence"],
+        "measure": "population",
+        **facts,
+        "varies_by": ["sex"],
+    }
+    assert "Count_Person" not in json.dumps(answer)
+    assert "Count_Person" not in digest
+    assert "group" not in digest
 
 
-def test_a_spec_with_no_elected_stat_vars_has_no_stat_var_key() -> None:
+def test_a_spec_with_no_elected_stat_vars_states_no_count() -> None:
     spec = render_answer(_envelope("definite", spec=_spec()))["parts"][0]["specs"][0]
 
-    assert "resolved_stat_var_dcids" not in spec
+    assert "member_count" not in spec
 
 
 def test_a_part_with_no_warnings_has_no_warnings_key() -> None:
@@ -193,6 +239,8 @@ def test_the_answer_states_only_what_the_digest_states(name: str, envelope: dict
             assert set(spec) <= _SPEC_KEYS
             assert spec["spec_id"] in digest
             assert not spec["label"] or spec["label"] in digest
+            assert "measure" not in spec or spec["measure"] in digest
+            assert "member_count" not in spec or f"{spec['member_count']:,} StatVar" in digest
         for warning in part.get("warnings", []):
             assert warning["message"] in digest
     for skill_id in answer.get("skills", []):

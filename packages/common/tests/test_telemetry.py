@@ -464,6 +464,24 @@ def test_end_turn_span_swallows_errors(monkeypatch):
     fake_span_cm.__exit__.assert_called_once_with(None, None, None)
 
 
+def test_end_turn_span_closes_the_span_when_recording_its_input_and_output_fails(monkeypatch):
+    """A turn whose input and output cannot be recorded still ends its span."""
+    telemetry._backend = "langfuse"
+    fake_span_cm = MagicMock()
+    fake_span_cm.__enter__.return_value.update.side_effect = ValueError("update failed")
+    fake_client = MagicMock()
+    fake_client.start_as_current_observation.return_value = fake_span_cm
+    monkeypatch.setattr(langfuse, "get_client", lambda: fake_client)
+    handle = start_turn_span("tr_abc123")
+
+    end_turn_span(handle, request="q", response="a")  # must not raise
+
+    fake_span_cm.__enter__.return_value.update.assert_called_once_with(
+        input="q", output="a", level=None, status_message=None
+    )
+    fake_span_cm.__exit__.assert_called_once()
+
+
 async def test_end_turn_span_runs_in_the_context_the_span_was_opened_in(monkeypatch):
     """The scope is exited in the copy of the context it was entered in, from
     whichever task closes the turn, so its context tokens are always reset in
@@ -519,6 +537,7 @@ def _turn_handle() -> telemetry._TurnSpan:
         scope=None,
         context=contextvars.copy_context(),
         otel_context=otel_trace.set_span_in_context(span),
+        observation=None,
     )
 
 

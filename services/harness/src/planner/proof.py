@@ -30,6 +30,7 @@ from planner.operations import (
     RankOperation,
     ShareOfOperation,
     Side,
+    SumOfOperation,
 )
 from planner.plan import (
     AggregateRequirement,
@@ -42,6 +43,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
+    SumOfRequirement,
 )
 
 # What kind of operation carries out each requirement kind. `compiler.compile`
@@ -52,6 +54,7 @@ KIND_OF_REQUIREMENT: Mapping[type, OperationKind] = {
     AggregateRequirement: OperationKind.AGGREGATE,
     GrowthRequirement: OperationKind.GROWTH,
     ComparisonRequirement: OperationKind.COMPARE,
+    SumOfRequirement: OperationKind.SUM_OF,
     RankRequirement: OperationKind.RANK,
     ShareOfRequirement: OperationKind.SHARE_OF,
     JoinRequirement: OperationKind.JOIN,
@@ -147,6 +150,10 @@ def mismatches(
         _bad_input("input", requirement.input_id, operation.input)
     elif isinstance(requirement, ComparisonRequirement):
         assert isinstance(operation, CompareOperation)
+        _bad_side("left", requirement.left, operation.left)
+        _bad_side("right", requirement.right, operation.right)
+    elif isinstance(requirement, SumOfRequirement):
+        assert isinstance(operation, SumOfOperation)
         _bad_side("left", requirement.left, operation.left)
         _bad_side("right", requirement.right, operation.right)
     elif isinstance(requirement, ShareOfRequirement):

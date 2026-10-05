@@ -64,12 +64,10 @@ def _ok_proposal(
 
 
 def _referral(kind: str, requirement_id: str) -> genai_types.FunctionResponse:
+    outcome = "choice_required" if kind == "source_ambiguous" else "invalid_input"
     return genai_types.FunctionResponse(
         name="translate",
-        response={
-            "outcome": "referred",
-            "referral": {"kind": kind, "requirement_id": requirement_id},
-        },
+        response={"outcome": outcome, "kind": kind, "requirement_id": requirement_id},
     )
 
 
@@ -214,7 +212,7 @@ def test_a_written_referral_alongside_the_expected_proposal_scores_zero() -> Non
 def test_a_refused_referral_alongside_the_expected_proposal_does_not_hedge() -> None:
     # A `translate` call the tool refused wrote no referral, so the plan
     # is exactly as the accepted proposal left it: there is nothing to hedge
-    # with. Only a response whose outcome is `referred` counts.
+    # with. Only a referral, the one answer naming a `kind`, counts.
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
     refused = genai_types.FunctionResponse(
         name="translate", response={"outcome": "invalid_input", "code": "referral_unearned"}

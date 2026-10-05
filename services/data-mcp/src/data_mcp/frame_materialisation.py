@@ -11,9 +11,10 @@ import hashlib
 import io
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx2
@@ -141,14 +142,16 @@ async def materialise_and_register(
     manifest: Manifest,
     settings: Settings,
     writer: str,
-    columns: tuple[str, ...] = (),
+    options: Mapping[str, Any],
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> MaterialisationOutcome:
     """Fetch, parse, and register the frame `manifest` names, or report why it couldn't.
 
-    `columns` is the mint's `options.columns`, and the frame registers under the
-    reference `frame_ref_for` gives the manifest's pair and `columns`.
+    `options` is the mint request's `options`. The frame registers under the
+    reference `frame_ref_for` gives the manifest's pair and `options.columns`, and
+    its bytes are the artifact whose `rendering` equals `options`
+    (`_select_requested_artifact`).
 
     Called once per successful `get_data` mint, after the manifest itself has already
     validated. Checks the store first: a pair already held, read back under a row claim
@@ -159,7 +162,7 @@ async def materialise_and_register(
     content-addressed and insert-only, so a held-but-broken object can't be healed by
     falling through to re-register (see `frame_integrity_failed`'s and `over_ceiling`'s
     own factories for what each case tells the caller). Otherwise fetches the
-    manifest's one Parquet artifact, bounds its row count from Parquet metadata alone
+    requested artifact, bounds its row count from Parquet metadata alone
     (before any row is parsed), parses it into a `Frame`, and registers it under
     its frame reference.
 
@@ -178,12 +181,13 @@ async def materialise_and_register(
     The store write must end with `_AFTER_WRITE_RESERVE_S` left, and one that runs out
     degrades with `degraded_reason="store_write"`.
     """
-    ref = _ref_or_refusal(manifest, columns=columns)
+    ref = _ref_or_refusal(manifest, columns=tuple(options.get("columns", ())))
     if isinstance(ref, MaterialisationOutcome):
         return ref
     outcome = await _register(
         ref,
         manifest=manifest,
+        options=options,
         settings=settings,
         writer=writer,
         transport=transport,
@@ -196,6 +200,7 @@ async def _register(
     ref: FrameRef,
     *,
     manifest: Manifest,
+    options: Mapping[str, Any],
     settings: Settings,
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
@@ -210,7 +215,16 @@ async def _register(
         return checked
     fetch_failure_reason = checked
 
-    artifact = _select_parquet_artifact(manifest)
+    artifact = _select_requested_artifact(manifest, options=options)
+    if artifact is None:
+        return MaterialisationOutcome(
+            status="refused",
+            attempts=0,
+            refusal=ToolRefusal.upstream_response_unusable(
+                detail="the mint's manifest lists no artifact with the requested rendering "
+                f"{json.dumps(dict(options), sort_keys=True)}"
+            ),
+        )
     progress = _FetchProgress()
     budget_s = settings.artifact_fetch_budget_s
     if deadline is not None:
@@ -595,18 +609,17 @@ def _ref_or_refusal(
         )
 
 
-def _select_parquet_artifact(manifest: Manifest) -> ArtifactEntry:
-    """The one artifact entry `get_data`'s own mint request always produces.
+def _select_requested_artifact(
+    manifest: Manifest, *, options: Mapping[str, Any]
+) -> ArtifactEntry | None:
+    """The artifact whose `rendering` equals the mint request's `options`, or `None`.
 
-    `get_data_tool.py` always sets `{"format": "parquet", "bundle": False}` in its mint
-    request `options`, so there is always exactly one matching entry; indexing into it
-    directly, rather than returning an `Optional` to check, matches `data_mcp.tool_errors`'
-    own statement of this same invariant elsewhere as settled fact. A `StopIteration` here
-    would mean that invariant broke, which is preferable to a defensive refusal branch
-    nobody could ever exercise for a state the rest of this service already treats as
-    impossible.
+    dfo-apis stores each artifact's `rendering` as the request's options with unset
+    fields left out, and a manifest lists every rendering stored under its pair: other
+    callers' groupby sums and column selections sit beside the requested one, in no
+    set order. A manifest whose own artifact has expired lists none that matches.
     """
-    return next(a for a in manifest.artifacts if a.rendering.get("format") == "parquet")
+    return next((a for a in manifest.artifacts if a.rendering == options), None)
 
 
 @dataclass

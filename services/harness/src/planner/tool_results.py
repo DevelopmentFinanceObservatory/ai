@@ -1,4 +1,4 @@
-"""One typed result shape for the planner's and the translator's tools.
+"""One typed result shape for the planner's tools and the translator's core functions.
 
 A tool that answers `{"error": "..."}` hands its caller a sentence to parse
 back into a decision: does this fail because a plan is missing, because a
@@ -11,9 +11,9 @@ sentence, and, where the next step is known, an `action` -- which tool to call
 next and with which arguments -- so a model that hits a problem is pointed at
 its recovery rather than left to reason about the message.
 
-`ProblemCode` is one vocabulary for both agents so that a code never has to be
-renamed when a tool moves from one agent to the other, and so a caller reading
-both agents' tools learns one set of names, not two.
+`ProblemCode` is one vocabulary for the planner and the translator so that a
+code never has to be renamed when a function moves from one to the other, and
+so a caller reading both learns one set of names, not two.
 """
 
 from __future__ import annotations
@@ -27,13 +27,29 @@ from planner.records import StrictModel
 
 
 class Outcome(StrEnum):
-    """How a tool call landed, at the coarsest grain a caller branches on."""
+    """How a tool call landed, at the coarsest grain a caller branches on.
+
+    `UNSUPPORTED` means the call asked for something the system cannot do:
+    no change to the input makes it work, so the caller records a decline.
+
+    A translator referral's own `outcome` (`translator.referral.OUTCOME_OF`)
+    reads from this vocabulary too, with three members only a translation
+    lands on: `CHOICE_REQUIRED`, a choice between sources the planner or
+    the user settles; `TRANSIENT`, a service that did not answer just now,
+    so the same input is worth one more try; and `INTERNAL`, a fault in the
+    system itself, carrying a diagnostic reference and never retried.
+    `INVALID_INPUT` there is input the planner can repair.
+    """
 
     OK = "ok"
     INVALID_INPUT = "invalid_input"
     STATE_MISSING = "state_missing"
     REFERRED = "referred"
     REFUSED = "refused"
+    UNSUPPORTED = "unsupported"
+    CHOICE_REQUIRED = "choice_required"
+    TRANSIENT = "transient"
+    INTERNAL = "internal"
 
 
 class ProblemCode(StrEnum):
@@ -55,7 +71,6 @@ class ProblemCode(StrEnum):
     REQUIREMENT_NOT_A_DATASET = "requirement_not_a_dataset"
     DECISION_UNKNOWN = "decision_unknown"
     INVALID_PLAN = "invalid_plan"
-    INVALID_TRANSLATION = "invalid_translation"
     INVALID_REFERRAL = "invalid_referral"
     INVALID_ARGUMENTS = "invalid_arguments"
     COMPILE_FAILED = "compile_failed"
@@ -65,9 +80,16 @@ class ProblemCode(StrEnum):
     SURFACE_UNAVAILABLE = "surface_unavailable"
     NO_CANDIDATES_RECORDED = "no_candidates_recorded"
     ASK_NOT_UNDERSTOOD = "ask_not_understood"
-    NO_PENDING_JUDGEMENT = "no_pending_judgement"
     ELECTION_UNTRACEABLE = "election_untraceable"
+    SOURCE_NOT_OFFERED = "source_not_offered"
     SEED_DROPPED = "seed_dropped"
+    OPERATION_UNSUPPORTED = "operation_unsupported"
+    DECLINE_MISSING = "decline_missing"
+    DECLINE_UNEARNED = "decline_unearned"
+    NOTHING_TO_PLAN = "nothing_to_plan"
+    ASKS_UNACCOUNTED = "asks_unaccounted"
+    FIX_UNSTATED = "fix_unstated"
+    FIX_DISAGREES = "fix_disagrees"
 
 
 class Action(StrictModel):
@@ -105,7 +127,9 @@ class Action(StrictModel):
 class ToolProblem(StrictModel):
     """One reason a tool call did not succeed, and what to do about it."""
 
-    outcome: Literal[Outcome.INVALID_INPUT, Outcome.STATE_MISSING, Outcome.REFUSED]
+    outcome: Literal[
+        Outcome.INVALID_INPUT, Outcome.STATE_MISSING, Outcome.REFUSED, Outcome.UNSUPPORTED
+    ]
     code: ProblemCode
     message: str
     action: Action | None = None
@@ -116,7 +140,9 @@ def problem(
     code: ProblemCode,
     message: str,
     *,
-    outcome: Literal[Outcome.INVALID_INPUT, Outcome.STATE_MISSING, Outcome.REFUSED],
+    outcome: Literal[
+        Outcome.INVALID_INPUT, Outcome.STATE_MISSING, Outcome.REFUSED, Outcome.UNSUPPORTED
+    ],
     action: Action | None = None,
     detail: dict[str, JsonValue] | None = None,
 ) -> dict[str, object]:

@@ -13,18 +13,19 @@ CI. Its tests live in `services/harness/tests/orchestrator/`.
 ## What it does
 
 `create_orchestrator_agent()` builds the `LlmAgent` on the tools it is given.
-The harness gives it eight (`harness.orchestrator_tools`):
+The harness gives it nine (`harness.orchestrator_tools`):
 
-| Tool             | Behaviour                                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `search`         | Sends the question and every part it names to Search in one call; returns each part's reading         |
-| `fetch`          | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views         |
-| `make_charts`    | Draws charts from those frames on the canvas and returns each chart's facts, or why it failed         |
-| `ask_user`       | Records a question for the user; the workflow pauses for the answer and hands it back                 |
-| `plan`           | Records a brief for the planner; the workflow runs the graph's plan path and hands back its frames    |
-| `get_skill`      | Loads a skill a search result named, through data-mcp                                                 |
-| `get_skill_file` | Reads a file a loaded skill links, or the next page of a long one, through data-mcp                   |
-| `explain_dfo`    | What DFO is and what can be asked, from the `dfo-faq` skill read through data-mcp (`harness.dfo_faq`) |
+| Tool             | Behaviour                                                                                                                        |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `search`         | Sends the question and every part it names to Search in one call; returns each part's reading                                    |
+| `fetch`          | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                    |
+| `make_charts`    | Draws charts from those frames on the canvas and returns each chart's facts, or why it failed                                    |
+| `ask_user`       | Records a question for the user; the workflow pauses for the answer and hands it back                                            |
+| `plan`           | Records a brief and the outputs asked for; the plan path runs and hands back its frames and each ask's status                    |
+| `get_skill`      | Loads a skill a search result named, through data-mcp                                                                            |
+| `get_skill_file` | Reads a file a loaded skill links, or the next page of a long one, through data-mcp                                              |
+| `explain_dfo`    | What DFO is and what can be asked, from the `dfo-faq` skill read through data-mcp (`harness.dfo_faq`)                            |
+| `recall`         | An earlier turn's plan records or readings, or a canvas component's entry, in full; a typed refusal names the legal turns or ids |
 
 The model sees digests only: part readings, frame views, one-line summaries
 and chart facts, never rows. Its instruction reads the canvas digest and the

@@ -85,6 +85,10 @@ FLUSH_TIMEOUT_SECONDS = 3.0
 _MAX_EVENT_STR_CHARS = 500
 _MAX_EVENT_METADATA_ITEMS = 32
 
+# The name of the root span `start_turn_span` opens, and the Langfuse trace
+# name every span of a turn carries, on the server side of its MCP calls too.
+TURN_SPAN_NAME = "turn"
+
 # The MCP request `_meta` key that carries a turn's Langfuse session to a server
 # (`turn_call_meta`). The MCP spec namespaces a `_meta` key with a DNS-style
 # prefix and reserves the prefixes whose second label is `modelcontextprotocol`
@@ -266,7 +270,9 @@ def _langfuse_exporter() -> Any:
     handed, so this sets the ones its own would get: the endpoint under
     `LANGFUSE_BASE_URL` (the path `LANGFUSE_OTEL_TRACES_EXPORT_PATH` names, if
     set), Basic auth from the key pair, the SDK's name, version and public-key
-    headers, and `LANGFUSE_TIMEOUT` seconds, 5 by default.
+    headers, and `LANGFUSE_TIMEOUT` seconds, 5 by default. It also sends
+    `x-langfuse-ingestion-version: 4`, which the SDK asks of a custom exporter
+    so that a Langfuse v4 server processes the spans in real time.
     """
     import base64
 
@@ -287,6 +293,7 @@ def _langfuse_exporter() -> Any:
                 "x-langfuse-sdk-name": "python",
                 "x-langfuse-sdk-version": langfuse_version,
                 "x-langfuse-public-key": public_key,
+                "x-langfuse-ingestion-version": "4",
             },
             timeout=int(os.getenv("LANGFUSE_TIMEOUT", "5")),
         )
@@ -433,12 +440,14 @@ class _TurnSpan:
     it, and the span is ended by whichever request closes the turn.
     `otel_context` is the OpenTelemetry context that holds the span (and, on
     Langfuse, the trace-root claim the SDK puts beside it), which
-    `use_turn_span` attaches.
+    `use_turn_span` attaches. `observation` is the Langfuse observation the
+    span is, `None` off Langfuse; `end_turn_span` sets its input and output.
     """
 
     scope: Any
     context: contextvars.Context
     otel_context: Any
+    observation: Any | None
 
 
 def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any | None:
@@ -466,12 +475,13 @@ def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any |
     that same attribute alone, filterable in whatever reads the export.
 
     `session_id` is the Langfuse session the turn belongs to, so turns that
-    share it group in Langfuse's Sessions view. It reaches every span started
-    under `use_turn_span(handle)` in this process, ADK's included, and only on
-    the Langfuse backend. Spans an MCP server opens for a call it receives over
-    HTTP start in the server's own context, and `turn_call_meta` carries the
-    session to it. The Langfuse SDK drops a `session_id` over 200 characters with a
-    warning, so the trace carries no session and ADK's spans fall back to their
+    share it group in Langfuse's Sessions view. It and the trace name
+    `TURN_SPAN_NAME` reach every span started under `use_turn_span(handle)` in
+    this process, ADK's included, and only on the Langfuse backend. Spans an
+    MCP server opens for a call it receives over HTTP start in the server's own
+    context, and `turn_call_meta` carries the session to it. The Langfuse SDK
+    drops a `session_id` over 200 characters with a warning, so the trace
+    carries no session and ADK's spans fall back to their
     per-turn `gen_ai.conversation.id`.
     """
     if _backend is None:
@@ -480,46 +490,51 @@ def start_turn_span(external_id: str, *, session_id: str | None = None) -> Any |
         from opentelemetry import context as otel_context_api
 
         context = contextvars.copy_context()
-        scope = context.run(_enter_turn_scope, external_id, session_id)
+        scope, observation = context.run(_enter_turn_scope, external_id, session_id)
         otel_context = context.run(otel_context_api.get_current)
-        return _TurnSpan(scope=scope, context=context, otel_context=otel_context)
+        return _TurnSpan(
+            scope=scope, context=context, otel_context=otel_context, observation=observation
+        )
     except Exception:
         logger.exception("failed to open a turn span for %s -- continuing untraced", external_id)
         return None
 
 
-def _enter_turn_scope(external_id: str, session_id: str | None) -> Any:
+def _enter_turn_scope(external_id: str, session_id: str | None) -> tuple[Any, Any | None]:
     """Open the turn span as the current span of the calling context and
-    return the entered context manager. On Langfuse, a `session_id` is
-    propagated to every span started under the turn and held for
+    return the entered context manager with the Langfuse observation, `None`
+    off Langfuse. On Langfuse, the trace name and a `session_id` are
+    propagated to every span started under the turn, the session is held for
     `turn_call_meta`, and the returned scope exits both before the span."""
     if _backend == "langfuse":
         from langfuse import Langfuse, get_client, propagate_attributes
 
         derived = Langfuse.create_trace_id(seed=external_id)
         with ExitStack() as stack:
-            stack.enter_context(
+            observation = stack.enter_context(
                 get_client().start_as_current_observation(
-                    name="turn",
+                    name=TURN_SPAN_NAME,
                     as_type="span",
                     trace_context={"trace_id": derived},
                     metadata={"dfo.external_id": external_id},
                 )
             )
+            stack.enter_context(
+                propagate_attributes(trace_name=TURN_SPAN_NAME, session_id=session_id or None)
+            )
             if session_id:
-                stack.enter_context(propagate_attributes(session_id=session_id))
                 stack.enter_context(_hold_turn_session(session_id))
             scope = stack.pop_all()
         logger.debug("turn span opened: %s -> langfuse trace %s", external_id, derived)
-        return scope
+        return scope, observation
 
     from opentelemetry import trace
 
     scope = trace.get_tracer(__name__).start_as_current_span(
-        "turn", attributes={"dfo.external_id": external_id}
+        TURN_SPAN_NAME, attributes={"dfo.external_id": external_id}
     )
     scope.__enter__()
-    return scope
+    return scope, None
 
 
 @cache
@@ -566,8 +581,9 @@ def turn_call_meta() -> dict[str, str]:
 @contextmanager
 def use_call_session(session_id: str | None) -> Iterator[None]:
     """Make every span opened in the block, and the current span, carry the
-    Langfuse session `session_id`, for an MCP server handling a call whose
-    client sent it in `_meta` (see `turn_call_meta`).
+    Langfuse session `session_id` and the trace name `TURN_SPAN_NAME`, for an
+    MCP server handling a call whose client sent the session in `_meta` (see
+    `turn_call_meta`, which sends it only from inside a turn).
 
     A no-op for an empty or `None` id and off the Langfuse backend. The session
     stays in this process: it is not put in baggage, so no outbound HTTP
@@ -578,7 +594,11 @@ def use_call_session(session_id: str | None) -> Iterator[None]:
             try:
                 from langfuse import propagate_attributes
 
-                stack.enter_context(propagate_attributes(session_id=session_id, as_baggage=False))
+                stack.enter_context(
+                    propagate_attributes(
+                        session_id=session_id, trace_name=TURN_SPAN_NAME, as_baggage=False
+                    )
+                )
             except Exception:
                 logger.debug("failed to propagate a call session -- continuing", exc_info=True)
         yield
@@ -633,8 +653,21 @@ def _leave_turn_scope(token: Any, marker: contextvars.Token[bool]) -> None:
         logger.debug("failed to detach a turn span -- continuing", exc_info=True)
 
 
-def end_turn_span(handle: Any | None) -> None:
+def end_turn_span(
+    handle: Any | None,
+    *,
+    request: Any = None,
+    response: Any = None,
+    error: str | None = None,
+) -> None:
     """Close a span opened by `start_turn_span`. A no-op for `None`.
+
+    On Langfuse, `request` and `response` become the input and output of the
+    turn's observation, which is the trace's root, so they are the trace's
+    overall input and output and what an evaluator on that observation reads.
+    An `error` (a machine-readable code, never exception text) makes the
+    observation's level `ERROR` with `error` as its status message. Off
+    Langfuse all three are ignored.
 
     Callable from any asyncio task: the span's scope is exited in the context
     it was entered in. Swallows any error from closing it, since telemetry
@@ -642,6 +675,16 @@ def end_turn_span(handle: Any | None) -> None:
     """
     if not isinstance(handle, _TurnSpan):
         return
+    if handle.observation is not None:
+        try:
+            handle.observation.update(
+                input=request,
+                output=response,
+                level="ERROR" if error else None,
+                status_message=error or None,
+            )
+        except Exception:
+            logger.debug("failed to record a turn's input and output -- continuing", exc_info=True)
     try:
         handle.context.run(handle.scope.__exit__, None, None, None)
     except Exception:

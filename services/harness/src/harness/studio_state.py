@@ -38,23 +38,34 @@ import functools
 import json
 import logging
 import math
+import re
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-import anyio
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
 from fastapi.responses import JSONResponse
 from google.adk.errors import StaleSessionError
 from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig
+from planner.plan import cut_user_text
+from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
 from harness.conversation import current_conversation_key
+from harness.graph import ORCHESTRATOR_SPECS_KEY
+from harness.turn_records import (
+    PlanRecord,
+    SearchReading,
+    named_spec_ids,
+    newest_per_spec_id,
+    render_readings,
+)
 from harness.wire import (
     AddOp,
     ComponentType,
@@ -77,11 +88,12 @@ logger = logging.getLogger(__name__)
 # The canvas digest's bounds: the newest blocks, each with a capped id, type,
 # title and fact summary, and a focus id that names a stored component. Caps are
 # serialised JSON bytes (`json.dumps`, so a non-ASCII character counts as its
-# escape). A cut field ends in `_CUT_MARKER`, and a cut summary is replaced by a
-# `{"cut": ...}` stub.
-# A one-series fact summary runs 430 to 960 bytes and each further series adds
-# about 550, so the cap holds a chart of about six series. Titles run about 40
-# bytes.
+# escape). A cut field ends in `_CUT_MARKER`. A fact summary over its cap keeps
+# its leading series in display order and says so (`_bounded_fact_summary`),
+# and one that does not fit even without series is replaced by a `{"cut": ...}`
+# stub. Factored (`_factored_fact_summary`), a one-series fact summary runs
+# about 600 bytes and each further series adds about 150, so the cap holds a
+# chart of about twenty series. Titles run about 40 bytes.
 _DIGEST_BLOCK_CAP = 16
 _TITLE_BYTE_CAP = 200
 _FACT_SUMMARY_BYTE_CAP = 4_096
@@ -101,12 +113,20 @@ _BLOCK_FRAME_BYTES = 128
 # 8 values), each cut to `_DIGEST_NAME_BYTE_CAP`, and a time span cut to
 # `_DIGEST_TIME_BYTE_CAP`. `_BLOCK_SHOWS_BYTES` covers both lists with their keys,
 # brackets and separators, and the time span with its key.
+# A list cut to its cap carries a `<key>_truncated` label of up to
+# `_SUBSET_LABEL_BYTES`, key included (`_subset_label`).
 _DIGEST_SHOW_CAP = 8
 _DIGEST_NAME_BYTE_CAP = 64
 _DIGEST_TIME_BYTE_CAP = 24
+_SUBSET_LABEL_BYTES = 96
 _BLOCK_SHOWS_BYTES = (
-    2 * (16 + _DIGEST_SHOW_CAP * (_DIGEST_NAME_BYTE_CAP + 2)) + 12 + _DIGEST_TIME_BYTE_CAP
+    2 * (16 + _DIGEST_SHOW_CAP * (_DIGEST_NAME_BYTE_CAP + 2) + _SUBSET_LABEL_BYTES)
+    + 12
+    + _DIGEST_TIME_BYTE_CAP
 )
+# The rule that chooses which items a cut list keeps: its leading items, in the
+# order the card displays them.
+_SUBSET_RULE = "display order"
 _DIGEST_WRAPPER_BYTES = 160
 CANVAS_DIGEST_MAX_BYTES = _DIGEST_WRAPPER_BYTES + _DIGEST_BLOCK_CAP * (
     _BLOCK_FRAME_BYTES
@@ -115,18 +135,36 @@ CANVAS_DIGEST_MAX_BYTES = _DIGEST_WRAPPER_BYTES + _DIGEST_BLOCK_CAP * (
     + _FACT_SUMMARY_BYTE_CAP
     + _BLOCK_SHOWS_BYTES
 )
-# The conversation digest's bounds: newest turns, each turn's text cut by
-# characters, its cards by count and title bytes, and its error by bytes, then
-# a byte cap on the serialised digest that drops the oldest turn and finally
-# shrinks the newest. Past any bound, converse `recall`s.
+# The conversation digest's bounds: newest turns, each with its ask whole,
+# an older turn's answer cut to whole sentences, its plans each as one line
+# cut by characters, its cards by count and title bytes, and its error by
+# bytes. Over the byte cap on the serialised digest, older answers shrink
+# through `_HISTORY_ANSWER_CAPS`, then the oldest turn drops, and finally the
+# newest turn shrinks. Past any bound, converse `recall`s.
 _HISTORY_TURN_CAP = 10
 _HISTORY_TEXT_CAP = 280
+_HISTORY_ANSWER_CAPS = (_HISTORY_TEXT_CAP, _HISTORY_TEXT_CAP // 2, 0)
+_HISTORY_PLAN_CAP = 1_000
 _HISTORY_CARD_CAP = 8
 _HISTORY_CARD_TITLE_BYTE_CAP = 100
 _HISTORY_ERROR_BYTE_CAP = 100
 CONVERSATION_DIGEST_MAX_BYTES = 5_000
+# What a newest turn's ask and answer are cut to once the newest turn alone
+# is over the digest's cap, halved each further try.
+_HISTORY_NEWEST_TEXT_CAP = CONVERSATION_DIGEST_MAX_BYTES // 2
 _RECALL_TURN_CAP = 5
 _RECALL_CARD_CAP = 3
+type RecallPart = Literal["plan", "readings", "canvas"]
+# What `recall_part` renders of a turn's plan records, or of its readings, in
+# characters, which a turn's plans share. `_RECALL_ID_CAP` is the most component
+# ids a refusal lists.
+_RECALL_TEXT_BUDGET = 4_000
+_RECALL_ID_CAP = 20
+# The keys of a turn record kept for the planner's ledger, which
+# `recall_state` leaves out.
+_TURN_LEDGER_KEYS = frozenset({"plans", "readings", "specs"})
+# Where a sentence ends: its closing mark, when whitespace follows.
+_SENTENCE_END = re.compile(r"[.!?](?=\s)")
 
 _COUNT_KEYS: dict[ComponentType, str] = {
     ComponentType.STAT_CARD: "stats",
@@ -384,9 +422,14 @@ class ConversationState:
     # with it next. Survives across turns within this conversation; lost
     # with the rest of this state on restart (`ApprovalRecord`'s docstring).
     approvals: list[ApprovalRecord] = field(default_factory=list)
-    # One record per completed turn: {user, assistant, cards, error}.
-    # Feeds the conversation digest (newest window) and the recall seam
-    # (everything older). In-process, like the composition manifest.
+    # One record per completed turn: {user, assistant, cards, error, plans,
+    # readings, specs}, where `plans` are the `PlanRecord`s of the plans the
+    # turn ran, `readings` the `SearchReading`s it read, as JSON, and
+    # `specs` the spec block `search` returned for each source those plans
+    # used. Every key but `user` and `assistant` is optional, and a record
+    # without `plans`, `readings` or `specs` holds none. Feeds the conversation digest (newest window), the recall
+    # seam (everything older) and the planner's ledger
+    # (`prior_ledger_state`).
     turns: list[dict[str, Any]] = field(default_factory=list)
     # MCP calls that have timed out at least once in this conversation, keyed
     # by tool + the call's own arguments (`mcp_client._McpTimeoutError.
@@ -401,6 +444,17 @@ class ConversationState:
     turn_user_message: str = ""
     turn_final_text: str = ""
     turn_components: list[dict[str, Any]] = field(default_factory=list)
+    # The turn's plan records and search readings as JSON, and the spec
+    # blocks its searches returned by spec_id, each the whole value the
+    # graph last wrote (`harness.graph.ORCHESTRATOR_PLAN_RECORDS_KEY`,
+    # `ORCHESTRATOR_SEARCHES_KEY`, `ORCHESTRATOR_SPECS_KEY`), set by
+    # `harness.studio` as events stream. `turn_specs` is process-local: the
+    # turn's own ADK session holds the blocks, and `StudioStore.load` reads
+    # them back from it, so the ledger stores only the blocks `close_turn`
+    # keeps.
+    turn_plans: list[dict[str, Any]] = field(default_factory=list)
+    turn_readings: list[dict[str, Any]] = field(default_factory=list)
+    turn_specs: dict[str, Any] = field(default_factory=dict)
     turn_recorded: bool = False
     # The current turn's telemetry root span, opened by `begin_turn` on the
     # freshly minted `trace_id`, kept open across a pause for approval, and
@@ -445,29 +499,41 @@ class ConversationState:
         return digest
 
     def conversation_digest_state(self) -> dict[str, Any] | None:
-        """The newest turns as compact {user, assistant, cards} records --
-        the models' cross-turn memory for statements that made no card.
-        Bounded three times: a turn-count window with each turn's text,
-        cards and error truncated (`_history_turn`), then a byte cap that
-        drops the oldest of the window, then, when the newest turn alone
-        still exceeds it, that turn's own truncation tightens until it fits.
-        The serialised digest never exceeds `CONVERSATION_DIGEST_MAX_BYTES`
-        (converse can `recall` past all of these bounds)."""
+        """The newest turns as compact {user, assistant, plans, cards}
+        records, the models' cross-turn memory.
+
+        Each ask is whole and so is the newest turn's answer. An older
+        turn's answer keeps the leading sentences that fit
+        `_HISTORY_TEXT_CAP` characters. Each plan a turn ran is one line
+        (`PlanRecord.digest_line`) cut to `_HISTORY_PLAN_CAP` characters.
+        Over `CONVERSATION_DIGEST_MAX_BYTES` serialised, the digest sheds in
+        a fixed order until it fits: older answers to the next of
+        `_HISTORY_ANSWER_CAPS`, then the oldest turn, one at a time, then the
+        newest turn's own caps, halved each try (`_history_turn`). Converse
+        can `recall` past all of these bounds."""
         if not self.turns:
             return None
         newest = self.turns[-_HISTORY_TURN_CAP:]
-        window = [_history_turn(turn) for turn in newest]
 
-        def size() -> int:
-            return len(json.dumps({"turns": window, "total_turns": len(self.turns)}))
+        def digest(window: list[dict[str, Any]]) -> dict[str, Any]:
+            return {"turns": window, "total_turns": len(self.turns)}
 
-        while len(window) > 1 and size() > CONVERSATION_DIGEST_MAX_BYTES:
+        def fits(window: list[dict[str, Any]]) -> bool:
+            return len(json.dumps(digest(window))) <= CONVERSATION_DIGEST_MAX_BYTES
+
+        window: list[dict[str, Any]] = []
+        for answer_cap in _HISTORY_ANSWER_CAPS:
+            window = [_history_turn(turn, answer_cap=answer_cap) for turn in newest[:-1]]
+            window.append(_history_turn(newest[-1]))
+            if fits(window):
+                return digest(window)
+        while len(window) > 1 and not fits(window):
             window.pop(0)
         shrink = 0
-        while size() > CONVERSATION_DIGEST_MAX_BYTES and shrink < _HISTORY_TEXT_CAP.bit_length():
+        while not fits(window) and shrink < _HISTORY_NEWEST_TEXT_CAP.bit_length():
             shrink += 1
             window[-1] = _history_turn(newest[-1], shrink=shrink)
-        return {"turns": window, "total_turns": len(self.turns)}
+        return digest(window)
 
     def anaphor_window(self, focus: str | None) -> str | None:
         """The window a window anaphor ("the same years" and siblings,
@@ -524,7 +590,7 @@ class ConversationState:
                 "total_cards": len(self.components),
             }
         hits = [
-            {"turn": index, **turn}
+            {"turn": index, **{k: v for k, v in turn.items() if k not in _TURN_LEDGER_KEYS}}
             for index, turn in enumerate(self.turns, start=1)
             if matches(f"{turn['user']} {turn['assistant']}")
         ]
@@ -534,13 +600,63 @@ class ConversationState:
             "total_turns": len(self.turns),
         }
 
+    def recall_part(
+        self,
+        *,
+        part: RecallPart,
+        turn: int | None = None,
+        component_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One earlier part of this conversation, in full: the plan records
+        (`plan`) or search readings (`readings`) of turn number `turn`
+        (1-based; the newest turn that has any when `turn` is None), each
+        rendered to at most `_RECALL_TEXT_BUDGET` characters, or the stored
+        entry of the canvas component `component_id`. Raises `RecallRefusedError`
+        naming the legal values when the target does not exist."""
+        if part == "canvas":
+            entry = self.components.get(component_id or "")
+            if entry is None:
+                ids = list(self.components)[-_RECALL_ID_CAP:]
+                raise RecallRefusedError(
+                    f"no canvas component {component_id!r}", {"component_ids": ids}
+                )
+            return {"part": part, "component_id": component_id, **entry}
+        key = "plans" if part == "plan" else "readings"
+        holding = [number for number, t in enumerate(self.turns, start=1) if t.get(key)]
+        if turn is None and holding:
+            turn = holding[-1]
+        if turn not in holding:
+            raise RecallRefusedError(
+                f"{'no turn' if turn is None else f'turn {turn}'} of this conversation "
+                f"holds a {part}",
+                {"turns": holding},
+            )
+        record = self.turns[turn - 1]
+        if part == "plan":
+            plans = _validated(PlanRecord, record["plans"], reader="recall", what="plan record")
+            budget = _RECALL_TEXT_BUDGET // max(len(plans), 1)
+            text = [plan.render(budget=budget) for plan in plans]
+        else:
+            readings = _validated(
+                SearchReading, record["readings"], reader="recall", what="search reading"
+            )
+            text = [render_readings(readings, budget=_RECALL_TEXT_BUDGET).text]
+        return {"part": part, "turn": turn, "user": record["user"], "text": text}
+
     def close_turn(self, *, final_text: str, error: str | None = None) -> None:
         """Append the turn's record, once -- the resume protocol can end a
-        turn from more than one code path."""
+        turn from more than one code path. The turn's telemetry span ends
+        with the user's message and `final_text` as its input and output, and
+        at level `ERROR` naming the `error` code when there is one."""
         if self.turn_recorded:
             return
         self.turn_recorded = True
-        end_turn_span(self._telemetry_span)
+        end_turn_span(
+            self._telemetry_span,
+            request=self.turn_user_message,
+            response=final_text,
+            error=error,
+        )
         self._telemetry_span = None
         record: dict[str, Any] = {
             "user": self.turn_user_message,
@@ -550,7 +666,86 @@ class ConversationState:
             record["cards"] = list(self.turn_components)
         if error:
             record["error"] = error
+        if self.turn_plans:
+            record["plans"] = list(self.turn_plans)
+        # A source only the translator or the canvas found is read here too,
+        # so a later turn's planner is shown it beside the ones a search
+        # returned (`prior_ledger_state`).
+        observed_at = datetime.now(UTC)
+        plans = _validated(PlanRecord, self.turn_plans, reader="close turn", what="plan record")
+        sourced = [
+            reading for plan in plans for reading in plan.source_readings(observed_at=observed_at)
+        ]
+        readings = [*self.turn_readings, *(reading.model_dump(mode="json") for reading in sourced)]
+        if readings:
+            record["readings"] = readings
+        # Only the blocks of the sources the turn's plans used, since a block
+        # can run to about 120 KB and the record is kept for the whole
+        # conversation.
+        used = {source.spec_id for plan in plans for source in plan.sources}
+        specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
+        if specs:
+            record["specs"] = specs
         self.turns.append(record)
+
+    def prior_ledger_state(self) -> dict[str, Any] | None:
+        """The search readings of every earlier turn, for this turn's planner
+        to render beside its own and pin from. None when no turn read any.
+
+        `readings` holds them oldest first, each spec_id held by its newest
+        reading only (`newest_per_spec_id`), as `SearchReading` JSON.
+        `warnings` holds, for each spec_id a reading names as its own or as
+        a candidate, the warnings of the part that named it, as `harness.
+        graph.ORCHESTRATOR_SPEC_WARNINGS_KEY` holds a turn's own; the newest
+        reading that names a spec_id decides. `spec_ids` lists the spec_ids
+        `earlier_block` resolves. No block is included. A pin or a fetch
+        reads one through `earlier_block`.
+        """
+        readings, blocks, warnings = self._earlier_ledger()
+        if not readings:
+            return None
+        return {
+            "readings": [r.model_dump(mode="json") for r in newest_per_spec_id(readings)],
+            "warnings": warnings,
+            "spec_ids": list(blocks),
+        }
+
+    def earlier_block(self, spec_id: str) -> dict[str, Any] | None:
+        """The spec block an earlier turn stored for `spec_id`, decided by the
+        newest reading that names it; None when that reading's turn stored
+        none.
+
+        A reading whose requested window is `latest` contributes no block,
+        since the latest year may have moved and a pin of it is confirmed by
+        a fresh search. A reading with no stored block, such as a source
+        only the translator found or a spec_id no plan of its turn used,
+        contributes none either.
+        """
+        return self._earlier_ledger()[1].get(spec_id)
+
+    def _earlier_ledger(
+        self,
+    ) -> tuple[list[SearchReading], dict[str, Any], dict[str, list[dict[str, Any]]]]:
+        """Every earlier turn's readings oldest first, and the block and
+        warnings the newest reading naming each spec_id decides
+        (`prior_ledger_state`, `earlier_block`)."""
+        readings: list[SearchReading] = []
+        blocks: dict[str, Any] = {}
+        warnings: dict[str, list[dict[str, Any]]] = {}
+        for turn in self.turns:
+            stored = turn.get("specs") or {}
+            for reading in _validated(
+                SearchReading, turn.get("readings") or (), reader="ledger", what="search reading"
+            ):
+                readings.append(reading)
+                for spec_id in named_spec_ids(reading):
+                    block = stored.get(spec_id)
+                    if block is None or reading.requested_window_kind == "latest":
+                        blocks.pop(spec_id, None)
+                    else:
+                        blocks[spec_id] = block
+                    warnings[spec_id] = [w.model_dump(mode="json") for w in reading.warnings]
+        return readings, blocks, warnings
 
     @property
     def awaiting_answer(self) -> bool:
@@ -599,6 +794,9 @@ class ConversationState:
         self.turn_user_message = ""
         self.turn_final_text = ""
         self.turn_components = []
+        self.turn_plans = []
+        self.turn_readings = []
+        self.turn_specs = {}
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -650,6 +848,8 @@ _KEY_TURN_USER_MESSAGE = "studio:turn_user_message"
 _KEY_TURN_FINAL_TEXT = "studio:turn_final_text"
 _KEY_TURN_COMPONENTS = "studio:turn_components"
 _KEY_TURN_RECORDED = "studio:turn_recorded"
+_KEY_TURN_PLANS = "studio:turn_plans"
+_KEY_TURN_READINGS = "studio:turn_readings"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -657,6 +857,29 @@ _CHECKPOINT_RETRY_ATTEMPTS = 3
 # `StudioStore.renew` and `StudioStore.request_cancel`'s fetch-append
 # cycles for their single-key `studio:segment` write.
 _SEGMENT_WRITE_RETRY_ATTEMPTS = 3
+
+
+async def _run_to_completion[T](work: Coroutine[Any, Any, T]) -> T:
+    """Run `work` in a task of its own and wait for it to finish even when
+    the caller is cancelled, then re-raise the caller's cancellation.
+
+    A ledger write the stream makes from a `finally` (`release`) or from a
+    task the stream cancels (`renew`, on the heartbeat) is cancelled with
+    `Task.cancel`, which no anyio shield stops. Cancelled mid-statement, the
+    write never lands, and an aiosqlite connection cancelled mid-statement
+    can leave the database file locked."""
+    task = asyncio.ensure_future(work)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
+    return task.result()
+
+
 # `StudioStore.mutate_composition`'s fetch-rebuild-mutate-append cycles for
 # its single-key `studio:composition` write.
 _COMPOSITION_MUTATE_RETRY_ATTEMPTS = 3
@@ -684,8 +907,9 @@ _COMPONENT_ITEM_PREFIX = "studio:component:"
 _WRITE_TOKEN_ITEM_PREFIX = "studio:write_token:"
 _APPROVAL_ITEM_PREFIX = "studio:approval:"
 
-# Identity and the five process-local runtime objects that
-# `_serialize_durable`/`_apply_delta` skip.
+# Identity, the five process-local runtime objects, and the turn's spec
+# blocks (`turn_specs`, read back from the turn's own ADK session by
+# `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
         "conversation_id",
@@ -694,6 +918,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "cancel_reason",
         "_telemetry_span",
         "_composition_ops",
+        "turn_specs",
     }
 )
 
@@ -766,6 +991,8 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
         _KEY_TURN_COMPONENTS: state.turn_components,
         _KEY_TURN_RECORDED: state.turn_recorded,
+        _KEY_TURN_PLANS: state.turn_plans,
+        _KEY_TURN_READINGS: state.turn_readings,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -825,6 +1052,10 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_components = list(value)
         elif key == _KEY_TURN_RECORDED:
             state.turn_recorded = value
+        elif key == _KEY_TURN_PLANS:
+            state.turn_plans = list(value)
+        elif key == _KEY_TURN_READINGS:
+            state.turn_readings = list(value)
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
@@ -915,6 +1146,7 @@ class StudioStore:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._session_service = session_service
+        self._turn_app_name = app_name
         self._app_name = f"{app_name}.ledger"
         self._runtime: dict[tuple[str, str], _RuntimeEntry] = {}
         self._clock = clock
@@ -1008,7 +1240,22 @@ class StudioStore:
                 if f.name not in _PROCESS_LOCAL_FIELDS:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
+        if entry.state.turn_index and not entry.state.turn_recorded:
+            entry.state.turn_specs = await self._turn_specs(principal, entry.state.session_id)
         return entry.state
+
+    async def _turn_specs(self, principal: str, session_id: str) -> dict[str, Any]:
+        """The spec blocks the open turn's own ADK session holds
+        (`ORCHESTRATOR_SPECS_KEY`), for `ConversationState.close_turn` to keep
+        those of the sources its plans used. Empty when the session holds
+        none or does not exist yet."""
+        session = await self._session_service.get_session(
+            app_name=self._turn_app_name,
+            user_id=principal,
+            session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        return dict((session.state.get(ORCHESTRATOR_SPECS_KEY) or {}) if session else {})
 
     def claim_segment(self, principal: str, conversation_id: str) -> str:
         """Claim a fresh segment on the LIVE state already loaded on this
@@ -1149,7 +1396,7 @@ class StudioStore:
         raise last_error
 
     async def renew(
-        self, principal: str, conversation_id: str, segment_id: str
+        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
     ) -> Literal["ok", "cancelled", "lost"]:
         """Push `segment_id`'s TTL forward by `SEGMENT_TTL_S`, writing only
         the `studio:segment` key under compare-and-swap. Fetches the
@@ -1165,40 +1412,58 @@ class StudioStore:
         flag keeps being observed until the caller reacts to it. `"ok"`
         otherwise. A `StaleSessionError` still standing after
         `_SEGMENT_WRITE_RETRY_ATTEMPTS` attempts, or any other exception
-        the session service raises, propagates. The caller's own
+        the session service raises, propagates, as does a `TimeoutError`
+        when the renewal takes longer than `timeout`. The caller's own
         heartbeat decides how long to keep trying before giving up on the
         renewal altogether.
+
+        Runs to the end even when the caller is cancelled
+        (`_run_to_completion`), since the heartbeat that calls it is
+        cancelled whenever its stream ends.
         """
-        entry = self._entry(principal, conversation_id)
-        last_error: StaleSessionError | None = None
-        async with entry.write_lock:
-            for _attempt in range(1, _SEGMENT_WRITE_RETRY_ATTEMPTS + 1):
-                session = await self._fetch_session(principal, conversation_id)
-                segment = _deserialize_segment(session.state.get(_KEY_SEGMENT)) if session else None
-                if session is None or segment is None or segment.id != segment_id:
-                    return "lost"
-                renewed = dataclasses.replace(segment, expires_at=self._clock() + SEGMENT_TTL_S)
-                event = Event(
-                    author="studio",
-                    actions=EventActions(state_delta={_KEY_SEGMENT: _serialize_segment(renewed)}),
-                )
-                try:
-                    await self._session_service.append_event(session, event)
-                except StaleSessionError as exc:
-                    last_error = exc
-                    continue
-                entry.session = session
-                entry.baseline[_KEY_SEGMENT] = _serialize_segment(renewed)
-                live_state = entry.state
-                if (
-                    live_state is not None
-                    and live_state.segment is not None
-                    and live_state.segment.id == renewed.id
-                ):
-                    live_state.segment = renewed
-                return "cancelled" if renewed.cancel else "ok"
-        assert last_error is not None
-        raise last_error
+        return await _run_to_completion(
+            self._renew(principal, conversation_id, segment_id, timeout=timeout)
+        )
+
+    async def _renew(
+        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float
+    ) -> Literal["ok", "cancelled", "lost"]:
+        """`renew`'s write, run as its own task."""
+        async with asyncio.timeout(timeout):
+            entry = self._entry(principal, conversation_id)
+            last_error: StaleSessionError | None = None
+            async with entry.write_lock:
+                for _attempt in range(1, _SEGMENT_WRITE_RETRY_ATTEMPTS + 1):
+                    session = await self._fetch_session(principal, conversation_id)
+                    segment = (
+                        _deserialize_segment(session.state.get(_KEY_SEGMENT)) if session else None
+                    )
+                    if session is None or segment is None or segment.id != segment_id:
+                        return "lost"
+                    renewed = dataclasses.replace(segment, expires_at=self._clock() + SEGMENT_TTL_S)
+                    event = Event(
+                        author="studio",
+                        actions=EventActions(
+                            state_delta={_KEY_SEGMENT: _serialize_segment(renewed)}
+                        ),
+                    )
+                    try:
+                        await self._session_service.append_event(session, event)
+                    except StaleSessionError as exc:
+                        last_error = exc
+                        continue
+                    entry.session = session
+                    entry.baseline[_KEY_SEGMENT] = _serialize_segment(renewed)
+                    live_state = entry.state
+                    if (
+                        live_state is not None
+                        and live_state.segment is not None
+                        and live_state.segment.id == renewed.id
+                    ):
+                        live_state.segment = renewed
+                    return "cancelled" if renewed.cancel else "ok"
+            assert last_error is not None
+            raise last_error
 
     async def checkpoint(self, principal: str, conversation_id: str, segment_id: str) -> None:
         """The reconciling full-state save: this instance's own changed
@@ -1309,48 +1574,64 @@ class StudioStore:
     ) -> None:
         """The end-of-segment save: drop this segment's still-resuming
         pending entries, clear the segment if it is still ours, then
-        `checkpoint`. Runs shielded from the caller's own cancellation,
-        with a timeout, since it runs in a `finally` on client-disconnect
-        and generator-finaliser paths where an unshielded await can
-        itself be cancelled. The timeout cancels the checkpoint once
-        (`asyncio.timeout`). anyio's `move_on_after` re-cancels at every
-        await until its scope exits, cutting short the session service's
-        own rollback and connection close.
+        `checkpoint`. Runs to the end even when the caller is cancelled
+        (`_run_to_completion`), since it runs in a `finally` on
+        client-disconnect and generator-finaliser paths, where a disconnect
+        cancels the task running it (`_unwind`'s `Task.cancel`). Cancelled
+        mid-checkpoint, the segment would stay live in the ledger until its
+        TTL. The timeout cancels the checkpoint once (`asyncio.timeout`).
+        anyio's `move_on_after` re-cancels at every await until its scope
+        exits, cutting short the session service's own rollback and
+        connection close.
 
-        Never raises: a `checkpoint` that cannot land (fenced out by a
-        takeover, a DB error, or the timeout above) is logged and
-        swallowed. The segment then simply expires by its own TTL, which
-        is what makes it safe to give up here.
+        Never raises anything but the caller's own cancellation: a
+        `checkpoint` that cannot land (fenced out by a takeover, a DB
+        error, or the timeout above) is logged and swallowed. The segment
+        then simply expires by its own TTL, which is what makes it safe to
+        give up here.
         """
         entry = self._runtime.get((principal, conversation_id))
         if entry is None or entry.state is None:
             return
-        with anyio.CancelScope(shield=True):
-            try:
-                async with asyncio.timeout(timeout):
-                    entry.state.drop_resuming(segment_id)
-                    if entry.state.segment is not None and entry.state.segment.id == segment_id:
-                        entry.state.segment = None
-                    try:
-                        await self.checkpoint(principal, conversation_id, segment_id)
-                    except SegmentLost:
-                        logger.warning(
-                            "studio ledger release: conversation %s segment %s was already "
-                            "taken over; nothing saved",
-                            conversation_id,
-                            segment_id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "studio ledger release: conversation %s failed to persist",
-                            conversation_id,
-                        )
-            except TimeoutError:
-                logger.warning(
-                    "studio ledger release on conversation %s did not complete within %ss",
-                    conversation_id,
-                    timeout,
-                )
+        await _run_to_completion(
+            self._save_release(entry.state, principal, conversation_id, segment_id, timeout=timeout)
+        )
+
+    async def _save_release(
+        self,
+        state: ConversationState,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        timeout: float,
+    ) -> None:
+        """`release`'s save, run as its own task."""
+        try:
+            async with asyncio.timeout(timeout):
+                state.drop_resuming(segment_id)
+                if state.segment is not None and state.segment.id == segment_id:
+                    state.segment = None
+                try:
+                    await self.checkpoint(principal, conversation_id, segment_id)
+                except SegmentLost:
+                    logger.warning(
+                        "studio ledger release: conversation %s segment %s was already "
+                        "taken over; nothing saved",
+                        conversation_id,
+                        segment_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "studio ledger release: conversation %s failed to persist",
+                        conversation_id,
+                    )
+        except TimeoutError:
+            logger.warning(
+                "studio ledger release on conversation %s did not complete within %ss",
+                conversation_id,
+                timeout,
+            )
 
     async def request_cancel(self, principal: str, conversation_id: str) -> bool:
         """Signal cancellation on `conversation_id`'s live segment,
@@ -1400,6 +1681,31 @@ class StudioStore:
         raise last_error
 
 
+class RecallRefusedError(Exception):
+    """`ConversationState.recall_part`'s target does not exist. `legal` maps
+    what it can be set to, by argument, to the values it accepts."""
+
+    def __init__(self, message: str, legal: dict[str, list[Any]]) -> None:
+        super().__init__(message)
+        self.legal = legal
+
+
+def make_recall_part(store: StudioStore) -> Any:
+    """The orchestrator's `recall` seam, bound to a store and resolved to the
+    conversation at CALL time, as `make_recall` is."""
+
+    async def recall_part(
+        *, part: RecallPart, turn: int | None, component_id: str | None
+    ) -> dict[str, Any]:
+        key = current_conversation_key.get()
+        conversation = store.current(*key) if key is not None else None
+        if conversation is None:
+            raise RecallRefusedError("there is no conversation to recall from", {})
+        return conversation.recall_part(part=part, turn=turn, component_id=component_id)
+
+    return recall_part
+
+
 def make_recall(store: StudioStore) -> Any:
     """The graph's recall seam, bound to a store. The conversation is
     resolved at CALL time through the request-scoped contextvar -- the same
@@ -1438,20 +1744,88 @@ def _cut_text(text: str, cap: int) -> str:
     return cut if len(json.dumps(cut)) <= cap else ""
 
 
+def _subset_label(*, showing: int, total: int) -> dict[str, Any]:
+    """The label a cut list carries, so a model reads `showing` items as a
+    subset of `total` chosen by `_SUBSET_RULE`."""
+    return {"showing": showing, "total": total, "rule": _SUBSET_RULE}
+
+
+def _factored_fact_summary(summary: Any) -> dict[str, Any] | None:
+    """A wire fact summary with each coordinate that every series holds at
+    the same value stated once, as `shared_coordinates`. Every other
+    coordinate stays on the series that holds it. The component id and
+    revision, which the block carries, are left out. None for a summary that
+    is not a dict whose series are dicts."""
+    if not isinstance(summary, dict) or not isinstance(summary.get("series"), list):
+        return None
+    series = [item for item in summary["series"] if isinstance(item, dict)]
+    if len(series) != len(summary["series"]):
+        return None
+    coordinates = [item.get("coordinates") or {} for item in series]
+    first, *rest = coordinates or [{}]
+    shared = {
+        key: value
+        for key, value in first.items()
+        if all(key in other and other[key] == value for other in rest)
+    }
+    factored_series = []
+    for item, own in zip(series, coordinates, strict=True):
+        entry = {key: value for key, value in item.items() if key != "coordinates"}
+        if kept := {key: value for key, value in own.items() if key not in shared}:
+            entry["coordinates"] = kept
+        factored_series.append(entry)
+    factored = {
+        key: value
+        for key, value in summary.items()
+        if key not in ("component_id", "revision", "series")
+    }
+    if shared:
+        factored["shared_coordinates"] = shared
+    factored["series"] = factored_series
+    return factored
+
+
 def _bounded_fact_summary(summary: Any) -> Any:
-    """`summary` when its serialised form fits `_FACT_SUMMARY_BYTE_CAP`, else
-    a `{"cut": ...}` stub stating its size and the limit. The block already
-    carries the component id and revision."""
+    """`summary`, factored where it can be (`_factored_fact_summary`), when
+    that fits `_FACT_SUMMARY_BYTE_CAP`. Over it, a factored summary keeps the
+    most leading series that fit, and `series_truncated` labels them a subset
+    of the card's series chosen by `_SUBSET_RULE`. Anything else over the cap
+    becomes a `{"cut": ...}` stub stating the summary's size and the limit."""
+    factored = _factored_fact_summary(summary)
+    shown = summary if factored is None else factored
+    if len(json.dumps(shown)) <= _FACT_SUMMARY_BYTE_CAP:
+        return shown
+    if factored is not None:
+        series = factored["series"]
+        total = len(series)
+
+        def leading(count: int) -> dict[str, Any]:
+            return {
+                **factored,
+                "series": series[:count],
+                "series_truncated": _subset_label(showing=count, total=total),
+            }
+
+        # The largest count that fits, by bisection, since each series kept adds bytes.
+        low, high = -1, len(series) - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(json.dumps(leading(middle))) <= _FACT_SUMMARY_BYTE_CAP:
+                low = middle
+            else:
+                high = middle - 1
+        if low >= 0:
+            return leading(low)
     size = len(json.dumps(summary))
-    if size <= _FACT_SUMMARY_BYTE_CAP:
-        return summary
     return {"cut": f"a {size}-byte fact summary exceeds the {_FACT_SUMMARY_BYTE_CAP}-byte limit"}
 
 
 def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     """One block of the canvas digest: the stored entry with its id, type,
-    title, fact summary and what it shows bounded. The stored entry stays
-    whole for `recall_state` and the composition "add" op."""
+    title, fact summary and what it shows bounded. A `variable` or
+    `entities` list shorter than the names the card draws carries a
+    `<key>_truncated` label. The stored entry stays whole for `recall_state`
+    and the composition "add" op."""
     block: dict[str, Any] = {"component_id": _cut_text(component_id, _BLOCK_ID_BYTES), **entry}
     if isinstance(block.get("type"), str):
         block["type"] = _cut_text(block["type"], _BLOCK_TYPE_BYTES)
@@ -1459,12 +1833,16 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         block["title"] = _cut_text(str(block["title"]), _TITLE_BYTE_CAP)
     if "fact_summary" in block:
         block["fact_summary"] = _bounded_fact_summary(block["fact_summary"])
+    drawn = _summary_names(entry.get("fact_summary"))
     for key in ("variable", "entities"):
         if key in block:
             names = block[key] if isinstance(block[key], list) else [block[key]]
             block[key] = [
                 _cut_text(str(name), _DIGEST_NAME_BYTE_CAP) for name in names[:_DIGEST_SHOW_CAP]
             ]
+            total = max(len(names), len(set(drawn[key])))
+            if total > len(block[key]):
+                block[f"{key}_truncated"] = _subset_label(showing=len(block[key]), total=total)
     if "time" in block:
         block["time"] = _cut_text(str(block["time"]), _DIGEST_TIME_BYTE_CAP)
     return block
@@ -1481,11 +1859,17 @@ def _window_phrase(display: Any) -> str | None:
     return None
 
 
-def _history_turn(turn: dict[str, Any], *, shrink: int = 0) -> dict[str, Any]:
-    """One turn of the conversation digest. Each cap is halved `shrink` times,
-    so the newest turn can be tightened until the whole digest fits; past the
-    cards' cap, `cards_omitted` counts the cards left out."""
-    text_cap = _HISTORY_TEXT_CAP >> shrink
+def _history_turn(
+    turn: dict[str, Any], *, answer_cap: int | None = None, shrink: int = 0
+) -> dict[str, Any]:
+    """One turn of the conversation digest.
+
+    The ask is whole, and the answer whole unless `answer_cap` holds it to
+    its leading sentences (`_leading_sentences`). `shrink` tightens the
+    newest turn when it alone is over the digest's cap: the ask and answer
+    are cut to `_HISTORY_NEWEST_TEXT_CAP` bytes and every other cap is
+    halved, `shrink` times each. Past the cards' cap, `cards_omitted` counts
+    the cards left out."""
     cards = turn.get("cards") or []
     kept = [
         {
@@ -1498,10 +1882,21 @@ def _history_turn(turn: dict[str, Any], *, shrink: int = 0) -> dict[str, Any]:
         }
         for card in cards[: _HISTORY_CARD_CAP >> shrink]
     ]
-    record: dict[str, Any] = {
-        "user": turn["user"][:text_cap],
-        "assistant": turn["assistant"][:text_cap],
-    }
+    user, assistant = turn["user"], turn["assistant"]
+    if answer_cap is not None:
+        assistant = _leading_sentences(assistant, answer_cap)
+    if shrink:
+        user = _cut_text(user, _HISTORY_NEWEST_TEXT_CAP >> shrink)
+        assistant = _cut_text(assistant, _HISTORY_NEWEST_TEXT_CAP >> shrink)
+    record: dict[str, Any] = {"user": user, "assistant": assistant}
+    plans = [
+        _cut_text(plan.digest_line(), _HISTORY_PLAN_CAP >> shrink)
+        for plan in _validated(
+            PlanRecord, turn.get("plans") or (), reader="conversation digest", what="plan record"
+        )
+    ]
+    if plans:
+        record["plans"] = plans
     if kept:
         record["cards"] = kept
     if len(cards) > len(kept):
@@ -1509,6 +1904,31 @@ def _history_turn(turn: dict[str, Any], *, shrink: int = 0) -> dict[str, Any]:
     if turn.get("error"):
         record["error"] = _cut_text(turn["error"], _HISTORY_ERROR_BYTE_CAP >> shrink)
     return record
+
+
+def _validated[M: BaseModel](
+    model: type[M], stored: Iterable[Any], *, reader: str, what: str
+) -> list[M]:
+    """Each of `stored` as a `model`. A record that fails validation is logged
+    and skipped, so a turn stored under an older schema still reads as the
+    records that do validate."""
+    records: list[M] = []
+    for raw in stored:
+        try:
+            records.append(model.model_validate(raw))
+        except ValidationError:
+            logger.warning("%s: skipping a stored %s", reader, what, exc_info=True)
+    return records
+
+
+def _leading_sentences(text: str, cap: int) -> str:
+    """`text` when it is at most `cap` characters, else its leading sentences
+    that fit `cap` ending in `_CUT_MARKER`, or, when its first sentence is
+    already longer, a prefix cut to `cap` (`planner.plan.cut_user_text`)."""
+    if len(text) <= cap:
+        return text
+    end = max((match.end() for match in _SENTENCE_END.finditer(text, 0, cap)), default=0)
+    return text[:end] + _CUT_MARKER if end else cut_user_text(text, cap)
 
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
@@ -1553,29 +1973,38 @@ def _digest_shows(component: dict[str, Any]) -> dict[str, Any]:
     holds.
     """
     summary = component.get("fact_summary") or {}
-
-    entities = [
-        str(series["label"])
-        for series in summary.get("series") or []
-        if isinstance(series, dict) and series.get("label")
-    ]
-    variables = [
-        str(indicator["name"])
-        for indicator in summary.get("indicators") or []
-        if isinstance(indicator, dict) and indicator.get("name")
-    ]
+    names = _summary_names(summary)
 
     shows: dict[str, Any] = {}
-    if variables:
-        shows["variable"] = _bounded_names(variables)
-    if entities:
-        shows["entities"] = _bounded_names(entities)
+    for key in ("variable", "entities"):
+        if names[key]:
+            shows[key] = _bounded_names(names[key])
     window = summary.get("window") or {}
     start = window.get("start") if isinstance(window, dict) else None
     end = window.get("end") if isinstance(window, dict) else None
     if start and end:
         shows["time"] = f"{start}-{end}"
     return shows
+
+
+def _summary_names(summary: Any) -> dict[str, list[str]]:
+    """Every name a wire fact summary draws, in display order: `variable`
+    from its indicators' names, `entities` from its series' labels. Empty
+    lists for a summary that is not a dict."""
+    if not isinstance(summary, dict):
+        return {"variable": [], "entities": []}
+    return {
+        "variable": [
+            str(indicator["name"])
+            for indicator in summary.get("indicators") or []
+            if isinstance(indicator, dict) and indicator.get("name")
+        ],
+        "entities": [
+            str(series["label"])
+            for series in summary.get("series") or []
+            if isinstance(series, dict) and series.get("label")
+        ],
+    }
 
 
 def _bounded_names(names: list[str]) -> list[str]:

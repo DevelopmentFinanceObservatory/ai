@@ -35,8 +35,25 @@ _MAX_ENTITY_TEXT_CHARS = 128
 _MAX_ROLE_CHARS = 64
 _MAX_TIME_CHARS = 100
 _MAX_UNIT_CHARS = 100
-_MAX_SOURCE_CHARS = 200
+MAX_SOURCE_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
+
+# The most `resolved.stat_vars.items` one search result carries across all its
+# spec blocks, which keeps a result under the transport's 1 MiB bound. A block
+# without a member digest lists at most 40, and a result holds up to six parts
+# of up to six candidates at about 1.2 KB an item, so 36 such blocks would
+# pass it.
+MAX_STAT_VAR_ITEMS = 200
+
+# The time phrases the parsed door binds. A phrase outside these draws a
+# `time_text_not_parsed` warning, so the `time` description lists them.
+TIME_FORMS = (
+    "YYYY",
+    "YYYY to YYYY",
+    "since YYYY",
+    "between YYYY and the latest",
+    "latest",
+)
 
 
 class SearchEntity(BaseModel):
@@ -76,7 +93,10 @@ class SearchPart(BaseModel):
         default=None,
         min_length=1,
         max_length=_MAX_TIME_CHARS,
-        description=("the time phrase, matched against a fixed lexicon, e.g. '2015 to 2024'"),
+        description=(
+            "the time phrase, in one of these forms only: "
+            + ", ".join(f"'{form}'" for form in TIME_FORMS)
+        ),
     )
     unit: str | None = Field(
         default=None,
@@ -87,7 +107,7 @@ class SearchPart(BaseModel):
     source: str | None = Field(
         default=None,
         min_length=1,
-        max_length=_MAX_SOURCE_CHARS,
+        max_length=MAX_SOURCE_CHARS,
         description=(
             "who reported it, refused when no unit is given and ignored when one is, so "
             "choose the source through get_data's facets instead"
@@ -189,6 +209,94 @@ async def _register_definitions(envelope: Mapping[str, Any]) -> ToolResult | Non
     return await put_definitions(definitions)
 
 
+def _cap_stat_var_items(envelope: Mapping[str, Any]) -> None:
+    """Cut each spec block's `resolved.stat_vars.items` in `envelope` by what the list is.
+
+    A block whose `resolved.shape` states `member_digest` is a family the
+    packaged code index elects, which the mint elects again from the same
+    index, so its list adds nothing a reader needs beyond `member_count` and
+    the digest: it keeps no items, unless Search lists exactly one, which is
+    then the whole list (a one-member family, or the root
+    `data_mcp.substitution.root_member` tests for). A block without a digest
+    lists a recall sample of confirmed members that is its membership, and
+    keeps every item. `MAX_STAT_VAR_ITEMS` then bounds the result: past it,
+    the blocks share it shortest list first, each taking an even share of the
+    items still unspent and at least one.
+
+    A cut list gets `truncated` set. `member_count` and the block's `shape`
+    stay as served, so a reader sees a family counted whole. The block's
+    `resolved.trace.resolved_stat_vars`, which follows the items' order, is
+    cut to the same length, with `resolved_stat_vars_truncated` set when it
+    loses an entry. A `no_data` part's `elected_stat_vars` becomes a count on
+    the same rule (`_cut_elected_stat_vars`).
+    """
+    _cut_elected_stat_vars(envelope)
+    blocks: list[tuple[dict[str, Any], Any]] = []
+    for node in _spec_nodes(envelope):
+        resolved = node.get("resolved") or {}
+        stat_vars = resolved.get("stat_vars")
+        if not isinstance(stat_vars, dict) or not isinstance(stat_vars.get("items"), list):
+            continue
+        block = (stat_vars, resolved.get("trace"))
+        shape = resolved.get("shape")
+        if isinstance(shape, dict) and shape.get("member_digest") and len(stat_vars["items"]) > 1:
+            _cut_stat_var_items(*block, 0)
+        blocks.append(block)
+    _share_stat_var_items(blocks, budget=MAX_STAT_VAR_ITEMS)
+
+
+def _cut_elected_stat_vars(envelope: Mapping[str, Any]) -> None:
+    """Replace each `no_data.elected_stat_vars` that lists a family with a member digest by its count.
+
+    The list names the same family as the part's `flagged_match` (dfo-apis
+    `NoData.elected_stat_vars`), and can run to thousands of StatVars. Where
+    that spec states `member_digest`, the list is dropped and
+    `elected_stat_var_count` carries how many it held. A family without a
+    digest keeps its list, which Search bounds at 40.
+    """
+    for part in envelope.get("parts") or []:
+        if part.get("status") != "no_data":
+            continue
+        no_data = part.get("no_data") or {}
+        flagged = no_data.get("flagged_match") or {}
+        shape = (flagged.get("resolved") or {}).get("shape") or {}
+        elected = no_data.get("elected_stat_vars")
+        if shape.get("member_digest") and isinstance(elected, list):
+            no_data["elected_stat_var_count"] = len(elected)
+            del no_data["elected_stat_vars"]
+
+
+def _share_stat_var_items(blocks: Sequence[tuple[dict[str, Any], Any]], *, budget: int) -> None:
+    """Cut `blocks` to share `budget` items, each keeping at least one.
+
+    Blocks are served shortest list first, each taking an even share of the
+    items still unspent, so a block listing fewer than its share leaves the
+    rest to the others. Blocks that fit `budget` whole are left as they are.
+    """
+    if sum(len(stat_vars["items"]) for stat_vars, _ in blocks) <= budget:
+        return
+    unspent = budget
+    for left, (stat_vars, trace) in zip(
+        range(len(blocks), 0, -1), sorted(blocks, key=lambda b: len(b[0]["items"])), strict=True
+    ):
+        _cut_stat_var_items(stat_vars, trace, max(1, unspent // left))
+        unspent -= len(stat_vars["items"])
+
+
+def _cut_stat_var_items(stat_vars: dict[str, Any], trace: Any, keep: int) -> None:
+    """Keep the first `keep` of `stat_vars["items"]`, and as many of the trace's `resolved_stat_vars`."""
+    if len(stat_vars["items"]) > keep:
+        stat_vars["items"] = stat_vars["items"][:keep]
+        stat_vars["truncated"] = True
+    listed = len(stat_vars["items"])
+    if not isinstance(trace, dict):
+        return
+    traced = trace.get("resolved_stat_vars")
+    if isinstance(traced, list) and len(traced) > listed:
+        trace["resolved_stat_vars"] = traced[:listed]
+        trace["resolved_stat_vars_truncated"] = True
+
+
 def _unusable_envelope(exc: Exception) -> ToolResult:
     return to_tool_result(
         ToolRefusal.upstream_response_unusable(
@@ -200,7 +308,8 @@ def _unusable_envelope(exc: Exception) -> ToolResult:
 async def resolve_and_register(wire: Mapping[str, Any]) -> dict[str, Any] | ToolResult:
     """POST `wire` to the Search API's resolve route and register every definition its envelope carries.
 
-    Returns the envelope, or the refusal `ToolResult` a caller returns in its
+    Returns the envelope, its spec blocks' StatVar items cut by block kind
+    (`_cap_stat_var_items`), or the refusal `ToolResult` a caller returns in its
     place: the upstream refused or could not be reached, the body is not an
     envelope, or a definition was not stored (`_register_definitions`).
     """
@@ -235,6 +344,7 @@ async def resolve_and_register(wire: Mapping[str, Any]) -> dict[str, Any] | Tool
         # refusals it returns are values, not exceptions, and pass through
         # untouched.
         refusal = await _register_definitions(envelope)
+        _cap_stat_var_items(envelope)
     except (AttributeError, KeyError, TypeError) as exc:
         return _unusable_envelope(exc)
     if refusal is not None:
@@ -266,9 +376,8 @@ async def search(
     against a fixed grammar, not free text: `role` names which side of the
     flow the entity is on -- a word for where it originates (e.g. donor,
     provider, creditor, exporter) is "from", a word for where it is
-    directed (e.g. recipient, debtor, importer) is "to"; `time` is a bare
-    year, a range ("2015 to 2020" or "2015-2020"), an open start
-    ("since 2015"), or "latest"/"current"/"now".
+    directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
+    the forms its own description lists.
     A `role_text_not_recognised` or `time_text_not_parsed` warning in the
     response means that field needs rephrasing into that grammar. A
     `source` value refuses when no unit is given and is ignored when one is,

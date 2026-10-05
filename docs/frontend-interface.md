@@ -173,17 +173,17 @@ a seed carries and for Search's answer for its identity, which supplies
 the rest. A seed or an answer past one is refused whole; nothing is cut
 to fit.
 
-| Member of `spec` or of Search's answer                              | Bound                     |
-| ------------------------------------------------------------------- | ------------------------- |
-| `resolved.rendered_sentence`                                        | 2,000 characters          |
-| `resolved.stat_vars.items`                                          | 200 items                 |
-| `resolved.entities`                                                 | 1,024 items               |
-| the roles of `definition.identity.entities`                         | 16                        |
-| `resolved.slots`, `coverage.dimensions`, `role_axis_facts`          | 64 items each             |
-| any other string the harness reads (a dcid, a role, a label)        | 256 characters            |
-| any count or year the harness reads                                 | a whole number, 12 digits |
-| the sentence, StatVars and entities together, as a model reads them | 65,536 characters         |
-| the record the turn keeps of the seed, identity included            | 131,072 characters        |
+| Member of `spec` or of Search's answer                             | Bound                     |
+| ------------------------------------------------------------------ | ------------------------- |
+| `resolved.rendered_sentence`                                       | 2,000 characters          |
+| `resolved.stat_vars.items`                                         | 200 items                 |
+| `resolved.entities`                                                | 1,024 items               |
+| the roles of `definition.identity.entities`                        | 16                        |
+| `resolved.slots`, `coverage.dimensions`, `role_axis_facts`         | 64 items each             |
+| any other string the harness reads (a dcid, a role, a label)       | 256 characters            |
+| any count or year the harness reads                                | a whole number, 12 digits |
+| the sentence, measure and entities together, as a model reads them | 65,536 characters         |
+| the record the turn keeps of the seed, identity included           | 131,072 characters        |
 
 **What a seeded turn shows before approval.** The harness resolves each
 usable seed's identity again through the Search API, all seeds at once,
@@ -421,7 +421,7 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
 
 - `fact_summary` holds `component_id`, `revision`, `series[]` (`{id, label, point_count, coordinates?, first?, last?, change?}`), `indicators[]`
   (`{id, name, description}`), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?`,
-  `series_truncated?`, `countries?`. By design, the numbers in the message
+  `series_truncated?`, `countries?`, `defaults?` (`[{pointer, detail}]`: the choices the platform made where the card's intent left one open, each naming the intent field it filled by JSON Pointer; absent means it made none). By design, the numbers in the message
   text come from fact summaries; the models are constrained to them, and
   the recorded transcripts hold to it. A chart's `window` is the one the
   platform states, or else the periods its axis draws: a bar chart of

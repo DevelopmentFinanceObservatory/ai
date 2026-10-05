@@ -75,6 +75,7 @@ IMPLEMENTATION_VERSIONS: Mapping[str, str] = {
     "share_of": "1",
     "join": "1",
     "filter": "1",
+    "sum_of": "1",
 }
 
 

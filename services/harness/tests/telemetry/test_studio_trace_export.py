@@ -38,6 +38,14 @@ from starlette.responses import StreamingResponse
 
 CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}
+QUESTION = "comprehensive overview of life expectancy in Kenya"
+
+
+def _attribute(span: Span, key: str) -> str | int | float | bool | None:
+    for attribute in span.attributes:
+        if attribute.key == key:
+            return getattr(attribute.value, attribute.value.WhichOneof("value"))
+    return None
 
 
 def _attribute_keys(span: Span) -> set[str]:
@@ -191,7 +199,8 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     """Both segments of a scripted turn run ADK's real workflow. Every span on
     the wire has its parent on the wire too, except `turn`, whose parent is the
     synthetic one the SDK creates for a seeded trace id; ADK's two `invocation`
-    spans are exported, and nothing else without attributes is."""
+    spans are exported, and nothing else without attributes is. `turn` carries
+    the question and the answer as its input and output."""
     init_telemetry(service_name="harness")
     app = create_app(settings=Settings(studio_scripted=True))
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
@@ -204,7 +213,7 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
             {
                 **base,
                 "kind": "turn.request",
-                "message": "comprehensive overview of life expectancy in Kenya",
+                "message": QUESTION,
             },
         )
         plan = first[-1]
@@ -232,6 +241,9 @@ async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     assert {span.parent_span_id for span in invocations} == {turn.span_id}
     assert {span.parent_span_id for span in workflows} == {span.span_id for span in invocations}
     assert _spans_with_an_unexported_parent(spans) == [turn]
+    # The turn's question and answer are the trace's overall input and output.
+    assert _attribute(turn, "langfuse.observation.input") == QUESTION
+    assert _attribute(turn, "langfuse.observation.output")
     # The filter drops attribute-less spans other than ADK's `invocation`.
     for scope, span in scoped:
         assert (

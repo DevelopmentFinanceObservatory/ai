@@ -559,6 +559,60 @@ def test_a_block_carrying_no_identity_states_no_pin_verdict() -> None:
     assert source_from_spec_block(block).pinned is None
 
 
+_AGE_UNBOUND = {
+    "key": {"axis": "how", "property": {"dcid": "age", "label": "age"}},
+    "binding": {"kind": "unbound"},
+}
+_PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}}
+
+
+@pytest.mark.parametrize(
+    ("gender_slot", "codes"),
+    [
+        pytest.param(_GENDER_BLOCK_SLOT, {"gender": ("Female",)}, id="one-code"),
+        pytest.param(
+            {**_GENDER_BLOCK_SLOT, "expansion": {"added": [{"dcid": "Female_Adult"}]}},
+            {"gender": ("Female", "Female_Adult")},
+            id="a-value-and-its-descendants",
+        ),
+        pytest.param(
+            {
+                **_GENDER_BLOCK_SLOT,
+                "binding": {
+                    "kind": "set",
+                    "values": [{"ref": {"dcid": "Male"}}, {"ref": {"dcid": "Female"}}],
+                },
+            },
+            {"gender": None},
+            id="a-set-with-no-expansion",
+        ),
+        pytest.param(
+            {
+                **_GENDER_BLOCK_SLOT,
+                "binding": {"kind": "set", "values": [{"ref": {"dcid": "Female"}}]},
+                "expansion": {"added": [{"dcid": "Female_Adult"}]},
+            },
+            {"gender": ("Female", "Female_Adult")},
+            id="a-set-and-its-descendants",
+        ),
+        pytest.param(
+            {**_GENDER_BLOCK_SLOT, "binding": {"kind": "range"}}, None, id="an-unknown-binding"
+        ),
+        pytest.param(
+            {**_GENDER_BLOCK_SLOT, "binding": {"kind": "value", "value": {}}},
+            None,
+            id="a-value-without-a-ref",
+        ),
+    ],
+)
+def test_slot_codes_hold_every_code_a_bound_slot_admits(
+    gender_slot: dict[str, Any], codes: dict[str, tuple[str, ...] | None] | None
+) -> None:
+    block = _described([_TOTAL], slots=[_AGE_UNBOUND, gender_slot, _PLACE])
+
+    assert source_from_spec_block(block).slot_codes == codes
+
+
 def test_a_defaulted_place_scope_opens_its_axis_with_every_member_counted() -> None:
     source = source_from_spec_block(_place_scope_block())
 

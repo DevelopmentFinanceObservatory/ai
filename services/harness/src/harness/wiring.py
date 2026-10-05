@@ -33,9 +33,9 @@ def build_generative_nodes(
 
     The model seams here are single constrained calls that build their genai
     client lazily on first use; pass `client` to share one across them. The
-    planner is `planner.agent`'s planner with `translator.agent`'s translator
+    planner is `planner.agent`'s planner with `translator.tool`'s `translate`
     attached, adapted by `harness.planner_seam.PlannerSeam`. `surface`
-    is the tool surface the translator discovers on, the compiler checks
+    is the tool surface `translate` discovers on, the compiler checks
     against, the planner's `get_skill` and `get_skill_file` call through,
     and converse reads dfo-faq through for a reply about DFO itself;
     pass the one `harness.server.create_app` already built for the

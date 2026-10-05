@@ -1,0 +1,632 @@
+"""The planner's `translate` tool, and the translator core it drives.
+
+The translator finds the data each dataset requirement needs (see
+`translator.discovery`), proposes the operations that carry the plan's
+requirements out, and hands both to `compiler.compile_plan`, which writes the
+workflow and checks it. None of this needs a model:
+`translator.mechanical.run_translate` drives it as code, and
+`build_translate_tool` exposes it to the planner as one function tool,
+`translate`, which reads the plan `propose_plan` recorded from session state
+and takes no arguments.
+
+`translate` answers the planner with one outcome from a closed set: `ok` once
+the plan compiled, or the `Referral` the run stopped on, flattened so its own
+`outcome` (`translator.referral.OUTCOME_OF`) is the answer's: `choice_required`
+with the candidate sources, `invalid_input` for a requirement the planner
+repairs, `unsupported`, `transient` or `internal`. The referral is also saved
+in session state, for the planner seam's stall watchdog and `submit_plan`'s
+own gate. A plan that is not a translatable draft answers with the typed
+problem that says so.
+
+Several candidate sources for one requirement close on a `source_ambiguous`
+referral carrying them. The planner records the choice as a decision or puts
+it to the user.
+
+None of the translator's work is confirmation-gated, because none retrieves
+observations or computes anything: discovery reads metadata, and compiling
+writes a workflow that nothing runs before the user approves it. The
+approval gate stays where it is, in the harness graph.
+
+An unreadable surface comes back as a typed problem rather than an exception:
+these run inside ADK tool calls, where raising ends the turn.
+`DuplicateToolNameError` is the exception, and propagates, since a tool name
+served twice is a misconfiguration retrying cannot resolve.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from enum import StrEnum
+from typing import assert_never, cast
+
+from compiler.compile import CompileIssue, CompileIssueCode, compile_plan
+from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.tool_context import ToolContext
+from planner.operations import Translation
+from planner.plan import (
+    DatasetRequirement,
+    Plan,
+    UnsupportedOperation,
+    plan_revision,
+    record_unsupported,
+    save_plan,
+)
+from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
+from planner.workflow import SelectedSource
+from pydantic import JsonValue, ValidationError
+
+from translator.discovery import (
+    DiscoveryLog,
+    apply_definitions,
+    build_discovery_tools,
+    compact_source,
+    current_draft,
+    dataset_keys,
+    described_sources,
+    discovery_lock,
+    fetch_definitions,
+    load_log,
+    requirement_revision,
+    settled_sources,
+)
+from translator.mechanical import TranslatorCore, run_translate
+from translator.referral import (
+    MAY_CARRY_CANDIDATES,
+    Referral,
+    ReferralKind,
+    StalePin,
+    load_referral,
+    save_referral,
+)
+
+logger = logging.getLogger(__name__)
+
+# The name the planner's model calls the tool by, and the name its function
+# response carries in the session.
+TRANSLATE_TOOL_NAME = "translate"
+
+
+def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tuple[StalePin, ...]:
+    """Every dataset requirement of `plan` but `requirement_id` whose pin discovery did not find.
+
+    Read off `log` (`DiscoveryLog.stale_pin_sources`), each with the sources
+    found in its place, in the plan's order.
+    """
+    stale: list[StalePin] = []
+    for requirement in plan.evidence_requirements:
+        if (
+            not isinstance(requirement, DatasetRequirement)
+            or requirement.id == requirement_id
+            or requirement.source_spec_id is None
+        ):
+            continue
+        found = log.stale_pin_sources(
+            requirement_revision(requirement), requirement.id, requirement.source_spec_id
+        )
+        if found is not None:
+            stale.append(StalePin(requirement_id=requirement.id, candidates=found))
+    return tuple(stale)
+
+
+def _referral_payload(referral: Referral) -> dict[str, object]:
+    """Return `referral` as the planner reads it: its `outcome`, and each candidate,
+    its own and each stale pin's, rendered by `compact_source`.
+
+    `no_data`'s candidates are the nearest series discovery found, not a
+    source the planner may pin without a fresh search: rendered without
+    `spec_id` so the only way one reaches a pinnable choice is a real
+    `source_ambiguous` or `pinned_source_not_found` referral. `budget_spent`
+    appears only when set, the one case the planner seam ends the entry on.
+    """
+    selectable = referral.kind is not ReferralKind.NO_DATA
+    excluded = {"candidates", "stale_pins"}
+    if not referral.budget_spent:
+        excluded.add("budget_spent")
+    payload = referral.model_dump(mode="json", exclude=excluded) | {
+        "outcome": referral.outcome.value,
+        "candidates": [
+            compact_source(source, selectable=selectable) for source in referral.candidates
+        ],
+    }
+    if referral.stale_pins:
+        payload["stale_pins"] = [
+            {
+                "requirement_id": pin.requirement_id,
+                "candidates": [
+                    compact_source(source, selectable=True) for source in pin.candidates
+                ],
+            }
+            for pin in referral.stale_pins
+        ]
+    return payload
+
+
+class IssueResolution(StrEnum):
+    """What a compile issue asks for, listed in the order `_compile_failure_action` prefers.
+
+    `DISCOVER_AGAIN` is a fix the loop applies itself, for a translation that
+    names a source discovery has not settled for its requirement. `INTERNAL`
+    is a fault no plan change repairs. `build_translation` copies a valid
+    plan's requirements verbatim, so a structural issue in the translation is
+    a translator fault, and a capability or schema issue is the services'
+    configuration. `UNSUPPORTED` is an operation no tool performs.
+    `UNMEETABLE` is a requirement the user decides how to change, and
+    `REPAIR` one the planner repairs itself, as `_PERMITTED_REPAIRS` names.
+    """
+
+    DISCOVER_AGAIN = "discover_again"
+    INTERNAL = "internal"
+    UNSUPPORTED = "unsupported"
+    UNMEETABLE = "unmeetable"
+    REPAIR = "repair"
+
+
+def issue_resolution(code: CompileIssueCode) -> IssueResolution:
+    """The one resolution every compile issue code maps to."""
+    match code:
+        case (
+            CompileIssueCode.SOURCE_UNSELECTED
+            | CompileIssueCode.SOURCE_NOT_DISCOVERED_FOR_REQUIREMENT
+            | CompileIssueCode.SOURCE_PIN_VIOLATED
+        ):
+            return IssueResolution.DISCOVER_AGAIN
+        case CompileIssueCode.SOURCE_UNUSABLE | CompileIssueCode.REQUIREMENT_UNMEETABLE:
+            return IssueResolution.UNMEETABLE
+        case CompileIssueCode.NO_CAPABILITY:
+            return IssueResolution.UNSUPPORTED
+        case (
+            CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
+            | CompileIssueCode.RANK_AXIS_REQUIRED
+            | CompileIssueCode.SHARE_AXIS_REQUIRED
+            | CompileIssueCode.SHARE_KEY_UNKNOWN
+            | CompileIssueCode.SOURCE_WIDER_THAN_REQUIREMENT
+            | CompileIssueCode.WINDOW_OUTSIDE_PERIOD
+            | CompileIssueCode.ENTITY_REQUIRED
+            | CompileIssueCode.UNKNOWN_ENTITY
+            | CompileIssueCode.ENTITY_AMBIGUOUS
+            | CompileIssueCode.ENTITY_UNRESOLVED
+            | CompileIssueCode.DEGENERATE_SIDES
+            | CompileIssueCode.SUM_SIDES_OVERLAP
+            | CompileIssueCode.SUM_OVERLAP_UNDECIDED
+            | CompileIssueCode.SUM_UNITS_DIFFER
+            | CompileIssueCode.FRAME_UNITS_DIFFER
+            | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
+            | CompileIssueCode.PERIODS_DISJOINT
+            | CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS
+            | CompileIssueCode.BAD_ARGS
+        ):
+            return IssueResolution.REPAIR
+        case (
+            CompileIssueCode.DUPLICATE_ID
+            | CompileIssueCode.REQUIREMENT_UNKNOWN
+            | CompileIssueCode.REQUIREMENT_UNSATISFIED
+            | CompileIssueCode.DUPLICATE_SATISFACTION
+            | CompileIssueCode.KIND_MISMATCH
+            | CompileIssueCode.OPERATION_MISMATCH
+            | CompileIssueCode.DANGLING_INPUT
+            | CompileIssueCode.INPUT_IS_TERMINAL
+            | CompileIssueCode.CYCLE
+            | CompileIssueCode.UNKNOWN_TERMINAL
+            | CompileIssueCode.TERMINAL_IS_READ
+            | CompileIssueCode.OPERATION_UNREACHABLE
+            | CompileIssueCode.AMBIGUOUS_CAPABILITY
+            | CompileIssueCode.UNKNOWN_TOOL
+            | CompileIssueCode.BAD_TOOL_SCHEMA
+            | CompileIssueCode.CAPABILITY_SCHEMA_DRIFT
+            | CompileIssueCode.CAPABILITY_UNPINNED
+            | CompileIssueCode.ARTIFACT_MISMATCH
+        ):
+            return IssueResolution.INTERNAL
+        case _:
+            assert_never(code)
+
+
+# What the planner may change for each `IssueResolution.REPAIR` code. The
+# issue's own reason says what was found.
+_PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
+    CompileIssueCode.INPUT_SHAPE_UNSUPPORTED: (
+        "change the calculation, or the requirement it reads, so its input has a shape the "
+        "calculation takes"
+    ),
+    CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
+    CompileIssueCode.SHARE_AXIS_REQUIRED: (
+        "set the share's `axis` to the role it is taken per, or name the numerator's `entity`"
+    ),
+    CompileIssueCode.SHARE_KEY_UNKNOWN: "set the share's `axis` to a role both sides carry",
+    CompileIssueCode.SOURCE_WIDER_THAN_REQUIREMENT: (
+        "name the entities the requirement needs, or filter the series to them before the "
+        "calculation pools them"
+    ),
+    CompileIssueCode.WINDOW_OUTSIDE_PERIOD: (
+        "move the growth window inside the requirement's period, or widen the period"
+    ),
+    CompileIssueCode.ENTITY_REQUIRED: (
+        "name the entity each side reads, among those its requirement names on one side of the flow"
+    ),
+    CompileIssueCode.UNKNOWN_ENTITY: (
+        "name only entities the requirement it reads states, or add the entity to that requirement"
+    ),
+    CompileIssueCode.ENTITY_AMBIGUOUS: "give the entity's role, so the name matches one column",
+    CompileIssueCode.ENTITY_UNRESOLVED: (
+        "name an entity the source resolves, or state the requirement's `across` axis"
+    ),
+    CompileIssueCode.DEGENERATE_SIDES: (
+        "make the two sides differ, by entity or by the requirement each reads"
+    ),
+    CompileIssueCode.SUM_SIDES_OVERLAP: (
+        "add two sources that hold different flows; to total entities of one series, aggregate it"
+    ),
+    CompileIssueCode.SUM_OVERLAP_UNDECIDED: (
+        "add two sources whose families bind one property to different codes, such as two "
+        "sectors; to total entities of one series, aggregate it"
+    ),
+    CompileIssueCode.SUM_UNITS_DIFFER: (
+        "state the same unit on both sides' requirements, or on neither"
+    ),
+    CompileIssueCode.FRAME_UNITS_DIFFER: (
+        "state the same unit on both sides' requirements, so each source is retrieved in it"
+    ),
+    CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
+        "on the requirement the reason names, state the unit it gives and leave its "
+        "`source_spec_id` unset, dropping any decision that fixes only that pin"
+    ),
+    CompileIssueCode.PERIODS_DISJOINT: (
+        "give the two sides' requirements periods that share at least one year"
+    ),
+    CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS: (
+        "join requirements that share a role, or compare them instead"
+    ),
+    CompileIssueCode.BAD_ARGS: (
+        "change the requirement field the refused argument is written from to a value the "
+        "tool accepts"
+    ),
+}
+
+
+def _referral_action(
+    issue: CompileIssue, resolution: IssueResolution, requirement_of: Mapping[str, str]
+) -> Action:
+    """The `return_to_planner` call that closes on `issue`.
+
+    A repair or a gap names the requirement the failing operation carries
+    out (`requirement_of`), or else the requirement the issue names. An issue
+    naming neither is a fault, and closes as one.
+    """
+    about = requirement_of.get(issue.operation_id or "") or issue.requirement_id
+    if resolution is IssueResolution.UNMEETABLE and issue.requirement_id is not None:
+        arguments: dict[str, JsonValue] = {
+            "kind": ReferralKind.REQUIREMENT_UNMEETABLE.value,
+            "requirement_id": issue.requirement_id,
+            "reason": issue.reason,
+        }
+    elif resolution is IssueResolution.UNSUPPORTED and about is not None:
+        arguments = {
+            "kind": ReferralKind.NO_OPERATION_COVERS.value,
+            "requirement_id": about,
+            "reason": issue.reason,
+        }
+    elif resolution is IssueResolution.REPAIR and about is not None:
+        arguments = {
+            "kind": ReferralKind.REQUIREMENT_NEEDS_REPAIR.value,
+            "requirement_id": about,
+            "reason": issue.reason,
+            "constraint": issue.code.value,
+            "repair": _PERMITTED_REPAIRS[issue.code],
+        }
+    else:
+        arguments = {
+            "kind": ReferralKind.INTERNAL_FAILURE.value,
+            "reason": f"{issue.code.value}: {issue.reason}",
+        }
+    return Action(call="return_to_planner", arguments=arguments)
+
+
+def _compile_failure_action(
+    issues: Sequence[CompileIssue], *, requirement_of: Mapping[str, str]
+) -> Action:
+    """Return what to call next to move past a failed `propose_operations`.
+
+    Every issue maps to one `IssueResolution`. The first issue of the most
+    preferred resolution present decides, so a source to discover again is
+    fixed before anything is referred, and a fault is reported before a
+    repair the fault would make moot. `requirement_of` maps each operation
+    id of the translation to the requirement it carries out.
+    """
+    resolved = [(issue_resolution(issue.code), issue) for issue in issues]
+    resolution, issue = min(resolved, key=lambda pair: list(IssueResolution).index(pair[0]))
+    if resolution is IssueResolution.DISCOVER_AGAIN:
+        return Action(call="discover_source", arguments={"requirement_id": issue.requirement_id})
+    return _referral_action(issue, resolution, requirement_of)
+
+
+def _translatable_draft(tool_context: ToolContext) -> Plan | dict[str, object]:
+    """Return the draft plan `propose_operations` may compile, or the problem that stops it.
+
+    Needs a draft plan with no referral pending on it and at least one
+    evidence requirement to carry out. No translator tool settles a pending
+    referral, so there is no action to point at. The planner reads it and
+    proposes or rejects.
+    """
+    plan = current_draft(tool_context)
+    if isinstance(plan, dict):
+        return plan
+    pending = load_referral(tool_context.state)
+    if pending is not None:
+        return problem(
+            ProblemCode.REFERRAL_PENDING,
+            f"A {pending.kind.value} referral is pending on this plan; the planner settles "
+            "it before the plan is translated again.",
+            outcome=Outcome.REFUSED,
+            detail={"kind": pending.kind.value, "requirement_id": pending.requirement_id},
+        )
+    if not plan.evidence_requirements:
+        return problem(
+            ProblemCode.INVALID_PLAN,
+            "This plan states no evidence requirements; the planner records them "
+            "before a plan can be translated.",
+            outcome=Outcome.REFUSED,
+        )
+    return plan
+
+
+def _logged_reference(reason: str) -> str:
+    """Log an internal translation failure and return the reference it is logged under."""
+    reference = uuid.uuid4().hex[:12]
+    logger.error("translation internal failure %s: %s", reference, reason)
+    return reference
+
+
+def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
+    """Build the translator's three core functions, for `translate` or a test to drive directly.
+
+    The planner's model sees only `translate` (`build_translate_tool`), which
+    drives the three in Python through `translator.mechanical.run_translate`.
+    They are built here so a test can exercise `propose_operations`'s and
+    `return_to_planner`'s own logic without going through `translate`.
+    """
+
+    async def propose_operations(
+        translation: Translation, tool_context: ToolContext
+    ) -> dict[str, object]:
+        """Compile `translation` against the recorded draft, the sources discovery
+        recorded and the live tool surface, and record it on the plan if it
+        compiles. Answers `ok` with the plan's new status, version, revision,
+        sources and steps, or the problem that stopped it, carrying every
+        compile issue and, when known, the action that moves past it; the plan
+        is then left untouched."""
+        plan = _translatable_draft(tool_context)
+        if isinstance(plan, dict):
+            return plan
+        try:
+            schemas = await surface.list_tools()
+        except ToolSurfaceUnavailableError as exc:
+            return problem(ProblemCode.SURFACE_UNAVAILABLE, str(exc), outcome=Outcome.REFUSED)
+
+        requirement_keys, pinned, across = dataset_keys(plan)
+
+        def settled(log: DiscoveryLog) -> dict[str, SelectedSource]:
+            """The sources `log` settles for this plan, less any the turn dropped."""
+            return settled_sources(
+                tool_context.state,
+                log,
+                requirement_keys=requirement_keys,
+                pinned=pinned,
+                across=across,
+            )
+
+        # The log read that decides what to describe takes `discovery_lock`,
+        # the same discipline `discover_source`'s own body follows; the
+        # `describe` round trip `fetch_definitions` runs does not, so the
+        # lock is released for it and re-taken only to apply what it found.
+        async with discovery_lock(tool_context.state):
+            log = load_log(tool_context.state)
+            discovered = settled(log)
+            definite_ids = log.definite_source_ids(requirement_keys=requirement_keys, pinned=pinned)
+            definite_sources = {
+                requirement_id: source
+                for requirement_id, source in discovered.items()
+                if requirement_id in definite_ids
+            }
+        if definite_sources:
+            pairs = await fetch_definitions(
+                surface,
+                log,
+                revision=plan_revision(plan),
+                requirement_keys=requirement_keys,
+                sources=definite_sources,
+            )
+            log = await apply_definitions(tool_context.state, pairs)
+            discovered = settled(log)
+        result = compile_plan(
+            plan=plan,
+            translation=translation,
+            schemas={schema.name: schema for schema in schemas},
+            discovered=discovered,
+        )
+        warnings = [warning.model_dump(mode="json") for warning in result.warnings]
+        if result.workflow is None:
+            return problem(
+                ProblemCode.COMPILE_FAILED,
+                f"This translation did not compile: {len(result.issues)} issue(s) found.",
+                outcome=Outcome.INVALID_INPUT,
+                action=_compile_failure_action(
+                    result.issues,
+                    requirement_of={op.id: op.requirement_id for op in translation.operations},
+                ),
+                detail={
+                    "issues": [
+                        issue.model_dump(mode="json", exclude_none=True) for issue in result.issues
+                    ],
+                    "warnings": warnings,
+                },
+            )
+
+        plan = plan.with_translation(translation=translation, workflow=result.workflow)
+        save_plan(tool_context.state, plan)
+        return ok(
+            status=plan.status.value,
+            version=plan.version,
+            revision=plan_revision(plan),
+            # Each dataset once, with every spec_id it is retrieved under and
+            # the phrase each was searched as: the workflow is the record of
+            # what was approved.
+            sources=described_sources(result.workflow.sources),
+            steps=[
+                {"id": step.id, "tool": f"{step.tool.server}.{step.tool.name}"}
+                for step in result.workflow.steps
+            ],
+            warnings=warnings,
+        )
+
+    def return_to_planner(
+        kind: ReferralKind,
+        reason: str,
+        tool_context: ToolContext,
+        requirement_id: str | None = None,
+        constraint: str | None = None,
+        repair: str | None = None,
+        reference: str | None = None,
+        repeated: bool = False,
+        budget_spent: bool = False,
+    ) -> dict[str, object]:
+        """Save a referral of the draft back to the planner and answer with it.
+
+        The referral is saved to session state for the stall watchdog and
+        `submit_plan`'s own gate, and the plan is left untouched. A
+        referral that may carry candidates takes them from the discovery
+        log; `no_data`'s are the nearest real sources found instead, with
+        the reason code. An `internal_failure` is logged at error level
+        under a fresh reference, unless it restates one already logged
+        under `reference`. A plan that is no longer a draft, an unknown
+        `requirement_id`, or a referral that does not validate answers the
+        problem instead.
+        """
+        # A raw string arrives here from a `discover_source` or compile
+        # action's arguments. `kind` is coerced on the way into `Referral`
+        # below, but the checks here run first, so a kind the vocabulary does
+        # not hold is left as it came and refused by `Referral`, which says so
+        # better than anything written here.
+        with suppress(ValueError):
+            kind = ReferralKind(kind)
+        # A draft, not any plan: a plan a successful compile already moved to
+        # PENDING_APPROVAL cannot have a referral written over it.
+        plan = current_draft(tool_context)
+        if isinstance(plan, dict):
+            return plan
+        requirement: DatasetRequirement | None = None
+        if requirement_id is not None:
+            try:
+                found = plan.requirement(requirement_id)
+            except KeyError:
+                known = [requirement.id for requirement in plan.evidence_requirements]
+                return problem(
+                    ProblemCode.REQUIREMENT_UNKNOWN,
+                    f"This plan records no requirement {requirement_id!r}.",
+                    outcome=Outcome.INVALID_INPUT,
+                    detail={"known": known},
+                )
+            requirement = found if isinstance(found, DatasetRequirement) else None
+        candidates: tuple[SelectedSource, ...] = ()
+        stale_pins: tuple[StalePin, ...] = ()
+        no_data_reason: str | None = None
+        if kind in MAY_CARRY_CANDIDATES and requirement_id is not None and requirement is not None:
+            key = requirement_revision(requirement)
+            log = load_log(tool_context.state)
+            if kind is ReferralKind.NO_DATA:
+                candidates = log.nearest_for(key, requirement_id)
+                no_data_reason = log.no_data_reason(key, requirement_id)
+            elif kind is ReferralKind.PINNED_SOURCE_NOT_FOUND:
+                candidates = log.pinnable_for(key, requirement_id)
+                stale_pins = _other_stale_pins(plan, log, requirement_id)
+            else:
+                candidates = log.candidates_for(key, requirement_id)
+                if kind is ReferralKind.SOURCE_AMBIGUOUS and len(candidates) < 2:
+                    return problem(
+                        ProblemCode.NO_CANDIDATES_RECORDED,
+                        f"Discovery recorded no candidate sources for {requirement_id!r} in this "
+                        "revision; a source is ambiguous only when `discover_source` answered "
+                        "with candidates for it.",
+                        outcome=Outcome.INVALID_INPUT,
+                    )
+            # `pinned_source_not_found` and `no_data` each carry whatever the
+            # log holds, even none: the latest search found no source a pin
+            # may be taken from, or the nearest-series relaxation found
+            # nothing, and a referral naming no candidates there reports
+            # exactly that.
+        try:
+            referral = Referral(
+                kind=kind,
+                reason=reason,
+                requirement_id=requirement_id,
+                candidates=candidates,
+                no_data_reason=no_data_reason,
+                constraint=constraint,
+                repair=repair,
+                reference=(
+                    reference or _logged_reference(reason)
+                    if kind is ReferralKind.INTERNAL_FAILURE
+                    else reference
+                ),
+                repeated=repeated,
+                budget_spent=budget_spent,
+                stale_pins=stale_pins,
+            )
+        except ValidationError as exc:
+            return problem(
+                ProblemCode.INVALID_REFERRAL,
+                f"This referral does not have the shape a referral needs: {exc}",
+                outcome=Outcome.INVALID_INPUT,
+            )
+        save_referral(tool_context.state, referral)
+        return referred(_referral_payload(referral))
+
+    (discover_source_tool,) = build_discovery_tools(surface=surface)
+    return TranslatorCore(
+        discover_source=discover_source_tool.func,
+        propose_operations=propose_operations,
+        return_to_planner=return_to_planner,
+    )
+
+
+def _planner_answer(result: dict[str, object]) -> dict[str, object]:
+    """Return what `translate` answers the planner with, given `run_translate`'s `result`.
+
+    A compiled plan answers `ok` alone. `submit_plan` reads the version,
+    revision and warnings off the plan's record, and the user reads the
+    sources and steps on the approval card. A referral answers as the
+    referral itself, its `outcome` one of `OUTCOME_OF`'s. A problem answers
+    unchanged.
+    """
+    if result.get("outcome") == Outcome.OK.value:
+        return ok()
+    if result.get("outcome") == Outcome.REFERRED.value:
+        return cast("dict[str, object]", result["referral"])
+    return result
+
+
+def build_translate_tool(*, surface: ToolSurface) -> FunctionTool:
+    """Build the planner's `translate` tool, closing over `surface` for the tool surface."""
+    core = build_translator_core(surface=surface)
+
+    async def translate(tool_context: ToolContext) -> dict[str, object]:
+        """Find the data the recorded plan needs and compile the workflow the user approves.
+
+        Takes no arguments: it reads the plan `propose_plan` recorded.
+
+        Returns:
+            `{"outcome": "ok"}` once the plan compiled, or the referral the
+            plan goes back on, whose `outcome` says what it asks of you.
+        """
+        answer = _planner_answer(await run_translate(tool_context, core=core))
+        if answer.get("outcome") == Outcome.UNSUPPORTED.value:
+            # Every kind `OUTCOME_OF` maps to `unsupported` is an
+            # `UnsupportedOperation`, so the plan has to decline it.
+            record_unsupported(tool_context.state, UnsupportedOperation(answer["kind"]))
+        return answer
+
+    translate.__name__ = TRANSLATE_TOOL_NAME
+    return FunctionTool(translate)
