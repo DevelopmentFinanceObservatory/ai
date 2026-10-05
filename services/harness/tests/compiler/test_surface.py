@@ -65,6 +65,7 @@ async def test_the_real_surface_covers_retrieval_and_the_analysis_verbs() -> Non
         "search",
         "share_of",
         "sources",
+        "sum_of",
     ]
 
 
@@ -108,6 +109,7 @@ async def test_the_real_surface_declares_a_version_on_every_tool_and_output_sche
         "join",
         "rank",
         "share_of",
+        "sum_of",
     }
     for schema in schemas:
         if schema.server == "analysis-mcp":

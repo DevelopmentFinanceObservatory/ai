@@ -371,13 +371,16 @@ def test_a_seeded_turn_carries_each_search_spec_and_its_operations() -> None:
     ]
 
 
-def test_a_seed_keeps_only_the_spec_id_the_identity_the_statvars_and_the_operations() -> None:
+def test_a_seed_keeps_only_the_spec_id_the_identity_the_statvars_the_digest_and_the_operations() -> (
+    None
+):
     """Every other member of the block the browser posts, the sentence, labels,
     coverage, headline and slots among them, is dropped as the seed is read."""
     raw = _load("request-11-turn-seeded.json")["seed_spec"][0]
     assert raw["spec"]["resolved"]["rendered_sentence"]
 
     kept = Seed.model_validate(raw).model_dump(mode="json", exclude_none=True)
+    shape = raw["spec"]["resolved"].get("shape")
 
     assert kept == {
         "spec": {
@@ -389,7 +392,13 @@ def test_a_seed_keeps_only_the_spec_id_the_identity_the_statvars_and_the_operati
                         {"ref": item["ref"]}
                         for item in raw["spec"]["resolved"]["stat_vars"]["items"]
                     ]
-                }
+                },
+                # Whether Search stated a member digest, and nothing else of the shape.
+                **(
+                    {"shape": {k: v for k, v in shape.items() if k == "member_digest"}}
+                    if shape is not None
+                    else {}
+                ),
             },
         },
         "operations": raw["operations"],

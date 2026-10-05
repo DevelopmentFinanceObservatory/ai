@@ -27,6 +27,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
+from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
 from harness.planner_seam import PlannerSeamError
@@ -42,8 +43,8 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
 )
-from harness.wire import CompositionActor, CompositionBlock, StepProduced, StepStatus
-from planner.plan import plan_revision
+from harness.wire import CompositionActor, CompositionBlock, PlanAsk, StepProduced, StepStatus
+from planner.plan import UnsupportedOperation, plan_revision
 from planner.workflow import ToolId
 
 from .resolved_revision import resolved_revision
@@ -208,6 +209,39 @@ def test_a_plan_proposed_ask_without_a_depth_leaves_it_unset() -> None:
 
     assert frame.depth is None
     assert frame.depth_notice is None
+    assert frame.asks is None
+
+
+def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:
+    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    final = plan.evidence_requirements[-1]
+    assert plan.translation is not None
+    (step_id,) = [op.id for op in plan.translation.operations if op.requirement_id == final.id]
+    asks = [
+        "life expectancy in Kenya each period",
+        "a ranking of East African countries",
+        "life expectancy in Kenya and its rank",
+    ]
+    payload = _plan_payload(
+        asks=asks,
+        answered=[{"ask": 0, "outputs": [final.id]}, {"ask": 2, "outputs": [final.id]}],
+        declined=[
+            {"ask": asks[1], "code": "unsupported_ask", "ask_ref": 1},
+            {"ask": "its rank", "code": "unsupported_ask", "ask_ref": 2},
+        ],
+    )
+
+    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    assert frame.asks is not None
+    answered, declined, in_part = frame.asks
+    reason = plan_display.DECLINE_REASONS[UnsupportedOperation.UNSUPPORTED_ASK]
+    assert answered == PlanAsk(ask=asks[0], answered_by=[step_id])
+    assert step_id in {step.id for step in frame.steps}
+    assert declined == PlanAsk(ask=asks[1], declined=reason)
+    assert in_part == PlanAsk(
+        ask=asks[2], answered_by=[step_id], declined=reason, not_computed="its rank"
+    )
 
 
 def test_a_regressed_version_is_logged_and_does_not_move_latest_backwards(
@@ -975,7 +1009,7 @@ def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
 
     working = translator.translate(_node_event("planner", planner_started={"revising": False}))
     drafting = translator.translate(_planner_call("propose_plan", question="q"))
-    checking = translator.translate(_planner_call("dfo_translator", request="translate"))
+    checking = translator.translate(_planner_call("translate"))
     ready = translator.translate(_planner_call("submit_plan", version=1))
     done = translator.translate(_node_event("planner", route="ok", output={"version": 1}))
 
@@ -1066,15 +1100,32 @@ def test_a_pause_completes_the_running_line_before_its_card() -> None:
     assert translator.finish() == []
 
 
-def _planner_ask(message: str) -> Event:
-    """The planner's `adk_request_input` call asking `message`."""
+def _planner_ask(message: str, *, partial: bool | None = None) -> Event:
+    """The planner's `adk_request_input` call asking `message`, as a streamed
+    chunk when `partial`."""
     call = types.FunctionCall(
         id="ask-1", name=REQUEST_INPUT_FUNCTION_CALL_NAME, args={"message": message}
     )
     return Event(
         author="dfo_planner",
+        partial=partial,
         content=types.Content(role="model", parts=[types.Part(function_call=call)]),
     )
+
+
+def test_a_streamed_ask_pauses_only_on_its_final_event() -> None:
+    """A streamed model call reaches the translator as partial chunks and then
+    one aggregated non-partial event, the only one the runner saves. Only that
+    event may announce the call `/interrupt` will answer."""
+    translator = _translator()
+
+    chunk_frames = translator.translate(_planner_ask("Which donors?", partial=True))
+    final_frames = translator.translate(_planner_ask("Which donors?", partial=False))
+
+    assert [f.event for f in chunk_frames if f.event == "elicitation.request"] == []
+    assert [f.event for f in final_frames if f.event == "elicitation.request"] == [
+        "elicitation.request"
+    ]
 
 
 def test_a_question_the_planner_asks_opens_with_the_drops_its_draft_started_with() -> None:
@@ -1165,12 +1216,12 @@ def test_a_planner_seam_error_reaches_the_user_without_its_model_facing_text() -
     conversation.begin_turn()
     exc = PlannerSeamError(
         "This plan still needs translating and compiling into a workflow before it can "
-        "execute. Call `dfo_translator` first."
+        "execute. Call `translate` first."
     )
 
     frame = _stream_fatal(conversation, exc)
 
     assert frame.error.error.value == "capability_unavailable"
     assert frame.error.retry.value == "do_not_retry"
-    assert "dfo_translator" not in frame.error.detail
+    assert "`translate`" not in frame.error.detail
     assert frame.error.detail == _PLANNER_FAILED_DETAIL.format(trace_id=conversation.trace_id)

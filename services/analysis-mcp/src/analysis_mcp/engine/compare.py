@@ -29,6 +29,11 @@ left slice scoped to `provenance=dcid:P1` paired against a right slice
 scoped to `dcid:P2`. Neither check runs when either side's slice is empty;
 `ComparisonPeriodsDisjointError` names that problem once the period
 intersection is checked.
+
+`slice_pair` (both slices and the unit check) and `align_periods` (the
+period intersection) serve `analysis_mcp.engine.sum_of` as well, which
+pairs its two sides the same way and differs in the value it computes and
+in its facet policy.
 """
 
 from __future__ import annotations
@@ -145,11 +150,13 @@ class CompareFacetMismatchError(Exception):
 
 
 class CompareNonFiniteResultError(Exception):
-    """A period's `delta` overflowed to a non-finite value."""
+    """A period's combined value overflowed to a non-finite value.
+    `quantity` names it: `delta` for `compare`, `sum` for `sum_of`."""
 
-    def __init__(self, *, time_period: str) -> None:
+    def __init__(self, *, time_period: str, quantity: str = "delta") -> None:
         self.time_period = time_period
-        super().__init__(f"non-finite delta for time_period {time_period!r}")
+        self.quantity = quantity
+        super().__init__(f"non-finite {quantity} for time_period {time_period!r}")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -213,7 +220,7 @@ def _one_sided_facet_warning(axis: str, left_ref: str | None, right_ref: str | N
 
 
 @dataclass(frozen=True, kw_only=True)
-class _Slice:
+class SideSlice:
     """One side narrowed to its own entity's rows, with the unit/facets
     resolved over exactly that slice. `table` holds one row per period."""
 
@@ -235,6 +242,11 @@ class _Slice:
             self.table.filter(array_kernel("invert", matched)),
         )
 
+    @property
+    def populated(self) -> bool:
+        """Whether any row survived narrowing."""
+        return self.table.num_rows > 0
+
 
 def _slice(
     frame: Frame,
@@ -242,7 +254,7 @@ def _slice(
     side: Literal["left", "right"],
     entity: Mapping[str, str],
     pinned_unit: str | UnitRequest | None,
-) -> _Slice:
+) -> SideSlice:
     """Narrow `frame` to `entity`'s own rows and resolve unit/facets over
     exactly that slice.
 
@@ -252,7 +264,7 @@ def _slice(
     """
     validate_entity_columns(frame, tuple(entity))
     # `exclude_unitless=True`: a period whose row leaves `unit` unbound is
-    # excluded from this comparison, shrinking this side's own
+    # excluded from this pairing, shrinking this side's own
     # `left_periods`/`right_periods` list (and, if it empties the side
     # entirely, raising `ComparisonPeriodsDisjointError`). This side's own
     # coverage fraction can still read 1.0 after losing a period, if its
@@ -265,11 +277,110 @@ def _slice(
         raise CompareAmbiguousSliceError(
             side=side, entity=entity, available=available_entity_columns(frame)
         )
-    return _Slice(
+    return SideSlice(
         table=table,
         unit=resolved.unit,
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
+        exclusions=exclusions,
+    )
+
+
+def slice_pair(
+    left_frame: Frame,
+    right_frame: Frame,
+    *,
+    left_entity: Mapping[str, str],
+    right_entity: Mapping[str, str],
+    left_pinned_unit: str | UnitRequest | None,
+    right_pinned_unit: str | UnitRequest | None,
+) -> tuple[SideSlice, SideSlice]:
+    """Both sides' slices, refused (`CompareUnitUnboundError`,
+    `CompareUnitMismatchError`) unless their resolved units agree.
+
+    The unit check runs only when both sides have rows. An empty slice
+    resolves to `unit=None` with no facet selections
+    (`narrow_and_resolve`'s documented behaviour), which would otherwise
+    misread as a mismatch against whatever the other, populated side
+    resolved to. The real problem an empty side has is no periods at all,
+    which `align_periods`' `ComparisonPeriodsDisjointError` names.
+    """
+    left = _slice(left_frame, side="left", entity=left_entity, pinned_unit=left_pinned_unit)
+    right = _slice(right_frame, side="right", entity=right_entity, pinned_unit=right_pinned_unit)
+    if not (left.populated and right.populated):
+        return left, right
+    left_unit, right_unit = left.unit, right.unit
+    if left_unit is None or right_unit is None:
+        if right_unit is not None:
+            raise CompareUnitUnboundError(
+                unbound_side="left", bound_side="right", bound_unit=right_unit
+            )
+        if left_unit is not None:
+            raise CompareUnitUnboundError(
+                unbound_side="right", bound_side="left", bound_unit=left_unit
+            )
+    elif left_unit != right_unit:
+        raise CompareUnitMismatchError(left_unit=left_unit, right_unit=right_unit)
+    return left, right
+
+
+@dataclass(frozen=True, kw_only=True)
+class PeriodAlignment:
+    """Two slices matched on the periods both offer. `left_matched` and
+    `right_matched` hold one row per intersected period, in period order."""
+
+    left_periods: tuple[str, ...]
+    right_periods: tuple[str, ...]
+    intersected_periods: tuple[str, ...]
+    left_coverage_fraction: float
+    right_coverage_fraction: float
+    left_matched: pa.Table
+    right_matched: pa.Table
+    exclusions: Exclusions
+
+
+def align_periods(
+    left: SideSlice, right: SideSlice, *, left_frame: Frame, right_frame: Frame
+) -> PeriodAlignment:
+    """Intersect `left`'s and `right`'s periods, refusing
+    (`ComparisonPeriodsDisjointError`) when they share none. Each side's
+    coverage fraction is the intersection's share of the periods that side
+    offered."""
+    left_periods = left.periods()
+    right_periods = right.periods()
+    intersected_periods = tuple(sorted(set(left_periods) & set(right_periods)))
+    if not intersected_periods:
+        raise ComparisonPeriodsDisjointError(left_periods=left_periods, right_periods=right_periods)
+
+    # Every period each side offered but the intersection dropped, recorded
+    # as an exclusion. The coverage fractions state the ratio, not which
+    # rows that ratio cost. `analysis_mcp.digest` renders only the coverage
+    # line, not a second line repeating these records.
+    left_matched, left_unmatched = left.matched(intersected_periods)
+    right_matched, right_unmatched = right.matched(intersected_periods)
+    exclusions = combine_exclusions(left.exclusions, right.exclusions)
+    exclusions = record_exclusion(
+        exclusions,
+        frame=left_frame,
+        reason="period_unmatched",
+        dropped=left_unmatched,
+        side="left",
+    )
+    exclusions = record_exclusion(
+        exclusions,
+        frame=right_frame,
+        reason="period_unmatched",
+        dropped=right_unmatched,
+        side="right",
+    )
+    return PeriodAlignment(
+        left_periods=left_periods,
+        right_periods=right_periods,
+        intersected_periods=intersected_periods,
+        left_coverage_fraction=len(intersected_periods) / len(left_periods),
+        right_coverage_fraction=len(intersected_periods) / len(right_periods),
+        left_matched=left_matched,
+        right_matched=right_matched,
         exclusions=exclusions,
     )
 
@@ -289,30 +400,19 @@ def run_compare(
     "the two sides" mean; see each raised exception's own docstring for its
     refusal condition.
     """
-    left = _slice(left_frame, side="left", entity=left_entity, pinned_unit=left_pinned_unit)
-    right = _slice(right_frame, side="right", entity=right_entity, pinned_unit=right_pinned_unit)
+    left, right = slice_pair(
+        left_frame,
+        right_frame,
+        left_entity=left_entity,
+        right_entity=right_entity,
+        left_pinned_unit=left_pinned_unit,
+        right_pinned_unit=right_pinned_unit,
+    )
 
-    # Both checks only run when both sides have rows -- an empty slice
-    # resolves to `unit=None` with no facet selections
-    # (`narrow_and_resolve`'s documented behaviour), which would
-    # otherwise misread as a mismatch against whatever the other, populated
-    # side resolved to. The real problem an empty side has is no periods at
-    # all, which `ComparisonPeriodsDisjointError` below already names.
+    # Runs only when both sides have rows, for the reason `slice_pair`
+    # gives for its unit check.
     cross_side_facet_warnings: tuple[str, ...] = ()
-    if left.table.num_rows and right.table.num_rows:
-        left_unit, right_unit = left.unit, right.unit
-        if left_unit is None or right_unit is None:
-            if right_unit is not None:
-                raise CompareUnitUnboundError(
-                    unbound_side="left", bound_side="right", bound_unit=right_unit
-                )
-            if left_unit is not None:
-                raise CompareUnitUnboundError(
-                    unbound_side="right", bound_side="left", bound_unit=left_unit
-                )
-        elif left_unit != right_unit:
-            raise CompareUnitMismatchError(left_unit=left_unit, right_unit=right_unit)
-
+    if left.populated and right.populated:
         facet_mismatch = first_cross_side_facet_mismatch(
             left.facet_selections, right.facet_selections
         )
@@ -332,38 +432,9 @@ def run_compare(
             )
         )
 
-    left_periods = left.periods()
-    right_periods = right.periods()
-    intersected_periods = tuple(sorted(set(left_periods) & set(right_periods)))
-    if not intersected_periods:
-        raise ComparisonPeriodsDisjointError(left_periods=left_periods, right_periods=right_periods)
-
-    left_coverage_fraction = len(intersected_periods) / len(left_periods) if left_periods else 0.0
-    right_coverage_fraction = (
-        len(intersected_periods) / len(right_periods) if right_periods else 0.0
-    )
-
-    # Every period each side offered but the intersection dropped, recorded
-    # as an exclusion -- the coverage fractions above state the ratio, not
-    # which rows that ratio cost. `analysis_mcp.digest` renders only the
-    # coverage line, not a second line repeating these records.
-    left_matched, left_unmatched = left.matched(intersected_periods)
-    right_matched, right_unmatched = right.matched(intersected_periods)
-    exclusions = combine_exclusions(left.exclusions, right.exclusions)
-    exclusions = record_exclusion(
-        exclusions,
-        frame=left_frame,
-        reason="period_unmatched",
-        dropped=left_unmatched,
-        side="left",
-    )
-    exclusions = record_exclusion(
-        exclusions,
-        frame=right_frame,
-        reason="period_unmatched",
-        dropped=right_unmatched,
-        side="right",
-    )
+    alignment = align_periods(left, right, left_frame=left_frame, right_frame=right_frame)
+    intersected_periods = alignment.intersected_periods
+    left_matched, right_matched = alignment.left_matched, alignment.right_matched
 
     period_comparisons = []
     for period, left_stat_var, left_value, right_stat_var, right_value in zip(
@@ -422,11 +493,11 @@ def run_compare(
         warnings=tuple(
             dict.fromkeys((*left.warnings, *right.warnings, *cross_side_facet_warnings))
         ),
-        left_periods=left_periods,
-        right_periods=right_periods,
+        left_periods=alignment.left_periods,
+        right_periods=alignment.right_periods,
         intersected_periods=intersected_periods,
-        left_coverage_fraction=left_coverage_fraction,
-        right_coverage_fraction=right_coverage_fraction,
+        left_coverage_fraction=alignment.left_coverage_fraction,
+        right_coverage_fraction=alignment.right_coverage_fraction,
         period_comparisons=period_comparisons,
-        exclusions=exclusions,
+        exclusions=alignment.exclusions,
     )

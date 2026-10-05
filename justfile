@@ -333,8 +333,6 @@ sync:
 
 PLANNER_AGENT    := "evals/agents/harness_planner_v2"
 PLANNER_SET      := "harness-planner-v2"
-TRANSLATOR_AGENT := "evals/agents/harness_translator_v1"
-TRANSLATOR_SET   := "harness-translator-v1"
 PAIR_AGENT       := "evals/agents/harness_pair_v1"
 PAIR_SET         := "harness-pair-v1"
 SKILLS_AGENT     := "evals/agents/harness_planner_skills_v1"
@@ -354,13 +352,7 @@ eval-planner: _check-env
         --config_file_path {{PLANNER_AGENT}}/test_config.json \
         --print_detailed_results
 
-# Score harness-translator-v1 from the CLI
-eval-translator: _check-env
-    {{EVAL_ADK}} adk eval {{TRANSLATOR_AGENT}} {{TRANSLATOR_SET}} \
-        --config_file_path {{TRANSLATOR_AGENT}}/test_config.json \
-        --print_detailed_results
-
-# Score harness-pair-v1 -- the planner with its translator sub-agent -- from the CLI
+# Score harness-pair-v1 -- the planner with its translate tool -- from the CLI
 eval-pair: _check-env
     {{EVAL_ADK}} adk eval {{PAIR_AGENT}} {{PAIR_SET}} \
         --config_file_path {{PAIR_AGENT}}/test_config.json \
@@ -424,7 +416,7 @@ adk-web: _check-env
     fi
     echo "ADK web → http://127.0.0.1:{{ADK_WEB_PORT}} (app: dfo_analyst_graph)"
     echo "  MCP mounts → http://127.0.0.1:{{PORT}}/mcp/{data,analysis,presentation}/mcp"
-    echo "  Startup takes 15-20s: the translator reads both MCP servers' schemas."
+    echo "  Startup takes 15-20s: translation reads both MCP servers' schemas."
     PORT={{PORT}} uv run --env-file {{ENV_FILE}} --with "google-adk" adk web evals/agents \
         --port {{ADK_WEB_PORT}} --session_service_uri memory://
 
@@ -433,12 +425,24 @@ adk-web: _check-env
 eval-studio-contract:
     uv run --package harness python evals/studio/run.py --mode scripted
 
+# The orchestrator engine's model-free contract. The real graph and planner seam
+# run with scripted models, and every model request is recorded and checked.
+# Cases marked xfail hold a known gap. See evals/studio/README.md.
+eval-studio-orchestrator:
+    uv run --package harness python evals/studio/run.py --mode orchestrator
+
 # harness-studio-v1 in full: live agent + rubric judge. Start the harness
 # first (and the datasets stub if the hosted mint is down); needs the model
 # key. See evals/studio/README.md.
 eval-studio: _check-env
     uv run --env-file {{ENV_FILE}} --package harness python evals/studio/run.py \
         --mode live --url http://localhost:{{PORT}} --judge
+
+# The orchestrator engine's live cases with the rubric judge. Start the harness
+# with `STUDIO_ENGINE=orchestrator just studio-live` first; needs the model key.
+eval-studio-orchestrator-live: _check-env
+    uv run --env-file {{ENV_FILE}} --package harness python evals/studio/run.py \
+        --mode orchestrator-live --url http://localhost:{{PORT}} --judge
 
 # ── Quality ──────────────────────────────────────────
 
@@ -530,9 +534,9 @@ digest-baseline:
 analysis-digest-baseline:
     DIGEST_BASELINE_UPDATE=1 uv run pytest services/analysis-mcp/tests/test_digest_budget.py -q
 
-# Re-measure what the planner and translator models are handed and rewrite the
-# committed composition baseline. Run after any deliberate change to the
-# planner/translator instruction text, tool surface or history handling. The
+# Re-measure what the planner model is handed and rewrite the committed
+# composition baseline. Run after any deliberate change to the planner's
+# instruction text, tool surface or history handling. The
 # diff of services/harness/tests/context_baseline.json is the review artifact.
 context-baseline:
     CONTEXT_BASELINE_UPDATE=1 uv run pytest services/harness/tests/test_context_budget.py --confcutdir=. -q

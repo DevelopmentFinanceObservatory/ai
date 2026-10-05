@@ -373,7 +373,10 @@ list of seeds, counting the seeds kept, none included.
 A plan pins each seed over the years it retrieves. A fetch with no plan
 retrieves the year Search showed when the question named none. Every
 `get_data` of a seed posts the StatVars Search's answer lists in
-`resolved.stat_vars.items` as `resolved_stat_var_dcids`.
+`resolved.stat_vars.items` as `resolved_stat_var_dcids` when that list is
+the dataset's membership, which holds when `resolved.shape` states no
+`member_digest` or the seed mints as its family's root. A family with a
+member digest posts none, since the mint elects its members again.
 
 On the `download` surface the first kept seed is retrieved, every
 other kept seed fails its step as `one_dataset_per_download`, and the
@@ -442,6 +445,20 @@ level step and the `place_types` argument all follow from `across`.
 
 A question that names its places ("the states of India", "the world")
 retrieves those places and shows no level step. `schema_version` stays 1.
+
+## Requested outputs on the plan card (delta 20, v1.5)
+
+`plan.proposed` gains an optional `asks`: each output the user asked for,
+in the order the orchestrator engine listed them when it called the
+planner, as `{ask, answered_by, declined?, not_computed?}`. `answered_by`
+holds the `PlanStep` ids whose results answer the ask; `declined` says in
+words why the plan does not compute it. A declined ask has an empty
+`answered_by`, unless the plan answers it in part: such an ask carries
+both, and `not_computed` names the part the plan does not compute, in the
+user's words. `not_computed` is optional and appears only on an ask
+answered in part. Every ask is answered, declined, or answered in part
+exactly once. A plan given no asks, and every plan on the classic engine,
+omits the field. `schema_version` stays 1.
 
 ## Corrections to the drafts (delta 10)
 
@@ -540,3 +557,6 @@ Fixture values that are samples, corrected here:
 1. A plan that ranks, totals or shares a dataset naming no place keeps
    one level of place first, and the card shows that step; no wire shape
    changes.
+1. `plan.proposed` gains `asks`, each `{ask, answered_by, declined?, not_computed?}`: the outputs the user asked for, each with the steps
+   that answer it, the reason it is declined, or both with the part not
+   computed; optional.

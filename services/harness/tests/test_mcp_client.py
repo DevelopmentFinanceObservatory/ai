@@ -19,14 +19,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx2
 import pytest
 from common.auth import apply_gate
 from common.caller import conversation_caller
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
+from data_mcp import stat_var_list
+from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
 from data_mcp.manifest import Manifest
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.settings import Settings as DataMcpSettings
+from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
@@ -44,6 +49,7 @@ from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, graph_envelope
+from harness.wire import FactSummary
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
@@ -414,6 +420,52 @@ async def test_the_executor_puts_the_resolved_revision_in_the_payload_verbatim(
     assert component["catalog_version"] == envelope["catalog_version"]
     assert component["provenance"]["inputs"][0]["spec_id"] == frame_ref["spec_id"]
     assert result["summary"] == "line_chart: Malaria grant disbursements to Ethiopia"
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "stored_refs"),
+    [
+        (
+            httpx2.Response(
+                200, json={"trace": {"resolved_stat_vars": [{"ref": "dcid:A"}, {"ref": "dcid:B"}]}}
+            ),
+            ["dcid:A", "dcid:B"],
+        ),
+        # A list that cannot be read back leaves the manifest as it came.
+        (httpx2.Response(404, json={"code": "not_found"}), None),
+    ],
+)
+async def test_the_executor_stores_a_retrievals_stat_var_list_the_result_left_out(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: httpx2.Response,
+    stored_refs: list[str] | None,
+) -> None:
+    frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    result = {
+        "definition": {"spec_id": frame_ref["spec_id"]},
+        "content_version": frame_ref["content_version"],
+        "trace": {},
+        "frame_ref": frame_ref,
+        STAT_VARS_OMITTED_KEY: 2,
+    }
+    scripted_presentation_client([_tool_result(result)])
+    upstream = UpstreamClient(
+        settings=DataMcpSettings(upstream_max_attempts=1),
+        transport=httpx2.MockTransport(lambda request: snapshot),
+    )
+    monkeypatch.setattr(stat_var_list, "get_client", lambda: upstream)
+    store = ProvenanceStore()
+    executor = McpExecutor(settings=Settings(), provenance=store)
+
+    outcome = await executor(tool="get_data", args={"spec_id": frame_ref["spec_id"]})
+
+    assert outcome["outcome"] == "ok"
+    lineage = store.get(conversation=current_conversation_id.get(), **frame_ref)
+    assert lineage is not None
+    stored = lineage[0].manifest
+    listed = stored["trace"].get("resolved_stat_vars")
+    assert (None if listed is None else [entry["ref"] for entry in listed]) == stored_refs
 
 
 def _period_mode_bar_chart(frame_ref: dict[str, Any]) -> dict[str, Any]:
@@ -1400,6 +1452,55 @@ async def test_a_summed_familys_ref_is_named_as_dfo_apis_names_it_and_never_desc
     ]
 
 
+async def test_a_sums_ref_is_named_by_the_two_sides_it_adds_and_never_described(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `sum_of` writes its rows under `dcid:<its spec_id>`. The card names
+    that ref by its sides: a summed family by dfo-apis's label, any other
+    StatVar by `describe`."""
+    conversation = current_conversation_id.get()
+    store = ProvenanceStore()
+    bilateral = ("spec_" + "1" * 32, "cv_" + "1" * 32)
+    imputed = ("spec_" + "2" * 32, "cv_" + "2" * 32)
+    store.put(
+        conversation=conversation,
+        spec_id=bilateral[0],
+        content_version=bilateral[1],
+        manifest={"summed_stat_var_count": 12, "summed_stat_var_label": "Bilateral ODA"},
+    )
+    store.put(
+        conversation=conversation,
+        spec_id=imputed[0],
+        content_version=imputed[1],
+        manifest={"trace": {"resolved_stat_vars": [{"ref": "dcid:ImputedOda", "roles": []}]}},
+    )
+    total = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "3" * 32}
+    total_ref = f"dcid:{total['spec_id']}"
+    assert store.alias(
+        conversation=conversation,
+        sources=[bilateral, imputed],
+        stat_var_count=1,
+        carried=[bilateral, imputed],
+        sum_of_sides={total_ref: ((bilateral,), (imputed,))},
+        **total,
+    )
+    describing = _DescribingClient()
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    facts = {"series": [{"id": "s0", "coordinates": {"stat_var": total_ref}}], "series_cut": 0}
+
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=total),
+    )
+
+    assert component is not None
+    assert describing.batches == [["ImputedOda"]]
+    (row,) = component["fact_summary"]["indicators"]
+    assert row["id"] == total_ref
+    assert row["name"] == "Bilateral ODA plus label ImputedOda"
+
+
 async def test_a_chart_with_no_stat_var_coordinate_lists_no_indicators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1417,6 +1518,30 @@ async def test_a_chart_with_no_stat_var_coordinate_lists_no_indicators(
     summary = component["fact_summary"]
     assert summary["indicators"] == []
     assert summary["attribution"]["indicator_count"] == 12
+
+
+async def test_the_platform_defaults_reach_the_wire_fact_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, describing, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
+
+    without = await executor._assemble_component(reply=reply, envelope=envelope)
+    facts["defaults"] = [{"pointer": "/intent/select", "detail": "Drew every recipient."}]
+    facts["a_member_the_platform_adds_later"] = {"x": 1}
+    with_defaults = await executor._assemble_component(reply=reply, envelope=envelope)
+
+    assert without is not None
+    assert "defaults" not in without["fact_summary"]
+    assert with_defaults is not None
+    assert with_defaults["fact_summary"]["defaults"] == [
+        {"pointer": "/intent/select", "detail": "Drew every recipient."}
+    ]
+    # The strict wire model sees only the members `_wire_fact_summary` names, so a
+    # member the platform adds later does not break the frame.
+    FactSummary.model_validate(with_defaults["fact_summary"])
 
 
 # --- progress: a get_data call's MCP progress reaches the caller ------------

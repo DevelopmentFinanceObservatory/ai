@@ -1,11 +1,11 @@
 """The op-spec schema: the closed verb set every toolkit tool call expands into.
 
-Seven verbs, closed at the `Verb` enum: `aggregate`, `compare`, `growth`,
-`rank`, `share_of`, `join`, and `filter`. Each verb is its own pydantic model
+Eight verbs, closed at the `Verb` enum: `aggregate`, `compare`, `growth`,
+`rank`, `share_of`, `join`, `filter`, and `sum_of`. Each verb is its own pydantic model
 carrying `frame_ref` plus that verb's own keyword-only parameters -- there is
 no single "parameters" bag a caller could stuff arbitrary keys into, because
 every model sets `extra="forbid"` and pydantic's own `BaseModel.__init__`
-already refuses positional arguments. `OpSpec` unions the seven, discriminated
+already refuses positional arguments. `OpSpec` unions the eight, discriminated
 on `verb`, so parsing a verb outside the closed set (or a positional call, or
 an unknown key) refuses at parse time rather than reaching an engine.
 
@@ -66,7 +66,7 @@ MAX_RANK_LIMIT = 1000
 
 
 class Verb(StrEnum):
-    """The closed verb set. No eighth verb, no synonym, no free-text escape hatch."""
+    """The closed verb set. No ninth verb, no synonym, no free-text escape hatch."""
 
     AGGREGATE = "aggregate"
     COMPARE = "compare"
@@ -75,6 +75,7 @@ class Verb(StrEnum):
     SHARE_OF = "share_of"
     JOIN = "join"
     FILTER = "filter"
+    SUM_OF = "sum_of"
 
 
 class OrderedThresholdPredicate(BaseModel):
@@ -251,10 +252,10 @@ class AggregateOpSpec(_OpSpecBase):
     unit: PinnedUnit | None = None
 
 
-class CompareOpSpec(_OpSpecBase):
-    """`compare`'s own period-intersection parameters.
+class _SlicePairOpSpec(_OpSpecBase):
+    """The two-slice parameters `compare` and `sum_of` share.
 
-    Each side of a comparison is a *slice*: `frame_ref` (the base class's
+    Each side is a *slice*: `frame_ref` (the base class's
     field) plus `left_entity`, a `{role_column: value}` binding narrowing it
     to one entity's own time series -- empty when `frame_ref` already names
     exactly one entity. `right_frame_ref` names the other side; left `None`,
@@ -268,7 +269,6 @@ class CompareOpSpec(_OpSpecBase):
     heterogeneous unit refusal never blocks resolving the other.
     """
 
-    verb: Literal[Verb.COMPARE] = Verb.COMPARE
     right_frame_ref: FrameRef | None = None
     left_entity: dict[
         Annotated[str, Field(max_length=_MAX_COLUMN_NAME_CHARS)],
@@ -280,6 +280,18 @@ class CompareOpSpec(_OpSpecBase):
     ] = Field(default_factory=dict)
     left_unit: PinnedUnit | None = None
     right_unit: PinnedUnit | None = None
+
+
+class CompareOpSpec(_SlicePairOpSpec):
+    """`compare`'s parameters: two slices, compared over their intersected periods."""
+
+    verb: Literal[Verb.COMPARE] = Verb.COMPARE
+
+
+class SumOfOpSpec(_SlicePairOpSpec):
+    """`sum_of`'s parameters: two slices, added over their intersected periods."""
+
+    verb: Literal[Verb.SUM_OF] = Verb.SUM_OF
 
 
 class GrowthOpSpec(_OpSpecBase):
@@ -507,7 +519,8 @@ OpSpec = Annotated[
     | RankOpSpec
     | ShareOfOpSpec
     | JoinOpSpec
-    | FilterOpSpec,
+    | FilterOpSpec
+    | SumOfOpSpec,
     Field(discriminator="verb"),
 ]
 

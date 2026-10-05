@@ -48,7 +48,7 @@ requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 # planner (the plan record and the Planner Agent), compiler (the workflow
-# build), translator (the Translator Agent), executor (the run) and
+# build), translator (the `translate` tool), executor (the run) and
 # orchestrator (the Orchestrator Agent) live at src/planner/, src/compiler/,
 # src/translator/, src/executor/ and src/orchestrator/, top-level modules
 # alongside src/harness/, so they ship on harness's own dependencies, tests,

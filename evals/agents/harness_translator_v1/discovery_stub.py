@@ -1,8 +1,8 @@
 """A canned data-mcp for the translator's discovery, with the real servers' schemas.
 
-The translator eval sets grade what the translator does with what discovery
-finds, not the search backend, so `search` here answers by the ask: one debt
-service source, one population source, two aid candidates, and nothing for
+The eval sets and the tests that run translation grade what translation does
+with what discovery finds, not the search backend, so `search` here answers by
+the ask: one debt service source, one population source, two aid candidates, and nothing for
 anything else. Every answer resolves exactly the entities the search part
 named -- role and label as they were sent, `ref` as `country/<code>` -- the
 way the real server resolves what it is asked about, so a plan naming Kenya

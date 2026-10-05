@@ -6,7 +6,7 @@ carries, what kind of number its `value` column holds, whether its rows are
 real observations or a collapsed span, whether a rank limit kept only some
 entities and cut rows out of it, whether its places mix levels, and which
 retrievals it ultimately rests on. `FrameShape`
-states that shape as a value; the eight transforms below compute one verb's
+states that shape as a value; the nine transforms below compute one verb's
 output shape from its input's; `rejects` states, for one verb reading one
 shape, the reason it may not -- reader-facing prose, or `None` when it may.
 
@@ -27,7 +27,7 @@ carries every rule a legal plan has to satisfy.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final, Literal
 
@@ -97,7 +97,7 @@ class TimeLabel(StrEnum):
 
 
 class ShapeVerb(StrEnum):
-    """The seven calculation verbs `rejects` states an *in* rule for.
+    """The eight calculation verbs `rejects` states an *in* rule for.
 
     `get_data` is not among them: it reads nothing upstream, so it has no
     *in* rule to state.
@@ -109,6 +109,7 @@ class ShapeVerb(StrEnum):
     FILTER = "filter"
     SHARE_OF = "share_of"
     COMPARE = "compare"
+    SUM_OF = "sum_of"
     JOIN = "join"
 
 
@@ -124,12 +125,15 @@ class RoleDimension:
     `RoleDimension` through unchanged or selects one from a single side, so
     a role dimension never merges two requirements' entities into one.
     `narrowed` is whether a filter has already kept only named entities on
-    this dimension.
+    this dimension. `breakdown` marks the dimension a requirement's
+    breakdown adds, whose values are codes of a classification rather than
+    entities, and which an aggregate grouping by breakdown keeps alone.
     """
 
     role: str | None
     requirement_id: Identifier
     narrowed: bool = False
+    breakdown: bool = False
 
 
 # The measure count of a family read separately whose source lists none of its
@@ -273,7 +277,7 @@ def _merged_roots(
     return tuple(sorted(set(left) | set(right)))
 
 
-# --- The eight transforms ---------------------------------------------------
+# --- The nine transforms ---------------------------------------------------
 
 
 def retrieved(
@@ -288,19 +292,17 @@ def retrieved(
     """The shape a fresh `get_data` retrieval carries.
 
     `roles` names every role column the selected source resolves that
-    `requirement_id`'s entities resolve under, and the column its `across`
-    covers; each is re-stamped with this
-    requirement's own id and `narrowed=False`, since nothing has filtered
-    the retrieval yet -- the caller's own `role` values are kept, but which
-    requirement and whether it is narrowed are this function's to state.
+    `requirement_id`'s entities resolve under, the column its `across`
+    covers, and the column its breakdown's codes sit in; each is re-stamped
+    with this requirement's own id and `narrowed=False`, since nothing has
+    filtered the retrieval yet. The caller's own `role` and `breakdown`
+    values are kept, and this function states which requirement a role
+    belongs to and whether it is narrowed.
     `measures` and `unsummable_axes` are the caller's (see `FrameShape`).
     A retrieval that `names_no_place` holds every level of place and may be
     read by a place-level filter.
     """
-    stamped = tuple(
-        RoleDimension(role=role.role, requirement_id=requirement_id, narrowed=False)
-        for role in roles
-    )
+    stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
     return FrameShape(
         roles=stamped,
         measures=measures,
@@ -318,12 +320,18 @@ def retrieved(
 
 
 def aggregated(
-    shape: FrameShape, *, reduction: Reduction, by_entity: bool, by_period: bool
+    shape: FrameShape,
+    *,
+    reduction: Reduction,
+    by_entity: bool,
+    by_period: bool,
+    by_breakdown: bool = False,
 ) -> FrameShape:
     """The shape `aggregate` produces, reducing `shape` by `reduction` per entity and/or period.
 
-    Role dimensions survive only when the group keeps entity apart; the
-    frame becomes one row per entity exactly when the group does not keep
+    Role dimensions survive only when the group keeps entity apart, except
+    the breakdown's, which a group by breakdown keeps alone. The frame
+    becomes one row per entity exactly when the group does not keep
     period apart. `measures`, `value` and `period` carry through unchanged --
     aggregate reduces rows, not what they measure. `cut_per_period` survives
     only a group by both entity and period, which keeps the gaps; a group by
@@ -348,8 +356,14 @@ def aggregated(
         time = TimeLabel.SPAN
         if shape.time is TimeLabel.PICKED:
             period = None
+    if by_entity:
+        roles = shape.roles
+    elif by_breakdown:
+        roles = tuple(role for role in shape.roles if role.breakdown)
+    else:
+        roles = ()
     return FrameShape(
-        roles=shape.roles if by_entity else (),
+        roles=roles,
         measures=shape.measures,
         value=shape.value,
         time=time,
@@ -551,9 +565,7 @@ def filtered(
     narrowed = set(narrowed_roles)
     narrows_every_role = None in narrowed
     roles = tuple(
-        RoleDimension(role=role.role, requirement_id=role.requirement_id, narrowed=True)
-        if narrows_every_role or role.role in narrowed
-        else role
+        replace(role, narrowed=True) if narrows_every_role or role.role in narrowed else role
         for role in shape.roles
     )
     picked_one_year = shape.time is TimeLabel.PICKED and not _spans_years(period)
@@ -617,6 +629,27 @@ def compared(left: FrameShape, right: FrameShape) -> FrameShape:
         roles=(),
         measures=1,
         value=ValueKind.DIFFERENCE,
+        time=_merged_time(left, right),
+        period=_intersection(left.period, right.period),
+        one_row_per_entity=True,
+        cut_per_period=False,
+        limited=left.limited or right.limited,
+        roots=_merged_roots(left.roots, right.roots),
+    )
+
+
+def summed_sides(left: FrameShape, right: FrameShape) -> FrameShape:
+    """The shape `sum_of` produces: one series, no role dimension, over the years both sides cover.
+
+    analysis-mcp's `run_sum_of` writes one row per period both sides report,
+    under its own StatVar, with no role column, so no role dimension carries
+    through to name a requirement behind it. `rejects` admits only two sides
+    holding the same kind of value, which the sum keeps.
+    """
+    return FrameShape(
+        roles=(),
+        measures=1,
+        value=left.value,
         time=_merged_time(left, right),
         period=_intersection(left.period, right.period),
         one_row_per_entity=True,
@@ -717,16 +750,37 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     )
 
 
+def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bool) -> str | None:
+    """Why `shape` has no role an aggregate's group by entity or breakdown keeps, or `None`.
+
+    A frame with no role dimension that rests on two retrievals, a
+    `sum_of`'s or an unkeyed `share_of`'s, holds one series, so a group by
+    entity reduces that series whole: a total over a span of two sources'
+    yearly sum.
+    """
+    if by_entity and not shape.roles and len(shape.roots) < 2:
+        return (
+            "aggregate cannot group by entity over a frame with no role dimension; group by "
+            "entity in the step that collapsed the roles"
+        )
+    if by_breakdown and not any(role.breakdown for role in shape.roles):
+        return (
+            "aggregate cannot group by breakdown over a frame that carries none; state "
+            "breakdown on the dataset requirement it reads"
+        )
+    return None
+
+
 def _rejects_aggregate(
-    shape: FrameShape, *, by_entity: bool, by_period: bool = False
+    shape: FrameShape, *, by_entity: bool, by_period: bool = False, by_breakdown: bool = False
 ) -> str | None:
     several = _several_measures("aggregate", shape)
     if several is not None:
         return several
     if not by_entity and (mixed := _mixed_levels("a total or an average across places", shape)):
         return mixed
-    if by_entity and not shape.roles:
-        return "aggregate cannot group by entity over a frame with no role dimension"
+    if missing := _missing_group_roles(shape, by_entity=by_entity, by_breakdown=by_breakdown):
+        return missing
     if by_period and shape.time is TimeLabel.PICKED:
         return (
             f"an aggregate by period reduces each year's rows, and {_PICKED}, so each year "
@@ -952,12 +1006,30 @@ def _rejects_paired_periods(verb: str, shape: FrameShape, other: FrameShape | No
     if TimeLabel.PICKED in (shape.time, other.time):
         return _rejects_paired_picked(verb, shape, other)
     if _labels_a_span(shape) is not _labels_a_span(other):
+        remedy = _paired_spans_remedy(verb, "collapse both sides over the same years, or neither")
         return (
             f"{verb} matches the two sides on their periods, and one side's rows carry one "
             "span of years, such as 2018/2022, while the other's carry single years, so no "
-            "period matches; collapse both sides over the same years, or neither"
+            f"period matches; {remedy}"
         )
     return _rejects_paired_spans(verb, shape, other) if _labels_a_span(shape) else None
+
+
+def _paired_spans_remedy(verb: str, remedy: str) -> str:
+    """What to do about two sides whose spans do not match: `remedy`, or for `sum_of` the sum first.
+
+    `sum_of` adds two yearly series over the years both report and names
+    each year one side lacks, so a total of two sources over a span sums
+    the series first, over the period the question asked about, and then
+    totals the sum.
+    """
+    if verb != "sum_of":
+        return remedy
+    return (
+        "add the two yearly series with the sum_of first, both over the period the question "
+        "asks about, then total the sum with an aggregate grouped by entity; the sum_of "
+        "names any year one side lacks"
+    )
 
 
 def _rejects_paired_spans(verb: str, shape: FrameShape, other: FrameShape) -> str | None:
@@ -966,15 +1038,15 @@ def _rejects_paired_spans(verb: str, shape: FrameShape, other: FrameShape) -> st
         return (
             f"{verb} matches the two sides on their periods, and a side's rows carry a span "
             "whose years only the data decides, such as a total of each entity's max or min, "
-            "so no other span is known to match it; collapse both sides over the same stated "
-            "years"
+            "so no other span is known to match it; "
+            f"{_paired_spans_remedy(verb, 'collapse both sides over the same stated years')}"
         )
     if shape.period != other.period:
         return (
             f"{verb} matches the two sides on their periods, and the two sides carry spans "
             f"over different years ({shape.period.start}-{shape.period.end} against "
-            f"{other.period.start}-{other.period.end}), so no period matches; collapse both "
-            "sides over the same years"
+            f"{other.period.start}-{other.period.end}), so no period matches; "
+            f"{_paired_spans_remedy(verb, 'collapse both sides over the same years')}"
         )
     return None
 
@@ -1132,6 +1204,23 @@ def _rejects_compare(shape: FrameShape, *, other: FrameShape | None = None) -> s
     return _several_measures("compare", shape) or _rejects_paired_periods("compare", shape, other)
 
 
+def _rejects_sum_of(shape: FrameShape, *, other: FrameShape | None = None) -> str | None:
+    reason = _several_measures("sum_of", shape) or _rejects_paired_periods("sum_of", shape, other)
+    if reason is not None:
+        return reason
+    if shape.value in (ValueKind.RATIO, ValueKind.ORDINAL):
+        return (
+            f"sum_of adds two values in one unit, and this side holds a {shape.value.value}, "
+            "which does not add up; sum the measured series first, then compute on the total"
+        )
+    if other is not None and other.value is not shape.value:
+        return (
+            f"sum_of adds two values of one kind, and one side holds a {shape.value.value} "
+            f"while the other holds a {other.value.value}; read both sides the same way"
+        )
+    return None
+
+
 def _rejects_join(shape: FrameShape, *, other: FrameShape | None = None) -> str | None:
     return _several_measures("join", shape) or _rejects_paired_periods("join", shape, other)
 
@@ -1143,6 +1232,7 @@ _REJECT_RULES: dict[ShapeVerb, Callable[..., str | None]] = {
     ShapeVerb.FILTER: _rejects_filter,
     ShapeVerb.SHARE_OF: _rejects_share_of,
     ShapeVerb.COMPARE: _rejects_compare,
+    ShapeVerb.SUM_OF: _rejects_sum_of,
     ShapeVerb.JOIN: _rejects_join,
 }
 
@@ -1152,7 +1242,7 @@ def rejects(verb: ShapeVerb, shape: FrameShape, **options: object) -> str | None
 
     The single place every verb's *in* rule is written, so `planner.plan`
     and `compiler.shapes` share one answer to "may this step read that
-    shape". A two-sided verb (`share_of`, `compare`, `join`) is called once
+    shape". A two-sided verb (`share_of`, `compare`, `sum_of`, `join`) is called once
     per side, with that side as `shape`; its cross-side checks (the period
     labels both sides match on, and `share_of`'s axis) take the counterpart
     as the `other` keyword and read the same regardless of which side is
@@ -1162,11 +1252,11 @@ def rejects(verb: ShapeVerb, shape: FrameShape, **options: object) -> str | None
         verb: Which verb's rule to check.
         shape: The candidate input shape.
         options: The verb's own options -- see each rule function for which
-            it reads (`by_entity`/`by_period` for aggregate, `change` for
+            it reads (`by_entity`/`by_period`/`by_breakdown` for aggregate, `change` for
             growth, `axis`/`among`/`window`/`per_period` for rank,
             `axis`/`scope`/`other`/`entity` for share_of, where `entity` is
             the one entity the side passed as `shape` narrows to, and
-            `other` for compare and join), and `place_level` and
+            `other` for compare, sum_of and join), and `place_level` and
             `period_threshold` for filter, whether it states a
             `PlaceLevel` and a `PeriodThreshold`.
 

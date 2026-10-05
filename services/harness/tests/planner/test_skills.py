@@ -61,8 +61,14 @@ def test_a_planner_built_with_a_surface_carries_the_skill_tools_and_names_dfo_fa
     names = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
     assert {"get_skill", "get_skill_file"} <= names
     instruction = str(agent.instruction)
-    assert 'get_skill("dfo-faq")' in instruction
-    assert "get_skill_file" in instruction
+    assert "`get_skill`" in instruction
+    assert "`get_skill_file`" in instruction
+    get_skill = next(
+        tool for tool in agent.tools if isinstance(tool, FunctionTool) and tool.name == "get_skill"
+    )
+    declaration = get_skill._get_declaration()
+    assert declaration is not None
+    assert "`dfo-faq`" in (declaration.description or "")
 
 
 def test_a_planner_built_without_a_surface_has_no_skill_tools_and_no_skill_paragraph() -> None:

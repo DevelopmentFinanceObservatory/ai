@@ -66,6 +66,7 @@ from harness.graph import (
     APPROVE_INTERRUPT,
     CLARIFY_INTERRUPT,
     FETCH_STEP_ID,
+    LINE_CHART_MAX_VALUES,
     MAX_CLARIFY_ROUNDS,
     PLANNER_STARTED_KEY,
     REFUSED_WRITE_VOCABULARY,
@@ -94,13 +95,16 @@ from harness.seeds import (
     SEED_STEP_TOOL,
     SEEDS_STEP_ID,
     DroppedSeed,
+    TakenSeed,
     dropped_seeds_note,
+    resolve_seed,
     seeded_envelope,
     stale_reason,
     stale_seeds,
     unplanned_seeds_text,
 )
 from harness.tool_contracts import graph_envelope
+from harness.wire import Seed
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -2321,15 +2325,26 @@ async def _fetch_args(envelope: dict[str, Any]) -> dict[str, Any]:
     return call["args"]
 
 
-async def test_fetch_posts_the_statvars_the_searched_block_elected() -> None:
+@pytest.mark.parametrize(
+    ("member_digest", "posted"),
+    [
+        (None, {"resolved_stat_var_dcids": ["Count_Person", "Count_Person_Female"]}),
+        # A family Search states a member digest for is elected again by the
+        # mint, so its listed StatVars are exemplars and none is posted.
+        ("d", {}),
+    ],
+    ids=["listed-membership", "digest-family"],
+)
+async def test_fetch_posts_the_statvars_the_searched_block_elected(
+    member_digest: str | None, posted: dict[str, Any]
+) -> None:
     block = _searched_block(SPEC_A, "Count_Person", "Count_Person_Female")
+    if member_digest is not None:
+        block["resolved"]["shape"] = {"member_count": 2, "member_digest": member_digest}
 
     args = await _fetch_args(_envelope(spec_block=block))
 
-    assert args == {
-        "spec_id": SPEC_A,
-        "resolved_stat_var_dcids": ["Count_Person", "Count_Person_Female"],
-    }
+    assert args == {"spec_id": SPEC_A, **posted}
 
 
 @pytest.mark.parametrize(
@@ -2429,6 +2444,9 @@ async def test_fetch_posts_the_statvars_search_elected_for_the_candidate_clarify
         "population of guatemala",
     )
     assert _pending_interrupt(events) == CLARIFY_INTERRUPT
+    # The interrupt reaches models, so it names no candidate's StatVars.
+    (asked,) = [call.args for call in events[-1].get_function_calls()]
+    assert "Count_Person" not in json.dumps(asked)
 
     await _resume(runner, session_id, CLARIFY_INTERRUPT, answer)
 
@@ -4284,6 +4302,34 @@ def _countries(count: int) -> list[str]:
     return [f"country/C{index:02d}" for index in range(count)]
 
 
+# The platform's release document as presentation-mcp's tests record it.
+_RELEASE = Path(__file__).parents[2] / "presentation-mcp/tests/fixtures/release.json"
+
+
+def test_a_line_chart_lists_no_more_values_than_the_catalogue_allows() -> None:
+    select_schema = json.loads(_RELEASE.read_text())["intent_schemas_tolerant"]["line_chart"][
+        "properties"
+    ]["select"]
+    (array,) = [
+        branch
+        for branch in select_schema["additionalProperties"]["anyOf"]
+        if branch["type"] == "array"
+    ]
+    cap = array["maxItems"]
+
+    allowed = _select_binding_ok(
+        type_="line_chart", select={"observationAbout": _countries(cap)}, view={}
+    )
+    refused = _select_binding_ok(
+        type_="line_chart", select={"observationAbout": _countries(cap + 1)}, view={}
+    )
+
+    assert cap == LINE_CHART_MAX_VALUES
+    assert allowed is None
+    assert refused is not None
+    assert refused["code"] == "series_limit_exceeded"
+
+
 @pytest.mark.parametrize("type_", ["bar_chart", "table"])
 def test_select_binding_ok_permits_24_series(type_: str) -> None:
     select = {"observationAbout": _countries(24), "stat_var": "a"}
@@ -4328,8 +4374,8 @@ def _counted_view(**total_counts: int) -> dict[str, Any]:
         ("table", {"stat_var": "a"}, _counted_view(stat_var=1, donor=30), 30),
         (
             "line_chart",
-            {"stat_var": "a", "donor": [f"donor/{index}" for index in range(25)]},
-            _counted_view(stat_var=1, donor=30),
+            {"donor": [f"donor/{index}" for index in range(5)]},
+            _counted_view(stat_var=5, donor=30),
             25,
         ),
         (
@@ -6529,6 +6575,7 @@ async def test_a_seeded_turn_stores_each_seed_through_data_mcp_and_mints_nothing
             "wide": False,
             "stat_var_shape_kind": None,
             "stat_var_item_count": 1,
+            "stat_var_member_count_exact": True,
             "entity_roles": [],
             "stat_var_truncated": False,
             "open_entity_axes": [],
@@ -6545,6 +6592,7 @@ async def test_a_seeded_turn_stores_each_seed_through_data_mcp_and_mints_nothing
             "wide": False,
             "stat_var_shape_kind": None,
             "stat_var_item_count": 1,
+            "stat_var_member_count_exact": True,
             "entity_roles": [],
             "stat_var_truncated": False,
             "open_entity_axes": [],
@@ -6778,6 +6826,25 @@ _KENYA_SEED = {
 }
 
 
+@pytest.mark.parametrize("digested", [True, False], ids=["digest-family", "recall-sample"])
+async def test_a_seed_resubmit_posts_its_stat_vars_only_for_a_family_without_a_member_digest(
+    definition_store: InMemoryDefinitionStore, digested: bool
+) -> None:
+    """Search elects a family with a member digest again from its code index and
+    ignores a posted list for it; a recall sample is re-read from the list."""
+    seed = copy.deepcopy(_KENYA_SEED)
+    listed = [item["ref"] for item in seed["spec"]["resolved"]["stat_vars"]["items"]]
+    assert seed["spec"]["resolved"]["shape"]["member_digest"] and listed
+    if not digested:
+        del seed["spec"]["resolved"]["shape"]["member_digest"]
+    surface = DataMcpDefinitions(served=[seed["spec"]])
+
+    await resolve_seed(surface, TakenSeed(index=0, seed=Seed.model_validate(seed)))
+
+    (call,) = surface.calls
+    assert call.get("stat_vars", []) == ([] if digested else listed)
+
+
 async def test_a_served_flow_seed_with_no_operation_plans_on_studio(
     definition_store: InMemoryDefinitionStore,
 ) -> None:
@@ -6826,11 +6893,11 @@ async def test_a_served_flow_seed_on_the_download_surface_fetches_the_year_searc
 
     assert _pending_interrupt(events) is None
     (call,) = executor.calls
+    # The flow family states a member digest, which the mint elects again,
+    # so the call posts none of its StatVars.
+    assert _KENYA_SEED["spec"]["resolved"]["shape"]["member_digest"]
     assert call["args"] == {
         "spec_id": _KENYA_SEED["spec"]["spec_id"],
-        "resolved_stat_var_dcids": [
-            item["ref"] for item in _KENYA_SEED["spec"]["resolved"]["stat_vars"]["items"]
-        ],
         "scope": {"window": {"kind": "range", "start_year": 2024, "end_year": 2024}},
     }
 
@@ -7467,6 +7534,8 @@ async def test_a_stale_seed_among_others_is_dropped_and_the_turn_replans_from_th
     }
     assert refusal["refusal"]["code"] == "spec_not_exportable"
     assert "Do not plan that dataset again in this turn" in refusal["refusal"]["message"]
+    posted = _MINT_REFUSED_SELECTION["request"]["resolved_stat_var_dcids"]
+    assert not [dcid for dcid in posted if dcid in refusal["refusal"]["message"]]
     assert [seed["spec_id"] for seed in seam.calls[-1]["envelope"]["seeds"]] == [_spec_id(good)]
     state = await _state(runner, session_id)
     assert [item.source.spec_id for item in seeded_sources(state)] == [_spec_id(good)]

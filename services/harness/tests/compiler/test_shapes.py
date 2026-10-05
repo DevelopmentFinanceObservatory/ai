@@ -285,7 +285,8 @@ def test_an_aggregate_grouping_by_entity_with_no_role_dimension_is_refused(
 
     assert "by_entity" not in shapes
     assert issues == [
-        "by_entity: aggregate cannot group by entity over a frame with no role dimension"
+        "by_entity: aggregate cannot group by entity over a frame with no role dimension; "
+        "group by entity in the step that collapsed the roles"
     ]
 
 

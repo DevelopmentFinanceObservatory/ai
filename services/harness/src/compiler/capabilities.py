@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="8802e5d3c1925c5dac13947cd16bf0901e2ebb58f50a67ab0151b7f366c81cc7",
+        input_schema_hash="ff63dcbf60ffd5e16fd55d91ad17520ebca36aa95600b6306572dc7e612408f3",
         call_timeout_s=30.0,
     ),
     ToolCapability(
@@ -173,8 +173,8 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.FRAME_REF_FROM_MANIFEST, artifact=ArtifactKind.FRAME_REF),
         ),
         implementation_version="1",
-        # Pins the `place_types` parameter.
-        input_schema_hash="0cef787e58d146ecd015c5f3f29241391d032ba6e9d505111cc9ca9a735ec0a5",
+        # Pins the `place_types` and `breakdown` parameters.
+        input_schema_hash="455b3888b3e8c2c123a3cbc287a2a610ed8f9d6a3d68aa94c49159276798446a",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -258,6 +258,16 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         input_schema_hash="11fa15d982a856f7d05d7adac23875e5a6e59f1c0ae507a427bbdcdfe77f53c8",
         output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
         empty_is_an_answer=True,
+    ),
+    ToolCapability(
+        tool=_analysis("sum_of"),
+        phase=Phase.WORKFLOW,
+        implements=(OperationKind.SUM_OF,),
+        inputs=(_FRAME_IN, ToolInput(parameter="right_frame_ref", artifact=ArtifactKind.FRAME_REF)),
+        outputs=(_FRAME_OUT,),
+        implementation_version="1",
+        input_schema_hash="13f8348bfeabf177fd65af0ce9ecbaca8368ab143f2bee4e038e6a60f9c03357",
+        output_schema_hash="12f6d8462ff7ba69118484d92181e7eb66869baa932fe27c44c6a3efab86f2de",
     ),
 )
 

@@ -25,26 +25,24 @@ standalone eval agents run without a live server.
 The planner settles methodology and states what evidence an answer rests on,
 then stops. A proposed plan is a `DRAFT` carrying `decisions` and
 `evidence_requirements`; finding the data, proposing the operations and
-compiling the workflow belong to `translator.agent`, which the planner calls
-as a tool before the user ever sees the plan -- `create_planner_agent` takes
-that agent as a sub-agent, and `harness.agents` builds the pair. So no tool
-name, column or operation appears here, `PENDING_APPROVAL` is a status only
-the translator writes, and `submit_plan` requires a plan that has been
+compiling the workflow belong to `translator.tool`'s `translate`, a function
+tool the planner calls before the user ever sees the plan --
+`create_planner_agent` takes that tool, and `harness.agents` builds it. So no
+tool name, column or operation appears here, `PENDING_APPROVAL` is a status
+only translation writes, and `submit_plan` requires a plan that has been
 through that step.
 
 Every tool below answers with `planner.tool_results`' typed shape -- `ok`,
 `problem`, with a stable `code` and, where the next step is known, an
 `action` -- rather than an unstructured `{"error": ...}` a caller has to
-parse. When the translator cannot carry a plan out, its `dfo_translator`
-tool call answers with the `Referral` itself, structured by
-`translator.agent.create_translator_agent`'s own `output_schema`: this
-agent's instruction reads it straight off that result, with nothing here
-to fetch it back a second time.
+parse. When translation cannot carry a plan out, `translate` answers with
+the `Referral` itself: this agent's instruction reads it straight off that
+result, with nothing here to fetch it back a second time.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Annotated, Any
 
 from compiler.surface import ToolSurface
@@ -54,46 +52,62 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
-from translator.agent import AGENT_NAME as TRANSLATOR_AGENT_NAME
 from translator.referral import ReferralKind, clear_referral, load_referral
+from translator.tool import TRANSLATE_TOOL_NAME
 
+from planner.declaration import PlanTool
+from planner.parties import PARTY_ROLES, party_role
 from planner.plan import (
-    ENVELOPE_SPEC_STATE_KEY,
+    MAX_DECLINES,
+    MAX_PLAN_ASKS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
     AnswerMode,
+    AskAnswer,
+    AsksUnaccountedError,
     DatasetRequirement,
     Decision,
+    DecisionDraft,
     DecisionFixes,
+    Decline,
     EvidenceRequirement,
     Plan,
     PlanStatus,
     ResolvedBy,
     SeededSource,
+    UnsettledFixError,
+    UnsupportedPlanError,
     cut_user_text,
+    is_search_pin,
+    load_asks,
     load_plan,
     load_plan_rounds,
+    load_unsupported,
     names_dropped_seed,
+    pin_sources,
     plan_revision,
+    record_unsupported,
     save_plan,
     save_plan_rounds,
     save_seeded_sources,
+    search_pin_slot,
     seeded_sources,
+    settle_decisions,
     windowed_copy,
 )
 from planner.records import Identifier, Period
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
-from planner.skills import DFO_FAQ_SKILL_ID, build_skill_tools
+from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
 AGENT_NAME = "dfo_planner"
 
 
 class _Patch(BaseModel):
-    """The four lists one `propose_plan` call states, checked before they reach a `Plan`.
+    """The lists one `propose_plan` call states, checked before they reach a `Plan`.
 
     ADK hands `propose_plan` raw values wherever it could not convert them, and
     builds the tool's declaration from the signature with every `Annotated`
@@ -102,7 +116,7 @@ class _Patch(BaseModel):
     holds no more items than a plan does.
     """
 
-    decisions: Annotated[list[Decision], Field(max_length=MAX_PLAN_DECISIONS)]
+    decisions: Annotated[list[DecisionDraft], Field(max_length=MAX_PLAN_DECISIONS)]
     evidence_requirements: Annotated[
         list[EvidenceRequirement], Field(max_length=MAX_PLAN_REQUIREMENTS)
     ]
@@ -110,66 +124,88 @@ class _Patch(BaseModel):
     removed_evidence_requirements: Annotated[
         list[Identifier], Field(max_length=MAX_PLAN_REQUIREMENTS)
     ]
+    declined: Annotated[list[Decline], Field(max_length=MAX_DECLINES)]
+    answered: Annotated[list[AskAnswer], Field(max_length=MAX_PLAN_ASKS)]
+
+    @model_validator(mode="after")
+    def _roles_are_party_words(self) -> _Patch:
+        """Reject an entity `role` outside `PARTY_ROLES`, naming the word it stands for when one does."""
+        refused = []
+        for requirement in self.evidence_requirements:
+            if not isinstance(requirement, DatasetRequirement):
+                continue
+            for entity in requirement.entities:
+                if entity.role is None or entity.role in PARTY_ROLES:
+                    continue
+                meant = party_role(entity.role)
+                refused.append(
+                    f"{requirement.id}/{entity.name}: {entity.role!r}"
+                    + (f", write {meant!r}" if meant is not None else "")
+                )
+        if refused:
+            raise ValueError(
+                f"an entity's role is one of {', '.join(PARTY_ROLES)}, or unset for a place "
+                f"the measure is about; {'; '.join(refused)}"
+            )
+        return self
 
 
 _PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
     "Given a development finance question, draft a methodological plan: "
     "state each real decision (measure, scope, time window when "
-    "the resolve envelope does not settle it, and so on), the "
+    "the search results do not settle it, and so on), the "
     "alternatives you considered, and a one-line reason for your choice. "
     "A decision is recorded only where you genuinely weighed more than one "
     "alternative; a value the question already states outright -- the "
     "entity it names, the measure it names -- is a fact for a requirement's "
-    "own fields to carry, and needs no `Decision` entry at all. A "
-    "`time_window_defaulted` warning in the resolve envelope means the "
-    "question gave no time text; the resolver has already settled the "
-    "answer's coverage, so that is not a decision -- never weigh candidate "
-    "ranges, never call `adk_request_input` over it, and never invent a "
-    "specific range from memory. When the envelope carries a `window`, "
-    "state the dataset requirement's `period` from it verbatim -- `start` "
-    "and `end` exactly as given, the coverage the resolver already found -- "
-    "and cite no decision that fixes it. When it carries none, the period "
-    "is a decision like any other. Source is different: when the envelope "
-    "names a `spec_id`, pin it as the `source_spec_id` of the plan's one "
-    "dataset requirement for that measure, verbatim, and cite no decision "
-    "for the pin itself -- the plan records why on its own. Otherwise the "
-    "source is a decision like any other. If `propose_plan` rejects a "
-    "decision for having only one "
-    "option, delete that decision in your next call rather than adding a "
-    "second option you did not actually consider. "
+    "own fields to carry, and needs no `Decision` entry at all. The search "
+    "results in your first message, a resolve envelope or numbered search "
+    "readings, are what the conversation's searches established, as far as "
+    "that message reports them; a reading from an earlier turn counts as "
+    "much as one from this turn. With no search results, draft from the "
+    "question alone. A "
+    "`time_window_defaulted` warning means the question gave no time text; "
+    "the resolver has already settled the answer's coverage, so that is not "
+    "a decision -- never weigh candidate ranges, never call "
+    "`adk_request_input` over it, and never invent a specific range from "
+    "memory. The period follows observed coverage: when a result carries a "
+    "`window`, state the dataset requirement's `period` from it verbatim -- "
+    "`start` and `end` exactly as given -- and cite no decision that fixes "
+    "it. An end year earlier than the latest year with data, or a start the "
+    "question did not ask for, is a `Decision` whose `fixes` names "
+    "`period` and whose rationale says why, such as a latest year whose "
+    "counts fall far below the years before it. Never call a year the latest "
+    "available when a result shows data for a later one. When no result "
+    "carries a window, the period is a decision like any other. Source is "
+    "different: when a result's own `spec_id` (a definite or chosen reading, "
+    "or the envelope's `spec_id`) answers a dataset requirement, pin it as "
+    "that requirement's `source_spec_id`, verbatim, and cite no decision "
+    "for the pin itself -- the plan records why on its own. A candidate's "
+    "`spec_id` is pinned only with a `Decision` of your own whose "
+    "`fixes` names `source_spec_id`. Otherwise the source is a decision "
+    "like any other. "
     "Ask the user directly only when a choice is "
     "genuinely ambiguous, settling other defaults the way a domain expert "
     "would. "
     "State what the answer rests on as evidence requirements: one dataset "
     "requirement per measure and source the answer needs, naming every "
     "entity the answer needs for that measure, and one derived requirement "
-    "per calculation the answer needs -- `aggregate`, `growth`, "
-    "`comparison`, `rank` (see below), `share_of` (see below), `join`, or "
-    "`filter` -- each citing the decision that fixed it and naming the "
-    "requirements it reads. Where the question or measure identifies an "
-    "entity's party, set its `role`, such as `'recipient'`/`'donor'`, "
-    "`'debtor'`/`'creditor'` or `'importer'`/`'exporter'`. Use party names, "
-    "never directions such as `'from'` or `'to'`. Otherwise leave `role` "
-    "unset. Carry roles forward in patches unless the amendment changes or "
-    "removes the relationship. When a flow source spans a party the question "
+    "per calculation the answer needs: `aggregate`, `growth`, "
+    "`comparison`, `sum_of`, `rank`, `share_of`, `join` or `filter`. "
+    "When a flow source spans a party the question "
     "leaves unnamed (aid from named donors to every recipient) and the "
     "measure is an additive amount, add an `aggregate` with "
     "`reduction='sum'` grouped by the named party and period before any "
     "`growth`, `rank` or `comparison`: it collapses the unnamed party alone "
     "and keeps every entity the question ranks, so each named entity has one "
     "value per year. A rate, index or per-person figure is never summed. "
-    "When the question ranks a party it names no "
-    'member of, such as "top donors" or "top 10 countries", or its answer is '
-    "that party's total, state the party in `across` and name no stand-in "
-    "entity such as `'World'`. `across` is the party word alone, such as "
-    "`'donor'`, `'recipient'` or `'country'`, and covers every member the "
-    "source holds: for a narrower population, such as a region, an income "
-    "group or a donor type, name its members in `entities` instead, and name "
-    "no entity in the party `across` covers. A world figure set beside a "
-    "named entity still names `'World'`. The envelope's `open_entity_axes` "
-    "lists the columns left open: `origin` is the giving party, "
-    "`destination` the receiving party, `observationAbout` the place. "
+    'A party the question names no member of, such as the donors of "top '
+    'donors", goes in `across` (see `across`). '
+    "A result's open axes "
+    "(`open_entity_axes`) are the columns left open: `origin` is the giving party "
+    "(an entity `role` of donor, creditor or exporter), `destination` the receiving "
+    "party (recipient, debtor or importer), `observationAbout` the place. "
     "A requirement whose `across` is the place, such as `'country'`, names "
     "no place, and its retrieval holds every place with data at every "
     "level: the world, regions, World Bank groups, countries and their "
@@ -179,8 +215,9 @@ _PLANNING = (
     '`{"kind": "place_level", "level": "Country"}`. Take the level the '
     'question names ("top 10 countries"). When it names none and reads as '
     'a comparison of countries ("top 10 by GDP"), choose `Country` in a '
-    "`Decision` resolved by `planner_default` whose `fixes.predicates` "
-    'states it. When its word covers several levels ("by region" is '
+    "`Decision` resolved by `planner_default` whose `fixes` names "
+    "`predicates`. "
+    'When its word covers several levels ("by region" is '
     "continents or subdivisions), ask the user. A question "
     "naming its places names them in `entities` and needs no level. State "
     "`change='absolute'` on a `growth` "
@@ -192,160 +229,142 @@ _PLANNING = (
     "`comparison` only when the question asks for a difference or a ratio, "
     "and for `join` only across different measures, since neither keeps the "
     "separate series a chart of one measure over several entities shows. "
-    "A family of StatVars is read summed or separately: see `stat_vars`. A "
+    "A family of StatVars is read summed or separately: see `stat_vars`. "
+    "When the question asks which members of a classification hold the most, "
+    'such as "which sectors received the most aid", state `breakdown` on the '
+    "dataset requirement, with `dimension` `'sector'` and `level` 0 for the "
+    "top-level groups unless the question names a finer level, and "
+    "`stat_vars='separate'`; then an `aggregate` with `reduction='sum'` and "
+    "`group_by` period and breakdown, which totals the parties the question "
+    "leaves open within each sector, and a `rank` with `axis='sector'` and a "
+    "`limit`. To "
+    "set that ranking beside another year, widen the period to cover both: "
+    "state `per_period` on the rank for each year's ranking side by side, or "
+    "read a `growth` over the aggregate between the two years for each "
+    "sector's change. A "
     "derived requirement's figures are what a question about a value, a "
-    "growth, a share or a rank asks for, and a comparison feeds "
-    "nothing further; it answers the question outright. Decide the "
+    "growth, a share or a rank asks for. When the answer is "
+    "one total of two different sources, such as bilateral aid plus imputed "
+    "multilateral aid, state a `sum_of`, naming each side's `entity` when "
+    "its requirement names several on one side of the flow, such as two "
+    "donors. Whether the two sources add up without "
+    "counting a flow twice is a methodological fact, not an assumption: "
+    "read it in the skill the sources' search results name, and cite a "
+    "`Decision` recording it, with the skill in its `rationale`. A sum "
+    "states the same `unit` on both inputs, or on neither. To total several "
+    "entities of one series, `aggregate` it. A total over a span of years, "
+    'such as "the total between 2010 and the latest", is one figure, never '
+    "a figure per year: an `aggregate` with `reduction='sum'` grouped by "
+    "`entity` alone sums the years, as a rank's `reduction` does for a "
+    "ranking of each entity's total. A total of two sources over a span "
+    "states the question's own period on both dataset requirements, adds "
+    "the two yearly series with a `sum_of` first, and then sums the years "
+    "of that one series with an `aggregate` grouped by `entity`; the "
+    "`sum_of` adds the years both sources report and names any year one "
+    "lacks. When `propose_plan` answers "
+    "`unsupported`, the system cannot compute that part, such as a "
+    "calculation over a comparison or a join: state it in `declined` and "
+    "plan what can still be answered, or propose `declined` alone when "
+    "nothing can. "
+    "Decide the "
     "methodology and leave the mechanics alone: which data and which "
     "operations carry your decisions out is worked out separately, after "
     "you propose, so name no tool. "
     "A rank naming `among='named'` needs a visible `filter` step narrowing "
     "to those entities first; `among='population'` is a claim over "
-    "entities nobody named, so cite a `Decision` whose `fixes.among` "
-    "states it. State `per_period` when the question asks how a position "
+    "entities nobody named, so cite a `Decision` whose `fixes` names "
+    "`among`, as a `share_of` stating `denominator_scope='pooled'` cites "
+    "one whose `fixes` names `denominator_scope`. "
+    "State `per_period` when the question asks how a position "
     "changed over time rather than who is first; a rank over it is an "
     "ordinal series, not a value, so growing it needs a `filter` naming "
     "the one entity the question is about, placed between the rank and "
     "the growth -- the series carries the whole population, and a growth "
     "over everyone's position at once has no defined answer. State a rank's "
-    "`limit` when the question asks for a top or bottom N; with `per_period` "
-    "it keeps each period's top or bottom N at their measured values, not "
-    "their positions, and each entity only in the years it made the cut, so "
-    "a growth or a per-entity `share_of` goes before that rank, and a top N "
-    "by each entity's total is one rank stating the `reduction` and the "
-    "`limit` with `per_period` unset. No rank reads another rank's output: "
-    "put the `limit` on the one rank that reads the measure. A `share_of` "
-    "cites a `Decision` whose `fixes.denominator_scope` states `pooled` "
-    "whenever it uses that scope, the same population claim a rank's "
-    "`among='population'` makes. "
-    "Whenever a `Decision` settles a field one of these calculations reads "
-    "-- `reduction`, `group_by`, a window, `direction`, `predicates`, "
-    "`among`, `axis`, `denominator_scope`, `change`, `per_period`, or "
-    "anything else a requirement states -- record that in the decision's "
-    "own `fixes`, naming the field and the value it settles. A decision "
-    "with nothing in `fixes` is a rationale a reviewer reads; one with "
-    "`fixes` set is checked automatically against every requirement that "
-    "cites it, so state it whenever what was decided is a field a "
-    "requirement carries -- `among='population'` and "
-    "`denominator_scope='pooled'` need it to validate at all. "
+    "`limit` when the question asks for a top or bottom N, or for the "
+    'members that hold the most, as "top donors" or "which sectors '
+    'received the most" does, with a `Decision` fixing the N when the '
+    "question names none. A growth or a per-entity `share_of` goes "
+    "before a rank with `per_period` and a `limit`, and a top N by each "
+    "entity's total is one rank stating the `reduction` and the `limit` "
+    "with `per_period` unset. No rank reads another rank's output: put the "
+    "`limit` on the one rank that reads the measure. "
 )
 
-# What each `propose_plan` call states about which plan it means, and how a
-# patch's own `question` is read. Held apart from `_PLANNING` because it is
-# the one paragraph `question_fixed` rewrites: standalone and `harness_pair_v1`
-# keep `_VERSIONING_FREE`, where a restart is a normal way to begin a second
-# plan; the harness graph's own seam builds with `question_fixed=True`, where
-# the turn's question is the graph's, not the planner's, to change.
+# What each `propose_plan` call states about which plan it means. Held apart
+# from `_PLANNING` because it is the one paragraph `question_fixed` rewrites:
+# standalone and `harness_pair_v1` keep `_VERSIONING_FREE`, where a restart is
+# a normal way to begin a second plan; the harness graph's own seam builds with
+# `question_fixed=True`, where the turn's question is the graph's, not the
+# planner's, to change. What each argument does is on the argument.
 _VERSIONING_FREE = (
     "Call `propose_plan` once with the complete first draft, and again "
-    "whenever the user asks for a change -- every call produces a new plan "
-    "version. Once a plan is recorded, every call states which of the two it "
-    "is: pass `amends_version` naming the version `propose_plan` answered "
-    "with to patch that plan, or `starts_new_plan=true` when the ask is a "
-    "different question that needs a plan of its own. A call stating neither "
-    "is refused, so decide deliberately; never let the wording of `question` "
-    "stand in for the choice. A patch states only the decisions and "
-    "requirements that change, matched by `slot` and by `id`, and everything "
-    "you leave out is carried forward. Nothing is deleted by leaving it out, "
-    "so name a decision in `removed_decisions` or a requirement in "
-    "`removed_evidence_requirements` to delete it. "
+    "whenever the user asks for a change. Once a plan is recorded, decide "
+    "deliberately whether the ask patches it (`amends_version`) or is a "
+    "different question that needs a plan of its own (`starts_new_plan`); "
+    "never let the wording of `question` stand in for the choice. "
 )
 
 _VERSIONING_FIXED = (
-    "Call `propose_plan` once with the complete first draft, and again "
-    "whenever the user asks for a change -- every call produces a new plan "
-    "version. This turn's question is fixed: once a plan is recorded, pass "
-    "`amends_version` naming the version `propose_plan` answered with, to "
-    "patch that plan, and a patch's own `question`, if it states one, has to "
-    "match the one already recorded -- it cannot be changed here. Pass "
-    "`starts_new_plan=true` instead only to say the user's reply asks a "
-    "different question: that call is refused and records nothing, and ends "
-    "the turn there -- the harness tells the user to send the other question "
-    "as its own message, so nothing further is needed from you once you have "
-    "made it. A call stating neither `amends_version` nor `starts_new_plan` "
-    "is refused, so decide deliberately. A patch states only the decisions "
-    "and requirements that change, matched by `slot` and by `id`, and "
-    "everything you leave out is carried forward. Nothing is deleted by "
-    "leaving it out, so name a decision in `removed_decisions` or a "
-    "requirement in `removed_evidence_requirements` to delete it. "
+    "Call `propose_plan` once with the complete first draft, and again, "
+    "patching it through `amends_version`, whenever the user asks for a "
+    "change. This turn's question is fixed. When the user's reply asks a "
+    "different question, call `propose_plan` with `starts_new_plan=true` "
+    "and stop there: the harness tells the user to send that question as "
+    "its own message, so nothing further is needed from you once you have "
+    "made it. "
 )
 
 # How to read skills, when the skill tools are built. Held apart because the
 # planner is also built without them, and an instruction naming a tool the
 # agent lacks sends the model at one ADK raises on.
 _SKILLS = (
-    "The resolve envelope's `skills` names the skills that apply to its "
-    "results, each by id with a description. A skill carries the "
-    "definitions, caveats and methods an answer in its domain rests on. When "
-    "a description bears on the question, call `get_skill` with its id "
-    "before you draft, and let what it says shape your decisions. Read a "
-    "file the skill links with `get_skill_file`, passing the path exactly "
-    "as `get_skill` lists it. Both answer in plain text, a refusal "
-    "included. A question about DFO itself (what it covers, where its data "
-    "comes from, how it works) starts with "
-    f'`get_skill("{DFO_FAQ_SKILL_ID}")`, a skill no search result names. When a skill '
-    "tool refuses, `capability_unavailable` included, draft the plan "
-    "without that skill. "
+    "The search results name the skills that apply to them by id, and an "
+    "envelope's `skills` describes each. When a skill bears on the question, "
+    "call `get_skill` with its id before you draft, and let what it says "
+    "shape your decisions; read a file it links with `get_skill_file`. A "
+    "question about DFO itself (what it covers, where its data comes from, "
+    "how it works) starts with `get_skill`, though no search result names "
+    "that skill. When a skill tool refuses, `capability_unavailable` "
+    "included, draft the plan without that skill. "
 )
 
-# What to do once a plan is recorded, when a translator is attached to carry
-# it out. Held apart because the planner is also built standalone -- its own
-# eval set scores it that way -- and a standalone planner that is told to call
-# `dfo_translator` calls a tool that is not there. ADK raises on an unknown
+# What to do once a plan is recorded, when the `translate` tool is attached to
+# carry it out. Held apart because the planner is also built standalone -- its
+# own eval set scores it that way -- and a standalone planner that is told to
+# call `translate` calls a tool that is not there. ADK raises on an unknown
 # tool name rather than answering the model, so the run dies mid-turn.
 _TRANSLATING = (
-    "Once `propose_plan` has recorded the plan, call `dfo_translator` with a "
-    'short `request` naming what you want it to do, such as "translate the '
-    'plan you have recorded" -- `request` is your instruction to it, not a '
-    "copy of the plan, and it is what the translator answers you on. "
-    "`dfo_translator` reads the recorded plan itself, from session state, so "
-    "never retype the plan's `question`, `decisions` or "
-    "`evidence_requirements` into `request`: it already has them as "
-    "`propose_plan` recorded them, and a copy you type by hand can differ "
-    "from them. Once a referral is settled, by your own decision or the "
+    "Once `propose_plan` has recorded the plan, call `translate`. Once a "
+    "referral is settled, by your own decision or the "
     "user's answer, propose with the `amends_version` the last "
-    "`propose_plan` call answered with, so the patch lands on that plan. "
-    "`dfo_translator`'s answer "
-    'is either `{"outcome": "ok"}`, meaning the plan compiled and no '
-    "referral is pending, or the referral itself. A compiled answer means: "
-    "call `submit_plan`, then invite the user's approval in one or two "
-    "sentences -- the plan itself is on their screen, so do not restate its "
-    "decisions, requirements, sources or steps. Otherwise the referral "
-    "is a source decision to settle. When the question itself states that "
-    "the user elected one of its candidates for this requirement, record "
-    "that as a `Decision`: `resolved_by=user`, `fixes.source_spec_id` set to "
-    "the elected candidate's id, and `options` listing every candidate the "
-    "referral gave you, not only the one chosen. When the referral carries a "
-    "`recommendation`, read it first: its `spec_id` names the candidate to "
-    "prefer, and its `rationale` is what your own choice should rest on, "
-    "rather than one you invent -- it is the translator's own grounded "
-    "reading of what discovery found, not a pick made for you. It is "
-    "advice, not an instruction: choose a different candidate when your "
-    "own reading of the question calls for it, and say so plainly, with "
-    "your own reason for departing from what was recommended. Settle "
-    "the referral yourself when the recommendation (or your own reading) "
-    "makes the choice unambiguous: record a `Decision` resolved by "
-    "`planner_default`, with the same `options`, `fixes.source_spec_id` set "
-    "to the candidate you chose, and a rationale that rests on the "
-    "recommendation when you follow it, or states your own reason when you "
-    "don't. Call `adk_request_input` instead whenever it is genuinely "
-    "ambiguous even with the recommendation in hand -- offer it the "
-    "referral's own `candidates` (each `spec_id` and a `label`, the "
-    "candidate's own `sentence`) and, when there is one, the "
-    "recommendation's `spec_id` and `rationale`. Its answer names the "
-    "`spec_id` the user picked; record that as a `Decision` the same way, "
-    "`resolved_by=user`, `fixes.source_spec_id` set to what they picked, "
-    "`options` listing every candidate `adk_request_input` offered -- a "
-    "`resolved_by=user` source pin is checked against what the user actually "
-    "answered `adk_request_input` with, not merely what it offered, so "
-    "naming a spec_id nobody actually picked -- whether it was never "
-    "offered, offered but not chosen, or offered with no answer on record "
-    "yet -- gets the plan refused. A `Decision` needs at least two options "
-    "to choose between either way. A source is pinned only through such a "
-    "decision between the candidates the translator offered, never picked "
-    "from the candidates directly, and never `resolved_by=user` for a "
-    "choice the question does not say the user made or `adk_request_input` "
-    "did not actually ask. That is how a `source_ambiguous` referral is settled: propose again once the decision is recorded; "
+    "`propose_plan` call answered with, so the patch lands on that plan, and "
+    "call `translate` again. When `translate` answers that the plan "
+    "compiled, call `submit_plan`, then invite the user's approval in one "
+    "or two sentences -- the plan itself is on their screen, so do not "
+    "restate its decisions, requirements, sources or steps. Otherwise it "
+    "answers with the referral. `choice_required` "
+    "(`source_ambiguous`, or `pinned_source_not_found` when the pinned source "
+    "was not found) means a requirement's source is not settled: "
+    "the referral's `candidates`, each with its `spec_id`, `sentence`, "
+    "`coverage_window` and the measures, entities and unit it resolves, are "
+    "the only sources that requirement may pin, and `propose_plan` refuses "
+    "any other. A `pinned_source_not_found` referral also lists in "
+    "`stale_pins` every other requirement whose pin was not found, each with "
+    "its own `candidates`; repair them all in one patch. Where a requirement "
+    "is offered one candidate, the fresh search settled it: pin that "
+    "`spec_id` as its `source_spec_id` and cite no decision for the pin. "
+    "Where several are offered, settle it yourself when the question, the brief or the "
+    "candidates' coverage make one the clear answer, a source the question "
+    "or the brief names included; when the choice is the user's to make, "
+    "call `adk_request_input` with the candidates. Either way, record a "
+    "`Decision` whose `options` name every candidate, whose `fixes` names "
+    "`source_spec_id` and whose rationale says why, "
+    "resolved by `planner_default` when you chose and by `user` when the "
+    "user's answer did; pin that `spec_id` as the requirement's "
+    "`source_spec_id`, and propose again. "
+    "A `choice_required` referral with no candidates means the pinned source "
+    "is gone: unpin it and change what the requirement asks for. By `kind`: "
     "`no_data` carries the nearest real sources search found instead and the "
     "reason code for why, each described without a spec_id -- read them for "
     "context, never pin one, since the requirement itself is what has to "
@@ -356,15 +375,21 @@ _TRANSLATING = (
     "theirs to choose; `ask_not_understood` means search dropped part of the ask and "
     "answered a narrower one, so reword the part the referral names; "
     "`seed_dropped` means remove that requirement; "
-    "`pinned_source_not_found` means a decision pins a source this revision's "
-    "discovery did not find, so settle that choice again against whichever "
-    "sources the referral carries instead; `no_operation_covers` means the "
-    "methodology has to change; `discovery_budget_exhausted` means the plan asks "
-    "for too much at once; `discovery_unavailable` means the data service "
+    "`requirement_needs_repair` names the `constraint` the requirement breaks and "
+    "the `repair` you may make, so make it and propose again; "
+    "`no_operation_covers` means no operation carries that requirement out; "
+    "`unsupported_ask` and `no_operation_covers` are `unsupported`, so the plan "
+    "states the ask in `declined` with the referral's `kind` as its code, as "
+    "for `propose_plan`'s own `unsupported` answer; `discovery_budget_exhausted` means the plan asks "
+    "for too much at once; `discovery_unavailable` or `surface_unavailable` means "
+    "the data service "
     "could not answer just now, so nothing about the requirement needs to "
-    "change and the same plan is worth trying again. A plan "
+    "change and the same plan is worth trying again; `internal_failure` is a "
+    "fault in the system that no change to the plan repairs, so tell the user, "
+    "with its `reference`, and propose nothing further. A plan "
     "that cannot be carried out is not one to approve. "
 )
+
 
 _WITHOUT_A_TRANSLATOR = (
     "Stop once `propose_plan` has recorded the plan: having it translated, "
@@ -387,7 +412,7 @@ def planner_instruction(
     """The planner's instruction, for the agent it is actually part of.
 
     `has_translator` and `has_skills` each name something the agent carries:
-    a sub-agent wrapped as a tool, or the skill tools. An instruction naming
+    the `translate` tool, or the skill tools. An instruction naming
     either where the agent has none sends the model at a tool ADK raises on.
 
     `question_fixed` selects which paragraph explains `starts_new_plan`:
@@ -440,7 +465,10 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
     each string in it is cut at `_MAX_LOC_ELEMENT_CHARS`. A `Decision`
     validator's message echoes `chosen` and `options`, which their own
     length caps bound. Any other `ValueError` is a plan rule stated in words,
-    so its text is the message.
+    so its text is the message. A rule that refused what the system cannot do
+    (`UnsupportedPlanError`) is no malformed draft, so it answers `_unsupported`;
+    nor is an ask left unaccounted for (`AsksUnaccountedError`), which answers
+    `_asks_unaccounted`.
 
     `exc.errors()` carries a `loc` tuple and, for a `model_validator` failure,
     the raised exception itself in `ctx["error"]`. Neither is JSON on its own,
@@ -450,7 +478,14 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
     """
     if not isinstance(exc, ValidationError):
         return _invalid_plan(f"Invalid plan data: {exc}")
+    cause = _unsupported_cause(exc)
+    if cause is not None:
+        return _unsupported(cause)
     errors = exc.errors(include_url=False, include_input=False)
+    for error in errors:
+        unaccounted = error.get("ctx", {}).get("error")
+        if isinstance(unaccounted, AsksUnaccountedError):
+            return _asks_unaccounted(unaccounted)
     reported = [
         {**error, "loc": tuple(_cut_loc_element(element) for element in error["loc"])}
         for error in errors[:_MAX_REPORTED_ERRORS]
@@ -468,6 +503,143 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
     )
 
 
+def _unsupported_cause(exc: ValueError) -> UnsupportedPlanError | None:
+    """The `UnsupportedPlanError` a plan rule raised under `exc`, if one did."""
+    if not isinstance(exc, ValidationError):
+        return None
+    for error in exc.errors(include_url=False, include_input=False):
+        cause = error.get("ctx", {}).get("error")
+        if isinstance(cause, UnsupportedPlanError):
+            return cause
+    return None
+
+
+def _unsupported(exc: UnsupportedPlanError) -> dict[str, object]:
+    """Return the `UNSUPPORTED` problem for a calculation no plan can state.
+
+    The `action` carries the decline's `code` and leaves its `ask`, the user's
+    own words, to the model.
+    """
+    code = exc.operation.value
+    return problem(
+        ProblemCode.OPERATION_UNSUPPORTED,
+        f"Unsupported: {exc}. This is a limit of the system, not a fault in the plan, so no "
+        f"reshaping makes it work. Record the part of the question that asks for it in "
+        f"`declined` with code {code!r}, in the user's words and, when the brief lists asks, "
+        "with the ask's number as `ask_ref`, and plan only what can still be answered, such "
+        "as each series on its own; when nothing can, propose `declined` alone, with no "
+        "requirements. The user is told that part was not computed.",
+        outcome=Outcome.UNSUPPORTED,
+        action=Action(
+            call="propose_plan", arguments={"declined": [{"code": code}]}, needs=("declined.ask",)
+        ),
+        detail={"operation": code},
+    )
+
+
+def _asks_unaccounted(exc: AsksUnaccountedError) -> dict[str, object]:
+    """Return the `ASKS_UNACCOUNTED` problem for a plan that drops or doubles an ask.
+
+    The `action` names each ask left unaccounted for and leaves the outputs
+    that answer it to the model.
+    """
+    return problem(
+        ProblemCode.ASKS_UNACCOUNTED,
+        f"{exc}. Answer an ask in `answered` with the ids of the requirements whose results "
+        "answer it, or, when `propose_plan` answered `unsupported` for it, decline it in "
+        "`declined` with its number as `ask_ref`; an ask the plan computes in part takes one "
+        "of each. A patch that answers or declines an ask replaces whatever accounted for it "
+        "before, so state each once.",
+        outcome=Outcome.INVALID_INPUT,
+        action=Action(
+            call="propose_plan",
+            arguments={"answered": [{"ask": number} for number in exc.uncovered]},
+            needs=("answered.outputs",),
+        )
+        if exc.uncovered
+        else None,
+        detail={"uncovered": list(exc.uncovered), "repeated": list(exc.repeated)},
+    )
+
+
+def _decline_missing(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
+    """Return the refusal for a plan that drops an ask answered `unsupported`.
+
+    Each `unsupported` answer `propose_plan` or `translate` gave in this
+    planner entry (`load_unsupported`) needs a `Decline` with its operation
+    as `code`, so the ask stays on the record instead of vanishing from a
+    reshaped plan.
+    """
+    declined = {decline.code for decline in plan.declined}
+    missing = sorted(code.value for code in load_unsupported(tool_context.state) - declined)
+    if not missing:
+        return None
+    return problem(
+        ProblemCode.DECLINE_MISSING,
+        f"An `unsupported` answer named {missing!r} earlier in this turn, and this plan does "
+        "not say so. State each in `declined`, with the part of the question it leaves "
+        "unanswered, in the user's words.",
+        outcome=Outcome.INVALID_INPUT,
+        action=Action(
+            call="propose_plan",
+            arguments={"declined": [{"code": code} for code in missing]},
+            needs=("declined.ask",),
+        ),
+        detail={"operations": list(missing)},
+    )
+
+
+def _decline_unearned(
+    plan: Plan, previous: Plan | None, tool_context: ToolContext
+) -> dict[str, object] | None:
+    """Return the refusal for a plan declining what no tool answered `unsupported`.
+
+    A decline this plan adds needs its code among the `unsupported` answers
+    `propose_plan` or `translate` gave in this planner entry
+    (`load_unsupported`). A decline carried unchanged from `previous`, the
+    plan this one amends, was earned when it was recorded; one restated with
+    the same `Decline.key` in other words is the same decline.
+    """
+    earned = load_unsupported(tool_context.state)
+    carried = {decline.key for decline in previous.declined} if previous is not None else set()
+    unearned = sorted(
+        {
+            decline.code.value
+            for decline in plan.declined
+            if decline.key not in carried and decline.code not in earned
+        }
+    )
+    if not unearned:
+        return None
+    return problem(
+        ProblemCode.DECLINE_UNEARNED,
+        f"`declined` names {unearned!r}, and neither `propose_plan` nor `translate` answered "
+        "`unsupported` with that code in this turn. Decline a part only when one of them "
+        "answered `unsupported` for it; answer the ask with the requirements that compute "
+        "it instead.",
+        outcome=Outcome.INVALID_INPUT,
+        detail={"operations": unearned},
+    )
+
+
+def _nothing_to_plan(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
+    """Return the answer for a plan that declines every ask and states nothing else.
+
+    Only declines this entry's `unsupported` answers required count: the
+    question is wholly beyond what the system computes, so the entry ends
+    on the declines, which the caller tells the user.
+    """
+    codes = {decline.code for decline in plan.declined}
+    if not codes or not codes <= load_unsupported(tool_context.state):
+        return None
+    return problem(
+        ProblemCode.NOTHING_TO_PLAN,
+        "Nothing in the question can be planned once its unsupported asks are declined.",
+        outcome=Outcome.REFUSED,
+        detail={"declined": [decline.model_dump(mode="json") for decline in plan.declined]},
+    )
+
+
 def _approval_summary(plan: Plan) -> dict[str, object]:
     """Return what a next call needs to know about the compiled `plan`.
 
@@ -475,7 +647,7 @@ def _approval_summary(plan: Plan) -> dict[str, object]:
     and every warning the compiler let through (`Workflow.warnings`). The
     plan's own decisions, requirements, sources and steps are deliberately
     absent. `harness.studio_translate` builds the card the user approves from
-    the plan record, through `harness.plan_display`, and `dfo_translator` and
+    the plan record, through `harness.plan_display`, and `translate` and
     `submit_plan` both read the record out of session state, so a copy here is
     a second description of one plan that can disagree with the first.
 
@@ -534,12 +706,12 @@ def _execution_blocked(
             ProblemCode.WORKFLOW_MISSING,
             "This plan still needs translating and compiling into a workflow "
             + (
-                "before it can execute. Call `dfo_translator` first."
+                "before it can execute. Call `translate` first."
                 if has_translator
                 else "before anything can execute, and no translator is attached here."
             ),
             outcome=Outcome.REFUSED,
-            action=Action(call="dfo_translator") if has_translator else None,
+            action=Action(call=TRANSLATE_TOOL_NAME) if has_translator else None,
         )
     if plan.version != version:
         return problem(
@@ -907,8 +1079,8 @@ def _answered_since_referral(tool_context: ToolContext) -> bool:
     translator's referral, read off this session's event history as
     `_elected_spec_ids` reads it.
 
-    The referral reaches the planner as the `FunctionResponse` for the
-    translator's own call, carrying its `kind` and `requirement_id`. This walks the
+    The referral reaches the planner as the `FunctionResponse` for its own
+    `translate` call, carrying its `kind` and `requirement_id`. This walks the
     session once, in event order. An `adk_request_input` call event after that
     response is an ask the model raised knowing the referral, and its `id` is
     remembered. A response counts as the user's answer when it pairs by `id` with
@@ -917,15 +1089,15 @@ def _answered_since_referral(tool_context: ToolContext) -> bool:
     declining to choose, which the planner may not substitute for, so the planner
     ends the turn by telling them what cannot be done.
 
-    A translator response naming a different referral than the last one starts
-    the walk over. A translator called again on a plan whose referral is still pending
+    A `translate` response naming a different referral than the last one starts
+    the walk over. `translate` called again on a plan whose referral is still pending
     answers with that same referral, so the answer the user gave in between still
     counts. A `propose_plan` that recorded a version clears the referral in
     session state, so it ends the referral this walk is following too. A refused
     proposal leaves both alone, which keeps the user's answer standing for the
     retry.
 
-    With no translator response on record the result is no answer. The guard
+    With no `translate` response on record the result is no answer. The guard
     refuses when it cannot say where the referral began, so an answer given for
     something else settles nothing.
     """
@@ -950,7 +1122,7 @@ def _answered_since_referral(tool_context: ToolContext) -> bool:
             body = response.response or {}
             if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
                 answered = answered or (response.id in asks and _is_answer(body))
-            elif response.name == TRANSLATOR_AGENT_NAME:
+            elif response.name == TRANSLATE_TOOL_NAME:
                 handed_back = (body.get("kind"), body.get("requirement_id"))
                 if handed_back != referral:
                     referral, answered = handed_back, False
@@ -1041,6 +1213,55 @@ def _election_untraceable(
     )
 
 
+def _refound_spec_ids(tool_context: ToolContext) -> frozenset[str]:
+    """The sources a pending `pinned_source_not_found` referral found in place of a stale pin.
+
+    One per requirement whose offer is a single source: the fresh search
+    settled on it, so re-pinning to it is no choice for the planner to
+    record. A requirement offered several is a real choice, which a
+    `Decision` the planner writes settles.
+    """
+    referral = load_referral(tool_context.state)
+    if referral is None or referral.kind is not ReferralKind.PINNED_SOURCE_NOT_FOUND:
+        return frozenset()
+    return frozenset(
+        candidates[0].spec_id for candidates in referral.offered().values() if len(candidates) == 1
+    )
+
+
+def _choice_not_offered(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
+    """Return the refusal for a pin a pending source choice did not offer, or `None`.
+
+    A `choice_required` referral names the sources each requirement it is
+    about may pin (`Referral.offered`): its `candidates`, and each stale
+    pin's, which discovery recorded and no model wrote. While it is pending,
+    each such requirement as `plan` states it either pins one of them or
+    pins nothing. A requirement the plan no longer states passes.
+    """
+    referral = load_referral(tool_context.state)
+    if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
+        return None
+    for requirement_id, candidates in referral.offered().items():
+        try:
+            requirement = plan.requirement(requirement_id)
+        except KeyError:
+            continue
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        offered = [candidate.spec_id for candidate in candidates]
+        if requirement.source_spec_id in offered:
+            continue
+        return problem(
+            ProblemCode.SOURCE_NOT_OFFERED,
+            f"{requirement.id!r} pins {requirement.source_spec_id!r}, which the "
+            f"{referral.kind.value} referral did not offer. Pin one of its candidates, put "
+            "them to the user, or unpin the requirement and change what it asks for.",
+            outcome=Outcome.REFUSED,
+            detail={"requirement_id": requirement.id, "candidates": offered},
+        )
+    return None
+
+
 def _dropped_seed_pinned(
     decisions: Sequence[Decision],
     requirements: Sequence[EvidenceRequirement],
@@ -1082,21 +1303,33 @@ def _dropped_seed_pinned(
     )
 
 
-def _unrecordable(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
+def _unrecordable(
+    plan: Plan, tool_context: ToolContext, *, previous: Plan | None
+) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
-    A plan states at least one requirement. A patch carries forward what it
+    A plan states at least one requirement, unless it declines every ask
+    (`_nothing_to_plan`). A patch carries forward what it
     does not name, so the amended plan is checked whole for a pin the recorded
-    plan made before the turn dropped its dataset (`_dropped_seed_pinned`).
+    plan made before the turn dropped its dataset (`_dropped_seed_pinned`), for
+    a pin a pending source choice did not offer (`_choice_not_offered`), for a
+    decline no `unsupported` answer earned (`_decline_unearned`, against
+    `previous`, the plan it amends), and for a decline every `unsupported`
+    answer this turn requires (`_decline_missing`).
     """
     if not plan.evidence_requirements:
-        return _invalid_plan(
+        return _nothing_to_plan(plan, tool_context) or _invalid_plan(
             "A plan states at least one evidence requirement: what data the answer "
             "rests on, citing the decisions that fixed it. State the requirements this "
             "question needs, or name the ones a patch removes in "
             "`removed_evidence_requirements`."
         )
-    return _dropped_seed_pinned(plan.decisions, plan.evidence_requirements, tool_context)
+    return (
+        _dropped_seed_pinned(plan.decisions, plan.evidence_requirements, tool_context)
+        or _choice_not_offered(plan, tool_context)
+        or _decline_unearned(plan, previous, tool_context)
+        or _decline_missing(plan, tool_context)
+    )
 
 
 def _repinned(
@@ -1245,39 +1478,32 @@ def _window_seeded_pins(
     return Plan.model_validate(moved.model_dump()), list(windows.values())
 
 
-def _source_decision_slot(spec_id: str) -> str:
-    """The `Decision.slot` `_synthesize_source_decisions` records a pin's decision under.
-
-    Derived from `spec_id` rather than fixed, so two different pins never
-    collide: this call names at most one, since `exposed_spec_id` is a single
-    id, but a patch can still cite an old one carried over from a plan drafted
-    against an earlier turn's envelope. `spec_id` already matches
-    `Identifier`'s own pattern (`planner.records.Identifier`, a lower ASCII
-    id), so prefixing it costs nothing in validity.
-    """
-    return f"source_{spec_id}"
-
-
 def _synthesize_source_decisions(
     decisions: Sequence[Decision],
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
     previous: Plan | None,
-    exposed_spec_id: str | None,
+    settled_spec_ids: Collection[str],
+    earlier_spec_ids: Collection[str] = (),
+    refound_spec_ids: Collection[str] = (),
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
-    """Add the `Decision` a verbatim pin of the envelope's own `spec_id` needs, so citing it is all the model has to do.
+    """Add the `Decision` a verbatim pin of a settled search result needs, so citing it is all the model has to do.
 
-    `harness.planner_seam` renders the resolve envelope's `spec_id` as an
-    allowed pin for a single-part question with nothing left to resolve, but
+    `harness.planner_seam` shows the planner the spec_ids this turn's
+    searches settled on (`PinSource.settled`) as allowed pins, but
     `_check_pin_rests_on_a_fixing_decision` still requires a citing
-    `Decision`. This writes that decision on the model's behalf, the way
-    `_ELECTED_SPEC_REASON` asks the model to write one when a clarify round
-    elects an id, except here nothing was elected for the model to narrate.
+    `Decision`. This writes one per pinned settled spec_id on the model's
+    behalf, and likewise for a re-pin to the one source a
+    `pinned_source_not_found` referral found in place of a stale pin
+    (`refound_spec_ids`). A pin of anything else, a candidate among several
+    included, needs a decision the model wrote. A requirement still citing a
+    decision written here for a pin it no longer states has that citation
+    dropped, so a re-pin needs no edit of `decision_ids` either.
 
-    A synthesized `Decision`'s two `options` are pinning the envelope's id
-    and leaving the source unpinned, the only two things genuinely true of a
-    `DatasetRequirement` pinning it, and `resolved_by=planner_default` names
-    the planner, not the user, as the one who settled it.
+    A synthesized `Decision`'s two `options` are pinning the id and leaving
+    the source unpinned, the only two things true of a `DatasetRequirement`
+    pinning it, and `resolved_by=planner_default` names the planner, not the
+    user, as the one who settled it.
 
     Only a requirement in this call's own `evidence_requirements` is
     examined, never one carried unchanged from `previous`; `previous.decisions`
@@ -1295,139 +1521,268 @@ def _synthesize_source_decisions(
             `evidence_requirements`.
         previous: The plan this call amends, or `None` on a first draft or a
             restart.
-        exposed_spec_id: `ENVELOPE_SPEC_STATE_KEY`'s value for this session,
-            the spec_id `harness.planner_seam` actually rendered to the model
-            this entry. `None` when the envelope omitted it, in which case
-            this is a no-op: a pin the model was never told was allowed is
-            left for the ordinary validator to refuse.
+        settled_spec_ids: The settled spec_ids `harness.planner_seam` showed
+            the model this entry (`pin_sources`). A pin of any other id is
+            left for the ordinary validator to judge.
+        earlier_spec_ids: Those of `settled_spec_ids` whose block came from
+            an earlier turn (`PinSource.earlier_turn`); their decision's
+            rationale names a search in this conversation, not this turn.
+        refound_spec_ids: The sources a pending `pinned_source_not_found`
+            referral offers as the one found in place of a requirement's
+            stale pin (`_refound_spec_ids`). A pin of one is settled the
+            same way, with a rationale saying so.
 
     Returns:
         `decisions`/`evidence_requirements`, unchanged unless some requirement
-        needed the pin cited. When so, each such requirement's `decision_ids`
-        cites the synthesized decision's slot, and the decision itself is
-        appended to `decisions` unless a prior round already recorded it.
+        needed a pin cited. When so, each such requirement's `decision_ids`
+        cites the synthesized decision's slot, and each decision is appended
+        to `decisions` unless a prior round already recorded it.
     """
-    if exposed_spec_id is None:
-        return list(decisions), list(evidence_requirements)
     known = {decision.slot: decision for decision in (previous.decisions if previous else ())}
     known.update({decision.slot: decision for decision in decisions})
+    pinnable = {*settled_spec_ids, *refound_spec_ids}
 
-    def _already_fixes_the_pin(decision_id: str) -> bool:
-        cited = known.get(decision_id)
-        return (
-            cited is not None
-            and cited.fixes is not None
-            and cited.fixes.source_spec_id == exposed_spec_id
-        )
+    def _uncited_pin(requirement: EvidenceRequirement) -> str | None:
+        if not isinstance(requirement, DatasetRequirement):
+            return None
+        pin = requirement.source_spec_id
+        if pin is None or pin not in pinnable:
+            return None
+        for slot in requirement.decision_ids:
+            cited = known.get(slot)
+            if cited is not None and cited.fixes is not None and cited.fixes.source_spec_id == pin:
+                return None
+        return pin
 
-    def _needs_the_pin(requirement: EvidenceRequirement) -> bool:
+    def _stale_citation(requirement: EvidenceRequirement, slot: str) -> bool:
+        """Whether `slot` is a decision this function wrote for a pin `requirement` no longer states."""
+        cited = known.get(slot)
         return (
             isinstance(requirement, DatasetRequirement)
-            and requirement.source_spec_id == exposed_spec_id
-            and not any(_already_fixes_the_pin(slot) for slot in requirement.decision_ids)
+            and cited is not None
+            and is_search_pin(cited)
+            and cited.fixes is not None
+            and cited.fixes.source_spec_id != requirement.source_spec_id
         )
 
-    slot = _source_decision_slot(exposed_spec_id)
-    if not any(_needs_the_pin(requirement) for requirement in evidence_requirements):
-        return list(decisions), list(evidence_requirements)
-    patched_requirements = [
-        requirement.model_copy(update={"decision_ids": (*requirement.decision_ids, slot)})
-        if _needs_the_pin(requirement)
-        else requirement
-        for requirement in evidence_requirements
-    ]
-    if slot in known:
-        return list(decisions), patched_requirements
-    synthesized = Decision(
-        slot=slot,
-        description="Whether to pin the source the resolve envelope already settled on.",
-        options=(f"pin {exposed_spec_id}", "leave the source unpinned"),
-        chosen=f"pin {exposed_spec_id}",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale=(
-            "The resolve envelope named this as the question's definite source, with "
-            "no other candidate on offer."
-        ),
-        fixes=DecisionFixes(source_spec_id=exposed_spec_id),
+    synthesized: list[Decision] = []
+    patched_requirements: list[EvidenceRequirement] = []
+    for stated in evidence_requirements:
+        kept = tuple(slot for slot in stated.decision_ids if not _stale_citation(stated, slot))
+        requirement = (
+            stated
+            if kept == stated.decision_ids
+            else stated.model_copy(update={"decision_ids": kept})
+        )
+        pin = _uncited_pin(requirement)
+        if pin is None:
+            patched_requirements.append(requirement)
+            continue
+        slot = search_pin_slot(pin)
+        patched_requirements.append(
+            requirement.model_copy(update={"decision_ids": (*requirement.decision_ids, slot)})
+        )
+        if slot in known:
+            continue
+        known[slot] = Decision(
+            slot=slot,
+            description="Whether to pin the source a search settled on.",
+            options=(f"pin {pin}", "leave the source unpinned"),
+            chosen=f"pin {pin}",
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale=(
+                "A fresh search found this source in place of the one pinned before."
+                if pin in refound_spec_ids and pin not in settled_spec_ids
+                else "A search in this conversation settled on this source for the measure."
+                if pin in earlier_spec_ids
+                else "A search this turn settled on this source for the measure."
+            ),
+            fixes=DecisionFixes(source_spec_id=pin),
+        )
+        synthesized.append(known[slot])
+    return [*decisions, *synthesized], patched_requirements
+
+
+def _settled_decisions(
+    drafts: Sequence[DecisionDraft],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    existing: Plan | None,
+    requirements_after: Sequence[EvidenceRequirement],
+    tool_context: ToolContext,
+) -> list[Decision] | dict[str, object]:
+    """This call's decisions built from `drafts`, or the refusal that stops the call first.
+
+    These checks run before the plan is touched, so a refusal records nothing
+    and spends no round: a referral the user has not answered
+    (`_referral_unanswered`), a draft fixing a field its requirements do not
+    settle (`planner.plan.settle_decisions`), a pin on a dataset the turn
+    dropped (`_dropped_seed_pinned`), and a user election the user never made
+    (`_election_untraceable`).
+
+    Args:
+        drafts: This call's `decisions` argument.
+        requirements: This call's own requirements.
+        existing: The plan recorded before this call.
+        requirements_after: Every requirement the plan states once the call
+            lands (`_requirements_after`), which a draft's fields are read off.
+        tool_context: The call's tool context.
+    """
+    blocked = _referral_unanswered(existing, tool_context)
+    if blocked is not None:
+        return blocked
+    try:
+        decisions = settle_decisions(drafts, requirements_after)
+    except UnsettledFixError as exc:
+        return _fix_unsettled(exc)
+    return (
+        _dropped_seed_pinned(decisions, requirements, tool_context)
+        or _election_untraceable(decisions, tool_context)
+        or decisions
     )
-    return [*decisions, synthesized], patched_requirements
 
 
-# `propose_plan`'s own docstring under `question_fixed`, assigned over the
-# function's definition-time docstring below once `build_planner_tools` knows
-# the mode. ADK builds the tool's declaration -- including each argument's own
-# `description` -- from this text, so the two arguments `question_fixed`
-# actually changes the handling of, `question` and `starts_new_plan`, read
-# here the way `_resolve_intent` enforces them; everything else is identical
-# to the definition's own docstring.
-_PROPOSE_PLAN_DOC_FIXED = """Record a plan, or patch the one already recorded.
+def _uncited_source_decisions(
+    previous: Plan | None,
+    decisions: Sequence[Decision],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    removed: Collection[str],
+) -> list[str]:
+    """The slot of each decision `_synthesize_source_decisions` wrote that no requirement of the patched plan cites.
 
-The call states which of the two it is, and never has a question's
-wording stand in for that. With nothing recorded, it is a first draft:
-state every decision the plan makes and every requirement the answer
-rests on. With a plan recorded, pass the `amends_version` that plan
-answers with, and the call patches it. This turn's question is fixed, so
-a patch's own `question`, if it states one, has to match the one already
-recorded. Pass `starts_new_plan=true` instead only to say the user's
-reply asks a different question -- that call is refused and records
-nothing, ending the turn there for the harness to tell the user to send
-it as its own message. A recorded plan and neither argument is refused.
-The reading is not guessed from `question`, because a reworded question
-that meant an amendment would otherwise drop every item the call did
-not restate.
+    Such a decision exists only because a requirement pinned its spec_id, so
+    when a patch unpins, re-pins or removes every requirement citing it, it
+    goes with them. The model did not write it and would not remove it by
+    name. A slot this call restates or removes is left as the call says.
 
-A patch names only what changes, keyed by `slot` for a decision and by
-`id` for a requirement, and every item it does not mention is carried
-forward. A patch's items are matched to the recorded plan by that key:
-a key the plan already states replaces that item, and a key it does
-not state adds one. Every call produces a new plan version.
+    Args:
+        previous: The plan this call amends, or `None`.
+        decisions: This call's own decisions, synthesized ones included.
+        requirements: Every requirement the patched plan states.
+        removed: The slots this call removes.
+    """
+    if previous is None:
+        return []
+    restated = {decision.slot for decision in decisions} | set(removed)
+    cited = {slot for requirement in requirements for slot in requirement.decision_ids}
+    return [
+        decision.slot
+        for decision in previous.decisions
+        if is_search_pin(decision) and decision.slot not in restated and decision.slot not in cited
+    ]
 
-Nothing is deleted by leaving it out. A decision or requirement is
-removed only by naming it in `removed_decisions` (its `slot`) or
-`removed_evidence_requirements` (its `id`), which is why those two
-arguments exist: an item absent from a patch means unchanged.
 
-Args:
-    question: The question this plan answers. Required on a first
-        draft. A patch may omit it, keeping the recorded question, or
-        restate it unchanged -- it cannot be changed here, since the
-        question is fixed for this turn.
-    amends_version: The `version` this call patches, as the last
-        `propose_plan` call answered it and as the brief's own
-        "version N" line states it. Required whenever a plan is
-        already recorded for this session, unless `starts_new_plan`
-        is set. It must be the version actually recorded.
-    starts_new_plan: Set true only to say the user's reply asks a
-        different question from the one already recorded for this
-        turn. Refused and records nothing: the harness ends the turn
-        and tells the user to send the other question as its own
-        message.
-    decisions: The decisions this call adds or replaces, keyed by
-        `slot`. On the first call, every decision the plan makes: at
-        most 24. `options` records what was considered, and
-        `rationale` is the one-line reason, and when `resolved_by` is
-        the user, that can just say so (e.g. "user's explicit preference, no stated
-        methodology reason").
-    evidence_requirements: The requirements this call adds or
-        replaces, keyed by `id`: a dataset requirement per series, and
-        a derived requirement per calculation, each citing in
-        `decision_ids` the decisions that fixed it. Every decision has
-        to be cited by at least one, and every dataset requirement has
-        to feed a calculation. A plan states at most 24
-        requirements.
-    removed_decisions: The `slot` of each decision this call deletes.
-    removed_evidence_requirements: The `id` of each requirement this
-        call deletes.
+def _requirements_after(
+    previous: Plan | None,
+    requirements: Sequence[EvidenceRequirement],
+    removed: Collection[str],
+) -> list[EvidenceRequirement]:
+    """Every requirement the plan states once this call's patch lands, in `Plan.amend`'s order.
 
-Returns:
-    `ok` with `status`, the `"draft"` this call just recorded;
-    `version`, the number to pass to `submit_plan`; `previous_version`,
-    the version this amended, `None` on a first draft; and `question`,
-    as stored. `previous_version` is why this is returned at all: it is
-    the one thing `Plan.amend` changed that your own arguments did not
-    state. Your decisions and requirements are in your own call, and
-    `dfo_translator` reads the plan from session state.
-"""
+    A removal naming no requirement is left for `Plan.amend` to refuse.
+    """
+    by_id = {
+        requirement.id: requirement
+        for requirement in (previous.evidence_requirements if previous else ())
+    }
+    by_id.update({requirement.id: requirement for requirement in requirements})
+    return [
+        requirement
+        for requirement_id, requirement in by_id.items()
+        if requirement_id not in removed
+    ]
+
+
+def _fix_unsettled(exc: UnsettledFixError) -> dict[str, object]:
+    """Return the refusal for a decision whose `fixes` names a field its requirements do not settle."""
+    return problem(
+        ProblemCode.FIX_DISAGREES if len(exc.stating) > 1 else ProblemCode.FIX_UNSTATED,
+        str(exc),
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "decision": exc.slot,
+            "field": exc.field,
+            "citing": list(exc.citing),
+            "stating": list(exc.stating),
+        },
+    )
+
+
+# What each `propose_plan` argument means, as the model reads it on the
+# argument itself (`planner.declaration.PlanTool`). `question` and
+# `starts_new_plan` read differently under `question_fixed`, the way
+# `_resolve_intent` enforces them; `_FIXED_ARGUMENTS` replaces those two.
+_PROPOSE_PLAN_ARGUMENTS = {
+    "question": (
+        "The question this plan answers. Required on a first draft and with "
+        "`starts_new_plan`, which starts at version 1 under it. A patch that "
+        "states one records it; one that omits it keeps the recorded question."
+    ),
+    "answer_mode": (
+        "Required on a first draft and with `starts_new_plan`. A patch that "
+        "states one switches the plan's mode and re-validates its requirements "
+        "under it; one that omits it keeps the recorded mode."
+    ),
+    "decisions": (
+        "The decisions this call adds or replaces, keyed by `slot`: a slot the "
+        "plan already states replaces that decision, and a new one adds it. A "
+        f"first draft states every decision the plan makes, at most "
+        f"{MAX_PLAN_DECISIONS}. Every decision is cited by at least one "
+        "requirement."
+    ),
+    "evidence_requirements": (
+        "The requirements this call adds or replaces, keyed by `id`, unique "
+        "within the plan and tagged by `kind`: an id the plan already states "
+        "replaces that requirement whole, so restate every field it keeps, "
+        "its entities' roles included, and a new id adds one. A derived "
+        "requirement names the requirement it reads in `input_id`. Each cites "
+        "in `decision_ids` the decisions that fixed its fields, and none when "
+        "the question or your instruction states them outright. A plan states "
+        f"at most {MAX_PLAN_REQUIREMENTS} requirements."
+    ),
+    "removed_decisions": (
+        "The `slot` of each decision this call deletes. Leaving a decision out of a patch keeps it."
+    ),
+    "removed_evidence_requirements": (
+        "The `id` of each requirement this call deletes. Leaving a requirement "
+        "out of a patch keeps it."
+    ),
+    "declined": (
+        "Each part of the question left unanswered because `propose_plan` or "
+        "`translate` answered `unsupported`, one per `code` and `ask_ref`."
+    ),
+    "answered": (
+        "When the brief lists asks, the requirements that answer each one, "
+        "keyed by `ask`. Every ask is answered here or declined in `declined` "
+        "with its number as `ask_ref`, exactly once, or both when the plan "
+        "computes part of it."
+    ),
+    "amends_version": (
+        "The `version` this call patches, as the last `propose_plan` call "
+        'answered it and as the brief\'s own "version N" line states it. '
+        "Required once a plan is recorded, unless `starts_new_plan` is set: "
+        "a call stating neither is refused, and `question` never stands in "
+        "for the choice."
+    ),
+    "starts_new_plan": (
+        "True begins a plan of its own, at version 1, for a different question "
+        "while a plan is recorded."
+    ),
+}
+
+_FIXED_ARGUMENTS = {
+    "question": (
+        "The question this plan answers. Required on a first draft. This "
+        "turn's question is fixed, so a patch either omits it or restates it "
+        "unchanged: it has to match the one already recorded."
+    ),
+    "starts_new_plan": (
+        "True says the user's reply asks a different question from the one "
+        "fixed for this turn. Refused, recording nothing: the harness ends the "
+        "turn and tells the user to send that question as its own message."
+    ),
+}
 
 
 def build_planner_tools(
@@ -1442,9 +1797,8 @@ def build_planner_tools(
     agent does not have sends the model at a tool ADK raises on.
 
     `question_fixed` closes over into `propose_plan`, which passes it straight
-    to `_resolve_intent` on every call, and selects `propose_plan`'s own
-    docstring (`_PROPOSE_PLAN_DOC_FIXED` in place of the definition's own),
-    so the `starts_new_plan` and `question` arguments ADK declares from it
+    to `_resolve_intent` on every call, and selects `_FIXED_ARGUMENTS`'
+    descriptions of `question` and `starts_new_plan`, so those two arguments
     describe the mode this tool set actually enforces.
     """
 
@@ -1463,23 +1817,13 @@ def build_planner_tools(
         recommended_spec_id: str | None = None,
         rationale: str | None = None,
     ) -> dict[str, object] | None:
-        """Ask the user a question a referral leaves to them.
+        """Ask the user a question a referral leaves to them, pausing the turn.
 
-        Call this when a `source_ambiguous` (or similarly candidate-
-        carrying) referral's choice is genuinely ambiguous, the same
-        standard that governs asking the user anything else, and for an
-        `unsupported_ask` or `requirement_unmeetable` referral, to say what
-        cannot be done and ask what to change. This is a long-running call:
-        it suspends the turn and returns nothing here -- the user's own
-        answer arrives as this call's own response, on your next turn,
-        naming the `spec_id` they picked (or free text, if they answered
-        outside the offered candidates). Record whichever `spec_id`
-        comes back as a `Decision`: `resolved_by=user`,
-        `fixes.source_spec_id` set to it, `options` listing every candidate
-        you offered here -- naming a `spec_id` this call never offered, or
-        one it offered but the user did not actually pick, gets the plan
-        refused, since a `resolved_by=user` pin has to trace to what the
-        user was actually asked and answered.
+        Returns nothing here: the user's answer arrives as this call's own
+        response on your next turn, naming the `spec_id` they picked, or free
+        text if they answered outside the candidates. A `resolved_by=user`
+        decision may pin only a `spec_id` this call offered and the user
+        picked.
 
         Args:
             message: The question to show the user, naming what is
@@ -1489,9 +1833,9 @@ def build_planner_tools(
                 `{"spec_id": ..., "label": ...}` -- `label` is the
                 candidate's own `sentence`, not invented text. Omit it for
                 a referral that carries none.
-            recommended_spec_id: The referral's `recommendation.spec_id`,
-                when it carries one -- must name one of `candidates`.
-            rationale: The referral's `recommendation.rationale`, when
+            recommended_spec_id: The candidate you favour, when you favour
+                one -- must name one of `candidates`.
+            rationale: Why you favour it, for the user to read, when
                 `recommended_spec_id` is given.
         """
         del message, rationale  # carried through to the wire frame, not read back here
@@ -1512,89 +1856,21 @@ def build_planner_tools(
         tool_context: ToolContext,
         question: str | None = None,
         answer_mode: AnswerMode | None = None,
-        decisions: list[Decision] = [],  # noqa: B006
+        decisions: list[DecisionDraft] = [],  # noqa: B006
         evidence_requirements: list[EvidenceRequirement] = [],  # noqa: B006
         removed_decisions: list[str] = [],  # noqa: B006
         removed_evidence_requirements: list[str] = [],  # noqa: B006
+        declined: list[Decline] = [],  # noqa: B006
+        answered: list[AskAnswer] = [],  # noqa: B006
         amends_version: int | None = None,
         starts_new_plan: bool = False,
     ) -> dict[str, object]:
         """Record a plan, or patch the one already recorded.
 
-        The call states which of the two it is, and never has a question's
-        wording stand in for that. With nothing recorded, it is a first draft:
-        state every decision the plan makes and every requirement the answer
-        rests on. With a plan recorded, pass the `amends_version` that plan
-        answers with, and the call patches it. Pass `starts_new_plan=true`
-        instead when the user's ask is a different question that calls for a
-        plan of its own. A recorded plan and neither argument is refused. The
-        reading is not guessed from `question`, because a reworded question
-        that meant an amendment would otherwise drop every item the call did
-        not restate.
-
-        A patch names only what changes, keyed by `slot` for a decision and by
-        `id` for a requirement, and every item it does not mention is carried
-        forward. A patch's items are matched to the recorded plan by that key:
-        a key the plan already states replaces that item, and a key it does
-        not state adds one. Every call produces a new plan version.
-
-        Nothing is deleted by leaving it out. A decision or requirement is
-        removed only by naming it in `removed_decisions` (its `slot`) or
-        `removed_evidence_requirements` (its `id`), which is why those two
-        arguments exist: an item absent from a patch means unchanged.
-
-        Args:
-            question: The question this plan answers. Required on a first
-                draft and with `starts_new_plan`, which starts at version 1
-                under it. A patch that states one records it, and one that
-                omits it keeps the recorded question.
-            answer_mode: `series` when the question asks to see a level or a
-                trend for named entities -- a lone dataset requirement,
-                unread by anything else, is then itself the answer. `computed`
-                when the question asks for a figure the series does not state
-                on its own, such as a difference, growth, share, rank or
-                total -- every dataset requirement then has to feed a
-                calculation. Required on a first draft and with
-                `starts_new_plan`. A patch that states one switches the
-                amended plan's mode and re-validates the requirements under
-                it; one that omits it keeps the recorded mode.
-            amends_version: The `version` this call patches, as the last
-                `propose_plan` call answered it and as the brief's own
-                "version N" line states it. Required whenever a plan is
-                already recorded for this session, unless `starts_new_plan`
-                is set. It must be the version actually recorded.
-            starts_new_plan: Set true to begin a plan of its own for a
-                different question while a plan is already recorded.
-            decisions: The decisions this call adds or replaces, keyed by
-                `slot`. On the first call, every decision the plan makes: at
-                most 24. `options` records what was considered, and
-                `rationale` is the one-line reason, and when `resolved_by` is
-                the user, that can just say so (e.g. "user's explicit preference, no stated
-                methodology reason").
-            evidence_requirements: The requirements this call adds or replaces,
-                keyed by `id`: a dataset requirement per measure and source,
-                naming every entity, and a derived requirement per calculation,
-                each citing in `decision_ids` the decisions that fixed it,
-                or none when the question states its fields outright.
-                Leave a dataset requirement's `unit` unset unless the
-                question asks for a currency or price basis: a source's own
-                unit is not one the user asked for.
-                Every decision has to be cited by at least one. Under
-                `answer_mode="series"`, a dataset requirement no calculation
-                reads is itself the answer; under `"computed"`, every one has
-                to feed a calculation. A plan states at most 24 requirements.
-            removed_decisions: The `slot` of each decision this call deletes.
-            removed_evidence_requirements: The `id` of each requirement this
-                call deletes.
-
-        Returns:
-            `ok` with `status`, the `"draft"` this call just recorded;
-            `version`, the number to pass to `submit_plan`; `previous_version`,
-            the version this amended, `None` on a first draft; and `question`,
-            as stored. `previous_version` is why this is returned at all: it is
-            the one thing `Plan.amend` changed that your own arguments did not
-            state. Your decisions and requirements are in your own call, and
-            `dfo_translator` reads the plan from session state.
+        Returns `ok` with `status` `"draft"`; the new `version`, which a
+        patch passes as `amends_version` and `submit_plan` takes; the
+        `previous_version` it amended, `None` on a first draft; and the
+        `question` as stored.
         """
         try:
             # ADK's arg preprocessing silently falls back to raw dicts for the
@@ -1609,27 +1885,19 @@ def build_planner_tools(
                     "evidence_requirements": evidence_requirements,
                     "removed_decisions": removed_decisions,
                     "removed_evidence_requirements": removed_evidence_requirements,
+                    "declined": declined,
+                    "answered": answered,
                 }
             )
         except ValidationError as exc:
             return _invalid_data(exc)
-        decisions = patch.decisions
         evidence_requirements = patch.evidence_requirements
         removed_decisions = patch.removed_decisions
         removed_evidence_requirements = patch.removed_evidence_requirements
+        declined = patch.declined
+        answered = patch.answered
         existing = load_plan(tool_context.state)
         seeded = seeded_sources(tool_context.state)
-        if seeded:
-            decisions, evidence_requirements = _seed_pins(decisions, evidence_requirements, seeded)
-        # These checks run before the plan is touched, so a refusal records nothing and
-        # spends no round.
-        blocked = (
-            _referral_unanswered(existing, tool_context)
-            or _dropped_seed_pinned(decisions, evidence_requirements, tool_context)
-            or _election_untraceable(decisions, tool_context)
-        )
-        if blocked is not None:
-            return blocked
         resolved = _resolve_intent(
             existing,
             amends_version=amends_version,
@@ -1641,6 +1909,8 @@ def build_planner_tools(
         if isinstance(resolved, dict):
             return resolved
         previous, rounds = resolved
+        if seeded:
+            _, evidence_requirements = _seed_pins((), evidence_requirements, seeded)
         if previous is not None and seeded:
             unwindowed, unwindowed_requirements = _seed_pins(
                 previous.decisions, previous.evidence_requirements, seeded
@@ -1651,25 +1921,51 @@ def build_planner_tools(
                     "evidence_requirements": tuple(unwindowed_requirements),
                 }
             )
-        # A verbatim pin of the envelope's own `spec_id` gets the citing
+        settled = _settled_decisions(
+            patch.decisions,
+            evidence_requirements,
+            existing=existing,
+            requirements_after=_requirements_after(
+                previous, evidence_requirements, removed_evidence_requirements
+            ),
+            tool_context=tool_context,
+        )
+        if isinstance(settled, dict):
+            return settled
+        # A verbatim pin of a spec_id a search settled on gets the citing
         # `Decision` it needs written here, on the model's behalf, so
         # `Plan`'s own validator never has to refuse it for lacking one.
         # See `_synthesize_source_decisions`.
-        decisions, evidence_requirements = _synthesize_source_decisions(
-            decisions,
+        pins = pin_sources(tool_context.state)
+        settled, evidence_requirements = _synthesize_source_decisions(
+            settled,
             evidence_requirements,
             previous=previous,
-            exposed_spec_id=tool_context.state.get(ENVELOPE_SPEC_STATE_KEY),
+            settled_spec_ids={spec_id for spec_id, source in pins.items() if source.settled},
+            earlier_spec_ids={spec_id for spec_id, source in pins.items() if source.earlier_turn},
+            refound_spec_ids=_refound_spec_ids(tool_context),
         )
+        removed_decisions = [
+            *removed_decisions,
+            *_uncited_source_decisions(
+                previous,
+                settled,
+                _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+                removed=removed_decisions,
+            ),
+        ]
         try:
             if previous is not None:
                 plan = previous.amend(
                     question=question,
                     answer_mode=answer_mode,
-                    decisions=decisions,
+                    decisions=settled,
                     evidence_requirements=evidence_requirements,
                     removed_decisions=removed_decisions,
                     removed_evidence_requirements=removed_evidence_requirements,
+                    declined=declined,
+                    asks=load_asks(tool_context.state),
+                    answered=answered,
                 )
             elif question is None or answer_mode is None:
                 missing = " and ".join(
@@ -1689,8 +1985,11 @@ def build_planner_tools(
                 plan = Plan(
                     question=question,
                     answer_mode=answer_mode,
-                    decisions=decisions,
+                    decisions=settled,
                     evidence_requirements=evidence_requirements,
+                    declined=declined,
+                    asks=load_asks(tool_context.state),
+                    answered=answered,
                 )
             plan, windows = _window_seeded_pins(plan, seeded)
         except (ValidationError, ValueError) as exc:
@@ -1702,8 +2001,11 @@ def build_planner_tools(
             # and a first draft or restart with no `question`/`answer_mode` is
             # one raised above. `_window_seeded_pins` raises one for a decision
             # fixing two seeded pins over different periods.
+            cause = _unsupported_cause(exc)
+            if cause is not None:
+                record_unsupported(tool_context.state, cause.operation)
             return _invalid_data(exc)
-        blocked = _unrecordable(plan, tool_context)
+        blocked = _unrecordable(plan, tool_context, previous=previous)
         if blocked is not None:
             return blocked
         if seeded:
@@ -1722,7 +2024,7 @@ def build_planner_tools(
         # Only what the model cannot read back off its own call, and the
         # question as stored. The decisions and requirements the model sent are
         # echoed nowhere, because the plan is in session state and
-        # `dfo_translator` reads it from there. `status` is always the
+        # `translate` reads it from there. `status` is always the
         # literal `"draft"` this call just wrote. `version` and its
         # predecessor are what the call did not already state.
         # `Plan.amend` bumps both and returns to `DRAFT`, and they are how
@@ -1733,9 +2035,6 @@ def build_planner_tools(
             previous_version=plan.previous_version,
             question=plan.question,
         )
-
-    if question_fixed:
-        propose_plan.__doc__ = _PROPOSE_PLAN_DOC_FIXED
 
     def reject_plan(tool_context: ToolContext) -> dict[str, object]:
         """Record that the user rejected the current plan.
@@ -1792,7 +2091,14 @@ def build_planner_tools(
     ask_user.__name__ = REQUEST_INPUT_FUNCTION_CALL_NAME
     return [
         LongRunningFunctionTool(ask_user),
-        FunctionTool(propose_plan),
+        PlanTool(
+            propose_plan,
+            arguments=(
+                _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS
+                if question_fixed
+                else _PROPOSE_PLAN_ARGUMENTS
+            ),
+        ),
         FunctionTool(reject_plan),
         FunctionTool(submit_plan),
     ]
@@ -1801,7 +2107,7 @@ def build_planner_tools(
 def create_planner_agent(
     *,
     model_name: str,
-    translator: LlmAgent | None = None,
+    translate: FunctionTool | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
 ) -> LlmAgent:
@@ -1809,8 +2115,7 @@ def create_planner_agent(
 
     Args:
         model_name: The model this agent runs on.
-        translator: The translator agent to attach as a sub-agent. Built with
-            `mode="single_turn"`, ADK wraps it as one more tool on this agent,
+        translate: The `translate` tool (`translator.tool.build_translate_tool`),
             which is how a draft plan gets translated and compiled. Omitted,
             the planner is the standalone agent its own eval set scores --
             which is also what keeps that set from needing a live tool
@@ -1820,7 +2125,7 @@ def create_planner_agent(
             instruction does not name them.
         question_fixed: Whether the question this planner drafts for is fixed
             for the entry it is called in. The harness graph's own seam sets
-            this when it builds the pair (`harness.planner_seam`), since the
+            this when it builds the planner (`harness.planner_seam`), since the
             graph derives and narrates a turn's `resolve_envelope`, `depth`
             and `question` before the planner ever runs, and a restart would
             silently swap the question out from under that state -- see
@@ -1835,34 +2140,30 @@ def create_planner_agent(
         name=AGENT_NAME,
         model=model_name,
         instruction=planner_instruction(
-            has_translator=translator is not None,
+            has_translator=translate is not None,
             has_skills=surface is not None,
             question_fixed=question_fixed,
         ),
         tools=[
             *(build_skill_tools(surface) if surface is not None else []),
             *build_planner_tools(
-                has_translator=translator is not None, question_fixed=question_fixed
+                has_translator=translate is not None, question_fixed=question_fixed
             ),
+            *([translate] if translate is not None else []),
         ],
-        sub_agents=[translator] if translator is not None else [],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
         # `ctx.run_node`), ADK defaults an agent with no explicit `mode` to
         # `single_turn`, and a `single_turn` agent with no explicit
         # `include_contents` to `'none'` (`run_llm_agent_as_node`,
         # `google.adk.workflow._llm_agent_wrapper`). `'none'` builds every
         # request from `_get_current_turn_contents`, which slices the session
-        # from the latest `author='user'` or other-agent-reply event --
-        # exactly what the translator sub-agent's own turn plants twice, once
-        # for its node input and once for each of its own replies. That
-        # slice boundary lands past this agent's own `dfo_translator` call,
-        # orphaning its response and, with it, the seam's context message and
-        # every earlier tool call of this agent's own turn, one orphaned
-        # response per `dfo_translator` call. Pinning `'default'` here uses
-        # `_get_contents` instead, which reads this agent's whole turn
-        # regardless of what a sub-agent plants in between, so the next
-        # generation carries the seam's context message and both tool
-        # call/response pairs.
+        # from the latest `author='user'` event. Every `_propose` call opens
+        # on a user message of its own, and a continuing one (a correction
+        # round, an amendment, a replan) carries only what is new, so that
+        # slice would drop the brief and every earlier tool call the
+        # continuing message relies on. Pinning `'default'` here uses
+        # `_get_contents` instead, which reads the whole history on this
+        # agent's branch.
         include_contents="default",
         # `AGENT_THINKING_CONFIG` (see `planner.settings`) pins every
         # generation to LOW thinking.

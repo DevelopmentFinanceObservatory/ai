@@ -1,8 +1,8 @@
-"""Tests for the translator agent: proposing, referring, and agent construction.
+"""Tests for `translator.tool`: proposing, referring, and the `translate` tool.
 
 `propose_operations` and `return_to_planner` are exercised directly, through
-`translator.agent.build_translator_core`, against a fake tool context: they
-are no longer model-facing tools in their own right, but the same functions
+`translator.tool.build_translator_core`, against a fake tool context: they
+are not model-facing tools in their own right, but the same functions
 `translate` (`translator.mechanical.run_translate`) drives, and this is what
 belongs to this package -- the logic each one runs, independent of who
 calls it. `translate`'s own loop has its own suite,
@@ -22,9 +22,10 @@ graph, outside this package.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, get_args
+from typing import Any
 
 import pytest
+import translator.tool
 from compiler.compile import CompileIssue, CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import (
@@ -34,11 +35,7 @@ from compiler.surface import (
     ToolSchema,
     ToolSurfaceUnavailableError,
 )
-from google.adk.agents import LlmAgent
-from google.adk.flows.llm_flows.single_flow import SingleFlow
-from google.adk.planners import BuiltInPlanner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
@@ -47,23 +44,25 @@ from planner.plan import (
     PlanStatus,
     SeededSource,
     Unit,
+    UnsupportedOperation,
+    load_unsupported,
     plan_revision,
     save_dropped_seeds,
 )
-from planner.settings import override_thinking_on_sampled_turns
+from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
-from translator.agent import (
-    Compiled,
-    Referred,
-    _before_translator_model,
-    _compile_failure_action,
-    build_translator_core,
-    build_translator_tools,
-    create_translator_agent,
-)
 from translator.discovery import DiscoveryRecord, load_log, requirement_revision, save_log
 from translator.mechanical import TranslatorCore
 from translator.referral import Referral, ReferralKind, load_referral, save_referral
+from translator.tool import (
+    TRANSLATE_TOOL_NAME,
+    IssueResolution,
+    _compile_failure_action,
+    _referral_payload,
+    build_translate_tool,
+    build_translator_core,
+    issue_resolution,
+)
 
 DraftFactory = Callable[..., Plan]
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -76,8 +75,6 @@ ContextHolding = Callable[[Plan], Any]
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
 SPEC_THIRD = "spec_" + "c" * 32
-
-TOOL_NAMES = ("translate",)
 
 # A translation mirroring the `requirements` pair: retrieve the dataset
 # requirement, total it per period for the aggregate that reads it.
@@ -184,19 +181,49 @@ def _stored(context: Any) -> Plan:
     return Plan.model_validate_json(context.state[PLAN_STATE_KEY])
 
 
-def test_build_translator_tools_registers_one_ungated_tool(real_schemas: list[ToolSchema]) -> None:
-    # No `read_plan`: the plan travels in the `dfo_translator` tool call's own
-    # `request` string (`create_translator_agent`'s module docstring), so
-    # there is nothing left to fetch back out of session state. No
-    # `discover_source`/`propose_operations`/`return_to_planner` either:
+def test_translate_is_one_ungated_tool_taking_no_arguments(real_schemas: list[ToolSchema]) -> None:
+    # The plan is read from session state, so the model passes nothing. No
+    # `discover_source`/`propose_operations`/`return_to_planner` tool either:
     # `translate` drives all three directly, in Python.
-    tools = {
-        tool.name: tool
-        for tool in build_translator_tools(surface=FixtureSurface(schemas=real_schemas))
-    }
+    tool = build_translate_tool(surface=FixtureSurface(schemas=real_schemas))
+    declaration = tool._get_declaration()
 
-    assert tuple(tools) == TOOL_NAMES
-    assert all(tool._require_confirmation is False for tool in tools.values())
+    assert tool.name == TRANSLATE_TOOL_NAME == "translate"
+    assert tool._require_confirmation is False
+    assert declaration is not None
+    assert (declaration.parameters, declaration.parameters_json_schema) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("kind", "recorded"),
+    [
+        (ReferralKind.NO_OPERATION_COVERS, {UnsupportedOperation.NO_OPERATION_COVERS}),
+        (ReferralKind.UNSUPPORTED_ASK, {UnsupportedOperation.UNSUPPORTED_ASK}),
+        (ReferralKind.NO_DATA, set()),
+    ],
+)
+async def test_translate_records_an_unsupported_referral_the_plan_must_decline(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: ReferralKind,
+    recorded: set[UnsupportedOperation],
+) -> None:
+    referral = Referral(kind=kind, reason="r", requirement_id="annual_debt_service")
+
+    async def run_translate(tool_context: Any, *, core: TranslatorCore) -> dict[str, object]:
+        return referred(_referral_payload(referral))
+
+    monkeypatch.setattr(translator.tool, "run_translate", run_translate)
+    context = context_holding(draft())
+
+    answer = await build_translate_tool(surface=FixtureSurface(schemas=real_schemas)).func(
+        tool_context=context
+    )
+
+    assert answer["kind"] == kind.value
+    assert load_unsupported(context.state) == recorded
 
 
 async def test_propose_operations_compiles_and_moves_the_plan_to_pending_approval(
@@ -214,7 +241,7 @@ async def test_propose_operations_compiles_and_moves_the_plan_to_pending_approva
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["outcome"] == "ok", result
@@ -246,7 +273,7 @@ async def test_propose_operations_compiles_no_source_the_turn_has_since_dropped(
     save_dropped_seeds(context.state, [SeededSource(source=source())])
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["outcome"] != "ok", result
@@ -265,7 +292,9 @@ async def test_a_definite_sources_describe_definition_reaches_the_workflow(
     surface = FixtureSurface(schemas=real_schemas, responses={"describe": _DESCRIBE_RESPONSE})
     core = build_translator_core(surface=surface)
 
-    result = await core.propose_operations(translation=GOOD_TRANSLATION, tool_context=context)
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
 
     assert result["outcome"] == "ok", result
     stored = _stored(context)
@@ -287,7 +316,7 @@ async def test_a_missing_describe_answer_leaves_the_definition_unset_and_still_c
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["outcome"] == "ok", result
@@ -320,11 +349,15 @@ async def test_a_same_revision_retry_reads_the_describe_memo(
         ],
     }
 
-    first = await core.propose_operations(translation=bad_translation, tool_context=context)
+    first = await core.propose_operations(
+        translation=Translation.model_validate(bad_translation), tool_context=context
+    )
     assert first["outcome"] != "ok", first
     assert _stored(context).status == PlanStatus.DRAFT
 
-    second = await core.propose_operations(translation=bad_translation, tool_context=context)
+    second = await core.propose_operations(
+        translation=Translation.model_validate(bad_translation), tool_context=context
+    )
     assert second["outcome"] != "ok", second
 
     assert surface.calls.get("describe") == 1
@@ -345,7 +378,7 @@ async def test_propose_operations_refuses_while_a_referral_is_pending(
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["outcome"] == "refused"
@@ -366,7 +399,7 @@ async def test_propose_operations_notes_a_source_found_under_other_words(
     )
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     (only_source,) = result["sources"]
@@ -385,7 +418,7 @@ async def test_a_source_discovery_never_confirmed_does_not_compile(
     _discovered(context, source(), source(spec_id=SPEC_OTHER), status=DiscoveryStatus.CANDIDATES)
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["outcome"] == "invalid_input"
@@ -417,7 +450,7 @@ async def test_a_mismatched_operation_comes_back_as_operation_mismatch(
     }
 
     result = await _core(real_schemas).propose_operations(
-        translation=translation, tool_context=context
+        translation=Translation.model_validate(translation), tool_context=context
     )
 
     assert result["code"] == "compile_failed"
@@ -453,7 +486,7 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
     }
 
     result = await _core(real_schemas).propose_operations(
-        translation=translation, tool_context=context
+        translation=Translation.model_validate(translation), tool_context=context
     )
 
     assert result["code"] == "compile_failed"
@@ -476,7 +509,7 @@ async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert [issue["code"] for issue in result["detail"]["issues"]] == ["requirement_unmeetable"]
@@ -490,7 +523,7 @@ async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     }
 
 
-async def test_a_proposal_failing_only_on_structure_carries_no_action(
+async def test_a_proposal_failing_only_on_structure_closes_as_an_internal_failure(
     real_schemas: list[ToolSchema],
     draft: DraftFactory,
     source: SourceFactory,
@@ -501,11 +534,11 @@ async def test_a_proposal_failing_only_on_structure_carries_no_action(
     translation = {**GOOD_TRANSLATION, "terminal": ["answer"]}
 
     result = await _core(real_schemas).propose_operations(
-        translation=translation, tool_context=context
+        translation=Translation.model_validate(translation), tool_context=context
     )
 
     assert result["code"] == "compile_failed"
-    assert "action" not in result
+    assert result["action"]["arguments"]["kind"] == "internal_failure"
 
 
 @pytest.mark.parametrize(
@@ -526,7 +559,7 @@ async def test_propose_operations_refuses_a_plan_it_cannot_translate(
     context = context_holding(draft(**plan_overrides))
 
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
     assert result["code"] == expected_code
@@ -537,35 +570,10 @@ async def test_propose_operations_without_a_plan_returns_an_error(
     empty_context: Any,
 ) -> None:
     result = await _core(real_schemas).propose_operations(
-        translation=GOOD_TRANSLATION, tool_context=empty_context
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=empty_context
     )
 
     assert result["code"] == "plan_missing"
-
-
-@pytest.mark.parametrize(
-    "translation",
-    [
-        {"operations": [{"kind": "deflate", "id": "real", "input": "debt"}], "terminal": ["real"]},
-        {"operations": [], "terminal": []},
-        ["not", "a", "translation"],
-    ],
-    ids=["unknown-kind", "empty", "not-a-mapping"],
-)
-async def test_propose_operations_rejects_a_malformed_translation(
-    real_schemas: list[ToolSchema],
-    draft: DraftFactory,
-    translation: object,
-    context_holding: ContextHolding,
-) -> None:
-    context = context_holding(draft())
-
-    result = await _core(real_schemas).propose_operations(
-        translation=translation, tool_context=context
-    )
-
-    assert result["code"] == "invalid_translation"
-    assert _stored(context).status == PlanStatus.DRAFT
 
 
 async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
@@ -578,7 +586,9 @@ async def test_an_unreadable_surface_is_an_error_and_keeps_the_draft(
     _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
     core = build_translator_core(surface=_UnreadableSurface(schemas=real_schemas))
 
-    result = await core.propose_operations(translation=GOOD_TRANSLATION, tool_context=context)
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
 
     assert result["code"] == "surface_unavailable"
     assert _stored(context).status == PlanStatus.DRAFT
@@ -734,30 +744,24 @@ def test_a_source_is_ambiguous_only_when_discovery_said_so(
     assert result["code"] == "no_candidates_recorded"
 
 
-def test_return_to_planner_names_a_decision_the_plan_makes(
+def test_return_to_planner_logs_an_internal_failure_under_the_reference_it_carries(
     real_schemas: list[ToolSchema],
     draft: DraftFactory,
     context_holding: ContextHolding,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     context = context_holding(draft())
-    core = _core(real_schemas)
 
-    ok = core.return_to_planner(
-        kind=ReferralKind.NO_OPERATION_COVERS,
-        reason="no operation divides one series by another",
-        decision_id="measure",
-        tool_context=context,
-    )
-    unknown = core.return_to_planner(
-        kind=ReferralKind.NO_OPERATION_COVERS,
-        reason="r",
-        decision_id="normalisation",
-        tool_context=context,
-    )
+    with caplog.at_level("ERROR", logger="translator.tool"):
+        result = _core(real_schemas).return_to_planner(
+            kind=ReferralKind.INTERNAL_FAILURE, reason="cycle: r", tool_context=context
+        )
 
-    assert ok["referral"]["decision_id"] == "measure"
-    assert unknown["code"] == "decision_unknown"
-    assert "measure" in unknown["detail"]["known"]
+    referral = result["referral"]
+    assert referral["outcome"] == "internal"
+    assert referral["reference"] in caplog.text
+    assert "cycle: r" in caplog.text
+    assert load_referral(context.state).reference == referral["reference"]
 
 
 def test_return_to_planner_refuses_a_requirement_the_plan_lacks(
@@ -823,24 +827,55 @@ def test_a_source_issue_points_at_discovery() -> None:
         )
     ]
 
-    action = _compile_failure_action(issues)
+    action = _compile_failure_action(issues, requirement_of={})
 
     assert action is not None
     assert action.call == "discover_source"
     assert action.arguments == {"requirement_id": "annual_debt_service"}
 
 
-def test_an_uncovered_operation_kind_points_at_the_referral() -> None:
+def test_an_uncovered_operation_kind_refers_its_requirement_as_unsupported() -> None:
     issues = [CompileIssue(code=CompileIssueCode.NO_CAPABILITY, reason="r", operation_id="op")]
 
-    action = _compile_failure_action(issues)
+    action = _compile_failure_action(issues, requirement_of={"op": "req"})
 
-    assert action is not None
     assert action.call == "return_to_planner"
-    assert action.arguments == {"kind": "no_operation_covers", "reason": "r"}
-    # decision_id is genuine model judgement `_compile_failure_action` cannot
-    # supply: named in `needs`, not guessed at or left silently missing.
-    assert action.needs == ("decision_id",)
+    assert action.arguments == {
+        "kind": "no_operation_covers",
+        "requirement_id": "req",
+        "reason": "r",
+    }
+    assert action.needs == ()
+
+
+@pytest.mark.parametrize("code", list(CompileIssueCode))
+def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
+    code: CompileIssueCode,
+) -> None:
+    """Each code resolves, alone, to a discovery retry or to a referral that
+    validates with one of the closed outcomes; a repair carries its permitted
+    change."""
+    issue = CompileIssue(code=code, reason="r", operation_id="op", requirement_id="req")
+
+    action = _compile_failure_action([issue], requirement_of={})
+
+    if issue_resolution(code) is IssueResolution.DISCOVER_AGAIN:
+        assert action.call == "discover_source"
+        return
+    arguments = dict(action.arguments or {})
+    if arguments["kind"] == ReferralKind.INTERNAL_FAILURE:
+        arguments["reference"] = "0123456789ab"
+    referral = Referral.model_validate(arguments)
+    expected = {
+        IssueResolution.INTERNAL: Outcome.INTERNAL,
+        IssueResolution.UNSUPPORTED: Outcome.UNSUPPORTED,
+        IssueResolution.UNMEETABLE: Outcome.INVALID_INPUT,
+        IssueResolution.REPAIR: Outcome.INVALID_INPUT,
+    }
+    assert referral.outcome is expected[issue_resolution(code)]
+    assert (referral.kind is ReferralKind.REQUIREMENT_NEEDS_REPAIR) == (
+        issue_resolution(code) is IssueResolution.REPAIR
+    )
 
 
 def test_a_source_issue_is_tried_before_an_unmeetable_one() -> None:
@@ -849,144 +884,19 @@ def test_a_source_issue_is_tried_before_an_unmeetable_one() -> None:
         CompileIssue(code=CompileIssueCode.SOURCE_UNSELECTED, reason="r", requirement_id="b"),
     ]
 
-    action = _compile_failure_action(issues)
+    action = _compile_failure_action(issues, requirement_of={})
 
     assert action is not None
     assert action.call == "discover_source"
     assert action.arguments == {"requirement_id": "b"}
 
 
-def test_an_uncorrelated_issue_gets_no_action() -> None:
-    issues = [CompileIssue(code=CompileIssueCode.CYCLE, reason="r", operation_id="op")]
-
-    assert _compile_failure_action(issues) is None
-
-
-def test_create_translator_agent_wires_name_model_description_and_tools(
-    real_schemas: list[ToolSchema],
-) -> None:
-    agent = create_translator_agent(
-        model_name="gemini-test", surface=FixtureSurface(schemas=real_schemas)
-    )
-
-    assert isinstance(agent, LlmAgent)
-    assert agent.name == "dfo_translator"
-    assert agent.model == "gemini-test"
-    assert "PENDING_APPROVAL" in agent.description
-    assert tuple(tool.name for tool in agent.tools) == TOOL_NAMES  # type: ignore[union-attr]
-
-
-def test_create_translator_agent_thinks_at_low_and_carries_thought_summaries(
-    real_schemas: list[ToolSchema],
-) -> None:
-    agent = create_translator_agent(
-        model_name="gemini-test", surface=FixtureSurface(schemas=real_schemas)
-    )
-
-    assert isinstance(agent.planner, BuiltInPlanner)
-    assert agent.planner.thinking_config.thinking_level is types.ThinkingLevel.LOW
-    assert agent.planner.thinking_config.include_thoughts is True
-
-
-def test_create_translator_agent_composes_the_thinking_override_ahead_of_the_opener(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """A single assignment here would silently drop whichever callback lost
-    the slot: `override_thinking_on_sampled_turns` always returns `None`, so
-    it runs first without ending `_before_translator_model`'s own turn to
-    decide the opener."""
-    agent = create_translator_agent(
-        model_name="gemini-test", surface=FixtureSurface(schemas=real_schemas)
-    )
-
-    assert agent.before_model_callback == [
-        override_thinking_on_sampled_turns,
-        _before_translator_model,
+def test_a_structural_issue_closes_as_an_internal_failure_before_a_repair() -> None:
+    issues = [
+        CompileIssue(code=CompileIssueCode.ENTITY_REQUIRED, reason="r", operation_id="cmp"),
+        CompileIssue(code=CompileIssueCode.CYCLE, reason="loop", operation_id="op"),
     ]
 
+    action = _compile_failure_action(issues, requirement_of={})
 
-def test_create_translator_agent_takes_a_mode(real_schemas: list[ToolSchema]) -> None:
-    surface = FixtureSurface(schemas=real_schemas)
-
-    assert create_translator_agent(model_name="m", surface=surface).mode is None
-    assert (
-        create_translator_agent(model_name="m", surface=surface, mode="single_turn").mode
-        == "single_turn"
-    )
-
-
-def test_create_translator_agent_closes_the_transfer_to_agent_escape_hatch(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """ADK declares a `transfer_to_agent` tool to any `LlmAgent` with a
-    parent unless told not to, regardless of `mode` -- a second,
-    unmonitored way for this agent's model to hand control back to the
-    planner that never builds a `Referral` and never calls
-    `return_to_planner`, the only response
-    `harness.planner_seam.PlannerSeam._stalled_referral` inspects.
-
-    Asserting the flags alone would not prove the escape is closed: what
-    actually stops ADK from declaring `transfer_to_agent` is
-    `LlmAgent._llm_flow` choosing `SingleFlow` over `AutoFlow`
-    (`google.adk.agents.llm_agent`), which only happens when both transfer
-    flags are set AND this agent has no sub-agents of its own -- so this
-    checks the flow ADK actually builds, not just the flags that feed it.
-    """
-    agent = create_translator_agent(
-        model_name="gemini-test", surface=FixtureSurface(schemas=real_schemas)
-    )
-
-    assert agent.disallow_transfer_to_parent is True
-    assert agent.disallow_transfer_to_peers is True
-    assert agent.sub_agents == []
-    assert isinstance(agent._llm_flow, SingleFlow)
-
-
-def test_create_translator_agent_carries_an_output_schema_admitting_compiled_or_referred(
-    real_schemas: list[ToolSchema],
-) -> None:
-    # A plain union, not a discriminated one: ADK's own `validate_schema`
-    # (`google.adk.utils._schema_utils`) does not re-validate a closing turn
-    # against either half, so nothing here checks that -- only that both
-    # halves are the ones `create_translator_agent`'s own module docstring
-    # names, `Compiled` and `Referred`, in that order.
-    agent = create_translator_agent(
-        model_name="gemini-test", surface=FixtureSurface(schemas=real_schemas)
-    )
-
-    assert get_args(agent.output_schema) == (Compiled, Referred)
-
-
-async def test_a_closing_turn_that_does_not_match_the_schema_hard_fails(
-    real_schemas: list[ToolSchema], scripted_llm: type[Any], run_to_completion: Any
-) -> None:
-    """The one real behaviour change `output_schema` brings: a model that
-    calls `translate` but does not also close with a schema-conforming turn
-    no longer hands the planner an unhelpful sentence -- ADK's
-    `process_llm_agent_output` (`google.adk.workflow._llm_agent_wrapper`)
-    tries to parse that closing text against `Compiled | Referral`, and a
-    plain-text turn like `ScriptedLlm`'s own default ("done") is not valid
-    JSON, so it raises. `_SingleTurnAgentTool.run_async`
-    (`google.adk.tools.agent_tool`) catches that and answers the caller with
-    a legible `"Error running sub-agent: ..."` string instead of silently
-    keeping the model's own words.
-
-    Runs the translator as a real sub-agent of a throwaway root, through a
-    real `Runner` (`scripted_llm`/`run_to_completion`, `conftest.py`) --
-    `.func()` alone never reaches ADK's own schema enforcement, which lives
-    entirely in the flow that runs a `single_turn` agent as a node.
-    """
-    translator = create_translator_agent(
-        model_name="m", surface=FixtureSurface(schemas=real_schemas), mode="single_turn"
-    )
-    translator.model = scripted_llm(tool_name="translate", tool_args={})
-    root_llm = scripted_llm(tool_name="dfo_translator", tool_args={"request": "irrelevant here"})
-    root = LlmAgent(name="root", model=root_llm, sub_agents=[translator])
-
-    await run_to_completion(agent=root, session_service=InMemorySessionService(), app_name="app")
-
-    assert len(root_llm.captured_requests) == 2
-    parts = root_llm.captured_requests[1].contents[-1].parts
-    (function_response,) = [p.function_response for p in parts if p.function_response]
-    assert function_response.name == "dfo_translator"
-    assert "Error running sub-agent" in function_response.response["result"]
+    assert action.arguments == {"kind": "internal_failure", "reason": "cycle: loop"}

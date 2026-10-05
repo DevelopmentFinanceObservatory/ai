@@ -41,8 +41,8 @@ def test_captured_envelope_renders_to_the_pinned_digest() -> None:
     The item's `constraint_properties` postdates the capture and is written in by
     hand: `Count_Person` asserts no constraint, so Search serves an empty list.
 
-    `render_digest` names `resolved.stat_vars.items` beside the spec_id, for
-    `get_data`'s `resolved_stat_var_dcids`. The rendered-digest assertion below
+    `render_digest` states the measure and its StatVar count beside the
+    spec_id, naming no member. The rendered-digest assertion below
     pins what the digest produces from this envelope, so a later change to
     sentence, coverage, StatVar or facet-option rendering shows up here as a
     diff against real bytes, not just against a hand-authored corpus case.
@@ -75,7 +75,7 @@ def test_captured_envelope_renders_to_the_pinned_digest() -> None:
         'Indicators, Wikidata Population, and Subnational Demographics Stats."  '
         "[spec_ed5b608a610cdc5a4bc703cf7d1bc2d0]\n"
         "confidence high · 27 observations, since 2010 · has data\n"
-        "StatVars for get_data's resolved_stat_var_dcids: Count_Person (Total population).\n"
+        "Measure: Total population · 1 StatVar.\n"
         "observationAbout Guatemala (country/GTM)\n"
         "provenance options for get_data: dc/base/WorldDevelopmentIndicators "
         "(WorldDevelopmentIndicators), dc/base/Subnational_Demographics_Stats "

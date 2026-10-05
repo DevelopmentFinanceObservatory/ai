@@ -175,10 +175,10 @@ async def test_no_signed_url_survives_the_full_search_to_pull_sequence() -> None
         assert _RESOURCE_READ_SENTINEL not in dumped
 
 
-async def test_a_stale_selection_refuses_and_the_next_search_lists_what_to_pass() -> None:
+async def test_a_stale_selection_refuses_and_get_data_after_a_new_search_succeeds() -> None:
     """StatVars the graph has moved past refuse naming the outsider at this tool's own
-    argument; the next `search` lists the StatVars to pass now, and `get_data` with
-    those succeeds. The refusal is the recorded dfo-apis answer."""
+    argument; the next `search` names no StatVar, and `get_data` with its spec_id
+    alone succeeds. The refusal is the recorded dfo-apis answer."""
     recorded = json.loads(
         (Path(__file__).parent / "fixtures" / "mint_refused_selection.json").read_text()
     )
@@ -218,17 +218,14 @@ async def test_a_stale_selection_refuses_and_the_next_search_lists_what_to_pass(
                 raise_on_error=False,
             )
             searched = await client.call_tool("search", {"parts": [{"variable": "population"}]})
-            listed = searched.structured_content["parts"][0]["specs"][0]["resolved_stat_var_dcids"]
             minted = await client.call_tool(
-                "get_data",
-                {"spec_id": definition["spec_id"], "resolved_stat_var_dcids": listed},
-                raise_on_error=False,
+                "get_data", {"spec_id": definition["spec_id"]}, raise_on_error=False
             )
 
     assert refused.is_error is True
     assert refused.structured_content is not None
     assert refused.structured_content["fix"]["not_members"] == ["Count_Household"]
     assert refused.structured_content["fix"]["pointers"] == ["/resolved_stat_var_dcids/1"]
-    assert "Count_Person (Population)" in text_of(searched)
+    assert "Count_Person" not in text_of(searched)
     assert minted.is_error is False
-    assert posted == [stale, ["Count_Person"]]
+    assert posted == [stale, None]

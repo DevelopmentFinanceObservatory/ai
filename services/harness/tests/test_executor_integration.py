@@ -30,6 +30,7 @@ from data_mcp.series_statistics import series_statistics_table
 from data_mcp.settings import Settings as DataMcpSettings
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
+from harness.provenance import data_artifact
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from planner.operations import (
@@ -1169,10 +1170,18 @@ def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
     return buf.getvalue()
 
 
+# When dfo-apis stored each GDP rendering, by whether it carries place types.
+_GDP_CREATED_AT = {False: "2026-10-01T00:00:00+00:00", True: "2026-10-02T00:00:00+00:00"}
+
+
 def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
     """dfo-apis' manifest for GDP. Both renderings come back under one
-    `content_version`, each with its own artifact."""
+    `content_version`, each with its own artifact and the request's options as its
+    `rendering`."""
     parquet = _gdp_parquet_bytes(place_types=place_types)
+    rendering: dict[str, Any] = {"bundle": False, "format": "parquet"}
+    if place_types:
+        rendering["columns"] = ["observationAbout_type"]
     stat_var = "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
     return {
         "schema_version": 1,
@@ -1188,10 +1197,10 @@ def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
         "artifacts": [
             {
                 "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": rendering,
                 "bytes": len(parquet),
                 "media_type": "application/vnd.apache.parquet",
-                "created_at": "2026-10-02T00:00:00+00:00",
+                "created_at": _GDP_CREATED_AT[place_types],
                 "tier": "working",
                 "url": "https://signed.example/should-not-be-fetched",
                 "url_expires_at": "2026-10-02T00:15:00+00:00",
@@ -1333,15 +1342,19 @@ def _serve_gdp_in_both_renderings(
     monkeypatch: pytest.MonkeyPatch, stats_registry: _StatsRegistry
 ) -> list[tuple[str, bool]]:
     """Answer GDP's mint with the type column when `options.columns` asks for it, and
-    without otherwise, under one `content_version`. Returns the artifact fetches as
-    `(content_version, typed)`, in order."""
+    without otherwise, under one `content_version`. Each manifest lists both renderings,
+    the one not requested first, as dfo-apis lists every rendering stored under a pair.
+    Returns the artifact fetches as `(content_version, typed)`, in order."""
     renderings = {
         typed: _register_statistics(stats_registry, _gdp_mint_response(place_types=typed))
         for typed in (False, True)
     }
+    data_artifacts = {typed: response["artifacts"][0] for typed, response in renderings.items()}
     typed_by_digest = {
-        response["artifacts"][0]["artifact_digest"]: typed for typed, response in renderings.items()
+        artifact["artifact_digest"]: typed for typed, artifact in data_artifacts.items()
     }
+    for typed, response in renderings.items():
+        response["artifacts"].insert(0, data_artifacts[not typed])
     fetched: list[tuple[str, bool]] = []
 
     async def fake_fetch(*, content_version: str, artifact_digest: str, **_: Any) -> bytes:
@@ -1429,6 +1442,31 @@ async def test_a_plain_total_after_a_level_filtered_rank_of_the_same_mint_reads_
     assert not total.is_error, total.text
     assert plain_content["role_keys"] == ["observationAbout"]
     assert fetched == [(GDP_CONTENT_VERSION, True), (GDP_CONTENT_VERSION, False)]
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["plain", "typed"])
+async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    _stats_registry: _StatsRegistry,
+    typed: bool,
+) -> None:
+    """The harness dates a retrieval by its manifest's data artifact
+    (`harness.provenance.data_artifact`). dfo-apis lists the other rendering first
+    with its own `created_at`, and get_data's manifest keeps only the requested one."""
+    _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+
+    async with running_lifespan(app):
+        surface = _gdp_surface(app, mounted_mcp_transport)
+        read = await surface.call_tool(
+            tool=_GET_DATA, arguments={"spec_id": GDP_SPEC, "place_types": typed}
+        )
+
+    assert not read.is_error, read.text
+    artifacts = (read.structured_content or {})["artifacts"]
+    assert data_artifact(artifacts)["created_at"] == _GDP_CREATED_AT[typed]
 
 
 def _gdp_surface(app: Any, mounted_mcp_transport: Callable[..., Any]) -> McpSurface:

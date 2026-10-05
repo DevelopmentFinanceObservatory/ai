@@ -1,0 +1,1229 @@
+{
+  "suite": "harness-studio-orchestrator-v1",
+  "description": "Orchestrator-engine eval: what each model is shown (scripted, mechanical, every case) and agent behavior (rubric-judged, live cases). Run with evals/studio/run.py --mode orchestrator or orchestrator-live; see evals/studio/README.md.",
+  "scenarios": {
+    "approved-plan": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                1990,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_11111111111111111111111111111111",
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "text": "Life expectancy in Kenya rose over the period."
+        }
+      ]
+    },
+    "refused-step-then-second-plan": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                1990,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_11111111111111111111111111111111",
+      "get_data_refusals": {
+        "spec_11111111111111111111111111111111": {
+          "code": "facet_not_available",
+          "retry_mode": "do_not_retry"
+        }
+      },
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Life expectancy in Kenya, any recent years",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner again."
+        },
+        {
+          "text": "The plan could not be run."
+        }
+      ]
+    },
+    "answer-only": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                1990,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "text": "Kenya's life expectancy rose over the period."
+        }
+      ]
+    },
+    "long-offer": {
+      "orchestrator": [
+        {
+          "text": "Kenya's life expectancy at birth is reported across the whole series the search found, rising through most of the period with a dip in the middle years, and the tool results give the earliest and latest values on the card. The series comes from a single source and covers every year the data holds, so the picture it gives is the national average rather than any region. Would you like me to compare it with Uganda's life expectancy over the same years?"
+        },
+        {
+          "text": "Here is the comparison with Uganda."
+        }
+      ]
+    },
+    "short-offer": {
+      "orchestrator": [
+        {
+          "text": "Kenya's life expectancy rose. Would you like Uganda too?"
+        },
+        {
+          "text": "Here is the comparison with Uganda."
+        }
+      ]
+    },
+    "blocked-reading-searched-again": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "translator_search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": []
+            }
+          ]
+        }
+      ],
+      "planner": [
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "aggregate",
+                "id": "life_expectancy_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "life_expectancy",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "question": "How fast did life expectancy grow in Kenya since 2000?",
+            "answer_mode": "computed"
+          }
+        },
+        {
+          "call": "translate",
+          "args": {}
+        },
+        {
+          "call": "submit_plan",
+          "args": {
+            "version": 1
+          }
+        },
+        {
+          "text": "The plan is ready for your approval."
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "text": "Life expectancy in Kenya rose over the period."
+        }
+      ]
+    },
+    "repeated-compile-failure": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": [],
+              "entities": [
+                "Kenya",
+                "Uganda"
+              ]
+            }
+          ]
+        }
+      ],
+      "translator_search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": [],
+              "entities": [
+                "Kenya",
+                "Uganda"
+              ]
+            }
+          ]
+        }
+      ],
+      "planner": [
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "aggregate",
+                "id": "life_expectancy_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "life_expectancy",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "question": "How fast did life expectancy grow in Kenya since 2000?",
+            "answer_mode": "computed"
+          }
+        },
+        {
+          "call": "translate",
+          "args": {}
+        },
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "aggregate",
+                "id": "life_expectancy_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "life_expectancy",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "amends_version": 1
+          }
+        },
+        {
+          "call": "translate",
+          "args": {}
+        },
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "aggregate",
+                "id": "life_expectancy_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "life_expectancy",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "amends_version": 2
+          }
+        },
+        {
+          "call": "translate",
+          "args": {}
+        },
+        {
+          "text": "The plan cannot be carried out."
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "text": "The plan could not be carried out."
+        }
+      ]
+    },
+    "plan-then-a-question-about-it": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                1990,
+                2020
+              ],
+              "warnings": [
+                {
+                  "code": "time_text_not_parsed",
+                  "message": "The time text in the question was not understood."
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_11111111111111111111111111111111",
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": []
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "text": "Life expectancy in Kenya rose over the period."
+        },
+        {
+          "text": "The plan assumed the period and read one source."
+        }
+      ]
+    },
+    "plan-with-asks": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": []
+            }
+          ]
+        }
+      ],
+      "translator_search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_11111111111111111111111111111111",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2000,
+                2020
+              ],
+              "warnings": []
+            }
+          ]
+        }
+      ],
+      "planner": [
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "dataset",
+                "id": "healthy_life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "healthy life expectancy",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "join",
+                "id": "joined",
+                "decision_ids": [
+                  "measure"
+                ],
+                "left_id": "life_expectancy",
+                "right_id": "healthy_life_expectancy"
+              },
+              {
+                "kind": "aggregate",
+                "id": "joined_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "joined",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "question": "How fast did life expectancy grow in Kenya since 2000?",
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "joined_by_period"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "call": "propose_plan",
+          "args": {
+            "decisions": [
+              {
+                "slot": "measure",
+                "description": "Which measure answers the question.",
+                "options": [
+                  "life expectancy at birth",
+                  "healthy life expectancy"
+                ],
+                "chosen": "life expectancy at birth",
+                "resolved_by": "planner_default",
+                "rationale": "Life expectancy at birth is the measure the question names."
+              }
+            ],
+            "evidence_requirements": [
+              {
+                "kind": "dataset",
+                "id": "life_expectancy",
+                "decision_ids": [
+                  "measure"
+                ],
+                "measure": "life expectancy at birth",
+                "entities": [
+                  {
+                    "name": "Kenya"
+                  }
+                ],
+                "period": {
+                  "start": 2000,
+                  "end": 2020
+                },
+                "source_spec_id": "spec_11111111111111111111111111111111"
+              },
+              {
+                "kind": "aggregate",
+                "id": "life_expectancy_by_period",
+                "decision_ids": [
+                  "measure"
+                ],
+                "input_id": "life_expectancy",
+                "reduction": "mean",
+                "group_by": [
+                  "period"
+                ]
+              }
+            ],
+            "question": "How fast did life expectancy grow in Kenya since 2000?",
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "life_expectancy_by_period"
+                ]
+              }
+            ],
+            "declined": [
+              {
+                "ask": "a ranking of the East African countries by life expectancy",
+                "code": "calculation_over_combined",
+                "ask_ref": 1
+              }
+            ]
+          }
+        },
+        {
+          "call": "translate",
+          "args": {}
+        },
+        {
+          "call": "submit_plan",
+          "args": {
+            "version": 1
+          }
+        },
+        {
+          "text": "The plan is ready for your approval."
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya since 2000",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya since 2000",
+            "asks": [
+              "the average life expectancy in Kenya each period",
+              "a ranking of the East African countries by it"
+            ]
+          }
+        },
+        {
+          "text": "Handed to the planner."
+        },
+        {
+          "text": "Average life expectancy in Kenya rose; the ranking could not be computed."
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "orchestrator-approved-plan-runs-and-answers",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "approved-plan",
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1,
+              "max_version": 1
+            },
+            "step_tools": [
+              "get_data",
+              "aggregate"
+            ],
+            "message_contains": [
+              "rose"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-approval-payload-stays-out-of-model-requests",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "approved-plan",
+      "checks": [
+        "approval_payload_absent_after_approval"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-hand-back-reaches-the-agent-unfenced",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "approved-plan",
+      "checks": [
+        "no_relay_marker"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-second-plan-entry-sees-no-fenced-hand-back",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "refused-step-then-second-plan",
+      "checks": [
+        "planner_sees_no_relay_marker"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-an-answered-turn-holds-no-fenced-block",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "answer-only",
+      "checks": [
+        "no_relay_marker"
+      ],
+      "turns": [
+        {
+          "message": "Life expectancy in Kenya?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-search-evidence-reaches-the-planner",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "approved-plan",
+      "checks": [
+        "planner_first_message_carries_search_evidence"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-later-yes-resolves-the-previous-offer",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "long-offer",
+      "checks": [
+        "previous_final_message_in_view"
+      ],
+      "turns": [
+        {
+          "message": "Life expectancy in Kenya?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        },
+        {
+          "message": "yes",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true,
+            "message_contains": [
+              "Uganda"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-short-closing-message-reaches-the-next-turn",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "short-offer",
+      "checks": [
+        "previous_final_message_in_view"
+      ],
+      "turns": [
+        {
+          "message": "Life expectancy in Kenya?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        },
+        {
+          "message": "yes",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true,
+            "message_contains": [
+              "Uganda"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-later-turn-sees-the-plan-an-earlier-turn-ran",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "plan-then-a-question-about-it",
+      "checks": [
+        "earlier_plan_in_view"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "What assumptions did the plan make?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-repeated-compile-failure-is-not-translated-a-third-time",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "repeated-compile-failure",
+      "checks": [
+        "translation_stops_on_a_repeated_failure"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-blocked-reading-is-searched-again-before-it-is-retrieved",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "blocked-reading-searched-again",
+      "checks": [
+        "blocked_reading_is_searched_again"
+      ],
+      "turns": [
+        {
+          "message": "How fast did life expectancy grow in Kenya since 2000?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-every-ask-reaches-the-card-and-the-hand-back",
+      "modes": [
+        "orchestrator"
+      ],
+      "scenario": "plan-with-asks",
+      "checks": [
+        "every_ask_accounted_for"
+      ],
+      "turns": [
+        {
+          "message": "How did average life expectancy in Kenya change each period since 2000, and how do the East African countries rank by it?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-period-outside-the-data-is-a-recorded-decision",
+      "modes": [
+        "orchestrator-live"
+      ],
+      "xfail": "period policy: the planner is not yet required to record a period that departs from the data's coverage as a decision, so a plan can narrow the period without saying so. Retire this marker when a departure is always a recorded decision.",
+      "turns": [
+        {
+          "message": "How did life expectancy in Kenya change from 1900 to 2023?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "period-departure-recorded",
+          "property": "The period the plan or the answer covers is the period the user asked for, 1900 to 2023, or the departure from it is stated: as a decision with a reason on the plan card, or in the closing message when no plan was proposed. A plan that silently uses another period, or an answer that presents a shorter period as the one asked for, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-every-requested-output-is-accounted-for",
+      "modes": [
+        "orchestrator-live"
+      ],
+      "xfail": "requested-output accounting: nothing yet requires each output the user asked for to be planned, declined with a code or put to the user, so one can drop out silently. Retire this marker when the plan maps every ask.",
+      "turns": [
+        {
+          "message": "Show Kenya's life expectancy as a line chart, give me the latest value as a stat card, and rank the East African countries by it.",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "every-ask-accounted-for",
+          "property": "Each output the first message asked for (the line chart of Kenya's life expectancy, the latest value as a stat card, the ranking of the East African countries) is produced as a component, set out as a step on the plan card, declined in the closing message with its reason, or put to the user as a question. An output that is neither produced nor mentioned is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-later-yes-resolves-the-previous-offer",
+      "modes": [
+        "orchestrator-live"
+      ],
+      "xfail": "conversation digest: the previous closing message reaches the next turn cut at 280 characters, so an offer made at its end can be gone when the user says yes. Retire this marker when the previous closing message is carried whole.",
+      "turns": [
+        {
+          "message": "Show life expectancy in Kenya. End your answer by offering one specific follow-up, and wait for my reply.",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "yes",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "yes-resolves-the-offer",
+          "property": "The second turn carries out the follow-up the first turn's closing message offered, with its own data or components, and does not ask what 'yes' refers to. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-blocking-warning-is-not-reused-as-an-answer",
+      "modes": [
+        "orchestrator-live"
+      ],
+      "xfail": "source reuse: a source found with a blocking warning (role or time text dropped) can still be reused by the planner as if it answered the whole part. Retire this marker when a reused source must carry no blocking warning.",
+      "turns": [
+        {
+          "message": "How much aid did France give Kenya in the year before last, by sector?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "dropped-text-not-answered",
+          "property": "When a search result for a part of the question carried a warning that the search had not understood the part's place or period text, the closing message says which words were not read, and no figure from that part's source is presented as answering them. When no search result carried such a warning, answer yes."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-an-unchanged-failure-is-not-repeated",
+      "modes": [
+        "orchestrator-live"
+      ],
+      "xfail": "loop guard: an unchanged plan step that failed deterministically can be proposed and run again, whatever the brief says. Retire this marker when the repeat is refused before it runs.",
+      "checks": [
+        "no_repeated_failed_step"
+      ],
+      "turns": [
+        {
+          "message": "top 10 countries by health spending per person",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "failure-not-repeated",
+          "property": "When a plan step fails with a refusal a retry cannot change, no later plan or fetch in the conversation puts the same step again: each differs from the failed one, or the closing message says what could not be done and why. This property always applies and is never inapplicable."
+        }
+      ]
+    }
+  ]
+}

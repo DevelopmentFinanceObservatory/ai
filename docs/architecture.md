@@ -31,20 +31,21 @@ The plan-approve-execute workflow spans four top-level modules beside it,
 `planner`, `translator`, `compiler` and `executor`. The planner settles
 methodology with the user and records each choice as a `Decision` and what
 evidence the answer rests on as `EvidenceRequirement`s, naming no tool. The
-translator finds the data each requirement needs through a bounded, read-only
-discovery of data-mcp's `search`, and proposes a closed set of typed operations.
+translator, code rather than an agent, finds the data each requirement needs
+through a bounded, read-only discovery of data-mcp's `search`, and builds the
+typed operation each requirement states.
 The compiler, code rather than an agent, maps those operations to tools through
 a hand-maintained capability table pinned to the live MCP schemas, writes every
 tool argument, and checks the result against the plan before anyone approves
 it. The planner states every calculation the answer needs as a typed
 requirement (an aggregate, a growth, a comparison, and so on), alongside the
-dataset requirements that feed them, and both agents' tools answer with a
+dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
-so a caller can branch on what stopped a call without parsing its message. The
-planner and translator are one agent tree, not two peers:
-`harness.agents` attaches the translator to the planner as a `single_turn`
-sub-agent, which ADK wraps as one more tool on the planner, so the planner calls
-it inside its own turn and the plan passes between them through session state.
+so a caller can branch on what stopped a call without parsing its message.
+`harness.agents` gives the planner the translator as one function tool,
+`translate`, so the planner calls it inside its own turn, the plan passes
+through session state, and the answer is the compiled outcome or the referral
+translation stopped on.
 Nothing runs until the user approves. The planner's own tool is `submit_plan`:
 it approves nothing and executes nothing, and declares a compiled plan ready
 for the user's answer. The gate is the graph's own approval interrupt, raised
@@ -174,8 +175,8 @@ through `compiler.sources.outcome_from_envelope` and answers with
 `compact_source`'s own field set, and keeps one `definition` string per
 source out of a `describe` answer. `executor.run` keeps each server's digest
 text as its step's `StepRecord.digest`, which `harness.graph` carries into
-`narrate`'s `step_summaries`. The planner's and translator's models are
-reached by `FunctionTool`s over these Python functions
+`narrate`'s `step_summaries`. The planner's model reaches these Python
+functions through `FunctionTool`s
 (`harness.agents.create_planner_with_translator`). ADK's `McpTool` plays no
 part, so no `CallToolResult` dump is built for them and an
 `after_tool_callback` editing one would have nothing to edit. Where a tool
@@ -203,7 +204,10 @@ it as cancelled). The `/turn` stream and the `/interrupt` stream that resumes
 the turn are separate requests, and each runs inside that span
 (`ConversationState.in_turn_span`), so the
 resumed segment's ADK, MCP and `record_event` spans nest under the same `turn`
-span.
+span. `close_turn` gives the `turn` span the user's message as its input and
+the closing text as its output, which Langfuse shows as the trace's input and
+output. A turn closed with an error code (`cancelled`, `abandoned`, and the
+like) ends at level `ERROR` with that code as its status message.
 
 Every studio stream calls `common.telemetry.flush_telemetry` before its
 response ends, so queued spans export while the request still has CPU.
@@ -255,12 +259,12 @@ names should stay org-agnostic until then.
 Config uses `pydantic-settings`, subclassing `common.settings.BaseServiceSettings` and
 driven entirely by environment variables. Each service has one `Settings`
 class for the service itself; harness carries a second,
-`planner.settings.AgentSettings`, so the planner and translator pin their own
-models without a caller reading a model string having to import the service's
-MCP URLs and session backend. Recognised names include `DFO_APIS_URL`,
+`planner.settings.AgentSettings`, so the planner pins its own model without
+a caller reading a model string having to import the service's MCP URLs and
+session backend. Recognised names include `DFO_APIS_URL`,
 `DATA_MCP_URL`, `ANALYSIS_MCP_URL`, `PRESENTATION_MCP_URL`,
 `PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
-`PLANNER_MODEL_NAME`, `TRANSLATOR_MODEL_NAME`, `DATABASE_URL` and the
+`PLANNER_MODEL_NAME`, `DATABASE_URL` and the
 `SESSION_STORE_*` family (optional, for a durable harness session store;
 unset falls back to in-memory sessions, see `services/harness/README.md`),
 the `LANGFUSE_*` family, and `PORT`. Each

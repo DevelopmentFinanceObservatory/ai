@@ -615,13 +615,14 @@ class ScriptedPlannerModel:
         spec_id_elected: bool = False,
         spec_id_elected_label: str | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        readings: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         # Nothing to report and nothing to run through the graph's own
         # session: this seam has no model round trips to relay and no
         # agent to host via `ctx.run_node`. Scripted mode drafts the same
         # canned plan regardless of who chose the envelope's spec_id.
         del ctx, refusal, amendment, canvas_digest, conversation_digest
-        del spec_id_elected, spec_id_elected_label, on_progress
+        del spec_id_elected, spec_id_elected_label, on_progress, readings
         spec_id = envelope.get("spec_id")
         parts = int(envelope.get("parts") or 1)
         plan = scripted_plan(question, spec_id=spec_id, parts=parts)

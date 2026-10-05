@@ -49,21 +49,6 @@ EXPECTED_CASE_IDS = {
             "adversarial-execute-before-approval",
         }
     ),
-    "harness-translator-v1": frozenset(
-        {
-            "maps-an-annual-total-onto-aggregate",
-            "maps-a-window-onto-growth",
-            "compares-two-entities",
-            "maps-a-per-head-figure-onto-share_of",
-            "refers-a-constant-price-requirement",
-            "refers-when-discovery-finds-several-sources",
-            "maps-a-named-rank-onto-rank-with-a-narrowing-filter",
-            "maps-a-population-rank-onto-rank-with-its-decision",
-            "maps-an-absolute-window-onto-growth",
-            "maps-a-keyed-share-onto-share_of",
-            "maps-kenyas-rank-series-onto-rank-filter-growth",
-        }
-    ),
     "harness-pair-v1": frozenset(
         {
             "translates-before-inviting-approval",

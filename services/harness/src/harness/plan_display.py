@@ -1,9 +1,11 @@
 """Turn a `Plan` into the words the plan card renders.
 
-`step_rows`, `requirement_rows` and `operation_rows` are pure functions from
-`planner.plan.Plan` to plain dicts. This module reads `planner.plan`,
-`planner.operations`, `planner.records` and `planner.workflow` only, so it
-can be written and tested before `harness.wire` carries the fields these
+`step_rows`, `requirement_rows`, `operation_rows` and `ask_rows` are pure
+functions from `planner.plan.Plan` to plain dicts, `shown_decisions` the
+decisions the card and the plan record list, and `with_source_names` a
+decision's text with each spec_id in it named in words. This module reads
+`planner.plan`, `planner.operations`, `planner.records` and
+`planner.workflow` only, so it can be written and tested before `harness.wire` carries the fields these
 rows fill, and it stays usable from `harness.wire`, `harness.studio_translate`
 and `planner.agent` alike without any of them importing each other through
 here.
@@ -29,6 +31,7 @@ same way.
 
 from __future__ import annotations
 
+import re
 import typing
 from collections.abc import Sequence
 
@@ -51,6 +54,7 @@ from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
     DatasetRequirement,
+    Decision,
     EvidenceRequirement,
     FilterRequirement,
     GrowthRequirement,
@@ -58,8 +62,12 @@ from planner.plan import (
     Plan,
     RankRequirement,
     ShareOfRequirement,
+    SumOfRequirement,
+    UnsupportedOperation,
+    is_search_pin,
 )
 from planner.records import (
+    Breakdown,
     EntityIn,
     GroupBy,
     GrowthChange,
@@ -77,6 +85,15 @@ _REDUCTION_WORDS: dict[Reduction, str] = {
     Reduction.MEAN: "average",
     Reduction.MAX: "highest",
     Reduction.MIN: "lowest",
+}
+
+# Why the plan does not compute an ask, by its decline code, in the user's terms.
+DECLINE_REASONS: dict[UnsupportedOperation, str] = {
+    UnsupportedOperation.CALCULATION_OVER_COMBINED: (
+        "the system cannot calculate further on a comparison or a combined table"
+    ),
+    UnsupportedOperation.NO_OPERATION_COVERS: "the system has no calculation that does this",
+    UnsupportedOperation.UNSUPPORTED_ASK: "the data found cannot answer this as asked",
 }
 
 _THRESHOLD_WORDS: dict[str, str] = {
@@ -118,13 +135,45 @@ def step_rows(plan: Plan) -> list[dict[str, object]]:
     return rows
 
 
+def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
+    """The decisions of `plan` the card and the plan record list.
+
+    Leaves out the decision `propose_plan` writes for a pin of a source a
+    search settled on (`planner.plan.is_search_pin`): its slot and choice
+    are the source's spec_id, and the plan names that source in words
+    where it lists its sources.
+    """
+    return tuple(decision for decision in plan.decisions if not is_search_pin(decision))
+
+
+# A spec_id as `planner.records.SpecId` states it, anywhere in a text.
+_SPEC_ID = re.compile(r"spec_[0-9a-f]{32}")
+
+
+def with_source_names(text: str, plan: Plan) -> str:
+    """`text` with each spec_id in it replaced by the name of the source it identifies.
+
+    A source the plan's workflow retrieves is named by its provenance label,
+    else its sentence; any other spec_id becomes "another source". A
+    decision a model wrote can name a source by its spec_id in `chosen`,
+    `options` or `rationale`, and the card and the plan record state no id.
+    """
+    sources = plan.workflow.sources if plan.workflow is not None else ()
+    names = {source.spec_id: source.provenance_label or source.sentence for source in sources}
+    return _SPEC_ID.sub(lambda match: names.get(match.group(), "another source"), text)
+
+
 def requirement_rows(plan: Plan) -> list[dict[str, object]]:
-    """One row per evidence requirement the plan states: id, kind, its decisions, and a sentence."""
+    """One row per evidence requirement the plan states: id, kind, its decisions, and a sentence.
+
+    A requirement's decisions are those `shown_decisions` lists.
+    """
+    shown = {decision.slot for decision in shown_decisions(plan)}
     return [
         {
             "id": requirement.id,
             "kind": requirement.kind,
-            "decision_ids": list(requirement.decision_ids),
+            "decision_ids": [slot for slot in requirement.decision_ids if slot in shown],
             "sentence": _sentence(requirement, plan),
         }
         for requirement in plan.evidence_requirements
@@ -156,14 +205,69 @@ def operation_rows(plan: Plan) -> list[dict[str, object]]:
     return rows
 
 
-def _group_by_phrase(group_by: Sequence[GroupBy]) -> str:
-    by_period = GroupBy.PERIOD in group_by
-    by_entity = GroupBy.ENTITY in group_by
-    if by_period and by_entity:
-        return "by year and by entity"
-    if by_period:
-        return "by year"
-    return "by entity"
+def ask_rows(plan: Plan) -> list[dict[str, object]]:
+    """One row per ask the plan accounts for, in the brief's order.
+
+    Each row is the `ask`, `answered_by`, the ids of the workflow steps
+    whose results answer it, `declined`, the code it was declined under,
+    `reason`, that code's `DECLINE_REASONS` entry, and `not_computed`, the
+    part the decline names in the user's words. The last three are `None`
+    for an ask the plan answers whole; an ask answered in part carries
+    both `answered_by` and a decline. A step's id is that of the operation
+    carrying out its requirement (`planner.workflow.WorkflowStep`).
+
+    Requires a plan carrying a `translation`.
+    """
+    assert plan.translation is not None, "ask_rows needs a plan carrying a translation"
+    step_of = {op.requirement_id: op.id for op in plan.translation.operations}
+    answered_by = {
+        answer.ask: [step_of[output] for output in answer.outputs] for answer in plan.answered
+    }
+    declined = {d.ask_ref: d for d in plan.declined if d.ask_ref is not None}
+    rows: list[dict[str, object]] = []
+    for number, ask in enumerate(plan.asks):
+        decline = declined.get(number)
+        rows.append(
+            {
+                "ask": ask,
+                "answered_by": answered_by.get(number, []),
+                "declined": decline.code if decline is not None else None,
+                "reason": DECLINE_REASONS[decline.code] if decline is not None else None,
+                "not_computed": decline.ask if decline is not None else None,
+            }
+        )
+    return rows
+
+
+def _group_by_phrase(group_by: Sequence[GroupBy], *, breakdown: Breakdown | None = None) -> str:
+    """`group_by` in words. A group by breakdown names the dimension of `breakdown`,
+    the one the aggregate's input states."""
+    words = {
+        GroupBy.PERIOD: "year",
+        GroupBy.ENTITY: "entity",
+        GroupBy.BREAKDOWN: breakdown.dimension.value if breakdown is not None else "breakdown",
+    }
+    return " and ".join(f"by {words[key]}" for key in GroupBy if key in group_by)
+
+
+def _breakdown_of(requirement: EvidenceRequirement, plan: Plan) -> Breakdown | None:
+    """The breakdown the one dataset requirement `requirement` reads states, or `None`."""
+    breakdowns = {
+        dataset.breakdown
+        for dataset in datasets_of(requirement, plan)
+        if dataset.breakdown is not None
+    }
+    return breakdowns.pop() if len(breakdowns) == 1 else None
+
+
+def _breakdown_clause(breakdown: Breakdown) -> str:
+    """How a retrieval breaks its total down, in words."""
+    level = (
+        "the top level of its hierarchy"
+        if breakdown.level == 0
+        else f"level {breakdown.level} below the top of its hierarchy"
+    )
+    return f"broken down by {breakdown.dimension.value}, each code rolled up to {level}"
 
 
 def _predicate_phrase(predicate: Predicate) -> str:
@@ -192,14 +296,18 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
     """
     if isinstance(requirement, DatasetRequirement):
         return requirement.measure
-    if isinstance(requirement, (AggregateRequirement, GrowthRequirement, RankRequirement)):
-        return _measure_of(plan.requirement(requirement.input_id), plan)
-    if isinstance(requirement, FilterRequirement):
+    if isinstance(
+        requirement, (AggregateRequirement, GrowthRequirement, RankRequirement, FilterRequirement)
+    ):
         return _measure_of(plan.requirement(requirement.input_id), plan)
     if isinstance(requirement, ComparisonRequirement):
         left = _measure_of(plan.requirement(requirement.left.input_id), plan)
         right = _measure_of(plan.requirement(requirement.right.input_id), plan)
         return f"{right} against {left}"
+    if isinstance(requirement, SumOfRequirement):
+        left = _measure_of(plan.requirement(requirement.left.input_id), plan)
+        right = _measure_of(plan.requirement(requirement.right.input_id), plan)
+        return f"{left} plus {right}"
     if isinstance(requirement, ShareOfRequirement):
         return f"share of {_measure_of(plan.requirement(requirement.numerator.input_id), plan)}"
     if isinstance(requirement, JoinRequirement):
@@ -286,7 +394,8 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
 def _label_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
     word = _REDUCTION_WORDS[requirement.reduction].capitalize()
-    return f"{word} {_measure_of(upstream, plan)} {_group_by_phrase(requirement.group_by)}"
+    group = _group_by_phrase(requirement.group_by, breakdown=_breakdown_of(requirement, plan))
+    return f"{word} {_measure_of(upstream, plan)} {group}"
 
 
 def _label_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -301,6 +410,12 @@ def _label_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
     left = plan.requirement(requirement.left.input_id)
     right = plan.requirement(requirement.right.input_id)
     return f"Compare {_measure_of(right, plan)} to {_measure_of(left, plan)}"
+
+
+def _label_sum_of(requirement: SumOfRequirement, plan: Plan) -> str:
+    left = plan.requirement(requirement.left.input_id)
+    right = plan.requirement(requirement.right.input_id)
+    return f"Add {_measure_of(left, plan)} and {_measure_of(right, plan)}"
 
 
 def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
@@ -353,6 +468,7 @@ _LABEL_BUILDERS: dict[type, typing.Callable[[typing.Any, Plan], str]] = {
     AggregateRequirement: _label_aggregate,
     GrowthRequirement: _label_growth,
     ComparisonRequirement: _label_comparison,
+    SumOfRequirement: _label_sum_of,
     RankRequirement: _label_rank,
     ShareOfRequirement: _label_share_of,
     JoinRequirement: _label_join,
@@ -406,15 +522,22 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     """The retrieval in words, with how it reads a family of StatVars. The
     selected source's `describe` definition stays out: for a StatVar it is
     the graph's constraint encoding ("mp=count,pt=Person"), which the
-    translator model reads and a user cannot."""
+    planner model reads and a user cannot."""
     source = _selected_source(requirement.id, plan)
-    reading = _reading_clause(source) if source is not None else None
-    parties = entities_phrase(requirement.entities, across=requirement.across)
-    return (
-        f"Retrieves {requirement.measure} for {parties}, "
-        f"{requirement.period.start}-{requirement.period.end}"
-        + (f", {reading}." if reading else ".")
+    # A breakdown sums the family within each code, so no reading of its members applies.
+    reading = (
+        _reading_clause(source) if source is not None and requirement.breakdown is None else None
     )
+    parties = entities_phrase(requirement.entities, across=requirement.across)
+    clauses = [
+        f"Retrieves {requirement.measure} for {parties}",
+        f"{requirement.period.start}-{requirement.period.end}",
+    ]
+    if requirement.breakdown is not None:
+        clauses.append(_breakdown_clause(requirement.breakdown))
+    if reading:
+        clauses.append(reading)
+    return ", ".join(clauses) + "."
 
 
 def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:
@@ -491,10 +614,8 @@ def _reading_clause(source: SelectedSource) -> str | None:
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
     word = _REDUCTION_WORDS[requirement.reduction]
-    return (
-        f"The {word} of {_measure_of(upstream, plan)}, grouped "
-        f"{_group_by_phrase(requirement.group_by)}."
-    )
+    group = _group_by_phrase(requirement.group_by, breakdown=_breakdown_of(requirement, plan))
+    return f"The {word} of {_measure_of(upstream, plan)}, grouped {group}."
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
@@ -519,22 +640,33 @@ def _sentence_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
     )
 
 
+def _sentence_sum_of(requirement: SumOfRequirement, plan: Plan) -> str:
+    left = plan.requirement(requirement.left.input_id)
+    right = plan.requirement(requirement.right.input_id)
+    return (
+        f"Adds {_measure_of(left, plan)} and {_measure_of(right, plan)} for each year both "
+        "report; years one side lacks are left out."
+    )
+
+
 def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     role = _axis_role(requirement, plan)
+    datasets = datasets_of(requirement, plan)
     covering = next(
-        (
-            dataset
-            for dataset in datasets_of(requirement, plan)
-            if dataset.across is not None and dataset.across == role
-        ),
+        (dataset for dataset in datasets if dataset.across is not None and dataset.across == role),
         None,
+    )
+    # A breakdown's codes are every code the source holds at its level, uncounted.
+    by_breakdown = any(
+        dataset.breakdown is not None and dataset.breakdown.dimension.value == role
+        for dataset in datasets
     )
     # The source counts every place on a place axis, so a level kept from it
     # is named without a count.
     level = _place_level_word(requirement, plan)
     among_text = among_phrase(
         requirement.among,
-        across=(level or role) if covering is not None else None,
+        across=(level or role) if covering is not None or by_breakdown else None,
         member_count=(
             _population_count(covering, plan) if covering is not None and level is None else None
         ),
@@ -600,6 +732,7 @@ _SENTENCE_BUILDERS: dict[type, typing.Callable[[typing.Any, Plan], str]] = {
     AggregateRequirement: _sentence_aggregate,
     GrowthRequirement: _sentence_growth,
     ComparisonRequirement: _sentence_comparison,
+    SumOfRequirement: _sentence_sum_of,
     RankRequirement: _sentence_rank,
     ShareOfRequirement: _sentence_share_of,
     JoinRequirement: _sentence_join,

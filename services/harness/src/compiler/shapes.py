@@ -35,6 +35,7 @@ from planner.operations import (
     RankOperation,
     RetrieveOperation,
     ShareOfOperation,
+    SumOfOperation,
 )
 from planner.plan import (
     DatasetRequirement,
@@ -43,7 +44,14 @@ from planner.plan import (
     keeps_one_level,
     states_period_threshold,
 )
-from planner.records import EntityIn, Identifier, Predicate, StatVarReading
+from planner.records import (
+    Breakdown,
+    BreakdownDimension,
+    EntityIn,
+    Identifier,
+    Predicate,
+    StatVarReading,
+)
 from planner.shapes import SEVERAL, FrameShape, MeasureCount, RoleDimension, ShapeVerb, year_filter
 from planner.shapes import aggregated as _aggregated
 from planner.shapes import compared as _compared
@@ -54,9 +62,23 @@ from planner.shapes import ranked as _ranked
 from planner.shapes import rejects as _rejects
 from planner.shapes import retrieved as _retrieved
 from planner.shapes import shared as _shared
+from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
 from compiler.evidence import open_axis_for, opens_place_axis, resolve_entity
+from compiler.sources import stat_var_count
+
+# The code system behind each breakdown dimension: the `get_data` breakdown's
+# `code_system`, the open axis a source's family varies along for it, and the
+# `stat_var_<code system>` column its rolled-up codes sit in.
+BREAKDOWN_CODE_SYSTEMS: Mapping[BreakdownDimension, str] = {
+    BreakdownDimension.SECTOR: "crsPurpose",
+}
+
+
+def breakdown_column(breakdown: Breakdown) -> str:
+    """The frame column a retrieval broken down by `breakdown` names each row's code in."""
+    return f"stat_var_{BREAKDOWN_CODE_SYSTEMS[breakdown.dimension]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +93,8 @@ class ResolvedRole:
     the source resolves a label under this column that the requirement does
     not name -- computed once at the retrieval and carried forward unchanged,
     since a column that started out wider than the requirement stays so
-    wherever the frame travels, until a filter narrows it.
+    wherever the frame travels, until a filter narrows it. `breakdown`
+    mirrors the dimension's own flag: the column holds a breakdown's codes.
     """
 
     column: str
@@ -80,6 +103,7 @@ class ResolvedRole:
     spec_id: str
     narrowed: bool
     surplus: bool
+    breakdown: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +230,12 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
         if left is None or right is None:
             return None
         return _compare_resolved(left, right)
+    if isinstance(operation, SumOfOperation):
+        left = _input_shape(operation.left.input, operations, shapes)
+        right = _input_shape(operation.right.input, operations, shapes)
+        if left is None or right is None:
+            return None
+        return _sum_of_resolved(left, right)
     assert isinstance(operation, JoinOperation)
     left = _input_shape(operation.left, operations, shapes)
     right = _input_shape(operation.right, operations, shapes)
@@ -232,16 +262,16 @@ def _separate_measures(source: SelectedSource) -> MeasureCount:
     """How many measures a family read separately carries.
 
     A retrieval of a family holds every member of its binding that has data.
-    The StatVars the source lists count them: exactly when the list is
-    complete (`stat_var_truncated` is false), so a family `search` confirmed
-    one member of carries one measure, and as a lower bound when `search`
-    capped it. The count is `SEVERAL` where the list bounds nothing above
-    one: an empty list, and one StatVar of a list that is capped or does not
-    say whether it is.
+    The StatVars `search` confirmed count them (`stat_var_count`): exactly
+    when the listing is complete (`stat_var_truncated` is false), so a
+    family `search` confirmed one member of carries one measure, and as a
+    lower bound otherwise. The count is `SEVERAL` where it bounds nothing
+    above one: no StatVar confirmed, and one of a listing that is capped or
+    does not say whether it is.
     """
-    listed = len(source.stat_vars)
-    if listed > 1 or (listed == 1 and source.stat_var_truncated is False):
-        return listed
+    count = stat_var_count(source)
+    if count > 1 or (count == 1 and source.stat_var_truncated is False):
+        return count
     return SEVERAL
 
 
@@ -260,11 +290,13 @@ def _retrieve_resolved(
     entity axis matches builds no shape: `compile._check_sources` reports it
     as the source's `open_axis_unresolved` finding.
 
-    A family read separately carries the measures its source counts
+    A requirement stating a breakdown keeps its codes' column last
+    (`breakdown_column`), a role nothing in the source resolves and so no
+    surplus. A family read separately carries the measures its source counts
     (`_separate_measures`) and the axes it may not be summed over
-    (`_unsummable_axes`); a summed family, or a source binding one StatVar,
-    carries one. A source that leaves its place axis open carries every
-    level of place (`compiler.evidence.opens_place_axis`), and
+    (`_unsummable_axes`). A summed family, a breakdown (which sums the family
+    within each code), and a source binding one StatVar carry one. A source
+    that leaves its place axis open carries every level of place (`compiler.evidence.opens_place_axis`), and
     `compiler.evidence` refuses one under a requirement whose `across` does
     not name the place party, so the plan's own reading
     (`planner.plan.names_no_place`) agrees.
@@ -315,7 +347,23 @@ def _retrieve_resolved(
                 surplus=surplus,
             )
         )
-    separate = source.stat_var_reading is StatVarReading.SEPARATE
+    if requirement.breakdown is not None:
+        role = requirement.breakdown.dimension.value
+        dims.append(
+            RoleDimension(role=role, requirement_id=operation.requirement_id, breakdown=True)
+        )
+        columns.append(
+            ResolvedRole(
+                column=breakdown_column(requirement.breakdown),
+                role=role,
+                requirement_id=operation.requirement_id,
+                spec_id=source.spec_id,
+                narrowed=False,
+                surplus=False,
+                breakdown=True,
+            )
+        )
+    separate = source.stat_var_reading is StatVarReading.SEPARATE and requirement.breakdown is None
     shape = _retrieved(
         requirement_id=operation.requirement_id,
         roles=tuple(dims),
@@ -352,7 +400,14 @@ def _aggregate_resolved(
 ) -> ResolvedShape | str:
     by_entity = GroupBy.ENTITY in operation.group_by
     by_period = GroupBy.PERIOD in operation.group_by
-    reason = _rejects(ShapeVerb.AGGREGATE, upstream.shape, by_entity=by_entity, by_period=by_period)
+    by_breakdown = GroupBy.BREAKDOWN in operation.group_by
+    reason = _rejects(
+        ShapeVerb.AGGREGATE,
+        upstream.shape,
+        by_entity=by_entity,
+        by_period=by_period,
+        by_breakdown=by_breakdown,
+    )
     if reason is not None:
         return reason
     shape = _aggregated(
@@ -360,6 +415,7 @@ def _aggregate_resolved(
         reduction=operation.reduction,
         by_entity=by_entity,
         by_period=by_period,
+        by_breakdown=by_breakdown,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 
@@ -504,6 +560,14 @@ def _compare_resolved(left: ResolvedShape, right: ResolvedShape) -> ResolvedShap
             return reason
     shape = _compared(left.shape, right.shape)
     return ResolvedShape(shape=shape, columns=())
+
+
+def _sum_of_resolved(left: ResolvedShape, right: ResolvedShape) -> ResolvedShape | str:
+    for shape, other in ((left.shape, right.shape), (right.shape, left.shape)):
+        reason = _rejects(ShapeVerb.SUM_OF, shape, other=other)
+        if reason is not None:
+            return reason
+    return ResolvedShape(shape=_summed_sides(left.shape, right.shape), columns=())
 
 
 def _join_resolved(left: ResolvedShape, right: ResolvedShape) -> ResolvedShape | str:

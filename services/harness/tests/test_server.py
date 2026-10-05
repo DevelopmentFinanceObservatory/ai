@@ -513,6 +513,7 @@ async def test_mounted_analysis_mcp_reports_its_tools() -> None:
         "share_of",
         "join",
         "filter",
+        "sum_of",
     }
 
 

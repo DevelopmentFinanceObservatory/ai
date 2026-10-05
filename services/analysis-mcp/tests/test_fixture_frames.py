@@ -83,6 +83,7 @@ async def test_seed_fixture_store_writes_every_fixture_under_a_valid_pair_and_is
         seeded.sparse_coverage,
         *seeded.join_pair,
         seeded.time_series_with_gap,
+        *seeded.sum_pair,
     )
     distinct_pairs = {(pair["spec_id"], pair["content_version"]) for pair in all_pairs}
     assert len(distinct_pairs) == len(all_pairs), "every fixture gets its own pair"
