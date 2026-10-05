@@ -1,0 +1,116 @@
+{
+  "cases": [
+    {
+      "id": "capped_25_groups",
+      "digest_chars": 1191
+    },
+    {
+      "id": "capped_30_groups",
+      "digest_chars": 1191
+    },
+    {
+      "id": "compare_capped_25_periods",
+      "digest_chars": 1218
+    },
+    {
+      "id": "compare_single_period",
+      "digest_chars": 580
+    },
+    {
+      "id": "empty_group_by",
+      "digest_chars": 522
+    },
+    {
+      "id": "filter_capped_25_rows",
+      "digest_chars": 1977
+    },
+    {
+      "id": "filter_empty_result",
+      "digest_chars": 372
+    },
+    {
+      "id": "filter_single_row",
+      "digest_chars": 444
+    },
+    {
+      "id": "five_groups",
+      "digest_chars": 604
+    },
+    {
+      "id": "frame_pair_fat",
+      "digest_chars": 488
+    },
+    {
+      "id": "frame_pair_lean",
+      "digest_chars": 488
+    },
+    {
+      "id": "growth_capped_25_entities",
+      "digest_chars": 1416
+    },
+    {
+      "id": "growth_single_entity",
+      "digest_chars": 411
+    },
+    {
+      "id": "join_capped_25_keys",
+      "digest_chars": 1494
+    },
+    {
+      "id": "join_single_key",
+      "digest_chars": 497
+    },
+    {
+      "id": "join_with_dropped_keys",
+      "digest_chars": 580
+    },
+    {
+      "id": "max_min_groups",
+      "digest_chars": 468
+    },
+    {
+      "id": "rank_capped_25_entities",
+      "digest_chars": 1494
+    },
+    {
+      "id": "rank_limit_10_of_25_entities",
+      "digest_chars": 1697
+    },
+    {
+      "id": "rank_single_entity",
+      "digest_chars": 453
+    },
+    {
+      "id": "share_of_capped_25_periods",
+      "digest_chars": 1170
+    },
+    {
+      "id": "share_of_single_period",
+      "digest_chars": 562
+    },
+    {
+      "id": "single_group",
+      "digest_chars": 488
+    },
+    {
+      "id": "sparse_coverage",
+      "digest_chars": 720
+    },
+    {
+      "id": "wide_band_100000_groups",
+      "digest_chars": 1283
+    },
+    {
+      "id": "wide_band_1000_groups",
+      "digest_chars": 1197
+    },
+    {
+      "id": "wide_band_25_groups",
+      "digest_chars": 1166
+    },
+    {
+      "id": "with_warnings",
+      "digest_chars": 546
+    }
+  ]
+}

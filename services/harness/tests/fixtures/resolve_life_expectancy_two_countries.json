@@ -1,0 +1,88 @@
+{
+  "comment": "The shape data-mcp's search returns for one part asking two countries of one measure. Taken from a live `search` call with {\"parts\": [{\"variable\": \"life expectancy\", \"entities\": [{\"text\": \"Nigeria\"}, {\"text\": \"Guatemala\"}]}]}, which resolved `definite` to one spec whose identity binds `observationAbout` to both countries. The envelope's nesting and field names are the wire contract; the ids, timing and diagnostics are the live call's values replaced with fixed ones. `requested_window` is `{\"kind\": \"all\"}` because the raw query named no time text at all -- the same `kind` vocabulary `get_data_digest._coverage_window_text` documents and `resolve_population_guatemala.json` (a `range` with only `start_year`, for \"since 2010\") uses for an explicit one.",
+  "schema_version": 1,
+  "query_echo": {
+    "entry_path": "parsed",
+    "raw_query": "life expectancy in Nigeria and Guatemala",
+    "extract_skipped": true
+  },
+  "status": "definite",
+  "rendered_sentence": "Life expectancy in Nigeria and Guatemala, 1960 to 2023, according to World Development Indicators.",
+  "parts": [
+    {
+      "variable_text": "life expectancy",
+      "status": "definite",
+      "warnings": [],
+      "restatement": {
+        "variable_text": "life expectancy",
+        "entities": [
+          {
+            "text": "Nigeria"
+          },
+          {
+            "text": "Guatemala"
+          }
+        ],
+        "time_text": "1960 to 2023"
+      },
+      "spec": {
+        "spec_id": "spec_97ba9e0ee9eb219b76a3ffdff33bb337",
+        "definition": {
+          "schema_version": 1,
+          "spec_id": "spec_97ba9e0ee9eb219b76a3ffdff33bb337",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "Person",
+              "measured_property": "lifeExpectancy",
+              "stat_type": "measuredValue"
+            },
+            "entities": {
+              "observationAbout": [
+                "country/GTM",
+                "country/NGA"
+              ]
+            },
+            "requested_window": {
+              "kind": "all"
+            }
+          }
+        },
+        "resolved": {
+          "shape": {
+            "kind": "statvar_schema",
+            "population_type": "Person",
+            "measured_property": "lifeExpectancy",
+            "stat_type": "measuredValue"
+          },
+          "stat_vars": {
+            "items": [
+              {
+                "ref": "LifeExpectancy_Person",
+                "label": "Life expectancy at birth",
+                "slot_values": [],
+                "constraint_properties": [],
+                "data_date_range": {
+                  "start": "1960",
+                  "end": "2023"
+                }
+              }
+            ],
+            "member_count": 1,
+            "truncated": false
+          },
+          "entities": {
+            "observationAbout": [
+              "country/GTM",
+              "country/NGA"
+            ]
+          },
+          "facets": {},
+          "rendered_sentence": "Life expectancy in Nigeria and Guatemala, 1960 to 2023, according to World Development Indicators.",
+          "confidence": "high"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,461 @@
+{
+  "format_version": 1,
+  "identity_version": "ops1",
+  "vectors": [
+    {
+      "name": "aggregate-single-group-by-dataset-snapshot",
+      "description": "aggregate over a Datasets snapshot frame_ref, grouped by one column",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [
+          "reporter"
+        ],
+        "aggregation": "sum"
+      },
+      "expected_op_spec_hash": "ops_5f58b599f0c12b2fc4741ade793c8cca"
+    },
+    {
+      "name": "aggregate-group-by-reordered-matches",
+      "description": "the same aggregate with group_by listed in a different order mints the identical hash",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [
+          "year",
+          "reporter"
+        ],
+        "aggregation": "sum"
+      },
+      "expected_op_spec_hash": "ops_02c26d84c2ac932b509f7064111ff31a"
+    },
+    {
+      "name": "aggregate-group-by-original-order",
+      "description": "group_by in the original order, paired with the reordered vector above to prove order-independence",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [
+          "reporter",
+          "year"
+        ],
+        "aggregation": "sum"
+      },
+      "expected_op_spec_hash": "ops_02c26d84c2ac932b509f7064111ff31a"
+    },
+    {
+      "name": "aggregate-no-group-by",
+      "description": "aggregate with an empty group_by (a full-frame reduction)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [],
+        "aggregation": "sum"
+      },
+      "expected_op_spec_hash": "ops_62e9f13ab91b77445c3d83ce6a42c72d"
+    },
+    {
+      "name": "aggregate-chained-input",
+      "description": "aggregate over a prior verb result's ops_/ocv_ pair, not a Datasets snapshot",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "ops_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "ocv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [
+          "reporter"
+        ],
+        "aggregation": "sum"
+      },
+      "expected_op_spec_hash": "ops_3ccfa76a9cffa5bea6fe67f400077ab7"
+    },
+    {
+      "name": "filter-ordered-threshold",
+      "description": "filter with a single ordered_threshold predicate",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gte",
+            "value": 1000000
+          }
+        ]
+      },
+      "expected_op_spec_hash": "ops_8329df0e217242c51f75315d091992d6"
+    },
+    {
+      "name": "filter-category-match",
+      "description": "filter with a single category_match predicate",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "FRA",
+              "DEU"
+            ]
+          }
+        ]
+      },
+      "expected_op_spec_hash": "ops_6c0dd6a1e802d70f2e83ffa64e57b924"
+    },
+    {
+      "name": "filter-two-predicates-order-a",
+      "description": "two predicates in one order, paired with the reordered vector below to prove order-independence",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gte",
+            "value": 1000000
+          },
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "FRA",
+              "DEU"
+            ]
+          }
+        ]
+      },
+      "expected_op_spec_hash": "ops_f8b3905a570106ac959d47cbbb7f561b"
+    },
+    {
+      "name": "filter-two-predicates-order-b",
+      "description": "the same two predicates listed in the opposite order mints the identical hash",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "DEU",
+              "FRA"
+            ]
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gte",
+            "value": 1000000
+          }
+        ]
+      },
+      "expected_op_spec_hash": "ops_f8b3905a570106ac959d47cbbb7f561b"
+    },
+    {
+      "name": "compare-minimal",
+      "description": "compare with every own parameter left at its default (#38)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "compare",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        }
+      },
+      "expected_op_spec_hash": "ops_23743f2c25cac218ac1df1dc73c1d3a1"
+    },
+    {
+      "name": "growth-minimal",
+      "description": "growth over a window with one entity_by column (#38)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2020",
+        "window_end": "2023",
+        "entity_by": [
+          "reporter"
+        ]
+      },
+      "expected_op_spec_hash": "ops_777705ef920649863a69d63f0a8e294c"
+    },
+    {
+      "name": "growth-entity-by-order-a",
+      "description": "growth's entity_by in one order, paired with the reordered vector below to prove order-independence",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2020",
+        "window_end": "2023",
+        "entity_by": [
+          "reporter",
+          "stat_var"
+        ]
+      },
+      "expected_op_spec_hash": "ops_369aafd1db1797c70bf735a5d840e1d6"
+    },
+    {
+      "name": "growth-entity-by-order-b",
+      "description": "the same entity_by reordered mints the identical hash",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2020",
+        "window_end": "2023",
+        "entity_by": [
+          "stat_var",
+          "reporter"
+        ]
+      },
+      "expected_op_spec_hash": "ops_369aafd1db1797c70bf735a5d840e1d6"
+    },
+    {
+      "name": "rank-minimal",
+      "description": "rank with one rank_by column and no aggregation (#38)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ]
+      },
+      "expected_op_spec_hash": "ops_f8f2c016a6383f65e5a06760b18150f8"
+    },
+    {
+      "name": "rank-rank-by-order-a",
+      "description": "rank's rank_by in one order, paired with the reordered vector below to prove order-independence",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter",
+          "stat_var"
+        ]
+      },
+      "expected_op_spec_hash": "ops_297bcb093b685e53b2750f115c03d625"
+    },
+    {
+      "name": "rank-rank-by-order-b",
+      "description": "the same rank_by reordered mints the identical hash",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "stat_var",
+          "reporter"
+        ]
+      },
+      "expected_op_spec_hash": "ops_297bcb093b685e53b2750f115c03d625"
+    },
+    {
+      "name": "rank-limit",
+      "description": "rank-minimal with limit 3: a set limit mints a hash distinct from rank-minimal's unset one",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ],
+        "limit": 3
+      },
+      "expected_op_spec_hash": "ops_64cf4d861a568d9c7c5355eeac46aa7e"
+    },
+    {
+      "name": "rank-limit-zero-refused-at-parse",
+      "description": "limit is at least 1 at the schema layer, so 0 refuses before minting is ever reached",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ],
+        "limit": 0
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "rank-empty-rank-by-refused-at-parse",
+      "description": "rank_by is required and non-empty at the schema layer, so an empty list refuses before minting is ever reached",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": []
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "share-of-minimal",
+      "description": "share_of with just a numerator frame_ref -- denominator_frame_ref/numerator_entity/denominator_entity/numerator_unit/denominator_unit/numerator_by/denominator_by all default (share_of's own parameters landed in #38b; numerator_by/denominator_by added by the keyed share_of PR, which moved this hash)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "share_of",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        }
+      },
+      "expected_op_spec_hash": "ops_293419959ce9704d6fa2281f67fd1446"
+    },
+    {
+      "name": "join-two-frames",
+      "description": "join always needs two genuinely distinct frames -- right_frame_ref is required, not defaulted (join's own parameters landed in #38b)",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "join",
+        "frame_ref": {
+          "spec_id": "spec_11111111111111111111111111111111",
+          "content_version": "cv_22222222222222222222222222222222"
+        },
+        "right_frame_ref": {
+          "spec_id": "spec_33333333333333333333333333333333",
+          "content_version": "cv_44444444444444444444444444444444"
+        }
+      },
+      "expected_op_spec_hash": "ops_5190e2737dbddb8cf65a3307036086b9"
+    },
+    {
+      "name": "join-missing-right-frame-ref",
+      "description": "join without right_frame_ref refuses at schema validation -- there is no 'two slices of one frame' reading for join",
+      "classification": "negative",
+      "expected_failure_kind": "schema_violation",
+      "op_spec": {
+        "verb": "join",
+        "frame_ref": {
+          "spec_id": "spec_11111111111111111111111111111111",
+          "content_version": "cv_22222222222222222222222222222222"
+        }
+      }
+    },
+    {
+      "name": "aggregate-duplicate-group-by-column",
+      "description": "the same column named twice in group_by refuses at minting",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [
+          "reporter",
+          "reporter"
+        ],
+        "aggregation": "sum"
+      },
+      "expected_failure_kind": "duplicate_member"
+    },
+    {
+      "name": "filter-duplicate-predicate",
+      "description": "the identical predicate stated twice refuses at minting",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gte",
+            "value": 1000000
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gte",
+            "value": 1000000
+          }
+        ]
+      },
+      "expected_failure_kind": "duplicate_member"
+    },
+    {
+      "name": "unknown-verb-refused-at-parse",
+      "description": "a verb outside the closed set of seven refuses before minting is ever reached",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "delete",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    }
+  ]
+}

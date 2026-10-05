@@ -1,0 +1,5 @@
+{
+  "judge_model": "gemini-3.6-flash",
+  "num_samples": 3,
+  "threshold": 1.0
+}

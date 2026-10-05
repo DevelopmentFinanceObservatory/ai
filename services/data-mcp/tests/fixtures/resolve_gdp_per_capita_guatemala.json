@@ -1,0 +1,568 @@
+{
+  "schema_version": 1,
+  "query_echo": {
+    "entry_path": "parsed",
+    "raw_query": "Guatemala GDP per capita",
+    "extract_skipped": true
+  },
+  "diagnostics": {
+    "engine_build": "0eaee8728bde740cbda1625d65afcb9ee2488167",
+    "trace_id": "deadaa08a2784bed840cb2696cfc7645",
+    "warnings": [],
+    "timing_ms": {
+      "total": 2768
+    },
+    "llm_usage": {
+      "input_tokens": 3052,
+      "output_tokens": 102,
+      "cached_tokens": 0
+    },
+    "timed_out": false
+  },
+  "parts": [
+    {
+      "variable_text": "GDP per capita",
+      "warnings": [
+        {
+          "code": "time_window_defaulted",
+          "severity": "warn",
+          "message": "no time_text was given; the answer was resolved across every period with data."
+        }
+      ],
+      "timing_ms": {
+        "total": 2764,
+        "by_step": {
+          "recall": 614,
+          "shape": 1108,
+          "bind": 874,
+          "materialise": 1,
+          "answer": 79,
+          "options": 88
+        }
+      },
+      "restatement": {
+        "variable_text": "GDP per capita",
+        "entities": [
+          {
+            "text": "Guatemala"
+          }
+        ]
+      },
+      "status": "definite",
+      "spec": {
+        "spec_id": "spec_6f1fb5c052357f7b02483e059cb05bd9",
+        "definition": {
+          "schema_version": 1,
+          "spec_id": "spec_6f1fb5c052357f7b02483e059cb05bd9",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "EconomicActivity",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal",
+              "measurement_denominator": {
+                "unresolved": true
+              }
+            },
+            "slots": [
+              {
+                "property": "activitySource",
+                "binding": {
+                  "state": "value",
+                  "ref": "GrossDomesticProduction"
+                }
+              }
+            ],
+            "entities": {
+              "observationAbout": [
+                "country/GTM"
+              ]
+            },
+            "requested_window": {
+              "kind": "all"
+            }
+          }
+        },
+        "resolved": {
+          "shape": {
+            "shape_id": "economicactivity_amount_measuredvalue_nominal_per_unresolved",
+            "label": "Nominal gross domestic product per capita",
+            "population_type": {
+              "dcid": "EconomicActivity",
+              "label": "EconomicActivity"
+            },
+            "measured_property": {
+              "dcid": "amount",
+              "label": "amount"
+            },
+            "stat_type": {
+              "dcid": "measuredValue",
+              "label": "measuredValue"
+            },
+            "measurement_qualifier": {
+              "dcid": "Nominal",
+              "label": "Nominal"
+            },
+            "measurement_denominator": {
+              "dcid": "PerCapita",
+              "label": "PerCapita"
+            },
+            "measurement_denominator_unresolved": true,
+            "slot_keys": [
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "activitySource",
+                  "label": "activitySource"
+                },
+                "label": "activity source"
+              },
+              {
+                "axis": "where",
+                "label": "place"
+              },
+              {
+                "axis": "when",
+                "label": "time window"
+              },
+              {
+                "axis": "source",
+                "label": "data source"
+              }
+            ],
+            "member_count": 1,
+            "refine_supported": true
+          },
+          "slots": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "activitySource",
+                  "label": "activitySource"
+                },
+                "label": "activity source"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "GrossDomesticProduction",
+                    "label": "GrossDomesticProduction"
+                  },
+                  "value_kind": "enum_value"
+                }
+              }
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "country/GTM",
+                    "label": "Guatemala"
+                  },
+                  "value_kind": "entity"
+                }
+              }
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            }
+          ],
+          "inapplicable_slots": [],
+          "unresolved_slots": [],
+          "stat_vars": {
+            "items": [
+              {
+                "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal_PerCapita",
+                "label": "Nominal gross domestic product per capita",
+                "slot_values": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "property": {
+                        "dcid": "activitySource",
+                        "label": "activitySource"
+                      },
+                      "label": "activity source"
+                    },
+                    "value": {
+                      "ref": {
+                        "dcid": "GrossDomesticProduction",
+                        "label": "GrossDomesticProduction"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  }
+                ],
+                "constraint_properties": [
+                  "activitySource"
+                ],
+                "data_date_range": {
+                  "start": "1960",
+                  "end": "2024"
+                }
+              }
+            ],
+            "member_count": 1,
+            "member_count_exact": false,
+            "truncated": false
+          },
+          "entities": [
+            {
+              "ref": "country/GTM",
+              "label": "Guatemala",
+              "entity_type": "Country",
+              "role": "observationAbout"
+            }
+          ],
+          "coverage": {
+            "kind": "exact",
+            "has_data": true,
+            "observation_count": 65,
+            "evidence": "facet_metadata",
+            "dimensions": [
+              {
+                "label": "sources",
+                "count": 1
+              },
+              {
+                "label": "observations",
+                "count": 65
+              },
+              {
+                "label": "variables",
+                "count": 1
+              }
+            ]
+          },
+          "facets": {},
+          "slot_options": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "activitySource",
+                  "label": "activitySource"
+                },
+                "label": "activity source"
+              },
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "GrossDomesticProduction",
+                      "label": "GrossDomesticProduction"
+                    },
+                    "value_kind": "enum_value"
+                  },
+                  "coverage": {
+                    "kind": "exact",
+                    "has_data": true,
+                    "observation_count": 65,
+                    "evidence": "facet_metadata",
+                    "dimensions": [
+                      {
+                        "label": "sources",
+                        "count": 1
+                      },
+                      {
+                        "label": "observations",
+                        "count": 65
+                      }
+                    ]
+                  }
+                }
+              ],
+              "truncated": true,
+              "source": "observed"
+            }
+          ],
+          "entity_options": [],
+          "facet_options": [
+            {
+              "axis": "provenance",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "dc/base/WorldDevelopmentIndicators",
+                      "label": "WorldDevelopmentIndicators"
+                    },
+                    "value_kind": "source"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            },
+            {
+              "axis": "unit",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "USDollar",
+                      "label": "USDollar"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            }
+          ],
+          "rendered_sentence": "Nominal gross domestic product per capita in Guatemala, 1960 to 2024, according to World Development Indicators.",
+          "sentence_plan": [
+            {
+              "kind": "slot",
+              "text": "Nominal gross domestic product per capita",
+              "axis": "what",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "activitySource",
+              "binding_ref": "how:activitySource",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": " in ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "Guatemala",
+              "axis": "where",
+              "binding_ref": "where:",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ", ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "1960 to 2024",
+              "axis": "when",
+              "binding_ref": "when:",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ", according to ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "World Development Indicators",
+              "axis": "source",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ".",
+              "entity_refs": []
+            }
+          ],
+          "trace": {
+            "resolved_stat_vars": [
+              {
+                "dcid": "Amount_EconomicActivity_GrossDomesticProduction_Nominal_PerCapita",
+                "label": "Nominal gross domestic product per capita"
+              }
+            ],
+            "resolved_entities": [
+              {
+                "dcid": "country/GTM",
+                "label": "Guatemala"
+              }
+            ],
+            "resolved_sources": [
+              {
+                "dcid": "dc/base/WorldDevelopmentIndicators",
+                "label": "WorldDevelopmentIndicators"
+              }
+            ],
+            "slot_filters": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "activitySource",
+                    "label": "activitySource"
+                  },
+                  "label": "activity source"
+                },
+                "binding_kind": "value",
+                "refs": [
+                  {
+                    "dcid": "GrossDomesticProduction",
+                    "label": "GrossDomesticProduction"
+                  }
+                ],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "where",
+                  "label": "place"
+                },
+                "binding_kind": "value",
+                "refs": [
+                  {
+                    "dcid": "country/GTM",
+                    "label": "Guatemala"
+                  }
+                ],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "source",
+                  "label": "data source"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              }
+            ],
+            "query_qualifiers": [],
+            "pipeline_trace": [
+              {
+                "step": "extract",
+                "ran": false
+              },
+              {
+                "step": "recall",
+                "ran": true,
+                "ms": 614
+              },
+              {
+                "step": "shape",
+                "ran": true,
+                "ms": 1108
+              },
+              {
+                "step": "bind",
+                "ran": true,
+                "ms": 874
+              },
+              {
+                "step": "materialise",
+                "ran": true,
+                "ms": 1
+              },
+              {
+                "step": "answer",
+                "ran": true,
+                "ms": 79
+              }
+            ],
+            "n_recalled": 63,
+            "capability_version": "cap_a71dd3a39765e8e5"
+          },
+          "confidence": "high",
+          "available_at_place": true,
+          "measure_label_axes": []
+        }
+      }
+    }
+  ],
+  "rendered_sentence": "Nominal gross domestic product per capita in Guatemala, 1960 to 2024, according to World Development Indicators.",
+  "sentence_plan": [
+    {
+      "kind": "slot",
+      "text": "Nominal gross domestic product per capita",
+      "axis": "what",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "activitySource",
+      "binding_ref": "how:activitySource",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "text",
+      "text": " in ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "Guatemala",
+      "axis": "where",
+      "binding_ref": "where:",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ", ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "1960 to 2024",
+      "axis": "when",
+      "binding_ref": "when:",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ", according to ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "World Development Indicators",
+      "axis": "source",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ".",
+      "entity_refs": []
+    }
+  ],
+  "status": "definite"
+}

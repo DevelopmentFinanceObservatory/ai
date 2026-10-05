@@ -1,0 +1,660 @@
+"""Renders `get_data`'s mint manifest into the model-facing digest.
+
+On a successful call, this digest is the entire model-facing surface. The
+harness reads `structuredContent` in code, so a model only ever sees this
+digest. `harness.mcp_client.McpExecutor._get_data` takes the mint manifest
+for the provenance store and the frame reference, then answers the graph
+with `_manifest_summary`'s one line, and `executor.run` records this digest
+text as its step's `StepRecord.digest` for `narrate` to read. So whatever
+this module doesn't render into the digest text, a successful `get_data`
+call never puts in front of the model at all.
+
+A refusal is the other half of that boundary. The actionable recovery
+grammar rides `structuredContent`, and `McpExecutor` merges it into the
+graph's typed refusal (`code`, `retry_mode`, `fix`), and that is what
+reaches the model.
+
+Scope for this module: the acknowledgement line, the coverage line, any
+warnings that qualify that coverage, the frame reference, the citation
+line, per-series statistics, any dropped-role, unheld-region,
+remint-persistence, operation-poll, or degraded-frame notes, and any
+remaining manifest warnings.
+
+Deliberately independent of `data_mcp.digest`: that module parses the Search
+API's resolve envelope (`resolved.coverage["kind"]`/`["has_data"]`, `.get()`
+on a facet value that is always a mapping there), shapes a manifest doesn't
+have. `strip_manifest`'s `CoverageModel` carries `{rows, dimensions, window}`
+with neither `kind` nor `has_data`, and a manifest's facet values are plain
+strings, so reusing `data_mcp.digest`'s renderers here would either silently
+misrender ("no data" on every frame) or raise (`AttributeError` on a bare
+string). `render_get_data_digest` is the public seam.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, cast
+
+from common.materialisation import FrameRef
+from common.price_basis import price_basis_reading
+
+from data_mcp.frame_materialisation import MaterialisationOutcome
+from data_mcp.manifest import (
+    CitationModel,
+    CoverageModel,
+    DefinitionModel,
+    Manifest,
+    SeriesStatisticsModel,
+    WarningModel,
+)
+
+# At most this many unheld region members are named; the rest are only
+# counted. A region can carry dozens of unheld members (a continent's worth
+# of countries this graph doesn't hold), and naming all of them would let one
+# region dominate the digest.
+_UNHELD_MEMBER_NAME_CAP = 3
+
+# The digest carries statistics for up to this many series; past it, only the
+# series count is reported. Matches the platform contract's own ceiling: a
+# wide frame (dozens of series across several units) has no single
+# meaningful summary, and a model holding forty sets of figures is likelier
+# to quote the wrong one than to reason across them.
+_STATISTICS_SERIES_CAP = 8
+
+# At most this many manifest warnings are rendered individually; the rest
+# are only counted. A frame can carry more warnings than are worth reading
+# one by one, and a run-on trailer is as unreadable as no trailer at all.
+# This is one shared budget across coverage and non-coverage warnings together,
+# not a per-group cap: coverage warnings draw from it first, and whatever is
+# left over goes to the rest.
+_MANIFEST_WARNING_CAP = 5
+
+# At most this many entity dcids are named per role in the acknowledgement
+# line; the rest are only counted. Resolving a region can expand to dozens
+# of member dcids (e.g. "Africa" resolves to roughly 54 countries), and
+# naming all of them would let one role's breadth dominate the sentence.
+_ACKNOWLEDGEMENT_ENTITY_CAP = 8
+
+# At most this many source labels are named in the citation line; the rest
+# are only counted. A frame merged across several providers carries one
+# source per provider, and naming all of them would let the citation line
+# grow with the frame instead of summarising it.
+_CITATION_SOURCE_CAP = 5
+
+# The SDG/OECD price-basis unit-code family: current prices (`CU`) or
+# constant prices carrying an optional base year (`CON`, `CON_1999`),
+# a three-letter currency, and an optional magnitude suffix.
+_SDG_PRICE_BASIS_RE = re.compile(
+    r"^SDG_(CU|CON(?:_(\d{4}))?)_(?P<currency>[A-Z]{3})(?:_(?P<magnitude>K|M|B))?$"
+)
+
+# This deployment's own current-price unit refs, read from
+# `search.engine.unit.refs._UNIT_REF_TABLE`.
+_DEPLOYMENT_CURRENT_REFS = frozenset({"USD", "EUR", "GBP"})
+
+# This deployment's own constant-price unit refs, same source: a currency
+# and the base year it is constant against.
+_DEPLOYMENT_CONSTANT_RE = re.compile(r"^Constant(?P<currency>[A-Z]{3})_(?P<year>\d{4})$")
+
+_MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
+
+# The manifest warning dfo-apis adds when a summed mint adds more than one
+# StatVar into the series it labels `dcid:<spec_id>`. Its message carries the
+# count of StatVars summed, which nothing else in the digest states, so it
+# renders outside `_MANIFEST_WARNING_CAP`.
+_STAT_VARS_SUMMED = "stat_vars_summed"
+
+# The coverage dimension dfo-apis counts after every declared role column.
+_YEARS_DIMENSION = "years"
+
+# A reader's noun for each flow axis a role column can sit on; a role with no
+# axis (`observationAbout`) reads "entity".
+_GRAIN_NOUNS = {"origin": "provider", "destination": "recipient"}
+
+
+@dataclass(frozen=True, kw_only=True)
+class UnheldRegionSummary:
+    """One resolved region this call queried that carries members outside this graph.
+
+    Built by `get_data_tool.py` from a `data_mcp.resolution.ResolvedRegion`, and
+    kept as plain data here rather than importing that type directly -- this
+    module renders whatever summary it's handed, with no seam of its own onto
+    the resolution grammar.
+    """
+
+    region_name: str
+    unheld_names: list[str]
+    unheld_count: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class OperationPollNote:
+    """This call's own mint crossed dfo-apis' sync budget and ran as a queued
+    operation, polled to completion before this call returned. Built by
+    `get_data_tool.py` from `data_mcp.operations.ResolvedOperation`, whose own
+    docstring explains why the digest reports this rather than leaving it to be
+    inferred from how long the call took.
+    """
+
+    operation_id: str
+    poll_attempts: int
+    elapsed_s: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SummedFamily:
+    """The family a summed mint added into one series per entity.
+
+    `ref` is the `stat_var` every summed series carries, and `label` is the
+    family's name from the `stat_vars_summed` warning, `None` when dfo-apis
+    sent none.
+    """
+
+    ref: str
+    label: str | None
+
+
+def statistics_needs_fetch(series_count: int | None) -> bool:
+    """True when `render_get_data_digest` will use fetched per-series rows for `series_count`.
+
+    `get_data_tool.py` calls this before touching the network, so a call
+    whose count is `None` (an old record), `0`, or past
+    `_STATISTICS_SERIES_CAP` never fetches the statistics artifact at all --
+    the digest renders a count-only line, or nothing, from `series_count`
+    alone in every one of those cases.
+    """
+    return series_count is not None and 0 < series_count <= _STATISTICS_SERIES_CAP
+
+
+def render_get_data_digest(
+    *,
+    manifest: Manifest,
+    frame_ref: FrameRef,
+    entity_labels: Mapping[str, str],
+    dropped_roles: Sequence[str],
+    unheld_regions: Sequence[UnheldRegionSummary],
+    remint_persist_failed: bool = False,
+    degraded_frame: MaterialisationOutcome | None = None,
+    series_stats: Sequence[SeriesStatisticsModel] | None = None,
+    statistics_fetch_failed: bool = False,
+    operation_poll: OperationPollNote | None = None,
+) -> str:
+    """Render `manifest` into the model-facing digest for `get_data`.
+
+    Args:
+        manifest: The stripped mint-route manifest this call retrieved.
+        frame_ref: The reference the frame is held under
+            (`frame_materialisation.frame_ref_for`).
+        entity_labels: dcid -> name, for every entity this call's own
+            resolution named. A dcid outside this map (e.g. one carried over
+            unchanged from the base definition, which this call never
+            resolved) renders as itself.
+        dropped_roles: Roles the base definition bound that an incoming,
+            non-empty `entities` override silently left unbound.
+        unheld_regions: One summary per resolved region that came back with
+            members this deployment's graph doesn't hold.
+        remint_persist_failed: This call re-minted under a new `spec_id` and
+            could not confirm the definition store write -- the store was
+            unreachable, or the write outran the deadline and may still land.
+            The frame reference below is genuine and usable right now, but a
+            later `get_data` call passing that same `spec_id` may not find it
+            registered.
+        degraded_frame: The `"degraded"` outcome of this call's
+            `data_mcp.frame_materialisation.materialise_and_register`: the mint
+            succeeded and the frame reference below is real, but the frame is not
+            confirmed held. Its `degraded_reason` picks the note's wording, and a
+            `"fetch"` or `"store_unchecked"` note reports its `attempts`, which may
+            be `0` (a sign failure or a timeout before the first GET completed).
+            `None` (the default) renders no note.
+        series_stats: The rows `data_mcp.series_statistics.fetch_series_statistics`
+            read off `manifest`'s own statistics artifact, already fetched
+            by the caller -- this function does no I/O of its own. Only
+            meaningful, and only ever read, when
+            `statistics_needs_fetch(manifest.series_count)` was true;
+            ignored otherwise, since a count of `0`, past the cap, or `None`
+            renders from `manifest.series_count` alone.
+        statistics_fetch_failed: The caller tried the fetch
+            `statistics_needs_fetch` called for and it raised -- a signed-URL
+            fetch or a Parquet decode failure. Renders a count-only line with
+            a note rather than raising: the mint itself succeeded and the
+            frame reference above is real, so a sidecar-artifact hiccup
+            degrades this section alone, exactly like a degraded frame fetch
+            degrades the frame reference's own section.
+        operation_poll: Set when this call's own mint crossed dfo-apis' sync
+            budget and was queued as an operation, then polled to completion
+            here before returning. `None` (the default) renders no note,
+            which is every call's outcome except this one -- an ordinary
+            synchronous mint never touches `data_mcp.operations` at all.
+
+    Returns:
+        A short prose digest: an acknowledgement of what was retrieved, its
+        coverage, any warnings that qualify that coverage, the frame
+        reference for downstream tools, then the citation, per-series statistics, any
+        dropped-role, unheld-region, remint-persistence, or operation-poll
+        notes, any degraded-fetch note, the `stat_vars_summed` warning, and
+        any remaining manifest warnings. On a `stat_vars_summed` warning the
+        acknowledgement names the grain of the total and each summed series
+        is headed as the family's total.
+    """
+    definition = manifest.definition
+    if definition is None:
+        # get_data always mints via `kind: "spec_id"`, which the mint route
+        # answers with a definition manifest, never a collection one -- this
+        # would mean that contract changed underneath this module.
+        raise ValueError(
+            "get_data's manifest carries no 'definition'; a collection manifest "
+            "here would mean the mint route's contract changed"
+        )
+    summed_warnings = [w for w in manifest.warnings if w.code == _STAT_VARS_SUMMED]
+    summed = (
+        _SummedFamily(
+            ref=f"dcid:{definition.spec_id}", label=summed_warnings[0].stat_var_label or None
+        )
+        if summed_warnings
+        else None
+    )
+    coverage_warnings, other_warnings = _split_coverage_warnings(
+        [w for w in manifest.warnings if w.code != _STAT_VARS_SUMMED]
+    )
+    shown_coverage, shown_other, warning_remainder = _budget_warnings(
+        coverage_warnings, other_warnings
+    )
+    sections = [
+        _acknowledgement_line(definition, manifest.coverage, entity_labels, summed=summed),
+        _coverage_line(manifest.coverage, definition),
+    ]
+    sections.extend(_warning_lines(shown_coverage))
+    sections.append(_frame_reference_line(frame_ref))
+    sections.append(_citation_line(manifest.citation))
+    sections.extend(
+        _statistics_sections(
+            manifest.series_count,
+            series_stats,
+            fetch_failed=statistics_fetch_failed,
+            summed=summed,
+        )
+    )
+    sections.extend(_dropped_role_line(role) for role in dropped_roles)
+    sections.extend(_unheld_region_line(region) for region in unheld_regions)
+    if remint_persist_failed:
+        sections.append(_remint_persist_failed_line())
+    if operation_poll is not None:
+        sections.append(_operation_poll_line(operation_poll))
+    if degraded_frame is not None:
+        sections.append(_degraded_frame_note(degraded_frame))
+    sections.extend(_warning_lines(summed_warnings))
+    sections.extend(_warning_lines(shown_other))
+    if warning_remainder > 0:
+        sections.append(f"{warning_remainder} more warning(s) not shown.")
+    return "\n\n".join(sections)
+
+
+def _split_coverage_warnings(
+    warnings: Sequence[WarningModel],
+) -> tuple[list[WarningModel], list[WarningModel]]:
+    """`warnings` split into ones that qualify the served coverage and the rest.
+
+    A coverage-scope warning's code starts with `coverage_` (for example
+    `coverage_below_scope`, raised when the served window falls short of the
+    requested one) and belongs beside the coverage line it qualifies, ahead
+    of statistics computed only over the served rows. Every other warning
+    keeps its place at the end of the digest.
+    """
+    coverage_warnings = [w for w in warnings if w.code.startswith("coverage_")]
+    other_warnings = [w for w in warnings if not w.code.startswith("coverage_")]
+    return coverage_warnings, other_warnings
+
+
+def _acknowledgement_line(
+    definition: DefinitionModel,
+    coverage: CoverageModel,
+    entity_labels: Mapping[str, str],
+    *,
+    summed: _SummedFamily | None,
+) -> str:
+    """A factual line built only from the identity document and its own entities.
+
+    No prose source exists here the way `search`'s `rendered_sentence` does --
+    `StoredDefinition` carries only `{spec_id, schema_version, canonical_bytes}`
+    -- so this states only what the identity document itself says: what shape
+    was minted, and for whom. A summed mint also names its family, by the
+    label dfo-apis gave it when there is one, and says the family's StatVars
+    were summed into one total series per entity role. dfo-apis sums away the
+    StatVar axis and keeps every declared role column, a role the question
+    left open included, so the roles come from `coverage.dimensions`, one per
+    frame role column plus `years`. The identity's `entities` hold only the
+    bound roles, keyed by flow axis.
+    """
+    identity = definition.identity
+    shape = identity.get("shape")
+    shape_id = shape.get("id") if isinstance(shape, Mapping) else None
+    if summed is not None:
+        subject = summed.label or "the requested StatVar family"
+    elif isinstance(shape_id, str) and shape_id:
+        subject = shape_id
+    else:
+        subject = "the requested data"
+
+    entities = identity.get("entities")
+    pieces = []
+    if isinstance(entities, Mapping):
+        for role, dcids in entities.items():
+            if isinstance(dcids, list) and dcids:
+                pieces.append(f"{role} {_render_dcids(dcids, entity_labels)}")
+    scope_text = " · ".join(pieces)
+
+    line = f"Retrieved {subject} for {scope_text}" if scope_text else f"Retrieved {subject}"
+    if summed is None:
+        return f"{line}."
+    nouns = dict.fromkeys(
+        _GRAIN_NOUNS.get(dim.axis or "", "entity")
+        for dim in coverage.dimensions
+        if dim.label != _YEARS_DIMENSION
+    )
+    grain = " and ".join(nouns) or "entity"
+    return f"{line}, with its StatVars summed into one total series per {grain}."
+
+
+def _render_dcids(dcids: Sequence[Any], entity_labels: Mapping[str, str]) -> str:
+    names = [dcid if not isinstance(dcid, str) else entity_labels.get(dcid, dcid) for dcid in dcids]
+    return _joined_with_cap([str(name) for name in names], _ACKNOWLEDGEMENT_ENTITY_CAP)
+
+
+def _joined_with_cap(items: Sequence[str], cap: int) -> str:
+    """Comma-join `items`, naming at most `cap` and summarising the rest.
+
+    Shared by every digest line whose item count can grow with the frame
+    rather than with what the model needs to know, so the line's length
+    stays bounded instead of tracking frame breadth.
+    """
+    shown = items[:cap]
+    remainder = len(items) - len(shown)
+    text = ", ".join(shown)
+    if remainder <= 0:
+        return text
+    return f"{text}, and {remainder} more" if text else f"{remainder} more"
+
+
+def _coverage_line(coverage: CoverageModel, definition: DefinitionModel) -> str:
+    row_word = "row" if coverage.rows == 1 else "rows"
+    pieces = [f"{coverage.rows} {row_word}"]
+    dims_text = ", ".join(f"{dim.count} {dim.label}" for dim in coverage.dimensions)
+    if dims_text:
+        pieces.append(dims_text)
+    window_text = _coverage_window_text(
+        coverage.window, definition.identity.get("requested_window")
+    )
+    if window_text:
+        pieces.append(window_text)
+    return "Coverage: " + " · ".join(pieces)
+
+
+def _coverage_window_text(window: Mapping[str, object] | None, requested_window: object) -> str:
+    """The coverage line's window piece, naming a requested range the served window fell short of.
+
+    `requested_window` is the identity document's own record of what the caller
+    asked for. Only its `range` kind carries years to compare. Its `all` and `latest`
+    kinds name no specific span, so the served window is the only fact worth stating.
+    """
+    served = _window_text(window)
+    if isinstance(requested_window, Mapping) and requested_window.get("kind") == "range":
+        requested = _window_text(cast("Mapping[str, object]", requested_window))
+        if requested and requested != served:
+            return f"requested {requested}, served {served}" if served else f"requested {requested}"
+    return served
+
+
+def _window_text(window: Mapping[str, object] | None) -> str:
+    if not window:
+        return ""
+    start, end = window.get("start_year"), window.get("end_year")
+    if start is not None and end is not None:
+        return f"{start}-{end}"
+    if start is not None:
+        return f"since {start}"
+    if end is not None:
+        return f"through {end}"
+    return ""
+
+
+def _frame_reference_line(frame_ref: FrameRef) -> str:
+    return (
+        f"Frame: spec_id={frame_ref.spec_id}, content_version={frame_ref.content_version} "
+        "-- pass both to downstream tools."
+    )
+
+
+def _citation_line(citation: CitationModel) -> str:
+    labels = _joined_with_cap([source.label for source in citation.sources], _CITATION_SOURCE_CAP)
+    return f"Source: {citation.text} ({labels})." if labels else f"Source: {citation.text}."
+
+
+def _dropped_role_line(role: str) -> str:
+    return (
+        f"Note: this call's entities override did not restate {role!r}, so that "
+        "role is no longer bound in the re-minted definition."
+    )
+
+
+def _unheld_region_line(region: UnheldRegionSummary) -> str:
+    shown = region.unheld_names[:_UNHELD_MEMBER_NAME_CAP]
+    remainder = region.unheld_count - len(shown)
+    names_text = ", ".join(shown)
+    if remainder > 0:
+        names_text = f"{names_text}, and {remainder} more" if names_text else f"{remainder} more"
+    return (
+        f"Note: {region.region_name!r} has {region.unheld_count} member(s) this "
+        f"deployment's graph does not hold ({names_text})."
+    )
+
+
+def _remint_persist_failed_line() -> str:
+    return (
+        "Note: this call re-minted a new spec_id, and could not confirm that the definition "
+        "store holds it -- the frame reference above is real and usable now, but a later "
+        "get_data call passing this spec_id may refuse definition_not_held rather than "
+        "find it."
+    )
+
+
+def _operation_poll_line(note: OperationPollNote) -> str:
+    attempt_word = "attempt" if note.poll_attempts == 1 else "attempts"
+    return (
+        f"Note: this mint exceeded the synchronous budget and ran as a queued operation "
+        f"({note.operation_id}) -- {note.poll_attempts} poll {attempt_word} over "
+        f"{note.elapsed_s:.0f}s before completing. The frame reference above is the same "
+        "as any other successful mint."
+    )
+
+
+def _degraded_frame_note(outcome: MaterialisationOutcome) -> str:
+    # `materialise_and_register` reads the frame store before it fetches, so a repeat
+    # call finds a frame that has landed since without fetching it, and otherwise
+    # fetches and writes it again.
+    retry = (
+        "Call get_data again with this spec_id to retry: it uses the frame if the store "
+        "holds it by then, and otherwise fetches and writes it again."
+    )
+    if outcome.degraded_reason == "store_write":
+        return (
+            "Note: the artifact behind the frame reference above was fetched, but the "
+            "frame store did not confirm the write before this call's deadline. The mint "
+            "succeeded and the reference names a real, durable result, and the write may "
+            "still land -- until it does, any analysis verb given this frame_ref refuses "
+            f"frame_not_held. {retry}"
+        )
+    # `attempts` can be `0`: a sign failure or a crossed deadline before the first GET
+    # ever completed means no attempt actually landed, and saying "after 0 attempt(s)"
+    # would misstate that as a GET that was tried and failed.
+    retrieval = (
+        "without a single attempt reaching the artifact"
+        if outcome.attempts == 0
+        else f"after {outcome.attempts} attempt(s)"
+    )
+    if outcome.degraded_reason == "store_unchecked":
+        held = (
+            "The frame store did not answer in time either, so this call could not check "
+            "whether it already holds the frame -- if it does not, any analysis verb given "
+            "this frame_ref refuses frame_not_held."
+        )
+    else:
+        held = (
+            "No bytes are held yet -- any analysis verb given this frame_ref will refuse "
+            "frame_not_held until a retry succeeds."
+        )
+    return (
+        f"Note: the artifact behind the frame reference above could not be retrieved "
+        f"{retrieval}. The mint succeeded and the reference names a real, durable result. "
+        f"{held} {retry}"
+    )
+
+
+def _statistics_sections(
+    series_count: int | None,
+    series_stats: Sequence[SeriesStatisticsModel] | None,
+    *,
+    fetch_failed: bool,
+    summed: _SummedFamily | None,
+) -> list[str]:
+    """One rendered block per series, or a single count-only line, or nothing.
+
+    `series_count` is `None` for a manifest minted before the field existed
+    -- that snapshot renders everything else and simply carries no
+    statistics section, the same as `0` (a mint that resolved to no series
+    at all): neither is worth a line. Past `_STATISTICS_SERIES_CAP`, or on a
+    fetch failure the caller already tried and reports via `fetch_failed`,
+    only the count is rendered -- `series_stats` is never read in either
+    case. Otherwise `series_stats` is exactly what the caller fetched from
+    the manifest's own statistics artifact; series membership comes from
+    those rows alone, never from `coverage.dimensions` or any other reading
+    of the frame's own rows. `summed` is the family a summed mint added into
+    one series, and `None` otherwise.
+    """
+    if not series_count:
+        return []
+    if series_count > _STATISTICS_SERIES_CAP:
+        return [
+            f"Statistics: {series_count} series retrieved -- too many to "
+            f"summarise individually (cap is {_STATISTICS_SERIES_CAP})."
+        ]
+    if fetch_failed:
+        return [
+            f"Statistics: {series_count} series retrieved -- could not fetch or decode "
+            "the statistics artifact, showing the count only."
+        ]
+    return [_series_statistics_block(series, summed) for series in series_stats or ()]
+
+
+def _series_statistics_block(series: SeriesStatisticsModel, summed: _SummedFamily | None) -> str:
+    # Only a summed series carries the family's own ref as its stat_var.
+    if summed is not None and series.stat_var == summed.ref:
+        name = summed.label or f"[{series.stat_var}]"
+        header_pieces = [f"Summed total of the family {name}"]
+    else:
+        header_pieces = [series.stat_var]
+    header_pieces.extend(f"{entity.role} {entity.ref}" for entity in series.entities)
+    unit = series.facet.get("unit")
+    if isinstance(unit, str):
+        reading = _unit_reading(unit)
+        header_pieces.append(f"unit {unit} ({reading})" if reading else f"unit {unit}")
+    first = f"first {_format_magnitude(series.first.value)} ({series.first.period})"
+    latest = f"latest {_format_magnitude(series.latest.value)} ({series.latest.period})"
+    minimum = f"min {_format_magnitude(series.minimum.value)} ({series.minimum.period})"
+    maximum = f"max {_format_magnitude(series.maximum.value)} ({series.maximum.period})"
+    lines = [
+        " · ".join(header_pieces),
+        f"  {first} · {latest} · {minimum} · {maximum}",
+    ]
+    if series.change is not None:
+        change_line = f"  change over window {_format_magnitude(series.change.absolute)}"
+        if series.change.percent is not None:
+            change_line += f" ({_format_percent(series.change.percent)}%)"
+        lines.append(change_line)
+    return "\n".join(lines)
+
+
+def _format_magnitude(value: float) -> str:
+    """Scale a statistic value to a short magnitude string, e.g. `12.4m`, `-2.6m`.
+
+    Always scaled to thousand/million/billion at one decimal place, so a
+    statistic (a citable figure the materialisation library computed) never
+    reads back as a literal observation value.
+    """
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000_000:
+        return f"{sign}{magnitude / 1_000_000_000:.1f}b"
+    if magnitude >= 1_000_000:
+        return f"{sign}{magnitude / 1_000_000:.1f}m"
+    if magnitude >= 1_000:
+        return f"{sign}{magnitude / 1_000:.1f}k"
+    return f"{sign}{magnitude:.1f}"
+
+
+def _format_percent(value: float) -> str:
+    return f"{value:.0f}"
+
+
+def _unit_reading(unit: str) -> str | None:
+    """A plain-language current-vs-constant-prices reading of a recognised unit code.
+
+    Matches only the SDG/OECD price-basis form and this deployment's own
+    current- and constant-price refs. Every other code, recognised elsewhere
+    or not, has no reading here and renders as itself.
+    """
+    match = _SDG_PRICE_BASIS_RE.match(unit)
+    if match:
+        return _price_basis_reading(
+            current=match.group(1) == "CU",
+            year=match.group(2),
+            currency=match.group("currency"),
+            magnitude=match.group("magnitude"),
+        )
+    if unit in _DEPLOYMENT_CURRENT_REFS:
+        return _price_basis_reading(current=True, year=None, currency=unit, magnitude=None)
+    match = _DEPLOYMENT_CONSTANT_RE.match(unit)
+    if match:
+        return _price_basis_reading(
+            current=False,
+            year=match.group("year"),
+            currency=match.group("currency"),
+            magnitude=None,
+        )
+    return None
+
+
+def _price_basis_reading(
+    *, current: bool, year: str | None, currency: str, magnitude: str | None
+) -> str:
+    reading = price_basis_reading(
+        currency=currency, prices="current" if current else "constant", base_year=year
+    )
+    return f"{reading}, {_MAGNITUDE_WORDS[magnitude]}" if magnitude else reading
+
+
+def _budget_warnings(
+    coverage_warnings: Sequence[WarningModel], other_warnings: Sequence[WarningModel]
+) -> tuple[list[WarningModel], list[WarningModel], int]:
+    """Split one shared budget of `_MANIFEST_WARNING_CAP` across both warning groups.
+
+    Coverage warnings keep their position beside the coverage line and draw
+    from the budget first; whatever budget remains goes to the other
+    warnings at the end. Whatever isn't shown from either group is combined
+    into a single remainder count, reported once.
+    """
+    shown_coverage = list(coverage_warnings[:_MANIFEST_WARNING_CAP])
+    remaining_budget = _MANIFEST_WARNING_CAP - len(shown_coverage)
+    shown_other = list(other_warnings[:remaining_budget]) if remaining_budget > 0 else []
+    remainder = (len(coverage_warnings) - len(shown_coverage)) + (
+        len(other_warnings) - len(shown_other)
+    )
+    return shown_coverage, shown_other, remainder
+
+
+def _warning_lines(warnings: Sequence[WarningModel]) -> list[str]:
+    """One line per manifest warning, with no cap or remainder of its own."""
+    return [
+        f"Warning [{warning.code}] ({warning.severity}): {warning.message}" for warning in warnings
+    ]

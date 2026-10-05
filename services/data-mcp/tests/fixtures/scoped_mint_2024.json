@@ -1,0 +1,205 @@
+{
+  "recorded": "dev dfo-apis, POST /api/datasets kind spec_id with scope.window, through data-mcp get_data",
+  "window": {
+    "kind": "range",
+    "start_year": 2024,
+    "end_year": 2024
+  },
+  "answers": [
+    {
+      "seed": {
+        "spec_id": "spec_5a427ccbf716df03efcd8896d335dee4",
+        "identity": {
+          "identity_version": "spec1",
+          "shape": {
+            "kind": "statvar_schema",
+            "population_type": "FinancialFlow",
+            "measured_property": "amount",
+            "stat_type": "measuredValue",
+            "measurement_qualifier": "Nominal"
+          },
+          "slots": [
+            {
+              "property": "crsCooperationModality",
+              "binding": {
+                "state": "unbound"
+              }
+            },
+            {
+              "property": "crsPurpose",
+              "binding": {
+                "state": "value",
+                "ref": "CRSPurposeCode110"
+              }
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "binding": {
+                "state": "unbound"
+              }
+            },
+            {
+              "property": "crsTypeOfFlow",
+              "binding": {
+                "state": "value",
+                "ref": "CRSTypeOfFlow10"
+              }
+            },
+            {
+              "property": "financialFlowType",
+              "binding": {
+                "state": "value",
+                "ref": "Disbursement"
+              }
+            },
+            {
+              "property": "nettingBasis",
+              "binding": {
+                "state": "value",
+                "ref": "Gross"
+              }
+            }
+          ],
+          "entities": {
+            "destination": [
+              "country/KEN"
+            ]
+          },
+          "requested_window": {
+            "kind": "all"
+          }
+        }
+      },
+      "minted": {
+        "spec_id": "spec_cda07653c670ca8cc439ba39d6823742",
+        "identity": {
+          "shape": {
+            "kind": "statvar_schema",
+            "stat_type": "measuredValue",
+            "population_type": "FinancialFlow",
+            "measured_property": "amount",
+            "measurement_qualifier": "Nominal"
+          },
+          "slots": [
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsCooperationModality"
+            },
+            {
+              "binding": {
+                "ref": "CRSPurposeCode110",
+                "state": "value"
+              },
+              "property": "crsPurpose"
+            },
+            {
+              "binding": {
+                "state": "unbound"
+              },
+              "property": "crsTypeOfFinance"
+            },
+            {
+              "binding": {
+                "ref": "CRSTypeOfFlow10",
+                "state": "value"
+              },
+              "property": "crsTypeOfFlow"
+            },
+            {
+              "binding": {
+                "ref": "Disbursement",
+                "state": "value"
+              },
+              "property": "financialFlowType"
+            },
+            {
+              "binding": {
+                "ref": "Gross",
+                "state": "value"
+              },
+              "property": "nettingBasis"
+            }
+          ],
+          "entities": {
+            "destination": [
+              "country/KEN"
+            ]
+          },
+          "identity_version": "spec1",
+          "requested_window": {
+            "kind": "range",
+            "end_year": 2024,
+            "start_year": 2024
+          }
+        }
+      }
+    },
+    {
+      "seed": {
+        "spec_id": "spec_ea1628059ea99e1dda8c3cac9f2434fa",
+        "identity": {
+          "identity_version": "spec1",
+          "shape": {
+            "kind": "statvar_schema",
+            "population_type": "FinancialFlow",
+            "measured_property": "amount",
+            "stat_type": "measuredValue",
+            "measurement_qualifier": "Nominal"
+          },
+          "slots": [
+            {
+              "property": "crsCooperationModality",
+              "binding": {
+                "state": "unbound"
+              }
+            },
+            {
+              "property": "crsPurpose",
+              "binding": {
+                "state": "value",
+                "ref": "CRSPurposeCode110"
+              }
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "binding": {
+                "state": "unbound"
+              }
+            },
+            {
+              "property": "crsTypeOfFlow",
+              "binding": {
+                "state": "value",
+                "ref": "CRSTypeOfFlow10"
+              }
+            },
+            {
+              "property": "financialFlowType",
+              "binding": {
+                "state": "value",
+                "ref": "Disbursement"
+              }
+            },
+            {
+              "property": "nettingBasis",
+              "binding": {
+                "state": "value",
+                "ref": "Gross"
+              }
+            }
+          ],
+          "entities": {},
+          "requested_window": {
+            "kind": "all"
+          }
+        }
+      },
+      "minted": {
+        "spec_id": "spec_fb56e081d5f4a1fdc15bb7eef2a4c547",
+        "identity": null
+      }
+    }
+  ]
+}

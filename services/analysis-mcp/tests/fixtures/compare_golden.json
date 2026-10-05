@@ -1,0 +1,23 @@
+{
+  "left_entity": { "reporter": "dcid:USA" },
+  "right_entity": { "reporter": "dcid:USA" },
+  "expected_left_periods": ["2022", "2023"],
+  "expected_right_periods": ["2022", "2023"],
+  "expected_intersected_periods": ["2022", "2023"],
+  "expected_left_coverage_fraction": 1.0,
+  "expected_right_coverage_fraction": 1.0,
+  "expected_period_comparisons": [
+    {
+      "time_period": "2022",
+      "left_value": 55303000000.0,
+      "right_value": 25130000000000.0,
+      "delta": 25074697000000.0
+    },
+    {
+      "time_period": "2023",
+      "left_value": 63575000000.0,
+      "right_value": 26486000000000.0,
+      "delta": 26422425000000.0
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+Source card listing 1 source (`cmp_01j9zc4kv7m4p7q9r1t0`, revision 1).
+
+- OECD DAC, licence CC BY 4.0, retrieved 2026-06-12: <https://stats.oecd.org/>
+
+Data through 2024; last refreshed 2026-06-12; next update expected 2026-10.
+Source: OECD DAC via ONE DFO, retrieved 12 June 2026

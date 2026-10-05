@@ -1,0 +1,53 @@
+[project]
+name = "common"
+version = "0.1.0"
+description = "Shared internals for dfo-ai services: settings base, logging, telemetry init."
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp>=4.0.10,<5",
+    "pydantic-settings>=2.0",
+    # The durable materialisation store's on-disk `Frame` shape
+    # (`common.materialisation.frame_codec`): a `Frame` is written to and
+    # read from whole Parquet-file bytes, the same library data-mcp already
+    # depends on for its own artifact parsing.
+    "pyarrow>=18.0",
+    # `common.materialisation.gcs_store`'s durable, bucket-backed
+    # `MaterialisationStore` -- the same version floor data-mcp's own
+    # `definition_store/gcs.py` depends on.
+    "google-cloud-storage>=2.18",
+    # Imported lazily by common.telemetry, and only when the LANGFUSE_* trio is
+    # set. It is a hard dependency anyway because `just env` fills those keys
+    # from Secret Manager by default, so the import path is the normal one.
+    # Capped at the major actually verified here: langfuse has broken its public
+    # API at every major so far (v3 renamed the client entry point, v4 replaced
+    # start_span/start_generation with start_observation). Since telemetry only
+    # runs when credentials are present, a silent major bump would surface as
+    # broken tracing in deployment rather than a failing test. 4.9 is the first
+    # release with the `mask_otel_spans` client argument.
+    "langfuse>=4.9,<5.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2

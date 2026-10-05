@@ -1,0 +1,8 @@
+site_name: MCP server
+docs_dir: docs/guide
+extra:
+  dfo:
+    path: mcp
+nav:
+  - Connect: connect.md
+  - What you can ask: what-you-can-ask.md

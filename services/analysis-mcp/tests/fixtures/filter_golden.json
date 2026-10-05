@@ -1,0 +1,33 @@
+{
+  "predicates": [
+    {
+      "kind": "ordered_threshold",
+      "column": "value",
+      "op": "gte",
+      "value": 50000000000
+    }
+  ],
+  "expected_total_row_count": 15,
+  "expected_kept_row_count": 2,
+  "expected_dropped_row_count": 13,
+  "expected_kept_row_summaries": [
+    {
+      "row_key": [
+        ["stat_var", "dcid:OfficialDevelopmentAssistanceNet_Disbursement"],
+        ["reporter", "dcid:USA"],
+        ["time_period", "2022"]
+      ],
+      "value": 55303000000.0,
+      "unit": "dcid:USDollar"
+    },
+    {
+      "row_key": [
+        ["stat_var", "dcid:OfficialDevelopmentAssistanceNet_Disbursement"],
+        ["reporter", "dcid:USA"],
+        ["time_period", "2023"]
+      ],
+      "value": 63575000000.0,
+      "unit": "dcid:USDollar"
+    }
+  ]
+}

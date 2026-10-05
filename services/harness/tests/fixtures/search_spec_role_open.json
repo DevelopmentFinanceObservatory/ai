@@ -1,0 +1,665 @@
+{
+  "comment": "One spec block of a `search` answer from dfo-apis at 74150da8 reading the dev graph, for the part discovery sends for \"top donors for education aid to Kenya\", {\"variable\": \"education aid\", \"entities\": [{\"text\": \"Kenya\", \"role\": \"recipient\"}], \"time\": \"2015 to 2023\"}: it resolved `definite` to spec_8f939bda6d95e552c87f95e77a81c071 with Kenya bound under `destination` and a `role_scope_defaulted` warning, and `resolved.role_axis_facts` counts the 55 providers Search left open on `origin`, with no `scope`. Trimmed to what the tests read: `resolved.stat_vars.items` keeps 2 of its 89 items, with `member_count: 89` as recorded, and `trace`, `slot_options`, `entity_options`, `sentence_plan` and `alternative_measures` are dropped.",
+  "spec": {
+    "spec_id": "spec_8f939bda6d95e552c87f95e77a81c071",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_8f939bda6d95e552c87f95e77a81c071",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "FinancialFlow",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_qualifier": "Nominal"
+        },
+        "slots": [
+          {
+            "property": "crsCooperationModality",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsPurpose",
+            "binding": {
+              "state": "value",
+              "ref": "CRSPurposeCode110"
+            }
+          },
+          {
+            "property": "crsTypeOfFinance",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "crsTypeOfFlow",
+            "binding": {
+              "state": "value",
+              "ref": "CRSTypeOfFlow10"
+            }
+          },
+          {
+            "property": "dac2aAidType",
+            "binding": {
+              "state": "unbound"
+            }
+          },
+          {
+            "property": "financialFlowType",
+            "binding": {
+              "state": "value",
+              "ref": "Disbursement"
+            }
+          },
+          {
+            "property": "nettingBasis",
+            "binding": {
+              "state": "value",
+              "ref": "Gross"
+            }
+          }
+        ],
+        "entities": {
+          "destination": [
+            "country/KEN"
+          ]
+        },
+        "requested_window": {
+          "kind": "range",
+          "start_year": 2015,
+          "end_year": 2023
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "financialflow_amount_measuredvalue_nominal",
+        "label": "gross disbursements (nominal, education, official development assistance)",
+        "population_type": {
+          "dcid": "FinancialFlow",
+          "label": "financial flow"
+        },
+        "measured_property": {
+          "dcid": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "dcid": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_qualifier": {
+          "dcid": "Nominal",
+          "label": "Nominal"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "crsCooperationModality",
+              "label": "CRS cooperation modality"
+            },
+            "label": "modality"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "crsPurpose",
+              "label": "CRS purpose"
+            },
+            "label": "sector"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "crsTypeOfFinance",
+              "label": "CRS type of finance"
+            },
+            "label": "instrument"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "crsTypeOfFlow",
+              "label": "CRS type of flow"
+            },
+            "label": "flow"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "financialFlowType",
+              "label": "financial flow type"
+            },
+            "label": "financial flow type"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "nettingBasis",
+              "label": "netting basis"
+            },
+            "label": "netting basis"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "dac2aAidType",
+              "label": "DAC 2a aid type"
+            },
+            "label": "aid type"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 257,
+        "member_digest": "a0ca4074c375020a45dd0a572174b89f53f2282f3e9dfa93d88eb7a793cd3cd3",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "dfo",
+            "label": "Development Finance Observatory"
+          }
+        ]
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "crsCooperationModality",
+              "label": "CRS cooperation modality"
+            },
+            "label": "modality"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "crsPurpose",
+              "label": "CRS purpose"
+            },
+            "label": "sector"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "CRSPurposeCode110",
+                "label": "education"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "expansion": {
+            "added": [
+              {
+                "dcid": "CRSPurposeCode111",
+                "label": "unspecified-level education"
+              },
+              {
+                "dcid": "CRSPurposeCode112",
+                "label": "basic education"
+              },
+              {
+                "dcid": "CRSPurposeCode113",
+                "label": "upper secondary education"
+              },
+              {
+                "dcid": "CRSPurposeCode114",
+                "label": "post-secondary education"
+              },
+              {
+                "dcid": "CRSPurposeCode11110",
+                "label": "education policy and administrative management"
+              },
+              {
+                "dcid": "CRSPurposeCode11120",
+                "label": "education facility and training"
+              },
+              {
+                "dcid": "CRSPurposeCode11130",
+                "label": "teacher training"
+              },
+              {
+                "dcid": "CRSPurposeCode11182",
+                "label": "educational research"
+              },
+              {
+                "dcid": "CRSPurposeCode11220",
+                "label": "primary education"
+              },
+              {
+                "dcid": "CRSPurposeCode11230",
+                "label": "basic life skills for adults"
+              },
+              {
+                "dcid": "CRSPurposeCode11231",
+                "label": "basic life skills for youth"
+              },
+              {
+                "dcid": "CRSPurposeCode11232",
+                "label": "primary education equivalent for adults"
+              },
+              {
+                "dcid": "CRSPurposeCode11240",
+                "label": "early childhood education"
+              },
+              {
+                "dcid": "CRSPurposeCode11250",
+                "label": "school feeding"
+              },
+              {
+                "dcid": "CRSPurposeCode11260",
+                "label": "lower secondary education"
+              },
+              {
+                "dcid": "CRSPurposeCode11320",
+                "label": "upper secondary schooling"
+              },
+              {
+                "dcid": "CRSPurposeCode11330",
+                "label": "vocational training"
+              },
+              {
+                "dcid": "CRSPurposeCode11420",
+                "label": "higher education"
+              },
+              {
+                "dcid": "CRSPurposeCode11430",
+                "label": "advanced technical and managerial training"
+              }
+            ]
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "crsTypeOfFinance",
+              "label": "CRS type of finance"
+            },
+            "label": "instrument"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "crsTypeOfFlow",
+              "label": "CRS type of flow"
+            },
+            "label": "flow"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "CRSTypeOfFlow10",
+                "label": "official development assistance"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": true
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "financialFlowType",
+              "label": "financial flow type"
+            },
+            "label": "financial flow type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "Disbursement",
+                "label": "disbursement"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "nettingBasis",
+              "label": "netting basis"
+            },
+            "label": "netting basis"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "Gross",
+                "label": "gross"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "dac2aAidType",
+              "label": "DAC 2a aid type"
+            },
+            "label": "aid type"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "country/KEN",
+                "label": "Kenya"
+              },
+              "value_kind": "entity"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "value_kind": "time_window",
+              "time_window": {
+                "start_year": 2015,
+                "end_year": 2023
+              }
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "inapplicable_slots": [
+        "dac2aAidType"
+      ],
+      "unresolved_slots": [],
+      "stat_vars": {
+        "items": [
+          {
+            "ref": "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11110_Nominal",
+            "label": "Official development assistance gross disbursements for education policy and administrative management (standard grant, core support to non-governmental organisations, other private bodies, public-private partnerships, and research institutes)",
+            "slot_values": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "crsTypeOfFlow",
+                    "label": "CRS type of flow"
+                  },
+                  "label": "flow"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "CRSTypeOfFlow10",
+                    "label": "official development assistance"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "financialFlowType",
+                    "label": "financial flow type"
+                  },
+                  "label": "financial flow type"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "Disbursement",
+                    "label": "disbursement"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "nettingBasis",
+                    "label": "netting basis"
+                  },
+                  "label": "netting basis"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "Gross",
+                    "label": "gross"
+                  },
+                  "value_kind": "enum_value"
+                }
+              }
+            ],
+            "constraint_properties": [
+              "crsCooperationModality",
+              "crsPurpose",
+              "crsTypeOfFinance",
+              "crsTypeOfFlow",
+              "financialFlowType",
+              "nettingBasis"
+            ],
+            "data_date_range": {
+              "start": "2015",
+              "end": "2023"
+            },
+            "data_confirmed_at_destination": true
+          },
+          {
+            "ref": "Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityB01_CRSPurposeCode11120_Nominal",
+            "label": "Official development assistance gross disbursements for education facility and training (standard grant, core support to non-governmental organisations, other private bodies, public-private partnerships, and research institutes)",
+            "slot_values": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "crsTypeOfFlow",
+                    "label": "CRS type of flow"
+                  },
+                  "label": "flow"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "CRSTypeOfFlow10",
+                    "label": "official development assistance"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "financialFlowType",
+                    "label": "financial flow type"
+                  },
+                  "label": "financial flow type"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "Disbursement",
+                    "label": "disbursement"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "nettingBasis",
+                    "label": "netting basis"
+                  },
+                  "label": "netting basis"
+                },
+                "value": {
+                  "ref": {
+                    "dcid": "Gross",
+                    "label": "gross"
+                  },
+                  "value_kind": "enum_value"
+                }
+              }
+            ],
+            "constraint_properties": [
+              "crsCooperationModality",
+              "crsPurpose",
+              "crsTypeOfFinance",
+              "crsTypeOfFlow",
+              "financialFlowType",
+              "nettingBasis"
+            ],
+            "data_date_range": {
+              "start": "2015",
+              "end": "2023"
+            },
+            "data_confirmed_at_destination": true
+          }
+        ],
+        "member_count": 89,
+        "member_count_exact": true,
+        "truncated": false
+      },
+      "entities": [
+        {
+          "ref": "country/KEN",
+          "label": "Kenya",
+          "entity_type": "Country",
+          "role": "destination"
+        }
+      ],
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 1807,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "sources",
+            "count": 1
+          },
+          {
+            "label": "observations",
+            "count": 177
+          },
+          {
+            "label": "variables",
+            "count": 89
+          }
+        ],
+        "window": {
+          "start_year": 2015,
+          "end_year": 2023
+        }
+      },
+      "headline": {
+        "year": 2024,
+        "year_named": true,
+        "named_window": {
+          "start_year": 2015,
+          "end_year": 2023
+        },
+        "observations": 239,
+        "series": 239,
+        "role_counts": {
+          "financingProvider": 46,
+          "financingRecipient": 1
+        }
+      },
+      "coverage_stamp": "05e8f5d15c9fae955b0902c185005979",
+      "facets": {},
+      "facet_options": [],
+      "rendered_sentence": "Gross disbursements (nominal) for education for official development assistance to Kenya, 2015 to 2023, according to OECD Creditor Reporting System (CRS). In 2024, the latest year with data, there are 239 observations across 239 series, covering 46 donors and 1 recipients. The question names 2015 to 2023. These counts are for 2024 alone.",
+      "confidence": "medium",
+      "available_at_place": true,
+      "skills": [],
+      "measure_label": "gross disbursements (nominal)",
+      "measure_label_axes": [
+        "populationType",
+        "measuredProperty",
+        "measurementQualifier",
+        "financialFlowType",
+        "nettingBasis"
+      ],
+      "open_axis_facts": [
+        {
+          "property": "crsCooperationModality",
+          "varies": true,
+          "distinct_count": 9,
+          "undeclared_count": 0
+        },
+        {
+          "property": "crsTypeOfFinance",
+          "varies": true,
+          "distinct_count": 4,
+          "undeclared_count": 0
+        }
+      ],
+      "role_axis_facts": [
+        {
+          "role": "origin",
+          "member_count": 55,
+          "members_available": true
+        }
+      ]
+    }
+  }
+}

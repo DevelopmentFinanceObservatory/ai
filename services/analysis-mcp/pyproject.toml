@@ -1,0 +1,46 @@
+[project]
+name = "analysis_mcp"
+version = "0.1.0"
+description = "Analysis Toolkit MCP: deterministic computation over retrieved data via a closed verb set."
+requires-python = ">=3.13"
+dependencies = [
+    "common",
+    "dfo-spec-kit",
+    "dfo-spec-kit-frame-grammar",
+    "fastmcp>=4.0.10,<5",
+    "pyarrow>=25.0.1",
+    "pydantic-settings>=2.14.2",
+]
+
+[project.scripts]
+analysis-mcp = "analysis_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+precision = 2
+
+[tool.uv.sources]
+common = { workspace = true }
+dfo-spec-kit = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/spec-kit" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/frame-grammar" }

@@ -1,0 +1,20 @@
+{
+  "kind": "composition.mutate",
+  "schema_version": 1,
+  "conversation_id": "sess_01j9zc0000",
+  "composition_id": "cps_01j9zc4frd",
+  "expected_revision": 2,
+  "operations": [
+    {
+      "op": "pin",
+      "component_id": "cmp_01j9zc3aqw"
+    },
+    {
+      "op": "reorder",
+      "order": [
+        "cmp_01j9zc3tk2",
+        "cmp_01j9zc3aqw"
+      ]
+    }
+  ]
+}

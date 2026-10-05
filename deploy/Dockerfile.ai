@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1
+#
+# Cloud Run image for the `ai` service (dfo-ai workspace): the harness plus
+# the data-mcp, analysis-mcp, and presentation-mcp FastMCP apps it mounts
+# in-process (see harness.server.create_app) -- one warm Cloud Run
+# instance, no cold starts on agent tool calls, loopback instead of network
+# hops. The packages stay separate (see deploy/README.md).
+#
+# Build from the REPO ROOT, not from deploy/, so uv can see the workspace
+# manifest and the workspace-source dependencies (common, data_mcp,
+# analysis_mcp, presentation_mcp):
+#
+#   docker buildx build -f deploy/Dockerfile.ai -t <image> .
+
+FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /app
+
+# uv needs git on PATH to resolve analysis-mcp's dfo-spec-kit-frame-grammar
+# git dependency, and git's HTTPS transport needs ca-certificates to verify
+# github.com -- neither ships in the base image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Workspace metadata first: the root manifest/lockfile plus every member
+# pyproject.toml the harness image needs -- itself, packages/common, and
+# the MCP packages it mounts (data_mcp, analysis_mcp, presentation_mcp).
+COPY pyproject.toml uv.lock ./
+COPY packages/common/pyproject.toml packages/common/pyproject.toml
+COPY services/harness/pyproject.toml services/harness/pyproject.toml
+COPY services/data-mcp/pyproject.toml services/data-mcp/pyproject.toml
+COPY services/analysis-mcp/pyproject.toml services/analysis-mcp/pyproject.toml
+COPY services/presentation-mcp/pyproject.toml services/presentation-mcp/pyproject.toml
+
+# Dependency-only layer: resolves from uv.lock and installs third-party deps
+# for the harness closure, since harness depends on the mounted MCP
+# packages as workspace packages. --no-install-workspace skips building the
+# workspace packages themselves, since their source isn't copied in yet --
+# this keeps the slow dependency layer cacheable across source-only
+# changes. ONEcampaign/dfo-spec-kit is a private git dependency; the token
+# is mounted as a BuildKit secret (tmpfs, never written to a layer) and the
+# git credential rewrite it drives is undone in this same RUN, so neither
+# the token nor the rewrite survives into the committed layer.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=spec_kit_token \
+    git config --global url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/" \
+    && uv sync --frozen --no-dev --no-install-workspace --package harness \
+    && git config --global --unset-all url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf
+
+COPY packages/common/src packages/common/src
+COPY services/harness/src services/harness/src
+COPY services/data-mcp/src services/data-mcp/src
+COPY services/analysis-mcp/src services/analysis-mcp/src
+COPY services/presentation-mcp/src services/presentation-mcp/src
+
+# Full sync: builds and installs common, harness, and the mounted MCP
+# packages into the same venv. --no-editable is required here -- the
+# runtime stage below copies only /app/.venv, not the source tree, so a
+# default editable install (a .pth file pointing back at builder-stage
+# source) would leave `import harness` (and the mounted MCP packages)
+# broken at runtime. Same BuildKit secret mount as the dependency-only
+# layer above -- this sync re-resolves the git dependency too.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=spec_kit_token \
+    git config --global url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/" \
+    && uv sync --frozen --no-dev --no-editable --package harness \
+    && git config --global --unset-all url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf
+
+FROM python:3.13-slim AS runtime
+
+RUN groupadd --system app \
+    && useradd --system --gid app --uid 1000 --home-dir /app --no-create-home app
+
+WORKDIR /app
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+
+ENV PATH=/app/.venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PORT=8080
+
+USER app
+EXPOSE 8080
+
+# Cloud Run sets $PORT at runtime; harness-server (FastAPI/uvicorn) reads it
+# via Settings and mounts data-mcp/analysis-mcp/presentation-mcp at
+# /mcp/data, /mcp/analysis, and /mcp/presentation on that same port -- see
+# harness.server.create_app.
+CMD ["harness-server"]

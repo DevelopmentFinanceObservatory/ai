@@ -1,0 +1,10 @@
+{
+  "shape": "node",
+  "dcid": "dc/base/OECD_DAC2A",
+  "label": "OECD DAC2a dataset",
+  "types": ["Dataset", "Source"],
+  "properties": {
+    "provenance": ["dc/base/OECD"],
+    "unit": ["USD"]
+  }
+}

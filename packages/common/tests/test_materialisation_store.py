@@ -1,0 +1,375 @@
+"""`InMemoryMaterialisationStore`: idempotent put, no session gate on get,
+retention absolute from first write, and protocol conformance.
+
+Every test below stands a plain sentinel object in for a `Frame` --
+`packages/common` has no runtime frame-grammar dependency and must not
+acquire one just to test a store that only ever holds and returns whatever
+reference it's given, never inspects it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+from common.materialisation import (
+    FrameExpired,
+    FrameRef,
+    FrameTooLarge,
+    HeldFrame,
+    InMemoryMaterialisationStore,
+)
+from common.materialisation.memory_store import FRAME_TTL
+from common.materialisation.store import MaterialisationStore
+
+
+@dataclass(frozen=True)
+class _FakeTrace:
+    upstream_trace: dict[str, Any]
+
+
+class _FakeStore:
+    """The minimal `MaterialisationStore` implementation this test needs."""
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple[str, str], tuple[object, _FakeTrace]] = {}
+
+    async def put(self, ref: FrameRef, *, frame: object, trace: _FakeTrace, writer: str) -> None:
+        self._entries[(ref.spec_id, ref.content_version)] = (frame, trace)
+
+    async def get(self, ref: FrameRef) -> tuple[object, _FakeTrace] | None:
+        return self._entries.get((ref.spec_id, ref.content_version))
+
+    async def open(self, ref: FrameRef) -> HeldFrame | None:
+        del ref
+        return None
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _ref() -> FrameRef:
+    return FrameRef(spec_id="spec_" + "a" * 32, content_version="cv_" + "b" * 32)
+
+
+def test_fake_store_satisfies_the_protocol() -> None:
+    store: MaterialisationStore = _FakeStore()
+    assert store is not None
+
+
+async def test_put_then_get_round_trips() -> None:
+    store = InMemoryMaterialisationStore()
+    ref = _ref()
+    frame = object()
+    trace = _FakeTrace(upstream_trace={})
+
+    await store.put(ref, frame=frame, trace=trace, writer="writer-a")
+    result = await store.get(ref)
+
+    assert result is not None
+    got_frame, got_trace = result
+    assert got_frame is frame
+    assert got_trace is trace
+
+
+async def test_get_returns_none_for_an_unheld_ref() -> None:
+    store = InMemoryMaterialisationStore()
+    assert await store.get(_ref()) is None
+
+
+async def test_put_is_idempotent_a_second_writer_does_not_overwrite_frame_or_trace() -> None:
+    store = InMemoryMaterialisationStore()
+    ref = _ref()
+    first_frame, first_trace = object(), _FakeTrace(upstream_trace={"n": 1})
+    second_frame, second_trace = object(), _FakeTrace(upstream_trace={"n": 2})
+
+    await store.put(ref, frame=first_frame, trace=first_trace, writer="writer-a")
+    await store.put(ref, frame=second_frame, trace=second_trace, writer="writer-b")
+
+    result = await store.get(ref)
+    assert result is not None
+    got_frame, got_trace = result
+    assert got_frame is first_frame
+    assert got_trace is first_trace
+
+
+async def test_put_of_an_already_held_key_does_not_refresh_created_at() -> None:
+    """Retention is absolute from first write: a second `put` of a live key keeps the
+    original `created_at`, so the pair still ages out on the schedule the *first*
+    write set, not one extended by later re-puts."""
+    ref = _ref()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    second_put = base + timedelta(days=15)
+    past_original_ttl = base + FRAME_TTL + timedelta(seconds=1)
+    clock = iter(
+        [
+            base,  # first put: created_at
+            second_put,  # second put: live-entry check only, created_at untouched
+            past_original_ttl,  # get(): past the boundary the first write set
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+
+    with pytest.raises(FrameExpired):
+        await store.get(ref)
+
+
+async def test_get_does_not_refresh_created_at_so_a_pair_still_ages_out_on_schedule() -> None:
+    ref = _ref()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    first_read = base + FRAME_TTL - timedelta(days=1)
+    second_read = base + FRAME_TTL + timedelta(days=1)
+    clock = iter(
+        [
+            base,  # put()
+            first_read,  # get() #1: just before the original TTL, succeeds
+            second_read,  # get() #2: past the original TTL -- the read above did not
+            # extend it, so this one still raises
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+
+    result = await store.get(ref)
+    assert result is not None
+
+    with pytest.raises(FrameExpired):
+        await store.get(ref)
+
+
+async def test_lazy_expiry_raises_frame_expired_with_no_intervening_touch() -> None:
+    ref = _ref()
+    clock = iter(
+        [
+            datetime(2026, 1, 1, tzinfo=UTC),  # put()
+            datetime(2026, 1, 1, tzinfo=UTC) + FRAME_TTL + timedelta(seconds=1),  # get()
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+
+    with pytest.raises(FrameExpired) as exc_info:
+        await store.get(ref)
+
+    assert exc_info.value.ref == ref
+
+
+async def test_two_consecutive_reads_of_an_expired_pair_both_raise_frame_expired() -> None:
+    ref = _ref()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    past_ttl = base + FRAME_TTL + timedelta(seconds=1)
+    clock = iter([base, past_ttl, past_ttl])
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+
+    with pytest.raises(FrameExpired):
+        await store.get(ref)
+    with pytest.raises(FrameExpired):
+        await store.get(ref)
+
+
+async def test_a_put_on_an_expired_key_heals_it() -> None:
+    ref = _ref()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    past_ttl = base + FRAME_TTL + timedelta(seconds=1)
+    clock = iter([base, past_ttl, past_ttl, past_ttl, past_ttl])
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+
+    with pytest.raises(FrameExpired):
+        await store.get(ref)
+
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="writer-a")
+    result = await store.get(ref)
+
+    assert result is not None
+
+
+async def test_a_read_just_inside_the_ttl_still_succeeds() -> None:
+    ref = _ref()
+    just_inside = datetime(2026, 1, 1, tzinfo=UTC) + FRAME_TTL - timedelta(seconds=1)
+    clock = iter(
+        [
+            datetime(2026, 1, 1, tzinfo=UTC),  # put()
+            just_inside,  # get(): the TTL comparison
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock))
+    frame, trace = object(), _FakeTrace(upstream_trace={})
+    await store.put(ref, frame=frame, trace=trace, writer="writer-a")
+
+    result = await store.get(ref)
+
+    assert result is not None
+    got_frame, got_trace = result
+    assert got_frame is frame
+    assert got_trace is trace
+
+
+async def test_aclose_is_a_no_op() -> None:
+    store = InMemoryMaterialisationStore()
+    await store.aclose()
+
+
+# max_entries: bounded growth
+
+
+def _ref_n(n: int) -> FrameRef:
+    return FrameRef(spec_id=f"spec_{'a' * 31}{n}", content_version=_ref().content_version)
+
+
+async def test_a_put_of_a_new_key_at_capacity_evicts_the_least_recently_touched() -> None:
+    store = InMemoryMaterialisationStore(max_entries=2)
+    ref_a, ref_b, ref_c = _ref_n(0), _ref_n(1), _ref_n(2)
+
+    await store.put(ref_a, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.put(ref_b, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    # Touching A leaves B as the least-recently-touched entry.
+    await store.get(ref_a)
+    await store.put(ref_c, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    assert len(store._entries) == 2
+    assert await store.get(ref_a) is not None
+    assert await store.get(ref_b) is None
+    assert await store.get(ref_c) is not None
+
+
+async def test_an_evicted_key_reads_back_as_a_plain_miss_not_frame_expired() -> None:
+    store = InMemoryMaterialisationStore(max_entries=1)
+    ref_a, ref_b = _ref_n(0), _ref_n(1)
+
+    await store.put(ref_a, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.put(ref_b, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    assert await store.get(ref_a) is None
+
+
+async def test_a_re_put_of_an_already_held_key_never_counts_as_new_even_at_capacity() -> None:
+    store = InMemoryMaterialisationStore(max_entries=1)
+    ref_a = _ref_n(0)
+    frame = object()
+    trace = _FakeTrace(upstream_trace={})
+
+    await store.put(ref_a, frame=frame, trace=trace, writer="w1")
+    await store.put(ref_a, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w2")
+
+    assert len(store._entries) == 1
+    result = await store.get(ref_a)
+    assert result is not None
+    got_frame, got_trace = result
+    assert got_frame is frame
+    assert got_trace is trace
+
+
+async def test_expired_entries_are_dropped_before_a_live_one_is_evicted() -> None:
+    ref_a, ref_b = _ref_n(0), _ref_n(1)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    past_ttl = base + FRAME_TTL + timedelta(seconds=1)
+    clock = iter(
+        [
+            base,  # put(a)
+            past_ttl,  # put(b): _drop_expired's own read
+            past_ttl,  # put(b): the new entry's created_at
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock), max_entries=1)
+    await store.put(ref_a, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    await store.put(ref_b, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    # `a` aged out and was dropped proactively -- `b` is the only entry, not evicted.
+    assert len(store._entries) == 1
+    assert (ref_b.spec_id, ref_b.content_version) in store._entries
+
+
+async def test_drop_expired_finds_an_expired_entry_moved_out_of_age_order_by_a_touch() -> None:
+    """`created_at` is fixed at an entry's first write; its position in `_entries`
+    moves on every touch. A touch can therefore put an *expired* entry at the end
+    (most-recently-touched) while a *live* entry that was never touched again sits at
+    the front -- `_drop_expired` has to find the expired one by scanning, not by
+    stopping at the first live entry it meets front-to-back, or it would leave the
+    expired entry unswept and evict the live one in its place instead.
+    """
+    ref_a, ref_b, ref_c = _ref_n(0), _ref_n(1), _ref_n(2)
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    t_b_created = t0 + timedelta(minutes=1)
+    t_touch_a = t0 + timedelta(minutes=2)
+    # Past a's own TTL boundary (t0 + FRAME_TTL) but short of b's (t_b_created + FRAME_TTL).
+    t_put_c = t0 + FRAME_TTL + timedelta(seconds=1)
+    clock = iter(
+        [
+            t0,  # put(a): created_at
+            t_b_created,  # put(b): created_at
+            t_touch_a,  # get(a): TTL comparison -- not expired yet, so this touches a,
+            # moving it to the end of `_entries` ahead of the still-untouched b
+            t_put_c,  # put(c): _drop_expired's own `now`
+            t_put_c,  # put(c): the new entry's created_at
+        ]
+    )
+    store = InMemoryMaterialisationStore(now=lambda: next(clock), max_entries=2)
+    await store.put(ref_a, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.put(ref_b, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.get(ref_a)
+
+    await store.put(ref_c, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    # `a` is expired and dropped despite sitting at the back; `b`, still live, survives
+    # rather than being evicted in `a`'s place.
+    assert set(store._entries) == {
+        (ref_b.spec_id, ref_b.content_version),
+        (ref_c.spec_id, ref_c.content_version),
+    }
+
+
+async def test_max_entries_is_respected_across_a_mixed_put_and_get_sequence() -> None:
+    store = InMemoryMaterialisationStore(max_entries=3)
+    refs = [_ref_n(n) for n in range(10)]
+
+    for i, ref in enumerate(refs):
+        await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+        if i > 0:
+            await store.get(refs[i - 1])
+        assert len(store._entries) <= 3
+
+
+@dataclass(frozen=True)
+class _SizedFrame:
+    num_rows: int
+
+
+async def test_open_reports_the_held_frames_rows_and_reads_to_it_and_its_trace() -> None:
+    store = InMemoryMaterialisationStore()
+    ref = _ref()
+    frame = _SizedFrame(num_rows=3)
+    trace = _FakeTrace(upstream_trace={})
+    await store.put(ref, frame=frame, trace=trace, writer="writer-a")
+
+    held = await store.open(ref)
+
+    assert held is not None
+    assert held.num_rows == 3
+    read_frame, read_trace = await held.read(max_rows=3)
+    assert read_frame is frame
+    assert read_trace == trace
+    with pytest.raises(FrameTooLarge, match="has 3 rows, over this read's 2-row limit"):
+        await held.read(max_rows=2)
+
+
+async def test_open_returns_none_for_a_miss_and_raises_for_an_expired_pair() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = InMemoryMaterialisationStore(now=lambda: now)
+    ref = _ref()
+
+    assert await store.open(ref) is None
+
+    await store.put(
+        ref, frame=_SizedFrame(num_rows=1), trace=_FakeTrace(upstream_trace={}), writer="w"
+    )
+    now += FRAME_TTL + timedelta(seconds=1)
+    with pytest.raises(FrameExpired):
+        await store.open(ref)

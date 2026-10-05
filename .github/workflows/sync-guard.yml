@@ -1,0 +1,45 @@
+# sync-guard: the required check on main in every DevelopmentFinanceObservatory
+# repo. It passes only a sync PR whose tree matches its ONEcampaign source
+# commit, or a release App image pin. The rules live in
+# DevelopmentFinanceObservatory/infra, in .github/actions/sync-guard and
+# scripts/sync-guard.sh.
+#
+# pull_request_target runs this file and the action from the default branch,
+# never from the PR, so a PR cannot edit the guard it faces. The job is
+# prod-only. In ONEcampaign it skips before the private action is ever
+# fetched.
+#
+# The job posts the sync-guard check run on the PR's head commit with the
+# release App's token, and the ruleset accepts sync-guard only from that
+# App. The token's secrets live in the sync-guard environment, which only
+# main may use, so a workflow a PR adds cannot mint it.
+name: sync-guard
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A force-push cancels the run for the old head. Each run judges the head
+# commit its own event names.
+concurrency:
+  group: sync-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync-guard:
+    # Named apart from the check run it posts, which is the required one.
+    name: sync-guard runner
+    if: github.repository_owner == 'DevelopmentFinanceObservatory'
+    runs-on: ubuntu-latest
+    environment: sync-guard
+    steps:
+      - uses: DevelopmentFinanceObservatory/infra/.github/actions/sync-guard@main
+        with:
+          reader-client-id: ${{ vars.READER_APP_CLIENT_ID }}
+          reader-private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          release-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          release-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

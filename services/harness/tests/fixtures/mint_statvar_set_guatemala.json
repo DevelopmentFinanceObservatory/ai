@@ -1,0 +1,305 @@
+{
+  "schema_version": 1,
+  "definition": {
+    "schema_version": 1,
+    "spec_id": "spec_4aa7b48a36e55c2c823c6942f7cb1c8f",
+    "identity": {
+      "shape": {
+        "id": "Count_Person",
+        "kind": "stat_var"
+      },
+      "slots": [],
+      "entities": {
+        "observationAbout": [
+          "country/GTM"
+        ]
+      },
+      "identity_version": "spec1",
+      "requested_window": {
+        "kind": "range",
+        "start_year": 2010
+      }
+    }
+  },
+  "content_version": "cv_ee28e3c8b6ec155398e2202a85808bda",
+  "coverage": {
+    "rows": 15,
+    "dimensions": [
+      {
+        "label": "observationAbout",
+        "count": 1
+      },
+      {
+        "label": "years",
+        "count": 15
+      }
+    ],
+    "window": {
+      "kind": "range",
+      "start_year": 2010,
+      "end_year": 2024,
+      "origin": "query"
+    }
+  },
+  "citation": {
+    "text": "WorldDevelopmentIndicators",
+    "sources": [
+      {
+        "ref": "dc/base/WorldDevelopmentIndicators",
+        "label": "WorldDevelopmentIndicators"
+      }
+    ]
+  },
+  "trace": {
+    "applied_window": {
+      "kind": "range",
+      "start_year": 2010,
+      "end_year": 2024,
+      "origin": "query"
+    },
+    "graph_revision": "unavailable:dfo-dcp-revision-endpoint-absent",
+    "source_revisions": [],
+    "resolved_stat_vars": [
+      {
+        "ref": "dcid:Count_Person",
+        "roles": [
+          "observationAbout"
+        ],
+        "observation_count": 15
+      }
+    ],
+    "facets": [
+      {
+        "axis": "provenance",
+        "ref": "dc/base/WorldDevelopmentIndicators",
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "selection_reason": "most_observations_over_disagreement",
+        "dispatch_facet_id": "18369491376878146239"
+      },
+      {
+        "axis": "measurementMethod",
+        "ref": null,
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "selection_reason": "absent_on_selected_facet",
+        "dispatch_facet_id": "18369491376878146239"
+      },
+      {
+        "axis": "unit",
+        "ref": null,
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "selection_reason": "absent_on_selected_facet",
+        "dispatch_facet_id": "18369491376878146239"
+      }
+    ],
+    "normalisations": [],
+    "frame_grammar_version": "1.0.0",
+    "materialiser_build": "ed164c1ef5d2aa6a3b49c3c8102f21c6928d5135",
+    "capability_version": "dset_1b4e9354a1e85394"
+  },
+  "warnings": [
+    {
+      "code": "processing_level_undeclared",
+      "severity": "info",
+      "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
+    },
+    {
+      "code": "revision_unavailable",
+      "severity": "info",
+      "message": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
+    },
+    {
+      "code": "facet_default_selected",
+      "severity": "warn",
+      "message": "facet axis 'provenance' had more than one candidate value; this deployment's default policy selected 'dc/base/WorldDevelopmentIndicators' by its ranking (observation count, then recency and the remaining tie-breaks)"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_digest": "sha256:1f6c487afbc200b95c21b731bc86c2616a714003fea9ff22bc554ad10cccc7d5",
+      "rendering": {
+        "format": "parquet",
+        "bundle": false
+      },
+      "bytes": 2527,
+      "media_type": "application/vnd.apache.parquet",
+      "created_at": "2026-09-17T10:06:47.032910+00:00",
+      "tier": "working"
+    },
+    {
+      "artifact_digest": "sha256:2e7d598bfcd311a06d32c842cd97d3727b825114fbaaf03cd665be21ddddd8e6",
+      "rendering": {
+        "statistics": "series"
+      },
+      "bytes": 512,
+      "media_type": "application/vnd.apache.parquet",
+      "created_at": "2026-09-17T10:06:47.032910+00:00",
+      "tier": "working"
+    }
+  ],
+  "series_count": 1,
+  "statistics": [
+    {
+      "stat_var": "dcid:Count_Person",
+      "entities": [
+        {
+          "role": "observationAbout",
+          "ref": "country/GTM"
+        }
+      ],
+      "facet": {
+        "provenance": "dc/base/WorldDevelopmentIndicators"
+      },
+      "observations": 15,
+      "first": {
+        "value": 14500112.0,
+        "period": "2010"
+      },
+      "latest": {
+        "value": 18406359.0,
+        "period": "2024"
+      },
+      "minimum": {
+        "value": 14500112.0,
+        "period": "2010"
+      },
+      "maximum": {
+        "value": 18406359.0,
+        "period": "2024"
+      },
+      "change": {
+        "absolute": 3906247.0,
+        "percent": 26.93942639891333
+      }
+    }
+  ],
+  "output_options": {
+    "capability_version": "dset_1b4e9354a1e85394",
+    "columns": [
+      {
+        "name": "stat_var",
+        "kind": "grain",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "observationAbout",
+        "kind": "role",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "time_period",
+        "kind": "grain",
+        "droppable": false,
+        "distinct": 15
+      },
+      {
+        "name": "value",
+        "kind": "value",
+        "droppable": true
+      },
+      {
+        "name": "unit",
+        "kind": "unit",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "measurementMethod",
+        "kind": "facet",
+        "droppable": true,
+        "distinct": 1
+      },
+      {
+        "name": "provenance",
+        "kind": "facet",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "status",
+        "kind": "status",
+        "droppable": true
+      }
+    ],
+    "formats": [
+      {
+        "name": "csv",
+        "state": "available"
+      },
+      {
+        "name": "xlsx",
+        "state": "available"
+      },
+      {
+        "name": "parquet",
+        "state": "available"
+      }
+    ],
+    "bundle": {
+      "state": "available"
+    },
+    "enrichments": [
+      {
+        "column": "observationAbout",
+        "field": "iso3",
+        "token": "observationAbout_iso3",
+        "state": "available",
+        "coverage": {
+          "entities": 1,
+          "covered": 1
+        },
+        "missing": [],
+        "truncated": false
+      },
+      {
+        "column": "observationAbout",
+        "field": "iso2",
+        "token": "observationAbout_iso2",
+        "state": "available",
+        "coverage": {
+          "entities": 1,
+          "covered": 1
+        },
+        "missing": [],
+        "truncated": false
+      },
+      {
+        "column": "observationAbout",
+        "field": "label",
+        "token": "observationAbout_label",
+        "state": "available",
+        "coverage": {
+          "entities": 1,
+          "covered": 1
+        },
+        "missing": [],
+        "truncated": false
+      }
+    ],
+    "pivots": [],
+    "groupby": {
+      "state": "available",
+      "axes": [
+        {
+          "name": "crsCooperationModality"
+        },
+        {
+          "name": "crsPurpose"
+        },
+        {
+          "name": "crsTypeOfFinance"
+        },
+        {
+          "name": "crsTypeOfFlow"
+        }
+      ]
+    }
+  }
+}

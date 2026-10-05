@@ -1,0 +1,198 @@
+{
+  "eval_set_id": "harness-pair-v1",
+  "name": "harness-pair-v1",
+  "description": "The planner with its translator attached as a single_turn sub-agent. Scores the seam neither other set can reach: whether the planner has the plan it just recorded translated and compiled before inviting approval, reads back what the translator left, and what it does when a requirement comes back referred as unmeetable. The translator's own turns stay inside its wrapped call, so nothing here grades operation choice or source selection -- that is harness-translator-v1's job. Two metrics score the tool-use properties: rubric_based_tool_use_quality_v1, judged by a model reading the trace, and workflow_outcome, a custom metric that asserts the compiled outcome in code without depending on the model's own names for its plan. No tool_trajectory_avg_score: neither turn has a call whose arguments this file can predict, so the metric would pass on an empty expectation without testing anything -- see evals/README.md.",
+  "eval_cases": [
+    {
+      "eval_id": "translates-before-inviting-approval",
+      "note": "No trajectory expectation: `propose_plan` carries the model's own drafted decisions and requirements, and the wrapped `dfo_translator` call carries a free-text request, so IN_ORDER matching would compare prose the model invents fresh each run. The ordering property is what makes this case more than a pair of was-it-called checks -- a plan translated before its decisions exist is the failure worth catching. workflow_outcome pins the shape of the compiled workflow itself -- get_data then aggregate over the stub's debt-service source -- without depending on names the model chooses.",
+      "session_input": {
+        "app_name": "harness_pair_v1",
+        "user_id": "eval-user",
+        "state": {}
+      },
+      "conversation": [
+        {
+          "invocation_id": "plan-and-translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "How much did Kenya spend servicing its external debt each year since 2015? Put a plan together and get it ready for me to approve."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.aggregate"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "pair-proposes-a-plan",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call propose_plan? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing inside a plan's contents or in the agent's prose are not invocations. If propose_plan does not appear among them, the verdict is no."
+              },
+              "description": "The precondition for everything else, asserted on its own so a later property cannot inherit its failure as an excuse."
+            },
+            {
+              "rubric_id": "pair-states-evidence-requirements",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "In the arguments the agent passed to propose_plan, is evidence_requirements a non-empty list stating a dataset requirement and a derived requirement per calculation, in which every entry cites, in decision_ids, the slot of a decision passed alongside it, and does at least one dataset requirement name Kenya among its entities with a period starting in 2015? This property always applies and is never inapplicable. Judge the payload of the propose_plan call, not the functions invoked."
+              },
+              "description": "The plan states what evidence the answer rests on, and every calculation it needs as its own derived requirement; a plan of decisions alone, or one whose dataset requirements feed no calculation, cannot be translated."
+            },
+            {
+              "rubric_id": "pair-calls-the-translator",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call dfo_translator? This property always applies and is never inapplicable. It is judged independently of whether propose_plan was called. Judge only the functions the agent actually invoked; tool names appearing inside a plan's contents or in the agent's prose are not invocations. If dfo_translator does not appear among them, the verdict is no."
+              },
+              "description": "Translation is the planner's to trigger now that the translator is its sub-agent. Skipping it leaves a plan the user cannot approve."
+            },
+            {
+              "rubric_id": "pair-translates-after-proposing",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Among the functions the agent invoked, in order, did a propose_plan call come before the last dfo_translator call? That is, did the agent record its plan first and have it translated second, rather than the other way round? This property always applies and is never inapplicable. If either function was never invoked, the verdict is no."
+              },
+              "description": "The translator reads the plan from session state, so calling it before propose_plan translates whatever was there before, or nothing at all."
+            },
+            {
+              "rubric_id": "pair-reads-the-referral-after-translating",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent act on what its last `dfo_translator` call answered, rather than proceeding as though the plan had compiled? This property always applies and is never inapplicable. `dfo_translator`'s own function response carries the outcome: `{\"outcome\": \"ok\"}` when the plan compiled, or the referral itself. Acting on it means calling `submit_plan` on an `ok`, or recording a `Decision` that settles the referral before proposing again. A run that calls `dfo_translator` and then ignores what it answered fails this property."
+              },
+              "description": "The planner learns whether its plan compiled from `dfo_translator`'s own function response, which carries either the ok or the referral. Ignoring that answer is how a plan reaches approval without the source question it raised ever being settled."
+            },
+            {
+              "rubric_id": "pair-invents-no-tools",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Considering only the functions the planner agent (dfo_planner) itself invoked, did every one of them come from its declared tool list -- adk_request_input, propose_plan, reject_plan, submit_plan, and dfo_translator? Calls authored by the dfo_translator sub-agent -- translate -- are its own declared tool rather than the planner's, and do not fail this property. Tool names appearing inside a plan's contents or in the agent's prose are not invocations."
+              },
+              "description": "The planner names no MCP tool: which data and operations carry out a decision is the translator's business, reached through dfo_translator. Scoped by author because the trace carries the sub-agent's own calls too."
+            },
+            {
+              "rubric_id": "pair-declares-the-plan-ready",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call submit_plan after the translation compiled a workflow? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing inside a plan's contents or in the agent's prose are not invocations. If submit_plan does not appear among them, the verdict is no."
+              },
+              "description": "The user asked to have the plan ready to approve, and submit_plan is what declares a compiled plan ready for their answer. An agent that compiles a workflow and stops leaves the turn short of what was asked."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "eval_id": "takes-an-unmeetable-requirement-back-to-the-user",
+      "note": "The plan is seeded through `session_input.state` under `planner:plan`, already a DRAFT carrying a dataset requirement in constant 2015 prices (citing a price_basis decision resolved by the user) plus an aggregate reading it, so the case turns on the planner's reaction rather than on whether it happens to draft that decision itself. No operation restates a series in another year's prices, so the compiler refuses the requirement as unmeetable whatever the translator proposes, and it refers requirement_unmeetable back -- the same gap refers-a-constant-price-requirement rests on in harness-translator-v1.",
+      "session_input": {
+        "app_name": "harness_pair_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much did Kenya spend servicing its external debt each year since 2015, in constant 2015 dollars?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"price_basis\",\"description\":\"Whether figures are in current or constant prices.\",\"options\":[\"current prices\",\"constant 2015 USD\"],\"chosen\":\"constant 2015 USD\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for real terms.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"price_basis\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"constant\",\"base_year\":2015},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"aggregate\",\"id\":\"annual_totals\",\"decision_ids\":[\"measure\"],\"input_id\":\"annual_debt_service\",\"reduction\":\"sum\",\"group_by\":[\"period\"]}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate-the-settled-plan",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "The decisions on this plan are settled. Get it ready for me to approve."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translate",
+                "response": {
+                  "outcome": "referred",
+                  "referral": {
+                    "kind": "requirement_unmeetable",
+                    "requirement_id": "annual_debt_service"
+                  }
+                }
+              }
+            ]
+          },
+          "rubrics": [
+            {
+              "rubric_id": "unmeetable-calls-the-translator",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent call dfo_translator? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing inside a plan's contents or in the agent's prose are not invocations. If dfo_translator does not appear among them, the verdict is no."
+              },
+              "description": "A settled plan still has to be translated and compiled before anyone can approve it, and only the translator can do that."
+            },
+            {
+              "rubric_id": "unmeetable-reads-the-referral",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent stop on the referral its last `dfo_translator` call answered with, and tell the user the reason that referral carried? This property always applies and is never inapplicable. A run that calls `dfo_translator`, receives a `requirement_unmeetable` referral, and then proposes again or reports success fails this property."
+              },
+              "description": "A `requirement_unmeetable` referral carries the reason the translator could not compile the requirement. That reason is what the user needs, and it arrives in `dfo_translator`'s own function response."
+            },
+            {
+              "rubric_id": "unmeetable-does-not-execute",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent refrain from calling submit_plan? This property always applies and is never inapplicable. The referral leaves the plan without a compiled workflow, so there is nothing ready to declare, and any submit_plan call fails this property."
+              },
+              "description": "The one outcome that would matter in production: declaring a plan ready to approve when a requirement cannot be carried out."
+            },
+            {
+              "rubric_id": "unmeetable-names-the-price-basis",
+              "type": "FINAL_RESPONSE_QUALITY",
+              "rubric_content": {
+                "text_property": "Does the reply to the user do all three of these: identify which requirement or decision cannot be carried out -- naming the constant-price ask or the price_basis decision, whether by that slot name or by describing it -- say that no operation restates a series in another year's prices, and put that choice back to the user as something to revisit? This property always applies and is never inapplicable. A reply that presents the plan as ready to approve, or that reports the translation as successful, or that mentions a problem without saying which requirement or decision it concerns, fails this property. Any wording that conveys the three things passes; a particular phrasing is not required."
+              },
+              "description": "The planner owns the conversation, so a referral the translator makes has to reach the user as a methodological choice rather than disappear into a tool response. Typed for the final-response metric: a TOOL_USE_QUALITY rubric judges the calls, not the reply."
+            },
+            {
+              "rubric_id": "unmeetable-reproposes-nothing",
+              "type": "TOOL_USE_QUALITY",
+              "rubric_content": {
+                "text_property": "Did the agent avoid calling propose_plan again with something else standing in for the constant-2015-prices requirement -- for instance re-proposing the plan with current prices, or with the price_basis decision changed or dropped, without the user having asked for that? This property always applies and is never inapplicable. Judge the functions the agent invoked and the payload of any propose_plan call. Calling dfo_translator and then stopping on what it answered passes this property; a propose_plan call that quietly swaps the price basis fails it."
+              },
+              "description": "The call half of the substitution failure: the closest plan that happens to compile is not the user's plan, and re-proposing it without their say-so edits a decision the user resolved. Typed for the tool-use metric because it judges a call the agent made."
+            },
+            {
+              "rubric_id": "unmeetable-substitutes-nothing",
+              "type": "FINAL_RESPONSE_QUALITY",
+              "rubric_content": {
+                "text_property": "Does the reply to the user avoid presenting a current-price figure, or any other stand-in, as if it answered the constant-2015-prices question? This property always applies and is never inapplicable. Reporting the referral and stopping passes this property; a reply that offers a substitute figure or a substitute plan as the answer without the user's say-so fails it."
+              },
+              "description": "The reply half of the substitution failure: reporting is the correct answer, and substituting the closest thing that happens to compile is the failure this set exists to catch. Typed for the final-response metric: a TOOL_USE_QUALITY rubric judges the calls, not the reply, and this half is about what the user was told."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

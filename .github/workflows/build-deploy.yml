@@ -1,0 +1,103 @@
+name: Build and deploy
+
+# The build and deploy steps deploy-dev.yml and deploy-prod.yml share. It
+# builds the ai image from the checked-out commit, pushes it to the target
+# environment's Artifact Registry, and points that environment's existing
+# Cloud Run service at it. Every project, region, registry, and service name
+# comes from the GitHub Environment named by `environment`, so dev and
+# production run the same steps against their own values. See
+# deploy/README.md for the vars and secrets each environment needs.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment to read vars and secrets from and deploy to.
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      # Cloud Run service name is dfo-infra's to define; this repo only
+      # knows about it through vars.SERVICE_AI. See deploy/README.md.
+      - name: Resolve image ref
+        id: target
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          REGION: ${{ vars.REGION }}
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          AR_REPO: ${{ vars.AR_REPO }}
+          SERVICE_AI: ${{ vars.SERVICE_AI }}
+        run: |
+          missing=0
+          for name in REGION PROJECT_ID AR_REPO SERVICE_AI; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing vars.$name in the '$ENVIRONMENT' GitHub Environment."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "image=$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/dfo-ai:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SA }}
+          token_format: access_token
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ vars.REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      # Dockerfile.ai mounts this read token on ONEcampaign/dfo-spec-kit as a
+      # BuildKit secret to fetch the private dfo-spec-kit git dependencies,
+      # and the build fails without it.
+      - id: spec-kit-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.READER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
+          owner: ONEcampaign
+          repositories: dfo-spec-kit
+          permission-contents: read
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile.ai
+          push: true
+          tags: ${{ steps.target.outputs.image }}
+          secrets: |
+            spec_kit_token=${{ steps.spec-kit-token.outputs.token }}
+
+      # Image-only update against the service dfo-infra already defined.
+      # Deliberately not `gcloud run services replace` -- that takes a full
+      # manifest and would fight dfo-infra for ownership of scaling, secrets,
+      # and service-account config.
+      - name: Point Cloud Run at the new image
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+          REGION: ${{ vars.REGION }}
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          SERVICE_AI: ${{ vars.SERVICE_AI }}
+        run: |
+          gcloud run services update "$SERVICE_AI" \
+            --image="$IMAGE" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --quiet

@@ -1,0 +1,12 @@
+{
+  "event": "error",
+  "seq": 6,
+  "error": {
+    "error": "constraint_violation",
+    "retry": "correct_and_retry",
+    "constraint_id": "log_scale_requires_positive_values",
+    "pointer": "/intent/scale",
+    "detail": "A log axis cannot represent the 2018 value of 0.",
+    "fix": "Use a linear scale, or exclude 2018 from the window."
+  }
+}

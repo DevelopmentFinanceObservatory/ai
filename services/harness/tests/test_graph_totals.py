@@ -1,0 +1,660 @@
+"""Tests for what `harness.graph` says about a summed family of StatVars.
+
+`_carried_retrievals` picks the retrievals whose StatVars a terminal frame
+carries, which the card counts its indicators from. `_stat_var_totals`
+writes the sentence `narrate` states for each summed family an answer frame
+carries, and `_with_totals` appends it when a draft leaves it out.
+
+The plans are compiled by `compile_plan` against the real tool schemas, over
+the spec blocks recorded from dev dfo-apis in
+`tests/fixtures/family_spec_blocks.json` where a test quotes a user question.
+Each `get_data` result declares the role keys and coverage dimensions the
+live frame declares: a CRS frame keys on `financingProvider` (origin axis) and
+`financingRecipient` (destination axis), whatever roles the source resolves.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+from analysis_mcp.server import mcp as analysis_mcp
+from common.materialisation import FrameRef
+from compiler.compile import compile_plan
+from compiler.sources import source_from_spec_block
+from compiler.surface import McpSurface, ToolSchema
+from data_mcp.server import mcp as data_mcp
+from executor.outcomes import Accepted, EvidenceRecord, StepRecord
+from harness.graph import _carried_retrievals, _stat_var_totals, _with_totals
+from planner.operations import (
+    AggregateOperation,
+    CompareOperation,
+    FilterOperation,
+    JoinOperation,
+    Operation,
+    RetrieveOperation,
+    ShareOfOperation,
+    Side,
+    Translation,
+)
+from planner.plan import (
+    AggregateRequirement,
+    AnswerMode,
+    ComparisonRequirement,
+    DatasetRequirement,
+    Decision,
+    DecisionFixes,
+    Entity,
+    EvidenceRequirement,
+    FilterRequirement,
+    JoinRequirement,
+    Plan,
+    PlanStatus,
+    RequirementSide,
+    ResolvedBy,
+    ShareOfRequirement,
+)
+from planner.records import GroupBy, Period, PeriodThreshold, Reduction, StatVarReading
+from planner.workflow import (
+    EvidenceBinding,
+    OpenAxis,
+    ResolvedEntity,
+    SelectedSource,
+    ToolId,
+    Workflow,
+    WorkflowStep,
+)
+
+_BLOCKS: dict[str, Any] = json.loads(
+    (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
+)
+CRS = "OECD Creditor Reporting System (CRS)"
+CRS_ROLE_KEYS = ("financingProvider", "financingRecipient")
+CRS_DIMENSIONS = (
+    {"label": "financingProvider", "count": 1, "axis": "origin"},
+    {"label": "financingRecipient", "count": 157, "axis": "destination"},
+    {"label": "years", "count": 27},
+)
+REGIONAL = " They include regional and unallocated flows as well as flows to individual countries."
+_WHAT = Decision(
+    slot="measure",
+    description="Which measure answers the question.",
+    options=["the CRS flow", "another source"],
+    chosen="the CRS flow",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The CRS reports the flow by donor and recipient.",
+)
+
+
+@pytest.fixture
+async def schemas() -> dict[str, ToolSchema]:
+    """The real servers' tool schemas, which the capability table is pinned to."""
+    tools = await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+    return {tool.name: tool for tool in tools}
+
+
+def _recorded(name: str) -> SelectedSource:
+    return source_from_spec_block(_BLOCKS[name]["parts"][0]["spec"])
+
+
+def _family(spec_char: str, label: str) -> SelectedSource:
+    """A Kenya family of three StatVars open on one summable axis, which the rule sums."""
+    return SelectedSource(
+        spec_id="spec_" + spec_char * 32,
+        sentence=f"{label} of Kenya, 2015 to 2024",
+        has_data=True,
+        stat_vars=(f"{label}_0", f"{label}_1", f"{label}_2"),
+        entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
+        unit_ref="usd",
+        unit_label="US dollars",
+        coverage_window=Period(start=2015, end=2024),
+        identity={"stat_var_schema": label},
+        open_axes=(OpenAxis(property="crsPurpose", summable=True),),
+    )
+
+
+def _single(spec_char: str, stat_var: str) -> SelectedSource:
+    """A Kenya source binding one StatVar, which no reading applies to."""
+    return _family(spec_char, stat_var).model_copy(
+        update={"stat_vars": (stat_var,), "open_axes": (), "identity": {"stat_var": stat_var}}
+    )
+
+
+def _dataset(
+    requirement_id: str, entities: Sequence[Entity], period: Period, **fields: Any
+) -> DatasetRequirement:
+    return DatasetRequirement(
+        id=requirement_id,
+        decision_ids=fields.pop("decision_ids", ["measure"]),
+        measure=fields.pop("measure", "official development assistance"),
+        entities=entities,
+        period=period,
+        **fields,
+    )
+
+
+def _kenya(requirement_id: str, measure: str) -> DatasetRequirement:
+    return _dataset(
+        requirement_id,
+        [Entity(name="Kenya", role="recipient")],
+        Period(start=2015, end=2024),
+        measure=measure,
+    )
+
+
+def _yearly_total(input_id: str, operation_input: str) -> tuple[AggregateRequirement, Operation]:
+    requirement = AggregateRequirement(
+        id="yearly_total",
+        decision_ids=["measure"],
+        input_id=input_id,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    operation = AggregateOperation(
+        id="yearly_total",
+        requirement_id="yearly_total",
+        input=operation_input,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    return requirement, operation
+
+
+def _compiled(
+    schemas: Mapping[str, ToolSchema],
+    requirements: Sequence[EvidenceRequirement],
+    operations: Sequence[Operation],
+    *,
+    terminal: Sequence[str],
+    discovered: Mapping[str, SelectedSource],
+    decisions: Sequence[Decision] = (_WHAT,),
+    answer_mode: AnswerMode = AnswerMode.COMPUTED,
+) -> Plan:
+    draft = Plan(
+        question="a question about a family of StatVars",
+        answer_mode=answer_mode,
+        decisions=decisions,
+        evidence_requirements=requirements,
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(operations=operations, terminal=terminal)
+    compiled = compile_plan(
+        plan=draft, translation=translation, schemas=dict(schemas), discovered=dict(discovered)
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+
+
+def _digest(step_id: str) -> str:
+    return hashlib.sha256(step_id.encode()).hexdigest()[:32]
+
+
+def _frame(step_id: str) -> FrameRef:
+    return FrameRef(spec_id="ops_" + _digest(step_id), content_version="ocv_" + _digest(step_id))
+
+
+def _retrieved(spec_id: str, step_id: str) -> FrameRef:
+    return FrameRef(spec_id=spec_id, content_version="cv_" + _digest(step_id))
+
+
+def _manifest(
+    frame: FrameRef,
+    *,
+    summed: int | None,
+    label: str | None = None,
+    role_keys: Sequence[str] = CRS_ROLE_KEYS,
+    dimensions: Sequence[Mapping[str, Any]] = CRS_DIMENSIONS,
+) -> dict[str, Any]:
+    """A `get_data` result as data-mcp returns it, cut to the fields narration reads."""
+    return {
+        "schema_version": 1,
+        "definition": {"schema_version": 1, "spec_id": frame.spec_id, "identity": {}},
+        "content_version": frame.content_version,
+        "coverage": {"rows": 688, "dimensions": list(dimensions)},
+        "citation": {"text": CRS, "sources": []},
+        "trace": {},
+        "warnings": [],
+        "artifacts": [],
+        "role_keys": list(role_keys),
+        "stat_var_count": 1,
+        "summed_stat_var_count": summed,
+        "summed_stat_var_label": label,
+        "frame_ref": frame.model_dump(),
+    }
+
+
+class _Surface:
+    """Answers `retrieval_manifest` from the `get_data` results it was given."""
+
+    def __init__(self, manifests: Sequence[dict[str, Any]]) -> None:
+        self.manifests = {
+            (manifest["definition"]["spec_id"], manifest["content_version"]): manifest
+            for manifest in manifests
+        }
+
+    def retrieval_manifest(self, *, frame_ref: Mapping[str, str | None]) -> dict[str, Any] | None:
+        return self.manifests.get((frame_ref["spec_id"], frame_ref["content_version"]))
+
+
+def _run(
+    plan: Plan,
+    *,
+    summed: Mapping[str, int | None],
+    role_keys: Mapping[str, tuple[str, ...] | None],
+    labels: Mapping[str, str] | None = None,
+    retrieval_role_keys: Sequence[str] = CRS_ROLE_KEYS,
+) -> tuple[_Surface, Accepted]:
+    """The surface and outcome of `plan` having run: each retrieval's `get_data`
+    result sums `summed[step_id]` StatVars, and each step declares
+    `role_keys[step_id]` (a retrieval its frame's own, `retrieval_role_keys`)."""
+    workflow = plan.workflow
+    assert workflow is not None
+    frames = {
+        binding.step_id: _retrieved(binding.spec_id, binding.step_id)
+        for binding in workflow.evidence_bindings
+    }
+    manifests = [
+        _manifest(
+            frames[step_id],
+            summed=summed.get(step_id),
+            label=(labels or {}).get(step_id),
+            role_keys=retrieval_role_keys,
+        )
+        for step_id in frames
+    ]
+    results = {step_id: frames.get(step_id, _frame(step_id)) for step_id in workflow.terminal_steps}
+    outcome = Accepted(
+        revision="rev",
+        evidence=tuple(
+            EvidenceRecord(
+                requirement_id=binding.requirement_id,
+                step_id=binding.step_id,
+                frame_ref=frames[binding.step_id],
+                spec_id=binding.spec_id,
+                stat_vars=(),
+                window=None,
+                gaps=(),
+                citation=CRS,
+            )
+            for binding in workflow.evidence_bindings
+        ),
+        steps=tuple(
+            StepRecord(
+                step_id=step.id,
+                tool=step.tool,
+                attempts=1,
+                frame_ref=frames.get(step.id) or results.get(step.id) or _frame(step.id),
+                digest="",
+                role_keys=(
+                    tuple(retrieval_role_keys) if step.id in frames else role_keys.get(step.id)
+                ),
+                stat_var_count=1,
+            )
+            for step in workflow.steps
+        ),
+        results=results,
+    )
+    return _Surface(manifests), outcome
+
+
+def _germany_bilateral_oda(
+    schemas: Mapping[str, ToolSchema], *, then: str = "aggregate", **dataset_fields: Any
+) -> Plan:
+    """ "Chart Germany's bilateral ODA since 2000" over the recorded source,
+    which resolves Germany alone, so the compiler predicts the retrieval's
+    role keys as `("origin",)`. `then` is the step the answer reads: the
+    yearly total across recipients, or a filter keeping each recipient."""
+    source = _recorded("germany_bilateral_oda")
+    decisions = dataset_fields.pop("decisions", (_WHAT,))
+    oda = _dataset(
+        "oda",
+        [Entity(name="Germany", role="donor")],
+        Period(start=2000, end=2026),
+        **dataset_fields,
+    )
+    retrieve = RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id)
+    if then == "aggregate":
+        total, total_op = _yearly_total("oda", "oda_op")
+        return _compiled(
+            schemas,
+            [oda, total],
+            [retrieve, total_op],
+            terminal=["yearly_total"],
+            discovered={"oda": source},
+            decisions=decisions,
+        )
+    from_2005 = FilterRequirement(
+        id="from_2005",
+        decision_ids=["measure"],
+        input_id="oda",
+        predicates=(PeriodThreshold(op="gte", year=2005),),
+    )
+    return _compiled(
+        schemas,
+        [oda, from_2005],
+        [
+            retrieve,
+            FilterOperation(
+                id="from_2005_op",
+                requirement_id="from_2005",
+                input="oda_op",
+                predicates=(PeriodThreshold(op="gte", year=2005),),
+            ),
+        ],
+        terminal=["from_2005_op"],
+        discovered={"oda": source},
+        decisions=decisions,
+        answer_mode=AnswerMode.SERIES,
+    )
+
+
+def _by_default(count: str, name: str = CRS) -> str:
+    return f'By default, the figures for "{name}" sum the family\'s {count} indicators.'
+
+
+async def test_germany_s_bilateral_oda_totalled_each_year_includes_regional_flows(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    plan = _germany_bilateral_oda(schemas)
+    assert plan.workflow is not None
+    (retrieval,) = (step for step in plan.workflow.steps if step.id == "oda_op")
+    # The compiler predicts only the role Germany resolves under; the frame
+    # declares both, and the yearly total keeps neither.
+    assert retrieval.expected_role_keys == ("origin",)
+    assert retrieval.args["stat_vars"] == "sum"
+
+    surface, outcome = _run(plan, summed={"oda_op": 1554}, role_keys={"yearly_total": ()})
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == [_by_default("1,554") + REGIONAL]
+
+
+async def test_a_filter_keeping_each_recipient_states_the_family_count_alone(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    plan = _germany_bilateral_oda(schemas, then="filter")
+
+    surface, outcome = _run(plan, summed={"oda_op": 74}, role_keys={"from_2005_op": CRS_ROLE_KEYS})
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == [_by_default("74")]
+
+
+async def test_germany_s_oda_to_kenya_names_its_recipient_and_states_no_regional_flows(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    source = _recorded("germany_oda_to_kenya")
+    oda = _dataset(
+        "oda",
+        [Entity(name="Germany", role="donor"), Entity(name="Kenya", role="recipient")],
+        Period(start=2000, end=2024),
+    )
+    total, total_op = _yearly_total("oda", "oda_op")
+    plan = _compiled(
+        schemas,
+        [oda, total],
+        [RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id), total_op],
+        terminal=["yearly_total"],
+        discovered={"oda": source},
+    )
+
+    surface, outcome = _run(plan, summed={"oda_op": 12}, role_keys={"yearly_total": ()})
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == [_by_default("12")]
+
+
+async def test_a_reading_the_user_settled_says_so_and_the_planners_own_says_nothing(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    settled = Decision(
+        slot="reading",
+        description="Read the aid family summed or as separate series",
+        options=["sum", "separate"],
+        chosen="sum",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user asked for one total",
+        fixes=DecisionFixes(stat_vars=StatVarReading.SUM),
+    )
+    user_plan = _germany_bilateral_oda(
+        schemas,
+        decision_ids=["measure", "reading"],
+        stat_vars=StatVarReading.SUM,
+        decisions=(_WHAT, settled),
+    )
+    planner_plan = _germany_bilateral_oda(schemas, stat_vars=StatVarReading.SUM)
+
+    for plan, expected in (
+        (user_plan, f'As you asked, the figures for "{CRS}" sum the family\'s 74 indicators.'),
+        (planner_plan, f'The figures for "{CRS}" sum the family\'s 74 indicators.'),
+    ):
+        surface, outcome = _run(plan, summed={"oda_op": 74}, role_keys={"yearly_total": ()})
+        assert _stat_var_totals(surface, outcome, plan=plan) == [expected + REGIONAL]
+
+
+def _two_sided(
+    schemas: Mapping[str, ToolSchema], kind: str, left: SelectedSource, right: SelectedSource
+) -> Plan:
+    """`left` and `right` retrieved for Kenya and read by one `kind` step, `combined`."""
+    left_req, right_req = _kenya("left", "grants"), _kenya("right", "loans")
+    derived: EvidenceRequirement
+    operation: Operation
+    match kind:
+        case "join":
+            derived = JoinRequirement(
+                id="combined", decision_ids=["measure"], left_id="left", right_id="right"
+            )
+            operation = JoinOperation(
+                id="combined", requirement_id="combined", left="left_op", right="right_op"
+            )
+        case "compare":
+            derived = ComparisonRequirement(
+                id="combined",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="left"),
+                right=RequirementSide(input_id="right"),
+            )
+            operation = CompareOperation(
+                id="combined",
+                requirement_id="combined",
+                left=Side(input="left_op"),
+                right=Side(input="right_op"),
+            )
+        case "share_of":
+            derived = ShareOfRequirement(
+                id="combined",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="left"),
+                denominator=RequirementSide(input_id="right"),
+            )
+            operation = ShareOfOperation(
+                id="combined",
+                requirement_id="combined",
+                numerator=Side(input="left_op"),
+                denominator=Side(input="right_op"),
+            )
+        case _:
+            raise AssertionError(kind)
+    return _compiled(
+        schemas,
+        [left_req, right_req, derived],
+        [
+            RetrieveOperation(id="left_op", requirement_id="left", spec_id=left.spec_id),
+            RetrieveOperation(id="right_op", requirement_id="right", spec_id=right.spec_id),
+            operation,
+        ],
+        terminal=["combined"],
+        discovered={"left": left, "right": right},
+    )
+
+
+KENYA_ROLE_KEYS = ("financingRecipient",)
+KENYA_DIMENSIONS = ({"label": "financingRecipient", "count": 1, "axis": "destination"},)
+
+
+@pytest.mark.parametrize("kind", ["share_of", "compare"])
+async def test_a_summed_family_that_only_supplies_values_gets_no_sentence(
+    schemas: dict[str, ToolSchema], kind: str
+) -> None:
+    """A `share_of` denominator and a `compare`'s right side are summed, but
+    the answer frame carries neither's StatVars, so narration states no
+    total for them."""
+    plan = _two_sided(schemas, kind, _single("a", "Grants"), _family("b", "Loans"))
+    assert plan.workflow is not None
+    assert plan.workflow.source_of("right_op").stat_var_reading is StatVarReading.SUM
+
+    surface, outcome = _run(
+        plan,
+        summed={"right_op": 3},
+        role_keys={"combined": KENYA_ROLE_KEYS},
+        retrieval_role_keys=KENYA_ROLE_KEYS,
+    )
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == []
+
+
+async def test_two_summed_families_joined_get_one_sentence_each_naming_its_family(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    plan = _two_sided(schemas, "join", _family("a", "Grants"), _family("b", "Loans"))
+
+    surface, outcome = _run(
+        plan,
+        summed={"left_op": 3, "right_op": 5},
+        labels={"left_op": "Grants to Kenya", "right_op": "Loans to Kenya"},
+        role_keys={"combined": KENYA_ROLE_KEYS},
+        retrieval_role_keys=KENYA_ROLE_KEYS,
+    )
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == [
+        _by_default("3", "Grants to Kenya"),
+        _by_default("5", "Loans to Kenya"),
+    ]
+
+
+async def test_two_retrievals_of_one_spec_each_state_their_own_reading(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """One family read twice, once by the rule and once as the plan asked:
+    each retrieval's sentence names who set its own reading."""
+    family = _family("a", "Grants")
+    by_rule = _kenya("by_rule", "grants")
+    by_plan = _dataset(
+        "by_plan",
+        [Entity(name="Kenya", role="recipient")],
+        Period(start=2015, end=2024),
+        measure="grants",
+        stat_vars=StatVarReading.SUM,
+    )
+    plan = _compiled(
+        schemas,
+        [by_rule, by_plan],
+        [
+            RetrieveOperation(id="by_rule_op", requirement_id="by_rule", spec_id=family.spec_id),
+            RetrieveOperation(id="by_plan_op", requirement_id="by_plan", spec_id=family.spec_id),
+        ],
+        terminal=["by_rule_op", "by_plan_op"],
+        discovered={"by_rule": family, "by_plan": family},
+        answer_mode=AnswerMode.SERIES,
+    )
+
+    surface, outcome = _run(
+        plan,
+        summed={"by_rule_op": 3, "by_plan_op": 3},
+        role_keys={},
+        retrieval_role_keys=KENYA_ROLE_KEYS,
+    )
+
+    # Steps run in canonical order, `by_plan_op` first.
+    assert _stat_var_totals(surface, outcome, plan=plan) == [
+        f'The figures for "{CRS}" sum the family\'s 3 indicators.',
+        _by_default("3"),
+    ]
+
+
+async def test_a_retrieval_that_summed_nothing_states_nothing(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    plan = _germany_bilateral_oda(schemas)
+    surface, outcome = _run(plan, summed={}, role_keys={"yearly_total": ()})
+
+    assert _stat_var_totals(surface, outcome, plan=plan) == []
+    assert _stat_var_totals(None, outcome, plan=plan) == []
+
+
+def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = None) -> WorkflowStep:
+    return WorkflowStep(
+        id=step_id,
+        operation_id=step_id,
+        tool=ToolId(server="data-mcp" if tool == "get_data" else "analysis-mcp", name=tool),
+        bindings={
+            name: {"from_step": source, "output": "frame_ref"}
+            for name, source in (frame_bindings or {}).items()
+        },
+        input_schema_hash="sha256:" + "0" * 64,
+    )
+
+
+def test_a_join_carries_both_sides_and_a_compare_only_its_left() -> None:
+    steps = {
+        step.id: step
+        for step in (
+            _step("left", "get_data"),
+            _step("right", "get_data"),
+            _step(
+                "joined", "join", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}
+            ),
+            _step(
+                "compared",
+                "compare",
+                frame_bindings={"frame_ref": "left", "right_frame_ref": "right"},
+            ),
+            _step("yearly", "aggregate", frame_bindings={"frame_ref": "compared"}),
+        )
+    }
+
+    def carried(step_id: str) -> frozenset[str]:
+        return _carried_retrievals(
+            step_id, steps_by_id=steps, retrieval_step_ids=frozenset({"left", "right"})
+        )
+
+    assert carried("joined") == {"left", "right"}
+    assert carried("compared") == {"left"}
+    assert carried("yearly") == {"left"}
+    assert carried("right") == {"right"}
+
+
+def test_a_retrieval_s_source_is_the_one_at_its_binding_s_position() -> None:
+    """Two retrievals of one spec, read differently: each step's source is
+    its own, and a workflow listing one source for both names it by spec."""
+    family = _family("a", "Grants")
+    steps = [_step("one", "get_data"), _step("two", "get_data")]
+    bindings = [
+        EvidenceBinding(requirement_id="one", step_id="one", spec_id=family.spec_id),
+        EvidenceBinding(requirement_id="two", step_id="two", spec_id=family.spec_id),
+    ]
+    summed = family.model_copy(update={"stat_var_reading": StatVarReading.SUM})
+    separate = family.model_copy(update={"stat_var_reading": StatVarReading.SEPARATE})
+
+    paired = Workflow(
+        steps=steps, sources=[summed, separate], evidence_bindings=bindings, terminal_steps=["one"]
+    )
+    shared = Workflow(
+        steps=steps, sources=[summed], evidence_bindings=bindings, terminal_steps=["one"]
+    )
+
+    assert paired.source_of("one") is summed
+    assert paired.source_of("two") is separate
+    assert shared.source_of("two") is summed
+    assert paired.source_of("absent") is None
+
+
+def test_a_draft_that_leaves_the_total_out_gets_it_appended_once() -> None:
+    total = _by_default("74")
+    assert _with_totals("Aid rose.", [total]) == f"Aid rose. {total}"
+    stated = f"Aid rose. {total}"
+    assert _with_totals(stated, [total]) == stated
+    assert _with_totals("", [total]) == total

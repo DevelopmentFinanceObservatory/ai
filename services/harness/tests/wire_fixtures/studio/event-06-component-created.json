@@ -1,0 +1,101 @@
+{
+  "event": "component.created",
+  "seq": 4,
+  "component_id": "cmp_01j9zc3aqw",
+  "revision": 1,
+  "type": "stat_card",
+  "catalog_version": "2026.10.0",
+  "min_catalog_version": "2026.10.0",
+  "payload": {
+    "schema_version": 1,
+    "component": {
+      "type": "stat_card",
+      "title": {
+        "text": "Official aid to Ethiopia, 2021",
+        "authorship": "model"
+      }
+    }
+  },
+  "fact_summary": {
+    "component_id": "cmp_01j9zc3aqw",
+    "revision": 1,
+    "window": {
+      "start": "2016",
+      "end": "2024"
+    },
+    "unit": {
+      "currency": "USD",
+      "magnitude": "billions",
+      "price_basis": "constant",
+      "base_year": 2023
+    },
+    "series": [
+      {
+        "id": "eth_official_aid",
+        "label": "Ethiopia",
+        "coordinates": {
+          "recipient": "country/ETH",
+          "prices": "constant"
+        },
+        "point_count": 9,
+        "first": 1.9,
+        "last": 3.2,
+        "change": {
+          "absolute": -1.117,
+          "percent": -58.8,
+          "from_period": "2020",
+          "to_period": "2021"
+        }
+      }
+    ],
+    "countries": [
+      "Ethiopia"
+    ],
+    "indicators": [
+      {
+        "id": "BX.GRT.EXTA.CD.DT",
+        "name": "Grants, Excluding Technical Cooperation (current US$)",
+        "description": "Grants are defined as legally binding commitments that obligate a specific value of funds available for disbursement for which there is no repayment requirement. Data are in current U.S. dollars."
+      }
+    ],
+    "attribution": {
+      "label": "World Bank IDS · 1 indicator",
+      "source_count": 1,
+      "indicator_count": 1,
+      "source_detail_url": "/data/sources/wb-ids"
+    }
+  },
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_77b1e4c9aa",
+        "content_version": "cv_2c9a01ff34"
+      }
+    ],
+    "execution_ref": "exec_5f13c8b0",
+    "sources": [
+      {
+        "id": "src_wb_ids",
+        "name": "World Bank International Debt Statistics",
+        "publisher": "World Bank",
+        "url": "https://www.worldbank.org/en/programs/debt-statistics/ids",
+        "licence": "CC BY 4.0",
+        "retrieved": "2026-06-30"
+      }
+    ],
+    "freshness": {
+      "data_through": "2024",
+      "last_refreshed": "2026-06-30",
+      "next_expected": "2026-12",
+      "partial_period": false
+    },
+    "warnings": [],
+    "generated_at": "2026-08-04T09:20:41Z",
+    "citation": "World Bank (2026) – International Debt Statistics. With major processing by Development Finance Observatory (DFO).",
+    "refreshed_from": null
+  },
+  "created_from": {
+    "step_id": "s2",
+    "message_seq": 0
+  }
+}

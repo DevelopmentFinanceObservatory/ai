@@ -1,0 +1,14 @@
+{
+  "event": "suggestions",
+  "seq": 7,
+  "items": [
+    {
+      "label": "Compare with Kenya",
+      "prompt": "Show the same series for Kenya alongside Ethiopia."
+    },
+    {
+      "label": "Split by creditor",
+      "prompt": "Break the 2021 fall down by creditor type."
+    }
+  ]
+}

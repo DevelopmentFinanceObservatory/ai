@@ -1,0 +1,77 @@
+{
+  "description": "aggregate(sum) grouped by reporter over analysis_mcp.fixtures.plain_single_unit_frame() -- one committed expected-output fixture for a worked aggregate (#37).",
+  "source_fixture": "plain_single_unit_frame",
+  "group_by": [
+    "reporter"
+  ],
+  "aggregation": "sum",
+  "expected_resolved_unit": "dcid:USDollar",
+  "expected_coverage": {
+    "realised_coverage_fraction": 1.0,
+    "present_cell_count": 5,
+    "expected_cell_count": 5,
+    "skipped_cell_count": 0
+  },
+  "expected_groups": [
+    {
+      "group_key": [
+        [
+          "reporter",
+          "dcid:DEU"
+        ]
+      ],
+      "value": 104986000000.0,
+      "row_count": 3,
+      "time_period_min": "2021",
+      "time_period_max": "2023"
+    },
+    {
+      "group_key": [
+        [
+          "reporter",
+          "dcid:FRA"
+        ]
+      ],
+      "value": 46784000000.0,
+      "row_count": 3,
+      "time_period_min": "2021",
+      "time_period_max": "2023"
+    },
+    {
+      "group_key": [
+        [
+          "reporter",
+          "dcid:GBR"
+        ]
+      ],
+      "value": 50455000000.0,
+      "row_count": 3,
+      "time_period_min": "2021",
+      "time_period_max": "2023"
+    },
+    {
+      "group_key": [
+        [
+          "reporter",
+          "dcid:JPN"
+        ]
+      ],
+      "value": 54734000000.0,
+      "row_count": 3,
+      "time_period_min": "2021",
+      "time_period_max": "2023"
+    },
+    {
+      "group_key": [
+        [
+          "reporter",
+          "dcid:USA"
+        ]
+      ],
+      "value": 166683000000.0,
+      "row_count": 3,
+      "time_period_min": "2021",
+      "time_period_max": "2023"
+    }
+  ]
+}

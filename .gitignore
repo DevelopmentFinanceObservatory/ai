@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+
+# uv / virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Ruff
+.ruff_cache/
+
+# ty
+.ty_cache/
+
+# AI
+.claude/
+CLAUDE.md
+AGENTS.md
+
+# Generated eval outputs -- the dataset-authoring tooling under evals/ stays tracked
+/evals/artifacts/
+# harness-studio-v1 run results (one JSON per run.py invocation)
+/evals/studio/.results/
+# adk eval's own local run-history cache, written under whichever evals/agents/<suite>/ it ran against
+.adk/
+
+# Local working notes (deliberately untracked)
+/notes/
+issues.md
+/.codegraph
+# One-off local checks (probes, demos, ad hoc scripts). Not the test suite:
+# the suite is services/*/tests and packages/*/tests.
+test_scripts/
+.playwright-mcp/

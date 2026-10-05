@@ -1,0 +1,955 @@
+"""Renders each verb's result into its own model-facing digest.
+
+The harness reads `structuredContent` in code, so a model only ever sees
+this digest. `executor.run` reads a verb's declared shape and row count out
+of it, keeps this digest text as its step's `StepRecord.digest`, and
+`harness.graph` carries that into `narrate`'s `step_summaries`. Everything
+the model needs to act on has to be in this text: the result's own
+`{spec_id, content_version}` pair, the computed numbers, units, coverage,
+warnings, and trace identity. Each `render_*_digest` function reads only
+its own result dataclass's summary tuples (`GroupSummary`, `EntityGrowth`,
+`PeriodComparison`, `EntityRank`), never `frame.rows`. The frame itself
+never appears in a digest.
+
+Every list is capped at `_LIST_CAP` entries, following `data_mcp.digest`'s
+own discipline of bounding the model-facing text while the full result stays
+reachable, here by resolving the same `{spec_id, content_version}` pair as a
+downstream verb's `frame_ref`. `tests/test_digest_budget.py` catches a leak
+of that bound. `render_rank_digest` takes the head of its own
+already-caller-ordered `entity_ranks`, since `ascending` states which end of
+the ranking the caller wants. Every other renderer's own order is
+framework-defined (canonical, chronological, or grain-based) rather than
+caller-stated, so those pick the shown entries by magnitude instead
+(`_capped`, or `_capped_positions` over `join`'s columnar matched keys).
+Each renderer's `_truncation_note` call names which rule it used.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+
+import pyarrow as pa
+from common.time_grain import span_label
+from dfo_frame_grammar import array_kernel
+from dfo_frame_grammar.grammar import UnitRequest
+
+from analysis_mcp.artifact import Exclusion, Interval, Time
+from analysis_mcp.disambiguation import truncate_value
+from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
+from analysis_mcp.engine.compare import CompareResult, PeriodComparison
+from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
+from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
+from analysis_mcp.engine.join import JoinResult, MatchedKey
+from analysis_mcp.engine.rank import EntityRank, RankResult
+from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
+from analysis_mcp.execution_identity import ExecutionIdentity
+from analysis_mcp.units import unit_name
+
+# Bounded without starving the model of entries it's likely to need; see the
+# module docstring for which renderers pick by magnitude vs. position.
+_LIST_CAP = 20
+
+
+def _capped[T](items: Sequence[T], *, magnitude: Callable[[T], float]) -> Sequence[T]:
+    """Up to `_LIST_CAP` entries of `items`, chosen by descending
+    `abs(magnitude(entry))` rather than by position -- for a renderer whose
+    order is not the caller's stated criterion, the largest-magnitude
+    entries are the most likely to be what a model needs from a truncated
+    digest. `render_rank_digest` does not call this function, since its own
+    order already is the caller's criterion.
+
+    Kept entries are returned in `items`' own original order, not sorted by
+    magnitude, so the shown block still reads in the order its verb
+    promises.
+    """
+    if len(items) <= _LIST_CAP:
+        return items
+    kept_positions = sorted(
+        sorted(range(len(items)), key=lambda i: abs(magnitude(items[i])), reverse=True)[:_LIST_CAP]
+    )
+    return [items[i] for i in kept_positions]
+
+
+def _capped_positions(magnitudes: pa.Array) -> list[int]:
+    """`_capped`'s selection over an Arrow array of per-entry magnitudes:
+    the positions of up to `_LIST_CAP` entries by descending absolute
+    magnitude, ties to the earlier position, returned in ascending order.
+    A renderer whose entries stay columnar calls this, so only the kept
+    entries become Python objects."""
+    if len(magnitudes) <= _LIST_CAP:
+        return list(range(len(magnitudes)))
+    # `array_sort_indices` is stable, so equal magnitudes keep position
+    # order, as `sorted(..., reverse=True)` does in `_capped`.
+    order = array_kernel("array_sort_indices", array_kernel("abs", magnitudes), order="descending")
+    return sorted(order.slice(0, _LIST_CAP).to_pylist())
+
+
+def _format_number(value: float) -> str:
+    """Exact, minimal, reproducible: `repr`'s own round-trip string, with a
+    bare trailing `.0` dropped. `-0.0` normalises to `0.0` first --
+    IEEE-754 addition of `-0.0 + 0.0` is defined to produce positive zero,
+    which is a shorter, more portable normalisation than a separate
+    equality check.
+    """
+    value = value + 0.0
+    text = repr(value)
+    return text[:-2] if text.endswith(".0") else text
+
+
+def _signed_number_text(value: float) -> str:
+    """`_format_number`, with an explicit leading `+` for a non-negative
+    value -- `repr`'s own text already carries the `-` for a negative one,
+    so nothing is added there. Used for an absolute growth's difference,
+    where the sign is the point (an increase vs. a decrease) and
+    `growth_rate:+.1%`'s own percentage formatting does not apply."""
+    text = _format_number(value)
+    return text if text.startswith("-") else f"+{text}"
+
+
+def _unit_text(unit: str | UnitRequest | None) -> str:
+    """`unit` named as `units.unit_name` names it (a converted unit as
+    "converted to <price basis>"), capped the same way `truncate_value` caps
+    a key value, or `'(none declared)'` when unbound. `unit` is read straight
+    off input rows and carries the same unbounded-length risk as any key
+    value."""
+    if unit is None:
+        return "(none declared)"
+    return truncate_value(unit_name(unit))
+
+
+def _key_text(key: Sequence[tuple[str, str]]) -> str:
+    """The `column=value, ...` text for an entity/group key tuple. Each
+    value is capped (`truncate_value`); each column name is not, since a
+    column name is schema, not a per-row data value."""
+    if not key:
+        return "(all rows)"
+    return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
+
+
+_MAGNITUDE_SELECTION = "kept the largest-magnitude entries"
+_RANK_ORDER_SELECTION = f"kept the first {_LIST_CAP} in rank order, rank 1 first"
+
+
+def _truncation_note(shown: Sequence[object], total: int, *, selection: str) -> str:
+    """A fixed-shape truncation note, at constant cost regardless of the
+    true count. A larger candidate pool still changes *which* entries a
+    magnitude-selecting renderer keeps, and a wider-magnitude entry costs
+    more to render; `tests/test_digest_budget.py`'s truncation-cost gate
+    measures that growth and holds it bounded.
+
+    `selection` names which rule picked `shown` for this renderer; each
+    call site passes its own rather than this function guessing from
+    `shown` alone, since a single hardcoded string would misstate a
+    positional renderer's selection (`render_rank_digest`'s).
+    """
+    if total <= len(shown):
+        return ""
+    return (
+        f"\n  ... more entries not shown ({selection}); the header's own count is the true total."
+    )
+
+
+_EXCLUSION_REASON_TEXT: dict[str, str] = {
+    "unit_unbound": "left unit unbound",
+    "unit_not_selected": "declared a unit other than the one selected",
+    "outside_window": "outside the requested window",
+    "predicate": "removed by the predicate",
+    "unmatched_key": "had no matching key on the other side",
+    "beyond_limit": "ranked beyond the limit",
+}
+
+# `entity_not_selected` and `period_unmatched` are excluded here: a
+# caller's own `entity` binding asked for those rows to go, and an
+# unmatched period already has its own representation on the coverage line
+# (`render_compare_digest`).
+_DIGEST_HIDDEN_EXCLUSION_REASONS = frozenset({"entity_not_selected", "period_unmatched"})
+
+# Cap on how many distinct entity names an exclusion line lists before
+# falling back to the bare row count.
+_EXCLUSION_ENTITY_NAME_CAP = 5
+
+
+def _exclusion_group_label(reason: str, side: str | None) -> str:
+    """`reason (reason_text)`, or `reason, side (reason_text)` when `side`
+    names one of a two-input verb's two sides."""
+    reason_text = _EXCLUSION_REASON_TEXT.get(reason, reason)
+    if side is None:
+        return f"{reason} ({reason_text})"
+    return f"{reason}, {side} ({reason_text})"
+
+
+def _exclusion_entities_text(group: Sequence[Exclusion]) -> str | None:
+    """`role=value, role=value, ...` for up to `_EXCLUSION_ENTITY_NAME_CAP`
+    names total across every role column `group`'s exclusions declare
+    entities for, sorted by role. `None` when no exclusion in `group` names
+    any entity.
+    """
+    by_role: dict[str, list[str]] = {}
+    for exclusion in group:
+        for role, values in exclusion.entities.items():
+            by_role.setdefault(role, []).extend(values)
+    pairs = [
+        f"{role}={truncate_value(value)}" for role in sorted(by_role) for value in by_role[role]
+    ]
+    if not pairs:
+        return None
+    return ", ".join(pairs[:_EXCLUSION_ENTITY_NAME_CAP])
+
+
+def _exclusions_block(exclusions: Sequence[Exclusion]) -> str | None:
+    """One line per (reason, side) pair: the total row count dropped for
+    that reason on that side, summed across every narrowing step that
+    raised it, plus up to `_EXCLUSION_ENTITY_NAME_CAP` of the entities
+    affected, keyed by role column. `None` when `exclusions` is empty, or
+    when every exclusion's own reason is in `_DIGEST_HIDDEN_EXCLUSION_REASONS`.
+    """
+    shown = [
+        exclusion
+        for exclusion in exclusions
+        if exclusion.reason not in _DIGEST_HIDDEN_EXCLUSION_REASONS
+    ]
+    if not shown:
+        return None
+    by_group: dict[tuple[str, str | None], list[Exclusion]] = {}
+    for exclusion in shown:
+        by_group.setdefault((exclusion.reason, exclusion.side), []).append(exclusion)
+    lines = []
+    for (reason, side), group in by_group.items():
+        total_rows = sum(exclusion.rows for exclusion in group)
+        label = _exclusion_group_label(reason, side)
+        line = f"  {label}: {total_rows} row(s)"
+        entities_text = _exclusion_entities_text(group)
+        if entities_text is not None:
+            line += f" [{entities_text}]"
+        lines.append(line)
+    return "\n".join(["exclusions:", *lines])
+
+
+def _join_and(items: Sequence[str]) -> str:
+    """An English list: `a`, `a and b`, or `a, b and c`."""
+    items = list(items)
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _absent_clause(interval: Interval) -> str:
+    """`; every period in the span is present` when `interval.contiguous`,
+    `; contiguity is unknown` when it's `None`, else `; {absent, and
+    absent} absent` -- with a trailing `(N total)` whenever `absent` is a
+    truncated sample of `absent_count`, so a capped list can never read as
+    exhaustive. Every `time:` line ends with this clause."""
+    if interval.contiguous is None:
+        return "; contiguity is unknown"
+    if interval.contiguous:
+        return "; every period in the span is present"
+    clause = f"; {_join_and(interval.absent)} absent"
+    if interval.absent_count > len(interval.absent):
+        clause += f" ({interval.absent_count} total)"
+    return clause
+
+
+def _time_line(time: Time | None, *, per_item_note: str = "") -> str | None:
+    """`time: labels stand for the span {start} to {end}...` when `time` is
+    an `Interval`, covering which periods the union spans and, via
+    `_absent_clause`, which are missing. `per_item_note` points to a
+    per-group window shown elsewhere on the digest, when the renderer has
+    one. `None` for a plain `Observation` or an absent `time`.
+    """
+    if not isinstance(time, Interval):
+        return None
+    text = f"time: labels stand for the span {time.start} to {time.end}"
+    if per_item_note:
+        text += f"; {per_item_note}"
+    return text + _absent_clause(time)
+
+
+def _rank_time_line(
+    time: Time | None, *, per_period: bool, periods_in_window: Sequence[str]
+) -> str | None:
+    """`time: rows are labelled {label}; real periods span {start} to
+    {end}...` for an `Interval`, where `{label}` is the one `time_period`
+    every collapsed row carries (`span_label(periods_in_window)`, as
+    `engine.rank.run_rank` stamps it). `None` for a plain `Observation` or an
+    absent `time`.
+
+    `per_period=True` states which periods were ranked instead, since each
+    row carries the period it was ranked in. `None` when `periods_in_window`
+    is empty, which a real call never has but a hand-built `RankResult` in a
+    test may.
+    """
+    if not periods_in_window:
+        return None
+    if per_period:
+        return (
+            "time: each row's time_period is the period it was ranked in; "
+            f"periods ranked: {', '.join(periods_in_window)}"
+        )
+    if not isinstance(time, Interval):
+        return None
+    text = (
+        f"time: rows are labelled {span_label(periods_in_window)}; "
+        f"real periods span {time.start} to {time.end}"
+    )
+    return text + _absent_clause(time)
+
+
+def _artifact_sections(*, exclusions: Sequence[Exclusion], time_line: str | None) -> list[str]:
+    """The `exclusions:`/`time:` sections every renderer appends after its
+    own `warnings:` block and before `_derived_note`, in that order.
+    `time_line` is pre-rendered by the caller: `_time_line`, or
+    `_rank_time_line` for rank."""
+    sections: list[str] = []
+    exclusions_block = _exclusions_block(exclusions)
+    if exclusions_block is not None:
+        sections.append(exclusions_block)
+    if time_line is not None:
+        sections.append(time_line)
+    return sections
+
+
+def _derived_note(derived: Mapping[str, object] | None) -> str | None:
+    """A fixed-size statement naming which of this result's own inherited
+    fields have become unreliable after transformation, or `None` when the
+    result carries no derived marker.
+
+    `derived` is `applied_policy.detail["derived"]` (see
+    `frame_ref_resolution.DerivedMarker`), written to the trace by every
+    producer verb. Every flag that's set folds into one `"; "`-joined
+    sentence rather than a line per flag.
+    """
+    if not derived:
+        return None
+    dishonest: list[str] = []
+    if derived.get("dimensionless"):
+        dishonest.append("unit (inherited from an input value this result no longer denominates)")
+    if derived.get("inherited_stat_var"):
+        dishonest.append("stat_var (inherited; no longer names what this value measures)")
+    if derived.get("ordinal"):
+        dishonest.append(
+            "value (a rank position, or a difference of positions -- not a measured "
+            "quantity; a ratio or a relative growth rate over it is meaningless)"
+        )
+    if not dishonest:
+        return None
+    return "derived result -- do not reuse as if genuine: " + "; ".join(dishonest) + "."
+
+
+def _identity_block(
+    *, op_spec_hash: str, content_version: str, execution_identity: ExecutionIdentity
+) -> str:
+    """The identity block every verb's digest ends with, in the same shape
+    and order every other renderer here uses."""
+    return "\n".join(
+        [
+            f"frame reference: spec_id={op_spec_hash}, content_version={content_version} "
+            "-- pass both to downstream tools. presentation-mcp's write_component accepts "
+            "only spec_/cv_ frame references and refuses an ops_/ocv_ pair.",
+            f"execution_identity: {execution_identity.canonical_string()}",
+        ]
+    )
+
+
+def _time_window_text(summary: GroupSummary) -> str:
+    if summary.time_period_min == summary.time_period_max:
+        return summary.time_period_min
+    return f"{summary.time_period_min}..{summary.time_period_max}"
+
+
+def _own_window_differs(summary: GroupSummary, period_label: str | None) -> bool:
+    """Whether a group's own periods cover less than the call-wide label
+    every row carries. Always true when there is no call-wide label."""
+    if period_label is None:
+        return True
+    return span_label((summary.time_period_min, summary.time_period_max)) != period_label
+
+
+def _group_line(summary: GroupSummary, *, period_label: str | None) -> str:
+    """One group's line. The group's own window shows unless it equals the
+    call-wide `period_label` the header states."""
+    key_text = _key_text(summary.group_key)
+    window = f"{_time_window_text(summary)}, " if _own_window_differs(summary, period_label) else ""
+    value_text = _format_number(summary.value)
+    if summary.value_period is not None:
+        value_text = f"{value_text} ({summary.value_period})"
+    return f"  {key_text} [{window}n={summary.row_count}]: {value_text}"
+
+
+def render_aggregate_digest(
+    *,
+    group_by: Sequence[str],
+    aggregation: str,
+    result: AggregateResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.aggregate.run_aggregate`)
+    into the digest text a successful `aggregate` tool call returns.
+
+    When every row carries one label (`result.period_label`, set under sum or
+    mean with `time_period` outside `group_by`), the header states it once, and a
+    group's line carries its own earliest and latest period only when they
+    cover less than that label. Otherwise every group's line carries them.
+    """
+    group_by_text = (
+        ", ".join(group_by) if group_by else "(none -- whole frame reduced to one group)"
+    )
+    header = f"aggregate: {aggregation} grouped by {group_by_text}"
+    if result.period_label is not None:
+        header += f"; every row's time_period is {result.period_label}"
+
+    # Magnitude, not positional: `group_summaries` is ordered by the
+    # group_key's canonical sort, not a criterion the caller stated (see
+    # this module's docstring). When `group_by` names `time_period`, the
+    # group key is the time axis, so a magnitude cap can drop a scattered
+    # subset of years out of an otherwise-contiguous run, and a model
+    # scanning the shown years reads a gapped chronology as contiguous.
+    shown = _capped(result.group_summaries, magnitude=lambda summary: summary.value)
+    group_lines = [_group_line(summary, period_label=result.period_label) for summary in shown]
+    groups_block = "\n".join([f"{len(result.group_summaries)} group(s):", *group_lines])
+    groups_block += _truncation_note(
+        shown, len(result.group_summaries), selection=_MAGNITUDE_SELECTION
+    )
+
+    unit_line = f"unit: {_unit_text(result.resolved_unit)}"
+    coverage_line = (
+        f"coverage: {result.realised_coverage_fraction:.1%} "
+        f"({result.present_cell_count}/{result.expected_cell_count} expected grid cells present, "
+        f"{result.skipped_cell_count} missing)"
+    )
+
+    sections = [header, groups_block, unit_line, coverage_line]
+
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+
+    if result.period_label is None:
+        per_item_note = "each group's own window is on its line"
+    elif any(_own_window_differs(summary, result.period_label) for summary in shown):
+        per_item_note = "a group whose own periods cover less shows its window on its line"
+    else:
+        per_item_note = ""
+    time_line = _time_line(time, per_item_note=per_item_note)
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=time_line))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _places_text(value: float) -> str:
+    """An ordinal growth's own difference, stated in words rather than left
+    as a bare signed number: 12th -> 5th is `-7`, and a negative number for
+    an improvement is the single most misreadable value this toolkit
+    produces. `"N places better"` for a negative change (the rank number
+    went down), `"N places worse"` for a positive one, `"no change"` at
+    zero. `value` is always a whole number of places (a difference of two
+    integers), so `int()` never truncates a real fraction here.
+    """
+    places = abs(int(value))
+    unit = "place" if places == 1 else "places"
+    if value < 0:
+        return f"{places} {unit} better"
+    if value > 0:
+        return f"{places} {unit} worse"
+    return "no change"
+
+
+def _growth_line(growth: EntityGrowth, *, change: str, ordinal: bool) -> str:
+    key_text = _key_text(growth.entity_key)
+    # `ordinal`: the input carried a rank position, so the difference reads
+    # in places, in words -- see `_places_text`. `change == "relative"`: a
+    # percentage, the established formatting. `change == "absolute"`: a
+    # plain signed difference in the input's own unit (stated separately,
+    # on `unit_line`) -- a percentage format here would misstate an
+    # absolute USD or places difference as a rate.
+    if ordinal:
+        value_text = _places_text(growth.growth_rate)
+    elif change == "relative":
+        value_text = f"{growth.growth_rate:+.1%}"
+    else:
+        value_text = _signed_number_text(growth.growth_rate)
+    return (
+        f"  {key_text}: {value_text} "
+        f"({_format_number(growth.value_start)} -> {_format_number(growth.value_end)})"
+    )
+
+
+def render_growth_digest(
+    *,
+    window_start: str,
+    window_end: str,
+    entity_by: Sequence[str],
+    result: GrowthResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.growth.run_growth`) into
+    the digest text a successful `growth` tool call returns.
+
+    When the input carried `DerivedMarker.ordinal` (a per-period rank's own
+    output, or a growth reading one), every entity's own line and the
+    `unit:` line both read in places, in words, rather than as a signed
+    number or a bare `None` unit -- see `_places_text`.
+    """
+    entity_by_text = (
+        ", ".join(entity_by) if entity_by else "(none -- the whole frame is one entity)"
+    )
+    header = f"growth: {window_start}..{window_end}, entity_by {entity_by_text}"
+
+    ordinal = bool(derived and derived.get("ordinal"))
+    shown = _capped(result.entity_growths, magnitude=lambda growth: growth.growth_rate)
+    lines = [_growth_line(growth, change=result.change, ordinal=ordinal) for growth in shown]
+    entities_block = "\n".join([f"{len(result.entity_growths)} entit(y/ies):", *lines])
+    entities_block += _truncation_note(
+        shown, len(result.entity_growths), selection=_MAGNITUDE_SELECTION
+    )
+
+    if ordinal:
+        unit_line = "unit: absolute change (places)"
+    elif result.change == "relative":
+        unit_line = f"unit: {_unit_text(result.resolved_unit)}"
+    elif result.resolved_unit is not None:
+        unit_line = f"unit: absolute change ({_unit_text(result.resolved_unit)})"
+    elif derived is not None and derived.get("dimensionless"):
+        # The input was already dimensionless (a prior relative-growth or
+        # share_of result) -- its own unit-less ratio reads as percentage
+        # points once differenced, not as a bare unitless number.
+        unit_line = "unit: absolute change (percentage points)"
+    else:
+        unit_line = f"unit: absolute change ({_unit_text(result.resolved_unit)})"
+
+    sections = [header, entities_block, unit_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _comparison_line(comparison: PeriodComparison) -> str:
+    return (
+        f"  {comparison.time_period}: {_format_number(comparison.left_value)} -> "
+        f"{_format_number(comparison.right_value)} (delta {_format_number(comparison.delta)})"
+    )
+
+
+def render_compare_digest(
+    *,
+    result: CompareResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.compare.run_compare`) into
+    the digest text a successful `compare` tool call returns."""
+    header = (
+        f"compare: {len(result.intersected_periods)} intersected period(s) "
+        f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
+    )
+
+    # Magnitude, not positional: `period_comparisons` is ordered
+    # chronologically, not by the caller's own criterion. A magnitude cap
+    # drops the smallest-delta periods, which are often the direct answer
+    # to "in which years did these two match?"
+    shown = _capped(result.period_comparisons, magnitude=lambda comparison: comparison.delta)
+    lines = [_comparison_line(comparison) for comparison in shown]
+    comparisons_block = "\n".join([f"{len(result.period_comparisons)} compared period(s):", *lines])
+    comparisons_block += _truncation_note(
+        shown, len(result.period_comparisons), selection=_MAGNITUDE_SELECTION
+    )
+
+    coverage_line = (
+        f"period overlap: left {result.left_coverage_fraction:.1%}, "
+        f"right {result.right_coverage_fraction:.1%} (share of each side's own offered "
+        "periods that the other side also covers)"
+    )
+    unit_line = (
+        f"left unit: {_unit_text(result.left_resolved_unit)}, "
+        f"right unit: {_unit_text(result.right_resolved_unit)}"
+    )
+
+    sections = [header, comparisons_block, coverage_line, unit_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _rank_line(rank: EntityRank) -> str:
+    key_text = _key_text(rank.entity_key)
+    return (
+        f"  #{rank.rank} {key_text}: {_format_number(rank.value)} "
+        f"[n={rank.row_count}, coverage={rank.coverage_fraction:.0%}]"
+    )
+
+
+def _rank_block(ranks: Sequence[EntityRank]) -> str:
+    """`ranks`, already in rank order, as a `_rank_line`-per-entity block
+    capped at `_LIST_CAP` -- shared by the collapse mode's own single block
+    and by `_per_period_ranks_block`'s block-per-period call, one period's
+    own ranking at a time."""
+    shown = ranks[:_LIST_CAP]
+    lines = [_rank_line(rank) for rank in shown]
+    block = "\n".join([f"{len(ranks)} ranked entit(y/ies):", *lines])
+    return block + _truncation_note(shown, len(ranks), selection=_RANK_ORDER_SELECTION)
+
+
+def _per_period_ranks_block(entity_ranks: Sequence[EntityRank]) -> str:
+    """One block per period, each capped and truncation-noted exactly like
+    the collapse mode's single block. `entity_ranks` is already grouped by
+    period -- the engine (`engine.rank._rank_per_period`) emits one
+    period's own ranking, in rank order, before moving to the next -- so
+    consecutive runs sharing a `time_period` are the per-period grouping,
+    with no second sort needed here.
+    """
+    periods: list[str] = []
+    grouped: dict[str, list[EntityRank]] = {}
+    for rank in entity_ranks:
+        if rank.time_period not in grouped:
+            periods.append(rank.time_period)
+        grouped.setdefault(rank.time_period, []).append(rank)
+    blocks = [
+        f"{period}:\n  " + _rank_block(grouped[period]).replace("\n", "\n  ") for period in periods
+    ]
+    return "\n".join(blocks)
+
+
+def render_rank_digest(
+    *,
+    rank_by: Sequence[str],
+    result: RankResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.rank.run_rank`) into the
+    digest text a successful `rank` tool call returns.
+
+    `result.per_period=True` renders one block per period instead of one
+    ranking overall -- each entity's own `value` here is still the measured
+    value (`EntityRank.value`), not the rank position the output *frame*'s
+    own column carries with no `limit`; `_derived_note` states that
+    distinction when `derived["ordinal"]` is set.
+
+    `result.limit` adds the kept and ranked counts to the header. The rank
+    block lists the whole ranking, so the header's count and each line's
+    rank number say which entries the output frame holds.
+    """
+    reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
+    window_text = (
+        f"{result.window_start}..{result.window_end}"
+        if result.window_start is not None
+        else "(no window)"
+    )
+    header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
+    if result.per_period:
+        header += ", per_period=True"
+    if result.limit is not None:
+        scope, counted = (" per period", "rows") if result.per_period else ("", "entities")
+        header += (
+            f", limit {result.limit}{scope} (kept {len(result.kept_ranks)} of "
+            f"{len(result.entity_ranks)} ranked {counted})"
+        )
+
+    # Positional, not `_capped`: `entity_ranks` is already ordered by the
+    # caller's own criterion (`ascending`, or its default) within each
+    # period, so the head of each block is what a caller asking for "the 20
+    # lowest/highest" wants. A magnitude selection would show the opposite
+    # end of the ranking from rank 1.
+    ranks_block = (
+        _per_period_ranks_block(result.entity_ranks)
+        if result.per_period
+        else _rank_block(result.entity_ranks)
+    )
+
+    unit_line = f"unit: {_unit_text(result.resolved_unit)}"
+    coverage_line = f"overall coverage: {result.overall_coverage_fraction:.1%}"
+
+    sections = [header, ranks_block, unit_line, coverage_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    time_line = _rank_time_line(
+        time, per_period=result.per_period, periods_in_window=result.periods_in_window
+    )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=time_line))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _share_line(share: PeriodShare) -> str:
+    return (
+        f"  {share.time_period}: {_format_number(share.numerator_value)} / "
+        f"{_format_number(share.denominator_value)} = {share.share:.3%}"
+    )
+
+
+def _key_share_block(key: tuple[tuple[str, str], ...], shares: Sequence[PeriodShare]) -> str:
+    key_text = _key_text(key)
+    lines = [_share_line(share) for share in shares]
+    return "\n".join([f"{key_text} [{len(shares)} period(s)]:", *lines])
+
+
+def render_share_of_digest(
+    *,
+    result: ShareOfResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.share_of.run_share_of`)
+    into the digest text a successful `share_of` tool call returns.
+
+    An un-keyed call (every `PeriodShare.key` empty) renders one flat,
+    magnitude-capped list of period shares. A keyed call (`numerator_by`
+    non-empty) instead renders one
+    block per key -- `result.period_shares` is already grouped by key, then
+    by period, in the order `run_share_of` built it (sorted keys, sorted
+    periods within each), so grouping here needs no re-sort. The key list
+    itself is magnitude-capped by each key's own largest-magnitude share,
+    the same selection rule every other renderer's own grouped list uses.
+    """
+    keyed = any(share.key for share in result.period_shares)
+    if keyed:
+        grouped: dict[tuple[tuple[str, str], ...], list[PeriodShare]] = {}
+        for share in result.period_shares:
+            grouped.setdefault(share.key, []).append(share)
+        keys = list(grouped)
+        shown_keys = _capped(
+            keys, magnitude=lambda key: max(abs(share.share) for share in grouped[key])
+        )
+        header = (
+            f"share_of: {len(keys)} key(s), {len(result.period_shares)} matched "
+            "(key, period) pair(s)"
+        )
+        shares_block = "\n\n".join(_key_share_block(key, grouped[key]) for key in shown_keys)
+        shares_block += _truncation_note(shown_keys, len(keys), selection=_MAGNITUDE_SELECTION)
+    else:
+        header = f"share_of: {len(result.period_shares)} matched period(s)"
+        # Magnitude, not positional: `period_shares` is ordered
+        # chronologically. A magnitude cap hides periods with the smallest
+        # share, often the direct answer to "in which periods was this
+        # share near zero?"
+        shown = _capped(result.period_shares, magnitude=lambda share: share.share)
+        lines = [_share_line(share) for share in shown]
+        shares_block = "\n".join([f"{len(result.period_shares)} period share(s):", *lines])
+        shares_block += _truncation_note(
+            shown, len(result.period_shares), selection=_MAGNITUDE_SELECTION
+        )
+
+    numerator_unit_text = _unit_text(result.numerator_resolved_unit)
+    denominator_unit_text = _unit_text(result.denominator_resolved_unit)
+    unit_line = f"numerator unit: {numerator_unit_text}, denominator unit: {denominator_unit_text}"
+    coverage_line = (
+        f"period overlap: numerator {result.numerator_coverage_fraction:.1%}, "
+        f"denominator {result.denominator_coverage_fraction:.1%} (share of each side's own "
+        "offered periods that the other side also covers)"
+    )
+
+    sections = [header, shares_block, unit_line, coverage_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _matched_key_line(matched: MatchedKey) -> str:
+    key_text = _key_text(matched.key)
+    return (
+        f"  {key_text} [{matched.time_period}]: left={_format_number(matched.left_value)}, "
+        f"right={_format_number(matched.right_value)}"
+    )
+
+
+def render_join_digest(
+    *,
+    join_keys: Sequence[str],
+    result: JoinResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.join.run_join`) into the
+    digest text a successful `join` tool call returns."""
+    join_keys_text = ", ".join(join_keys) if join_keys else "(none -- time_period only)"
+    header = (
+        f"join: on {join_keys_text} + time_period, {len(result.matched_keys)} matched key(s) "
+        f"({result.left_dropped_key_count} left-only, {result.right_dropped_key_count} "
+        "right-only, dropped)"
+    )
+
+    matched_keys = result.matched_keys
+    shown = matched_keys.rows(
+        _capped_positions(
+            array_kernel(
+                "max_element_wise",
+                array_kernel("abs", matched_keys.left_values),
+                array_kernel("abs", matched_keys.right_values),
+            )
+        )
+    )
+    lines = [_matched_key_line(matched) for matched in shown]
+    matches_block = "\n".join([f"{len(result.matched_keys)} matched key(s):", *lines])
+    matches_block += _truncation_note(
+        shown, len(result.matched_keys), selection=_MAGNITUDE_SELECTION
+    )
+
+    left_unit_text = _unit_text(result.left_resolved_unit)
+    right_unit_text = _unit_text(result.right_resolved_unit)
+    unit_line = f"left unit: {left_unit_text}, right unit: {right_unit_text}"
+
+    sections = [header, matches_block, unit_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+def _filter_row_line(summary: FilterRowSummary) -> str:
+    key_text = _key_text(summary.row_key)
+    unit_text = _unit_text(summary.unit)
+    return f"  {key_text}: {_format_number(summary.value)} [{unit_text}]"
+
+
+def render_filter_digest(
+    *,
+    predicate_count: int,
+    result: FilterResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.filter.run_filter`) into
+    the digest text a successful `filter` tool call returns."""
+    header = (
+        f"filter: {predicate_count} predicate(s) applied, {result.kept_row_count}/"
+        f"{result.total_row_count} row(s) kept ({result.dropped_row_count} dropped)"
+    )
+
+    # Magnitude, not positional: `kept_row_summaries` is ordered by the
+    # frame grammar's grain order, not a criterion the caller stated. A
+    # predicate filters by a threshold, not by magnitude, so there is no
+    # caller-stated ordering to preserve here.
+    shown = _capped(result.kept_row_summaries, magnitude=lambda summary: summary.value)
+    lines = [_filter_row_line(summary) for summary in shown]
+    rows_block = "\n".join([f"{len(result.kept_row_summaries)} kept row(s):", *lines])
+    rows_block += _truncation_note(
+        shown, len(result.kept_row_summaries), selection=_MAGNITUDE_SELECTION
+    )
+
+    sections = [header, rows_block]
+    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)

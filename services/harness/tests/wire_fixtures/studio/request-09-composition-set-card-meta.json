@@ -1,0 +1,20 @@
+{
+  "kind": "composition.mutate",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "composition_id": "cps_01J9ZD2M8Q3N5T7V9X1B3D5F7H",
+  "expected_revision": 4,
+  "operations": [
+    {
+      "op": "set_card_meta",
+      "component_id": "cmp_01J9ZD4R6T8V0X2Z4B6D8F0H2K",
+      "meta": {
+        "subtitle": "Official development finance, 2018-2024",
+        "description": "Annual totals across grants and official loans.",
+        "x_label": "Years",
+        "y_label": "USD ($)",
+        "style": {"show_area_fill": true}
+      }
+    }
+  ]
+}

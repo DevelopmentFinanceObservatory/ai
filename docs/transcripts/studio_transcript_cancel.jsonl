@@ -1,0 +1,3 @@
+{"event":"message.delta","seq":0,"text":"Looking into health spending data for Kenya."}
+{"event":"activity.step","seq":1,"step_id":"resolve","label":"Resolve the question against the data graph","status":"complete","detail":"resolved: definite","tool":"search"}
+{"event":"error","seq":2,"error":{"error":"cancelled","retry":"do_not_retry","detail":"the turn was cancelled by the client"}}

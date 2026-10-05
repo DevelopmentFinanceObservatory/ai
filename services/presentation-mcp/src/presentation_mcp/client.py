@@ -1,0 +1,983 @@
+"""Async HTTP `Assembler` implementation over dfo-apis' presentation surface.
+
+Copies `data_mcp.client.UpstreamClient`'s shape: one `httpx2.AsyncClient`
+behind a retry loop bounded by wall-clock, problem-body parsing that keeps a
+refusal's `code` intact, a span per call, injectable transport and sleep, and
+`route` kept separate from the interpolated path for span cardinality. No
+surface probe: the server's startup `release()` fetch already proves the
+surface is mounted before any tool call reaches this client.
+
+The `caller` kwarg on `create_component`/`revise_component` is accepted
+because the `Assembler` Protocol requires it, and never put on the wire --
+it is presentation-mcp's own local truth about its own transport (external
+vs. first-party), not something the platform needs to know.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import gzip
+import json
+import logging
+import random
+import re
+import secrets
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Self
+
+import httpx2
+from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
+from opentelemetry import trace
+
+from presentation_mcp.errors import PlatformError, PlatformTransportError
+from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
+from presentation_mcp.platform_contract import Caller, Refusal, RetryMode, WriteReply
+from presentation_mcp.settings import Settings
+
+logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
+
+_COMPONENTS_ROUTE = "/api/presentation/components"
+_COMPONENT_ROUTE = "/api/presentation/components/{component_id}"
+_FRAME_ROUTE = "/api/presentation/frames/{spec_id}/{content_version}"
+_RELEASE_ROUTE = "/api/presentation/release"
+# dfo-apis' own `datasets_api` surface, not `presentation_api` -- see
+# `_ensure_published_pair`'s own docstring for why this client calls it.
+_PUBLISH_ROUTE = "/api/datasets/frames/publish"
+
+# These match dfo-apis' presentation path-parameter checks. They deliberately
+# admit well-formed unknown ids so the platform, rather than this client,
+# decides whether a referenced component or frame exists.
+_COMPONENT_ID_PATTERN = re.compile(r"^cmp_[A-Za-z0-9_-]{1,64}$")
+_WRITE_TOKEN_PATTERN = re.compile(r"^cmw_[A-Za-z0-9_-]{1,64}$")
+_SPEC_ID_PATTERN = re.compile(r"^(?:spec|ops)_[a-z0-9]{1,64}$")
+_CONTENT_VERSION_PATTERN = re.compile(r"^(?:cv|ocv)_[a-z0-9]{1,64}$")
+
+# The largest request Cloud Run admits, measured on the wire. dfo-apis serves
+# HTTP/1, and Cloud Run rejects an HTTP/1 request over 32 MiB with a bare 413
+# before dfo-apis sees it. The publish body is gzipped, so this bounds the
+# compressed bytes; `_publish_pair` refuses a larger one locally, with the figures.
+_PUBLISH_BODY_CEILING_BYTES = 32 * 1024 * 1024
+
+# dfo-apis's `MAX_PUBLISH_BODY_BYTES`: the most bytes its publish door decodes
+# from a gzipped body. `_publish_pair` refuses an uncompressed body over it, so
+# the door never refuses for size a body this client sends.
+_PUBLISH_DECODED_BODY_CEILING_BYTES = 129_000_000
+
+# Level 1 compresses a 52 MiB body in about 0.23 s; higher levels cost more
+# time for a small gain on JSON this repetitive.
+_PUBLISH_GZIP_LEVEL = 1
+
+# Sent only on the publish call (`_ensure_published_pair`'s own POST to
+# `_PUBLISH_ROUTE`) -- the one dfo-apis route this client calls that checks
+# it (`datasets_api.doors.publish`, mirroring the pin door's identical
+# mechanism). Every other route on this surface ignores it, so it is never
+# attached to any other request `request()` issues.
+PRINCIPAL_HEADER = "x-dfo-principal"
+
+# Sent only on a revise: the component's write token, which dfo-apis checks
+# before it merges a patch.
+WRITE_TOKEN_HEADER = "x-dfo-write-token"
+
+# The code dfo-apis answers a revise with when its write token is missing or
+# wrong (403, not retryable). dfo-apis's own detail and fix name its REST
+# routes and the write-token header, which a caller of this server cannot
+# use, so `_refusal` answers this code with the tool-level text below.
+WRITE_REFUSED = "write_refused"
+_WRITE_REFUSED_DETAIL = (
+    "The write_token sent does not grant revising this component: it is not the "
+    "token this component's create returned, or the component predates write tokens. "
+    "To go on, call write_component without component_id. describe_component on this "
+    "id returns the intent to start from."
+)
+_WRITE_REFUSED_FIX = (
+    "Create a new component: call write_component without component_id. "
+    "describe_component on this id returns its intent, which the new "
+    "component can start from."
+)
+
+# The parsed door serves SSE or a buffered body from one route, chosen by
+# `Accept`. Every caller here wants the buffered body.
+DEFAULT_ACCEPT_HEADER = "application/json"
+
+AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
+SleepFn = Callable[[float], Awaitable[None]]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _PlatformRefusal(Refusal):
+    """A `Refusal` built from a platform problem body, carrying the body's own
+    `trace_id` as `platform_trace_id` so an operator can match a refused call
+    to the platform's log line. `None` when the body has no non-empty string
+    `trace_id`; the wire drops a `None` field.
+    """
+
+    platform_trace_id: str | None = None
+
+
+async def _default_sleep(seconds: float) -> None:
+    """Real sleep; tests inject a fake to keep backoff assertions fast."""
+    await asyncio.sleep(seconds)
+
+
+def _new_write_token() -> str:
+    """Mint a component write token: `cmw_` and 22 url-safe characters (128 bits)."""
+    return f"cmw_{secrets.token_urlsafe(16)}"
+
+
+def _component_id_refusal(component_id: str) -> Refusal | None:
+    """A local refusal for an invalid `component_id` path segment.
+
+    Guards `get_component` and `revise_component`, both of which format
+    `_COMPONENT_ROUTE` from this id before issuing a request. This check
+    catches empty ids and strings that would alter the route, so neither call
+    ever reaches the platform with an invalid component id.
+    """
+    if _COMPONENT_ID_PATTERN.fullmatch(component_id):
+        return None
+    return Refusal(
+        error="request_invalid",
+        retry=RetryMode.DO_NOT_RETRY,
+        detail="component_id must be a valid id a previous write_component reply returned.",
+        pointer="/component_id",
+    )
+
+
+def _write_token_refusal(write_token: str) -> Refusal | None:
+    """A local refusal for a malformed `write_token`, which would otherwise
+    reach the wire as a header value."""
+    if _WRITE_TOKEN_PATTERN.fullmatch(write_token):
+        return None
+    return Refusal(
+        error="request_invalid",
+        retry=RetryMode.DO_NOT_RETRY,
+        detail="write_token must be the token this component's create returned.",
+        fix=_WRITE_REFUSED_FIX,
+        pointer="/write_token",
+    )
+
+
+def _publish_body_refusal(
+    *, body_bytes: int, rows: int, ceiling: int, ceiling_kind: str, what: str
+) -> Refusal:
+    """The refusal for a publish body over one of its two byte ceilings.
+
+    `publish_body_bytes` bounds the gzipped bytes on the wire
+    (`_PUBLISH_BODY_CEILING_BYTES`) and `publish_body_decoded_bytes` bounds the
+    uncompressed JSON (`_PUBLISH_DECODED_BODY_CEILING_BYTES`); `what` names the
+    measured bytes in the message. The figures come from this frame's own body:
+    its bytes a row, in the same unit as `body_bytes`, and the rows of that
+    shape that fit under `ceiling`.
+    """
+    bytes_per_row = body_bytes / max(rows, 1)
+    fitting_rows = int(ceiling / bytes_per_row)
+    return Refusal(
+        error="over_ceiling",
+        retry=RetryMode.CORRECT_AND_RETRY,
+        detail=(
+            f"This frame is too large to publish to the platform: its {rows:,} rows encode to "
+            f"{body_bytes:,} {what} bytes, over the {ceiling:,}-byte limit. "
+            f"At {bytes_per_row:,.0f} bytes a row, about {fitting_rows:,} rows of this shape "
+            "fit. Narrow the frame to fewer rows."
+        ),
+        fix={
+            "ceiling_kind": ceiling_kind,
+            "body_bytes": body_bytes,
+            "ceiling": ceiling,
+        },
+    )
+
+
+async def _gzipped_publish_body(published: PublishBody) -> bytes | Refusal:
+    """The gzipped publish body, or the refusal for a body over either ceiling.
+
+    Compressed once, so every retry resends the same bytes. Off the event loop:
+    compressing a large body takes a fraction of a second and would stall every
+    call this instance serves. Run through the body's row claim, so a cancelled
+    publish leaves the rows held until the compression thread ends.
+    """
+    if len(published.data) > _PUBLISH_DECODED_BODY_CEILING_BYTES:
+        return _publish_body_refusal(
+            body_bytes=len(published.data),
+            rows=published.rows,
+            ceiling=_PUBLISH_DECODED_BODY_CEILING_BYTES,
+            ceiling_kind="publish_body_decoded_bytes",
+            what="uncompressed",
+        )
+    body = await published.hold_through(
+        asyncio.to_thread(gzip.compress, published.data, _PUBLISH_GZIP_LEVEL, mtime=0)
+    )
+    if len(body) > _PUBLISH_BODY_CEILING_BYTES:
+        return _publish_body_refusal(
+            body_bytes=len(body),
+            rows=published.rows,
+            ceiling=_PUBLISH_BODY_CEILING_BYTES,
+            ceiling_kind="publish_body_bytes",
+            what="compressed",
+        )
+    return body
+
+
+def _row_budget_refusal(exc: RowBudgetExhausted) -> Refusal:
+    """The refusal for a publish whose frame rows the process's frame row
+    budget (`common.row_budget`) has no room for."""
+    return Refusal(
+        error="service_unavailable",
+        retry=RetryMode.RETRY_AFTER_DELAY,
+        detail=(
+            "This server is already working on as many frame rows as its memory allows at "
+            f"once ({exc.max_rows:,}). This frame has {exc.requested:,} rows and "
+            f"{exc.free:,} are free. Retry after {ROW_BUDGET_RETRY_AFTER_S:.1f}s."
+        ),
+        fix={
+            "service": "presentation-mcp",
+            "rows_requested": exc.requested,
+            "rows_free": exc.free,
+            "rows_in_flight_max": exc.max_rows,
+        },
+        retry_after_s=ROW_BUDGET_RETRY_AFTER_S,
+    )
+
+
+def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Refusal:
+    """Return valid frame path segments, or a local refusal before routing.
+
+    `spec_id` and `content_version` are interpolated into `_FRAME_ROUTE`, so
+    accepting route syntax in either field could select a different platform
+    resource after URL normalization.
+    """
+    spec_id = frame_ref.get("spec_id")
+    content_version = frame_ref.get("content_version")
+    if not isinstance(spec_id, str) or not _SPEC_ID_PATTERN.fullmatch(spec_id):
+        return Refusal(
+            error="request_invalid",
+            retry=RetryMode.DO_NOT_RETRY,
+            detail="frame_ref.spec_id must be a valid id a previous frame reference returned.",
+            pointer="/frame_ref/spec_id",
+        )
+    if not isinstance(content_version, str) or not _CONTENT_VERSION_PATTERN.fullmatch(
+        content_version
+    ):
+        return Refusal(
+            error="request_invalid",
+            retry=RetryMode.DO_NOT_RETRY,
+            detail=(
+                "frame_ref.content_version must be a valid id a previous frame reference returned."
+            ),
+            pointer="/frame_ref/content_version",
+        )
+    return spec_id, content_version
+
+
+def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
+    """Parse `body` as a dfo-apis problem document, ignoring `Content-Type`.
+
+    Returns `None` unless `retryable` is present as a real bool, which is
+    what separates a dfo-apis problem (`dfo_platform.problem.ProblemDetails`)
+    from a proxy's `{"error": "unavailable"}` on the same status.
+    """
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if not isinstance(parsed.get("retryable"), bool):
+        return None
+    return parsed
+
+
+def _render_alternatives(alternatives: Sequence[Mapping[str, Any]]) -> str:
+    """Each legal value as `label (ref)`, or its ref alone where the two match.
+
+    A retry's select names values by ref (`country/USA`), so the ref rides
+    beside the label the model reads.
+    """
+    rendered = []
+    for alt in alternatives:
+        label, ref = str(alt["label"]), str(alt["ref"])
+        rendered.append(ref if label == ref else f"{label} ({ref})")
+    return ", ".join(rendered)
+
+
+def _render_fix(exc: PlatformError) -> str | None:
+    """A short, model-facing rendering of what would satisfy the request instead.
+
+    `constraint_id` names the violated rule, `alternatives` is a flat list of
+    legal values for the axis that triggered the refusal, and `issues` is one
+    such list per axis/member the refusal concerns. Each list gets its own
+    more-values-exist note from its own `truncated` flag: the top-level
+    `truncated` for `alternatives`, and each issue's own `truncated` for that
+    issue's list -- the two are computed independently on the wire and do not
+    imply one another.
+    """
+    parts: list[str] = []
+    if exc.constraint_id:
+        parts.append(f"violates constraint {exc.constraint_id!r}")
+    if exc.alternatives:
+        labels = _render_alternatives(exc.alternatives)
+        if exc.truncated:
+            labels += " (more values exist than are listed)"
+        parts.append(f"legal values: {labels}")
+    if exc.issues:
+        for issue in exc.issues:
+            axis = issue.get("axis") or issue.get("member") or issue.get("pointer") or "field"
+            alternatives = issue.get("alternatives") or []
+            if alternatives:
+                labels = _render_alternatives(alternatives)
+                if issue.get("truncated"):
+                    labels += " (more values exist than are listed)"
+                parts.append(f"{axis}: {labels}")
+    if not parts:
+        return None
+    return "; ".join(parts)
+
+
+class PlatformAssembler:
+    """`Assembler` implementation calling dfo-apis' `/api/presentation/*` surface.
+
+    Use as an async context manager or call `aclose()` directly to release
+    the connection pool.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        auth: AuthProvider | None = None,
+        sleep: SleepFn = _default_sleep,
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ) -> None:
+        """Build a client from `settings`.
+
+        Args:
+            settings: The service's `Settings`, supplying the base URL and
+                the `upstream_*` timeout/retry knobs.
+            auth: Async credential provider, called once per call rather than
+                per attempt. Injects nothing by default.
+            sleep: Backoff sleep, which tests replace to avoid waiting.
+            transport: `httpx2` transport override, `httpx2.MockTransport` in
+                tests.
+        """
+        self._retry_budget_s = settings.upstream_retry_budget_s
+        self._max_attempts = settings.upstream_max_attempts
+        self._backoff_base_s = settings.upstream_backoff_base_s
+        self._read_timeout_s = settings.upstream_read_timeout_s
+        self._connect_timeout_s = settings.upstream_connect_timeout_s
+        self._publish_principal = settings.datasets_first_party_principal
+        self._max_frame_rows = settings.max_frame_rows
+        self._auth = auth
+        self._sleep = sleep
+        self._client = httpx2.AsyncClient(
+            base_url=settings.dfo_apis_url,
+            timeout=httpx2.Timeout(
+                settings.upstream_connect_timeout_s, read=settings.upstream_read_timeout_s
+            ),
+            transport=transport,
+            headers={"Accept": DEFAULT_ACCEPT_HEADER},
+        )
+        # code -> RetryMode, cached from the last successful `release()`
+        # call. The server lifespan always calls `release()` before any tool
+        # call, so this is populated in practice by the time a refusal needs
+        # to compose a retry mode.
+        self._retry_modes: dict[str, RetryMode] = {}
+        # `(spec_id, content_version)` pairs this process has already
+        # published successfully -- see `_ensure_published_pair`'s own
+        # docstring for why a per-process memo, not a stronger cache, is the
+        # right amount of idempotency here. One `PlatformAssembler` lives
+        # for the whole process (the server lifespan builds exactly one),
+        # so this is a plain instance set, not a holder of its own.
+        self._published: set[tuple[str, str]] = set()
+        # One `asyncio.Lock` per pair ever seen, single-flighting concurrent
+        # first publishes of the same pair onto one network call instead of
+        # each racing its own (`_ensure_published_pair`'s own docstring).
+        # Never pruned, same as `_published` above: both grow with the
+        # number of distinct pairs this process ever publishes, not with
+        # call volume.
+        self._publish_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the underlying connection pool."""
+        await self._client.aclose()
+
+    async def create_component(
+        self,
+        *,
+        intent: Mapping[str, Any],
+        caller: Caller,
+    ) -> WriteReply | Refusal:
+        """Create a component, retrying transport failures and retryable 5xx replies.
+
+        The write token is minted here, once per call, and sent in the body of
+        every attempt. dfo-apis treats it as the create's idempotency key: a
+        repeat carrying the same token and intent returns the draft the first
+        attempt stored, so a create is retried like any other call. One
+        duplicate path remains: when every attempt fails, the model may call
+        `write_component` again, which mints a fresh token and can store a
+        second draft.
+
+        `caller` is accepted for Protocol conformance and never put on the wire
+        (see this module's own docstring).
+        """
+        write_token = _new_write_token()
+        # Publish before create: `create_component` never validates
+        # `intent["frame_ref"]` locally at all (see `_ensure_published`'s own
+        # docstring), so this is the only chance to publish an analysis-mcp
+        # result before the platform's own `ops_unsupported` refusal would
+        # otherwise answer for it.
+        publish_refusal = await self._ensure_published(intent.get("frame_ref"))
+        if publish_refusal is not None:
+            return publish_refusal
+        try:
+            response = await self.request(
+                "POST",
+                _COMPONENTS_ROUTE,
+                route=_COMPONENTS_ROUTE,
+                json={"intent": dict(intent), "write_token": write_token},
+            )
+        except PlatformError as exc:
+            return self._refusal(exc)
+        return self._write_reply(response.json())
+
+    async def revise_component(
+        self,
+        *,
+        component_id: str,
+        patch: Mapping[str, Any],
+        write_token: str,
+        caller: Caller,
+    ) -> WriteReply | Refusal:
+        # `caller` is accepted for Protocol conformance and never put on the
+        # wire (see this module's own docstring). A revise names the component
+        # it targets and merges the same patch into the same stored intent
+        # every time -- a repeated identical patch is the platform's
+        # structural no-op, so it is safe to retry.
+        refusal = _component_id_refusal(component_id) or _write_token_refusal(write_token)
+        if refusal is not None:
+            return refusal
+        # Same reasoning as `create_component`'s own publish hook: a patch
+        # naming a new `frame_ref` is never locally validated either, so
+        # publish it before it reaches the platform.
+        publish_refusal = await self._ensure_published(patch.get("frame_ref"))
+        if publish_refusal is not None:
+            return publish_refusal
+        path = _COMPONENT_ROUTE.format(component_id=component_id)
+        try:
+            response = await self.request(
+                "PATCH",
+                path,
+                route=_COMPONENT_ROUTE,
+                json={"intent": dict(patch)},
+                headers={WRITE_TOKEN_HEADER: write_token},
+            )
+        except PlatformError as exc:
+            return self._refusal(exc)
+        return self._write_reply(response.json())
+
+    async def get_frame_view(
+        self,
+        *,
+        frame_ref: Mapping[str, Any],
+        dimension: str | None = None,
+        query: str | None = None,
+    ) -> Mapping[str, Any] | Refusal:
+        frame_ref_or_refusal = _frame_ref_or_refusal(frame_ref)
+        if isinstance(frame_ref_or_refusal, Refusal):
+            return frame_ref_or_refusal
+        spec_id, content_version = frame_ref_or_refusal
+        publish_refusal = await self._ensure_published_pair(spec_id, content_version)
+        if publish_refusal is not None:
+            return publish_refusal
+        path = _FRAME_ROUTE.format(spec_id=spec_id, content_version=content_version)
+        params = {
+            k: v for k, v in {"dimension": dimension, "query": query}.items() if v is not None
+        }
+        try:
+            response = await self.request(
+                "GET",
+                path,
+                route=_FRAME_ROUTE,
+                params=params or None,
+            )
+        except PlatformError as exc:
+            return self._refusal(exc)
+        return response.json()
+
+    async def get_component(
+        self,
+        *,
+        component_id: str,
+        revision: int | None = None,
+    ) -> Mapping[str, Any] | Refusal:
+        refusal = _component_id_refusal(component_id)
+        if refusal is not None:
+            return refusal
+        path = _COMPONENT_ROUTE.format(component_id=component_id)
+        params = {"revision": revision} if revision is not None else None
+        try:
+            response = await self.request(
+                "GET",
+                path,
+                route=_COMPONENT_ROUTE,
+                params=params,
+            )
+        except PlatformError as exc:
+            return self._refusal(exc)
+        return response.json()
+
+    async def release(self) -> Mapping[str, Any]:
+        """The platform's release document, fetched fresh every call.
+
+        Raises `PlatformError`/`PlatformTransportError` on failure -- the one
+        `Assembler` call with no `Refusal` path. On success, caches this
+        document's `retry_modes` table for `_refusal` to compose a retry mode
+        from.
+        """
+        response = await self.request("GET", _RELEASE_ROUTE, route=_RELEASE_ROUTE)
+        document = response.json()
+        retry_modes = document.get("retry_modes")
+        if isinstance(retry_modes, Mapping):
+            parsed = {code: self._parse_retry_mode(mode) for code, mode in retry_modes.items()}
+            self._retry_modes = {code: mode for code, mode in parsed.items() if mode is not None}
+        return document
+
+    @staticmethod
+    def _parse_retry_mode(value: Any) -> RetryMode | None:
+        try:
+            return RetryMode(value)
+        except ValueError:
+            return None
+
+    def _write_reply(self, body: Mapping[str, Any]) -> WriteReply:
+        """The wire's create/revise reply, mapped onto `WriteReply`.
+
+        `catalog_version`, `composition_id`, and `composition_revision` are
+        deliberately omitted from `WriteReply`; `catalog_version` is logged
+        here so the dropped field still leaves a trace. `resolved_payload`
+        is kept verbatim for the server to carry in the tool result's
+        `_meta`. `write_token` is present on a create's reply alone.
+
+        The wire's `affordance` is the REST door's line naming its `PATCH`
+        and `GET` routes. This service omits it too. The equivalent
+        guidance lives in `tool_schema.py`'s parameter descriptions, which
+        reach a model through `tools/list`.
+        """
+        logger.debug("platform call minted catalog_version %s", body.get("catalog_version"))
+        return WriteReply(
+            component_id=body["component_id"],
+            revision=body["revision"],
+            changed=tuple(body.get("changed") or ()),
+            fact_summary=body["fact_summary"],
+            resolved_payload=body.get("resolved_payload"),
+            write_token=body.get("write_token"),
+        )
+
+    def _refusal(self, exc: PlatformError) -> Refusal:
+        """Translate a `PlatformError` into the model-facing `Refusal`."""
+        if isinstance(exc, PlatformTransportError):
+            return Refusal(
+                error="transient_unavailable",
+                retry=RetryMode.RETRY_AFTER_DELAY,
+                detail=exc.detail or "The platform call failed before a response arrived.",
+            )
+        if exc.code is None:
+            # No problem body parsed: classified by status alone. `detail`
+            # holds prose describing the failure for an integrator to read.
+            # The status code is logged here for tracing.
+            logger.debug("platform call answered %s with no problem body", exc.status)
+            if exc.status is not None and exc.status < 500:
+                detail = exc.detail or "The platform rejected this call and returned no reason."
+                return Refusal(error="request_invalid", retry=RetryMode.DO_NOT_RETRY, detail=detail)
+            detail = exc.detail or "The platform failed to answer this call."
+            return Refusal(
+                error="transient_unavailable", retry=RetryMode.RETRY_AFTER_DELAY, detail=detail
+            )
+        retry = RetryMode.DO_NOT_RETRY if not exc.retryable else self._retry_mode_for(exc.code)
+        if exc.code == WRITE_REFUSED:
+            detail, fix = _WRITE_REFUSED_DETAIL, _WRITE_REFUSED_FIX
+        else:
+            detail, fix = exc.detail or "The platform refused this call.", _render_fix(exc)
+        return _PlatformRefusal(
+            error=exc.code,
+            retry=retry,
+            detail=detail,
+            fix=fix,
+            pointer=exc.pointer,
+            platform_trace_id=exc.trace_id
+            if isinstance(exc.trace_id, str) and exc.trace_id
+            else None,
+        )
+
+    def _retry_mode_for(self, code: str) -> RetryMode:
+        """The retry mode for a retryable `code`, from the cached `release()` table.
+
+        Falls back to `RETRY_AFTER_DELAY` for a code the table doesn't name,
+        or before the table has ever been populated.
+        """
+        return self._retry_modes.get(code, RetryMode.RETRY_AFTER_DELAY)
+
+    async def _ensure_published(self, frame_ref: object) -> Refusal | None:
+        """Publish `frame_ref`'s pair first, when it needs publishing --
+        `create_component`/`revise_component`'s own hook, called on
+        whatever `intent`/`patch` carries under `"frame_ref"`, which unlike
+        `get_frame_view`'s own `frame_ref` argument is never locally
+        validated at all (`platform_contract.py`'s own docstring: intents
+        and patches stay opaque to this client, `frame_ref` being the one
+        exception `get_frame_view` reads). Reads only the two fields it
+        needs to decide whether to act -- `None` for anything that isn't a
+        mapping carrying both as strings, deferring entirely to whatever
+        the platform's own intent validation makes of it.
+        """
+        if not isinstance(frame_ref, Mapping):
+            return None
+        spec_id = frame_ref.get("spec_id")
+        content_version = frame_ref.get("content_version")
+        if not isinstance(spec_id, str) or not isinstance(content_version, str):
+            return None
+        return await self._ensure_published_pair(spec_id, content_version)
+
+    async def _ensure_published_pair(self, spec_id: str, content_version: str) -> Refusal | None:
+        """Ensure `{spec_id, content_version}` is published to dfo-apis'
+        `datasets_api` surface before the caller's own platform request
+        that needs it, when it needs publishing at all.
+
+        A `spec_`-prefixed pair is left alone: it names a Datasets
+        snapshot, already resolvable through the platform's ordinary
+        mint/pin path, and posting it to the publish door (`ops_`-only on
+        the wire) would just be refused. `ops_`/`ocv_` is analysis-mcp's
+        own pair, the one shape `LiveFrameStore` cannot resolve until this
+        door has run for it at least once.
+
+        Memoised per process in `self._published`: a repeat call for a pair
+        already published this process's lifetime is a same-request no-op,
+        never a second network call -- the route is idempotent server-side
+        too (a second publish of identical bytes is safe), but a session
+        that both describes and then writes the same ref in one turn is the
+        common case this memo is for, and skipping the call outright there
+        is cheaper than relying on the server's own dedup. Scoped to this
+        process: a second `PlatformAssembler` (this server restarted, or one
+        day horizontally scaled) republishes once, which is exactly as safe.
+        Single-flighted per pair via `self._publish_locks`, so two concurrent
+        first calls for the same pair still publish it only once, rather than
+        each racing to build a body and post it before the other records the
+        memo above.
+
+        Returns a `Refusal` only when publishing was needed and failed; the
+        caller's own platform call proceeds either way otherwise. See
+        `frame_publish.publish_body_for` for what "cannot be published"
+        means before any network call, this method's own `except
+        PlatformError` branch for what it means after one, and the
+        `publish_not_configured` branch below for what it means when this
+        process was never given a principal to publish as at all.
+        """
+        if not spec_id.startswith("ops_"):
+            return None
+        key = (spec_id, content_version)
+        if key in self._published:
+            return None
+
+        if self._publish_principal is None:
+            # Refused locally, before touching the local store or the
+            # network: an unconfigured principal refuses identically on
+            # every call for every pair, so there is nothing this process
+            # could learn by building the body or reaching the platform
+            # first. Reaching the platform anyway would collect dfo-apis'
+            # own `publish_not_permitted` 403 -- accurate, but generic ("the
+            # publish permission is not granted to this caller") next to
+            # naming the actual missing setting here.
+            return Refusal(
+                error="publish_not_configured",
+                retry=RetryMode.DO_NOT_RETRY,
+                detail=(
+                    "This deployment has no datasets_first_party_principal "
+                    "configured, so it cannot publish this frame to the platform."
+                ),
+            )
+
+        # Single-flighted per pair: concurrent first callers for the same
+        # pair await the same lock rather than each building a body and
+        # posting it independently. The route tolerates the redundant POSTs
+        # this would otherwise cause (idempotent server-side), so this is a
+        # load/latency fix, not a correctness one -- see this method's own
+        # docstring.
+        lock = self._publish_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if key in self._published:
+                # Someone else already won this pair's publish while this
+                # call waited on the lock above.
+                return None
+            return await self._publish_pair(spec_id=spec_id, content_version=content_version)
+
+    async def _publish_pair(self, *, spec_id: str, content_version: str) -> Refusal | None:
+        """Build and post the publish-door body for `(spec_id, content_version)`,
+        called under `_ensure_published_pair`'s own per-pair lock once it has
+        confirmed a principal is configured and no one else already
+        published this exact pair. Split out from `_ensure_published_pair`
+        only to keep that method's own branch count small; see its docstring
+        for everything this one implements.
+        """
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                published = await stack.enter_async_context(
+                    publish_body_for(
+                        spec_id=spec_id,
+                        content_version=content_version,
+                        max_frame_rows=self._max_frame_rows,
+                    )
+                )
+            except PublishBodyNotBuildable as exc:
+                if not exc.refuse_locally:
+                    # Nothing (yet) to publish from this process's own view of
+                    # the store -- not a publish failure. Proceed to the
+                    # caller's own platform call unmodified and let the
+                    # platform, the one party that knows whether the ref has
+                    # ever resolved anywhere, answer -- honestly `ops_unsupported`
+                    # if it never has.
+                    return None
+                return Refusal(
+                    error="request_invalid",
+                    retry=RetryMode.DO_NOT_RETRY,
+                    detail=f"Publishing this frame to the platform failed: {exc}",
+                )
+            except RowBudgetExhausted as exc:
+                return _row_budget_refusal(exc)
+
+            body = await _gzipped_publish_body(published)
+            if isinstance(body, Refusal):
+                return body
+
+            # Inside `publish_body_for`'s block, so the frame's row claim stays held
+            # while the encoded body is in memory for the request.
+            try:
+                await self.request(
+                    "POST",
+                    _PUBLISH_ROUTE,
+                    route=_PUBLISH_ROUTE,
+                    content=body,
+                    principal=self._publish_principal,
+                    headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+                )
+            except PlatformError as exc:
+                # Honest about which call failed: `_refusal` alone would read
+                # as a refusal of the caller's own request (the create/revise/
+                # describe call), when what actually failed is the publish this
+                # method ran ahead of it. Same code and retry mode either way --
+                # dfo-apis' publish door and its ordinary presentation surface
+                # already share one code vocabulary (`request_invalid`,
+                # `service_unavailable`, ...), just the detail text is reworded.
+                base = self._refusal(exc)
+                return replace(
+                    base, detail=f"Publishing this frame to the platform failed: {base.detail}"
+                )
+        self._published.add((spec_id, content_version))
+        return None
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        route: str,
+        json: Any | None = None,
+        content: bytes | None = None,
+        params: Mapping[str, Any] | None = None,
+        principal: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> httpx2.Response:
+        """Issue one dfo-apis presentation call, retried within a wall-clock budget.
+
+        Args:
+            method: HTTP method, e.g. "GET" or "POST".
+            path: The interpolated request path, e.g.
+                `/api/presentation/components/cmp_1`.
+            route: The path *template*, e.g.
+                `/api/presentation/components/{component_id}`. Kept separate
+                from `path` because it lands on the span as `url.template`,
+                which bounds span cardinality.
+            json: JSON request body.
+            content: An already-encoded request body, sent as is on every
+                attempt. The publish call sends its body this way.
+            params: Query parameters.
+            principal: The `x-dfo-principal` header value, or `None` to send
+                none at all. `None` everywhere except `_ensure_published_pair`'s
+                own publish call -- see `PRINCIPAL_HEADER`'s own comment for
+                why no other call needs it.
+            headers: Further request headers, sent on every attempt.
+                `revise_component` sends `WRITE_TOKEN_HEADER` here.
+
+        Returns:
+            The 2xx `httpx2.Response`.
+
+        Raises:
+            PlatformError: dfo-apis returned a non-2xx response.
+            PlatformTransportError: no response was ever received.
+        """
+        request_headers = dict(await self._auth()) if self._auth else {}
+        if principal is not None:
+            request_headers[PRINCIPAL_HEADER] = principal
+        request_headers.update(headers or {})
+        call_budget_s = max(self._retry_budget_s, self._read_timeout_s)
+
+        with tracer.start_as_current_span(
+            "platform.request",
+            attributes={"http.request.method": method, "url.template": route},
+        ) as call_span:
+            start = time.monotonic()
+            deadline = start + call_budget_s
+            attempt = 0
+            result: PlatformError | None = None
+
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                attempt += 1
+                with tracer.start_as_current_span(
+                    "platform.attempt",
+                    attributes={"http.request.resend_count": attempt - 1},
+                ) as attempt_span:
+                    try:
+                        async with asyncio.timeout(remaining):
+                            attempted = await self._attempt(
+                                method,
+                                path,
+                                json=json,
+                                content=content,
+                                params=params,
+                                headers=request_headers,
+                                timeout=min(self._read_timeout_s, remaining),
+                            )
+                    except TimeoutError:
+                        # Builtin `TimeoutError`, distinct from
+                        # `httpx2.TimeoutException`. `asyncio.timeout` bounds
+                        # connect, write and pool as well as read, so an
+                        # attempt that keeps trickling bytes cannot outlive
+                        # the budget.
+                        attempted = PlatformTransportError(
+                            detail=f"attempt exceeded the call's {call_budget_s:.1f}s retry budget"
+                        )
+                    if isinstance(attempted, httpx2.Response):
+                        attempt_span.set_attribute(
+                            "http.response.status_code", attempted.status_code
+                        )
+                        call_span.set_attribute("http.response.status_code", attempted.status_code)
+                        call_span.set_attribute("http.request.resend_count", attempt - 1)
+                        return attempted
+                    result = attempted
+                    if result.status is not None:
+                        attempt_span.set_attribute("http.response.status_code", result.status)
+
+                should_retry = self._should_retry(result) and attempt < self._max_attempts
+                backoff = 0.0
+                if should_retry:
+                    backoff = random.uniform(0, self._backoff_base_s * (2 ** (attempt - 1)))
+                    if time.monotonic() + backoff >= deadline:
+                        should_retry = False
+
+                if not should_retry:
+                    break
+                await self._sleep(backoff)
+
+            if result is None:
+                # Only on a zero or negative budget. A typed error keeps
+                # every failure leaving here a `PlatformError`.
+                result = PlatformTransportError(
+                    detail=f"the call's {call_budget_s:.1f}s budget expired before any attempt"
+                )
+            call_span.set_attribute("http.request.resend_count", attempt - 1)
+            if result.status is not None:
+                call_span.set_attribute("http.response.status_code", result.status)
+            raise result
+
+    async def _attempt(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any | None,
+        content: bytes | None,
+        params: Mapping[str, Any] | None,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> httpx2.Response | PlatformError:
+        """Issue one HTTP attempt, returning the response or a classified error.
+
+        Never raises for ordinary failure modes (transport errors, non-2xx
+        responses). Those become the return value, so `request()`'s retry
+        loop decides what to do with them.
+        """
+        try:
+            response = await self._client.request(
+                method,
+                path,
+                json=json,
+                content=content,
+                params=params,
+                headers=headers,
+                timeout=self._attempt_timeout(timeout),
+            )
+        except httpx2.TransportError as exc:
+            return PlatformTransportError(detail=str(exc))
+        if response.is_success:
+            return response
+        return self._to_platform_error(response)
+
+    def _attempt_timeout(self, read: float) -> httpx2.Timeout:
+        """Build the per-attempt timeout, varying only the read deadline."""
+        return httpx2.Timeout(self._connect_timeout_s, read=read)
+
+    def _to_platform_error(self, response: httpx2.Response) -> PlatformError:
+        """Classify a non-2xx response into a `PlatformError`.
+
+        Falls back to treating any unparsed 5xx as retryable and any
+        unparsed 4xx as not, leaving `code` as `None` either way -- `code` is
+        only ever read off the wire.
+        """
+        problem = _parse_problem_json(response.content)
+        if problem is None:
+            return PlatformError(
+                status=response.status_code,
+                code=None,
+                retryable=response.status_code >= 500,
+            )
+        return PlatformError(
+            status=response.status_code,
+            code=problem.get("code"),
+            retryable=bool(problem.get("retryable", False)),
+            detail=problem.get("detail"),
+            pointer=problem.get("pointer"),
+            alternatives=problem.get("alternatives"),
+            issues=problem.get("issues"),
+            constraint_id=problem.get("constraint_id"),
+            truncated=bool(problem.get("truncated", False)),
+            trace_id=problem.get("trace_id"),
+        )
+
+    def _should_retry(self, error: PlatformError) -> bool:
+        """Whether `error` is eligible for another attempt.
+
+        Every call this client makes is safe to repeat: a read changes nothing,
+        a revise merges the same patch into the same stored intent, a publish
+        is idempotent server-side, and a create carries its own write token, so
+        the platform answers a repeat with the draft the first attempt stored.
+        A transport error is therefore always eligible, and so is a received
+        5xx that reports `retryable: true` (a platform `timeout` 504 can arrive
+        while the worker still commits). A 4xx describes the request, so
+        repeating it reproduces it.
+        """
+        if isinstance(error, PlatformTransportError):
+            return True
+        if error.status is not None and error.status < 500:
+            return False
+        return error.retryable

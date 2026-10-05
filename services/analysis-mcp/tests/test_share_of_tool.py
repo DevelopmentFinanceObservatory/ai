@@ -1,0 +1,621 @@
+"""The `share_of` tool end to end: every refusal path, one real analyst
+question through the registered tool, and the replay + execution-identity-
+perturbation determinism proofs.
+"""
+
+from __future__ import annotations
+
+import json
+import secrets
+
+import pytest
+from analysis_mcp import server as server_module
+from analysis_mcp.engine.share_of import run_share_of
+from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
+from analysis_mcp.filter_tool import filter_verb
+from analysis_mcp.fixtures import seed_fixture_store
+from analysis_mcp.frame_ref_resolution import derive_frame_content_version
+from analysis_mcp.identity import (
+    mint_toolkit_content_version,
+    op_spec_hash_for,
+    recompute_op_spec_hash,
+    recompute_toolkit_content_version,
+)
+from analysis_mcp.op_spec import AggregateOpSpec
+from analysis_mcp.rank_tool import rank
+from analysis_mcp.share_of_tool import share_of
+from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
+from dfo_frame_grammar import Frame
+from fastmcp import Client
+
+
+@pytest.fixture
+async def seeded():
+    store = InMemoryMaterialisationStore()
+    handles = await seed_fixture_store(store)
+    set_store(store)
+    yield store, handles
+    set_store(None)
+
+
+def _minimal_trace() -> Trace:
+    op_spec = AggregateOpSpec(
+        frame_ref=FrameRef(spec_id="spec_" + "a" * 32, content_version="cv_" + "b" * 32),
+        group_by=(),
+        aggregation="sum",
+    )
+    return Trace(
+        upstream_trace={
+            "graph_revision": "rev_test",
+            "source_revisions": [{"source": "test", "revision": "1"}],
+            "facets": [],
+            "conversion": None,
+        },
+        frame_content_version="cv_" + "d" * 32,
+        op_spec_hash=op_spec_hash_for(op_spec),
+        execution_record=ExecutionRecord(content="{}"),
+        applied_policy=AppliedPolicy(),
+        content_version="ocv_" + "c" * 32,
+        input_content_versions=["cv_" + "b" * 32],
+        execution_identity=current_execution_identity(),
+    )
+
+
+async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) -> dict[str, str]:
+    digest = secrets.token_hex(16)
+    ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
+    await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
+    return {"spec_id": ref.spec_id, "content_version": ref.content_version}
+
+
+# Refusals ----------------------------------------------------------------------
+
+
+async def test_op_spec_invalid_refuses(seeded) -> None:
+    _store, _handles = seeded
+    result = await share_of(frame_ref="not-a-valid-pair")
+    assert result.is_error is True
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+async def test_unregistered_numerator_pair_refuses_frame_not_held(seeded) -> None:
+    _store, _handles = seeded
+    never_registered = {"spec_id": "spec_" + "0" * 32, "content_version": "cv_" + "0" * 32}
+    result = await share_of(frame_ref=never_registered)
+    assert result.structured_content["code"] == "frame_not_held"
+
+
+async def test_unregistered_denominator_pair_refuses_frame_not_held(seeded) -> None:
+    _store, handles = seeded
+    never_registered = {"spec_id": "spec_" + "0" * 32, "content_version": "cv_" + "0" * 32}
+    result = await share_of(frame_ref=handles.join_pair[0], denominator_frame_ref=never_registered)
+    assert result.structured_content["code"] == "frame_not_held"
+
+
+async def test_grain_mismatch_refuses(seeded) -> None:
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 1.0},
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 2.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[{"stat_var": "dcid:Y", "reporter": "dcid:USA", "time_period": "2020", "value": 10.0}],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    assert result.structured_content["code"] == "share_of_grain_mismatch"
+    assert result.structured_content["fix"]["numerator_periods"] == ["2020", "2021"]
+    assert result.structured_content["fix"]["denominator_periods"] == ["2020"]
+    assert result.structured_content["fix"]["matched_periods"] == ["2020"]
+
+
+async def test_both_sides_empty_names_the_real_fault_not_two_matching_empty_lists(seeded) -> None:
+    """A typo'd role value on *both* `numerator_entity` and
+    `denominator_entity` makes both sides' own period sets the empty tuple.
+    The generic grain-mismatch message reads "The denominator's periods []
+    do not match the numerator's periods []" -- two identical empty lists
+    framed as disagreeing, which never names the actual fault: neither
+    side's own entity binding matched a single row. This dedicated branch
+    must say that instead."""
+    _store, handles = seeded
+    result = await share_of(
+        frame_ref=handles.plain_single_unit,
+        numerator_entity={"reporter": "dcid:TYPO_NUMERATOR"},
+        denominator_entity={"reporter": "dcid:TYPO_DENOMINATOR"},
+    )
+    assert result.structured_content["code"] == "share_of_grain_mismatch"
+    message = result.content[0].text
+    assert "do not match" not in message
+    assert "entity binding" in message
+    assert "matched" in message
+
+
+async def test_grain_mismatch_fix_names_the_filter_chain_and_common_periods(seeded) -> None:
+    """`share_of_grain_mismatch`'s refusal is fully recoverable inside the
+    toolkit when the two sides share some (not all) periods: a `filter`
+    call with a `category_match` on `time_period` narrowing both sides to
+    `matched_periods`, retried as `share_of`, succeeds. The refusal itself
+    must say so."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 1.0},
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 2.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[{"stat_var": "dcid:Y", "reporter": "dcid:USA", "time_period": "2020", "value": 10.0}],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    message = result.content[0].text
+    assert "filter" in message
+    assert "category_match" in message
+    assert "time_period" in message
+    assert "['2020']" in message
+
+
+async def test_grain_mismatch_repair_chain_actually_works_end_to_end(seeded) -> None:
+    """Proves the chain `share_of_grain_mismatch`'s own message names is a
+    real repair, not just documentation: filtering the numerator down to
+    `matched_periods` via a `category_match` on `time_period`, then retrying
+    `share_of` on the resulting pair, succeeds."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 1.0},
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 2.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[{"stat_var": "dcid:Y", "reporter": "dcid:USA", "time_period": "2020", "value": 10.0}],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    refusal = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    matched_periods = refusal.structured_content["fix"]["matched_periods"]
+
+    narrowed = await filter_verb(
+        frame_ref=numerator_ref,
+        predicates=(
+            {"kind": "category_match", "column": "time_period", "values": matched_periods},
+        ),
+    )
+    assert narrowed.is_error is False
+    narrowed_ref = {
+        "spec_id": narrowed.structured_content["spec_id"],
+        "content_version": narrowed.structured_content["content_version"],
+    }
+
+    retried = await share_of(frame_ref=narrowed_ref, denominator_frame_ref=denominator_ref)
+    assert retried.is_error is False
+
+
+async def test_zero_denominator_refuses_share_of_zero_denominator(seeded) -> None:
+    """A zero-summed denominator is retryable (a different denominator
+    source can sum to nonzero), so it gets its own code and
+    `correct_and_retry` -- distinct from a genuine overflow, which is
+    `non_finite_result`'s `do_not_retry`."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[{"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 5.0}],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[{"stat_var": "dcid:Y", "reporter": "dcid:USA", "time_period": "2020", "value": 0.0}],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    assert result.structured_content["code"] == "share_of_zero_denominator"
+    assert result.structured_content["retry_mode"] == "correct_and_retry"
+    assert result.structured_content["fix"]["time_period"] == "2020"
+
+
+async def test_heterogeneous_unit_frame_refuses(seeded) -> None:
+    _store, handles = seeded
+    result = await share_of(
+        frame_ref=handles.multi_unit,
+        numerator_entity={"reporter": "dcid:USA"},
+    )
+    assert result.structured_content["code"] == "unit_heterogeneous"
+
+
+async def test_unknown_entity_column_refuses_role_ambiguous(seeded) -> None:
+    _store, handles = seeded
+    result = await share_of(
+        frame_ref=handles.join_pair[0],
+        denominator_frame_ref=handles.join_pair[1],
+        numerator_entity={"donor": "dcid:USA"},
+        denominator_entity={"reporter": "dcid:USA"},
+    )
+    assert result.structured_content["code"] == "role_ambiguous"
+    assert result.structured_content["fix"]["columns"] == ["donor"]
+
+
+async def test_numerator_over_a_per_period_rank_refuses_derived_input_ordinal(seeded) -> None:
+    """A share over a rank position is meaningless on either side -- the
+    tool-level mirror of the plan-level rule. Unlike growth, share_of has
+    no retry that fixes this."""
+    _store, handles = seeded
+    ranked = await rank(frame_ref=handles.plain_single_unit, rank_by=("reporter",), per_period=True)
+    assert ranked.is_error is False
+    ranked_ref = {
+        "spec_id": ranked.structured_content["spec_id"],
+        "content_version": ranked.structured_content["content_version"],
+    }
+    result = await share_of(
+        frame_ref=ranked_ref,
+        denominator_frame_ref=handles.plain_single_unit,
+        numerator_entity={},
+        denominator_entity={},
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "derived_input_ordinal"
+    assert "numerator" in result.structured_content["fix"]["reason"]
+
+
+async def test_denominator_over_a_per_period_rank_refuses_derived_input_ordinal(seeded) -> None:
+    _store, handles = seeded
+    ranked = await rank(frame_ref=handles.plain_single_unit, rank_by=("reporter",), per_period=True)
+    assert ranked.is_error is False
+    ranked_ref = {
+        "spec_id": ranked.structured_content["spec_id"],
+        "content_version": ranked.structured_content["content_version"],
+    }
+    result = await share_of(
+        frame_ref=handles.plain_single_unit,
+        denominator_frame_ref=ranked_ref,
+        numerator_entity={},
+        denominator_entity={},
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "derived_input_ordinal"
+    assert "denominator" in result.structured_content["fix"]["reason"]
+
+
+async def test_cross_frame_unit_mismatch_refuses(seeded) -> None:
+    """Each side resolves cleanly to its own single unit, but the two units
+    differ -- distinct from `unit_heterogeneous`, which fires within one
+    frame."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {
+                "stat_var": "dcid:X",
+                "reporter": "dcid:USA",
+                "time_period": "2020",
+                "value": 5.0,
+                "unit": "dcid:USDollar",
+            }
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {
+                "stat_var": "dcid:Y",
+                "reporter": "dcid:USA",
+                "time_period": "2020",
+                "value": 10.0,
+                "unit": "dcid:Percent",
+            }
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    assert result.structured_content["code"] == "cross_frame_unit_mismatch"
+    assert result.structured_content["fix"]["numerator"] == "dcid:USDollar"
+    assert result.structured_content["fix"]["denominator"] == "dcid:Percent"
+
+
+async def test_denominator_by_key_not_in_numerator_by_refuses_op_spec_invalid(seeded) -> None:
+    _store, handles = seeded
+    result = await share_of(
+        frame_ref=handles.join_pair[0],
+        numerator_by=["donor"],
+        denominator_by={"sector": "area"},
+    )
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+async def test_denominator_by_partial_mapping_refuses_share_of_key_unknown(seeded) -> None:
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["donor", "sector"],
+        rows=[
+            {
+                "stat_var": "dcid:X",
+                "donor": "dcid:USA",
+                "sector": "dcid:Health",
+                "time_period": "2020",
+                "value": 10.0,
+            }
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["provider"],
+        rows=[
+            {
+                "stat_var": "dcid:Y",
+                "provider": "dcid:USA",
+                "time_period": "2020",
+                "value": 100.0,
+            }
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(
+        frame_ref=numerator_ref,
+        denominator_frame_ref=denominator_ref,
+        numerator_by=["donor", "sector"],
+        denominator_by={"donor": "provider"},
+    )
+    assert result.structured_content["code"] == "share_of_key_unknown"
+    assert result.structured_content["fix"]["column"] == "sector"
+
+
+async def test_numerator_key_absent_from_denominator_refuses_share_of_key_unmatched(seeded) -> None:
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["donor"],
+        rows=[
+            {"stat_var": "dcid:X", "donor": "dcid:USA", "time_period": "2020", "value": 10.0},
+            {"stat_var": "dcid:X", "donor": "dcid:FRA", "time_period": "2020", "value": 5.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["provider"],
+        rows=[
+            {"stat_var": "dcid:Y", "provider": "dcid:USA", "time_period": "2020", "value": 100.0}
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(
+        frame_ref=numerator_ref,
+        denominator_frame_ref=denominator_ref,
+        numerator_by=["donor"],
+        denominator_by={"donor": "provider"},
+    )
+    assert result.structured_content["code"] == "share_of_key_unmatched"
+    assert result.structured_content["fix"]["key"] == {"donor": "dcid:FRA"}
+
+
+async def test_cross_frame_unit_unbound_refuses_and_is_retryable(seeded) -> None:
+    """The denominator's own rows leave `unit` unbound entirely; the
+    numerator resolves to a real unit. Distinct from
+    `cross_frame_unit_mismatch` -- and, unlike an unanticipated
+    `internal_error`, this is a `correct_and_retry` refusal: retry with a
+    denominator_frame_ref whose own rows actually declare a unit."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {
+                "stat_var": "dcid:X",
+                "reporter": "dcid:USA",
+                "time_period": "2020",
+                "value": 5.0,
+                "unit": "dcid:USDollar",
+            }
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {
+                "stat_var": "dcid:Y",
+                "reporter": "dcid:USA",
+                "time_period": "2020",
+                "value": 10.0,
+            }
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+    assert result.structured_content["code"] == "cross_frame_unit_unbound"
+    assert result.structured_content["retry_mode"] == "correct_and_retry"
+    assert result.structured_content["fix"]["unbound_side"] == "denominator"
+    assert result.structured_content["fix"]["bound_side"] == "numerator"
+    assert result.structured_content["fix"]["bound_unit"] == "dcid:USDollar"
+
+
+# Success: one real analyst question end to end, through the registered tool ----
+
+
+async def test_real_analyst_question_end_to_end_through_the_registered_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "What was the USA's ODA disbursed as a share of its GNI, 2022-2023"
+    via the live FastMCP `Client`, exercising the real registered tool."""
+    store = InMemoryMaterialisationStore()
+    handles = await seed_fixture_store(store)
+
+    async def _stub_build_store(_settings: object) -> InMemoryMaterialisationStore:
+        return store
+
+    monkeypatch.setattr(server_module, "_build_store", _stub_build_store)
+
+    async with Client(server_module.mcp) as client:
+        result = await client.call_tool(
+            "share_of",
+            {
+                "frame_ref": handles.join_pair[0],
+                "denominator_frame_ref": handles.join_pair[1],
+                "numerator_entity": {"reporter": "dcid:USA"},
+                "denominator_entity": {"reporter": "dcid:USA"},
+            },
+        )
+
+        assert result.is_error is False
+        digest = result.content[0].text
+        assert result.structured_content["spec_id"].startswith("ops_")
+        assert result.structured_content["content_version"].startswith("ocv_")
+        assert "2 matched period(s)" in digest
+        assert "2022:" in digest and "2023:" in digest
+
+
+async def test_keyed_share_of_end_to_end_through_the_registered_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "Rank donors by their share of ODA going to health" -- the keyed
+    reading, one row per donor per period, through the live FastMCP
+    `Client`."""
+    store = InMemoryMaterialisationStore()
+
+    async def _stub_build_store(_settings: object) -> InMemoryMaterialisationStore:
+        return store
+
+    monkeypatch.setattr(server_module, "_build_store", _stub_build_store)
+
+    numerator = Frame.build(
+        role_keys=["donor"],
+        rows=[
+            {"stat_var": "dcid:X", "donor": "dcid:USA", "time_period": "2020", "value": 10.0},
+            {"stat_var": "dcid:X", "donor": "dcid:GBR", "time_period": "2020", "value": 20.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["provider"],
+        rows=[
+            {"stat_var": "dcid:Y", "provider": "dcid:USA", "time_period": "2020", "value": 100.0},
+            {"stat_var": "dcid:Y", "provider": "dcid:GBR", "time_period": "2020", "value": 200.0},
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    async with Client(server_module.mcp) as client:
+        result = await client.call_tool(
+            "share_of",
+            {
+                "frame_ref": numerator_ref,
+                "denominator_frame_ref": denominator_ref,
+                "numerator_by": ["donor"],
+                "denominator_by": {"donor": "provider"},
+            },
+        )
+
+        assert result.is_error is False
+        assert result.structured_content["role_keys"] == ["donor"]
+        assert result.structured_content["rows"] == 2
+        digest = result.content[0].text
+        assert "2 key(s)" in digest
+        assert "dcid:USA" in digest and "dcid:GBR" in digest
+
+
+# Two slices of one frame_ref, through the registered tool ----------------------
+
+
+async def test_two_slices_of_one_frame_ref(seeded) -> None:
+    _store, handles = seeded
+    result = await share_of(
+        frame_ref=handles.join_pair[0],
+        numerator_entity={"reporter": "dcid:USA"},
+        denominator_entity={"reporter": "dcid:GBR"},
+    )
+    assert result.is_error is False
+
+
+# Replay + execution-identity perturbation ---------------------------------------
+
+
+async def test_replay_from_execution_record_content_is_bit_identical(seeded) -> None:
+    store, handles = seeded
+
+    result = await share_of(
+        frame_ref=handles.join_pair[0],
+        denominator_frame_ref=handles.join_pair[1],
+        numerator_entity={"reporter": "dcid:USA"},
+        denominator_entity={"reporter": "dcid:USA"},
+    )
+    assert result.is_error is False
+    output_ref = FrameRef(
+        spec_id=result.structured_content["spec_id"],
+        content_version=result.structured_content["content_version"],
+    )
+    stored_frame, stored_trace = await store.get(output_ref)
+
+    canonical_bytes = stored_trace.execution_record.content.encode()
+    assert recompute_op_spec_hash(canonical_bytes) == stored_trace.op_spec_hash
+
+    parameters = json.loads(stored_trace.execution_record.content)["parameters"]
+    numerator_frame, _numerator_trace = await store.get(FrameRef(**handles.join_pair[0]))
+    denominator_frame, _denominator_trace = await store.get(FrameRef(**handles.join_pair[1]))
+    replayed = run_share_of(
+        numerator_frame,
+        denominator_frame,
+        numerator_entity=parameters["numerator_entity"],
+        denominator_entity=parameters["denominator_entity"],
+        numerator_pinned_unit=parameters["numerator_unit"],
+        denominator_pinned_unit=parameters["denominator_unit"],
+    )
+    assert replayed.frame == stored_frame
+
+    # Distinct from the recompute-from-parameters replay above. Proves the
+    # *stored* frame_content_version was derived over the stored output
+    # frame, not the input frame's bytes.
+    assert (
+        derive_frame_content_version(frame=stored_frame, upstream_trace=stored_trace.upstream_trace)
+        == stored_trace.frame_content_version
+    )
+
+    recomputed_content_version = recompute_toolkit_content_version(
+        op_spec_hash=stored_trace.op_spec_hash,
+        input_content_versions=list(stored_trace.input_content_versions),
+        execution_identity=stored_trace.execution_identity,
+    )
+    assert recomputed_content_version == stored_trace.content_version
+
+
+async def test_execution_identity_perturbation_moves_the_content_version(seeded) -> None:
+    store, handles = seeded
+
+    result = await share_of(
+        frame_ref=handles.join_pair[0],
+        denominator_frame_ref=handles.join_pair[1],
+        numerator_entity={"reporter": "dcid:USA"},
+        denominator_entity={"reporter": "dcid:USA"},
+    )
+    output_ref = FrameRef(
+        spec_id=result.structured_content["spec_id"],
+        content_version=result.structured_content["content_version"],
+    )
+    _stored_frame, stored_trace = await store.get(output_ref)
+
+    bumped_identity = ExecutionIdentity(
+        engine_version=stored_trace.execution_identity.engine_version,
+        frame_grammar_version=stored_trace.execution_identity.frame_grammar_version,
+        reduction_policy_version="9.9.9",
+    )
+    moved_content_version = mint_toolkit_content_version(
+        op_spec_hash=stored_trace.op_spec_hash,
+        input_content_versions=list(stored_trace.input_content_versions),
+        execution_identity=bumped_identity,
+    )
+    assert moved_content_version != stored_trace.content_version

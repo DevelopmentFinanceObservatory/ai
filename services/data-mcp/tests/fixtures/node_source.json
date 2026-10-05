@@ -1,0 +1,13 @@
+{
+  "shape": "source",
+  "dcid": "dc/base/WHO",
+  "label": "World Health Organization",
+  "license": "CC BY-NC-SA 3.0 IGO",
+  "license_type": "cc-by-nc-sa",
+  "description": "Global health statistics and indicators published by WHO.",
+  "url": "https://www.who.int",
+  "freshness": {
+    "release_frequency": "P1Y",
+    "refresh_schedule": "P3M"
+  }
+}

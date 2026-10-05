@@ -1,0 +1,1209 @@
+{
+  "schema_version": 1,
+  "query_echo": {
+    "entry_path": "parsed",
+    "raw_query": "population for Guatemala since 2010",
+    "extract_skipped": true
+  },
+  "diagnostics": {
+    "engine_build": "ed164c1ef5d2aa6a3b49c3c8102f21c6928d5135",
+    "trace_id": "1faaf362156544a68b4e0ba14173d96b",
+    "warnings": [],
+    "timing_ms": {
+      "total": 2190
+    },
+    "llm_usage": {
+      "input_tokens": 2968,
+      "output_tokens": 570,
+      "cached_tokens": 0
+    },
+    "timed_out": false
+  },
+  "parts": [
+    {
+      "variable_text": "population",
+      "warnings": [],
+      "timing_ms": {
+        "total": 2188,
+        "by_step": {
+          "recall": 0,
+          "shape": 265,
+          "bind": 1799,
+          "materialise": 2,
+          "answer": 1,
+          "options": 121
+        }
+      },
+      "restatement": {
+        "variable_text": "population",
+        "entities": [
+          {
+            "text": "Guatemala"
+          }
+        ],
+        "time_text": "since 2010"
+      },
+      "status": "definite",
+      "spec": {
+        "spec_id": "spec_ed5b608a610cdc5a4bc703cf7d1bc2d0",
+        "definition": {
+          "schema_version": 1,
+          "spec_id": "spec_ed5b608a610cdc5a4bc703cf7d1bc2d0",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "Person",
+              "measured_property": "count",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "property": "age",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "armedForcesStatus",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "educationalAttainment",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "employment",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "gender",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "literacyStatus",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "nativity",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "placeOfBirth",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "placeOfResidenceClassification",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "race",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "religion",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "residenceType",
+                "binding": {
+                  "state": "unbound"
+                }
+              }
+            ],
+            "entities": {
+              "observationAbout": [
+                "country/GTM"
+              ]
+            },
+            "requested_window": {
+              "kind": "range",
+              "start_year": 2010
+            }
+          }
+        },
+        "resolved": {
+          "shape": {
+            "shape_id": "person_count_measuredvalue",
+            "label": "Total population",
+            "population_type": {
+              "dcid": "Person",
+              "label": "Person"
+            },
+            "measured_property": {
+              "dcid": "count",
+              "label": "count"
+            },
+            "stat_type": {
+              "dcid": "measuredValue",
+              "label": "measuredValue"
+            },
+            "measurement_denominator_unresolved": false,
+            "slot_keys": [
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "age",
+                  "label": "age"
+                },
+                "label": "age"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "nativity",
+                  "label": "nativity"
+                },
+                "label": "nativity"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "employment",
+                  "label": "employment"
+                },
+                "label": "employment"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "race",
+                  "label": "race"
+                },
+                "label": "race"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "placeOfResidenceClassification",
+                  "label": "placeOfResidenceClassification"
+                },
+                "label": "place of residence classification"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "religion",
+                  "label": "religion"
+                },
+                "label": "religion"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "literacyStatus",
+                  "label": "literacyStatus"
+                },
+                "label": "literacy status"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "gender",
+                  "label": "gender"
+                },
+                "label": "gender"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "residenceType",
+                  "label": "residenceType"
+                },
+                "label": "residence type"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "educationalAttainment",
+                  "label": "educationalAttainment"
+                },
+                "label": "educational attainment"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "placeOfBirth",
+                  "label": "placeOfBirth"
+                },
+                "label": "place of birth"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "armedForcesStatus",
+                  "label": "armedForcesStatus"
+                },
+                "label": "armed forces status"
+              },
+              {
+                "axis": "where",
+                "label": "place"
+              },
+              {
+                "axis": "when",
+                "label": "time window"
+              },
+              {
+                "axis": "source",
+                "label": "data source"
+              }
+            ],
+            "member_count": 1,
+            "refine_supported": true
+          },
+          "slots": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "age",
+                  "label": "age"
+                },
+                "label": "age"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "nativity",
+                  "label": "nativity"
+                },
+                "label": "nativity"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "employment",
+                  "label": "employment"
+                },
+                "label": "employment"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "race",
+                  "label": "race"
+                },
+                "label": "race"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "placeOfResidenceClassification",
+                  "label": "placeOfResidenceClassification"
+                },
+                "label": "place of residence classification"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "religion",
+                  "label": "religion"
+                },
+                "label": "religion"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "literacyStatus",
+                  "label": "literacyStatus"
+                },
+                "label": "literacy status"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "gender",
+                  "label": "gender"
+                },
+                "label": "gender"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "residenceType",
+                  "label": "residenceType"
+                },
+                "label": "residence type"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "educationalAttainment",
+                  "label": "educationalAttainment"
+                },
+                "label": "educational attainment"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "placeOfBirth",
+                  "label": "placeOfBirth"
+                },
+                "label": "place of birth"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "armedForcesStatus",
+                  "label": "armedForcesStatus"
+                },
+                "label": "armed forces status"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "country/GTM",
+                    "label": "Guatemala"
+                  },
+                  "value_kind": "entity"
+                }
+              }
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "value_kind": "time_window",
+                  "time_window": {
+                    "start_year": 2010
+                  }
+                }
+              }
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding": {
+                "kind": "unbound"
+              }
+            }
+          ],
+          "inapplicable_slots": [
+            "age",
+            "nativity",
+            "employment",
+            "race",
+            "placeOfResidenceClassification",
+            "religion",
+            "literacyStatus",
+            "gender",
+            "residenceType",
+            "educationalAttainment",
+            "placeOfBirth",
+            "armedForcesStatus"
+          ],
+          "unresolved_slots": [],
+          "stat_vars": {
+            "items": [
+              {
+                "ref": "Count_Person",
+                "label": "Total population",
+                "slot_values": [],
+                "constraint_properties": [],
+                "data_date_range": {
+                  "start": "1960",
+                  "end": "2024"
+                }
+              }
+            ],
+            "member_count": 1,
+            "truncated": false
+          },
+          "entities": [
+            {
+              "ref": "country/GTM",
+              "label": "Guatemala",
+              "entity_type": "Country",
+              "role": "observationAbout"
+            }
+          ],
+          "coverage": {
+            "kind": "exact",
+            "has_data": true,
+            "observation_count": 27,
+            "dimensions": [
+              {
+                "label": "sources",
+                "count": 3
+              },
+              {
+                "label": "observations",
+                "count": 15
+              },
+              {
+                "label": "variables",
+                "count": 1
+              }
+            ],
+            "window": {
+              "start_year": 2010
+            }
+          },
+          "facets": {},
+          "slot_options": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "placeOfResidenceClassification",
+                  "label": "placeOfResidenceClassification"
+                },
+                "label": "place of residence classification"
+              },
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "Urban",
+                      "label": "Urban"
+                    },
+                    "value_kind": "enum_value"
+                  },
+                  "coverage": {
+                    "kind": "breadth",
+                    "has_data": true,
+                    "dimensions": [
+                      {
+                        "label": "sources",
+                        "count": 2
+                      },
+                      {
+                        "label": "observations",
+                        "count": 65
+                      }
+                    ],
+                    "window": {
+                      "start_year": 2010
+                    }
+                  }
+                }
+              ],
+              "truncated": true,
+              "source": "observed"
+            }
+          ],
+          "entity_options": [],
+          "facet_options": [
+            {
+              "axis": "provenance",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "dc/base/WorldDevelopmentIndicators",
+                      "label": "WorldDevelopmentIndicators"
+                    },
+                    "value_kind": "source"
+                  }
+                },
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "dc/base/Subnational_Demographics_Stats",
+                      "label": "Subnational_Demographics_Stats"
+                    },
+                    "value_kind": "source"
+                  }
+                },
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "dc/base/WikidataPopulation",
+                      "label": "WikidataPopulation"
+                    },
+                    "value_kind": "source"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            },
+            {
+              "axis": "measurementMethod",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "WorldBankSubnationalPopulationEstimate",
+                      "label": "World Bank Subnational Population Estimates."
+                    },
+                    "value_kind": "enum_value"
+                  }
+                },
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "WikidataPopulation",
+                      "label": "WikidataPopulation"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            }
+          ],
+          "rendered_sentence": "Total population in Guatemala, since 2010, according to World Development Indicators, Wikidata Population, and Subnational Demographics Stats.",
+          "sentence_plan": [
+            {
+              "kind": "slot",
+              "text": "Total population",
+              "axis": "what",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "age",
+              "binding_ref": "how:age",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "armedForcesStatus",
+              "binding_ref": "how:armedForcesStatus",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "educationalAttainment",
+              "binding_ref": "how:educationalAttainment",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "employment",
+              "binding_ref": "how:employment",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "gender",
+              "binding_ref": "how:gender",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "literacyStatus",
+              "binding_ref": "how:literacyStatus",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "nativity",
+              "binding_ref": "how:nativity",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "placeOfBirth",
+              "binding_ref": "how:placeOfBirth",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "placeOfResidenceClassification",
+              "binding_ref": "how:placeOfResidenceClassification",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "race",
+              "binding_ref": "how:race",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "religion",
+              "binding_ref": "how:religion",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "",
+              "axis": "how",
+              "property_dcid": "residenceType",
+              "binding_ref": "how:residenceType",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": " in ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "Guatemala",
+              "axis": "where",
+              "binding_ref": "where:",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ", ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "since 2010",
+              "axis": "when",
+              "binding_ref": "when:",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ", according to ",
+              "entity_refs": []
+            },
+            {
+              "kind": "slot",
+              "text": "World Development Indicators, Wikidata Population, and Subnational Demographics Stats",
+              "axis": "source",
+              "entity_refs": []
+            },
+            {
+              "kind": "text",
+              "text": ".",
+              "entity_refs": []
+            }
+          ],
+          "trace": {
+            "resolved_stat_vars": [
+              {
+                "dcid": "Count_Person",
+                "label": "Total population"
+              }
+            ],
+            "resolved_entities": [
+              {
+                "dcid": "country/GTM",
+                "label": "Guatemala"
+              }
+            ],
+            "resolved_sources": [
+              {
+                "dcid": "dc/base/WorldDevelopmentIndicators",
+                "label": "WorldDevelopmentIndicators"
+              },
+              {
+                "dcid": "dc/base/WikidataPopulation",
+                "label": "WikidataPopulation"
+              },
+              {
+                "dcid": "dc/base/Subnational_Demographics_Stats",
+                "label": "Subnational_Demographics_Stats"
+              }
+            ],
+            "slot_filters": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "age",
+                    "label": "age"
+                  },
+                  "label": "age"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "nativity",
+                    "label": "nativity"
+                  },
+                  "label": "nativity"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "employment",
+                    "label": "employment"
+                  },
+                  "label": "employment"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "race",
+                    "label": "race"
+                  },
+                  "label": "race"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "placeOfResidenceClassification",
+                    "label": "placeOfResidenceClassification"
+                  },
+                  "label": "place of residence classification"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "religion",
+                    "label": "religion"
+                  },
+                  "label": "religion"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "literacyStatus",
+                    "label": "literacyStatus"
+                  },
+                  "label": "literacy status"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "gender",
+                    "label": "gender"
+                  },
+                  "label": "gender"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "residenceType",
+                    "label": "residenceType"
+                  },
+                  "label": "residence type"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "educationalAttainment",
+                    "label": "educationalAttainment"
+                  },
+                  "label": "educational attainment"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "placeOfBirth",
+                    "label": "placeOfBirth"
+                  },
+                  "label": "place of birth"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "dcid": "armedForcesStatus",
+                    "label": "armedForcesStatus"
+                  },
+                  "label": "armed forces status"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "where",
+                  "label": "place"
+                },
+                "binding_kind": "value",
+                "refs": [
+                  {
+                    "dcid": "country/GTM",
+                    "label": "Guatemala"
+                  }
+                ],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                "binding_kind": "value",
+                "refs": [],
+                "provenance": "binder"
+              },
+              {
+                "key": {
+                  "axis": "source",
+                  "label": "data source"
+                },
+                "binding_kind": "unbound",
+                "refs": [],
+                "provenance": "binder"
+              }
+            ],
+            "query_qualifiers": [],
+            "applied_window": {
+              "start_year": 2010
+            },
+            "date_source": "query",
+            "pipeline_trace": [
+              {
+                "step": "extract",
+                "ran": false
+              },
+              {
+                "step": "recall",
+                "ran": true,
+                "ms": 0
+              },
+              {
+                "step": "shape",
+                "ran": true,
+                "ms": 265
+              },
+              {
+                "step": "bind",
+                "ran": true,
+                "ms": 1799
+              },
+              {
+                "step": "materialise",
+                "ran": true,
+                "ms": 2
+              },
+              {
+                "step": "answer",
+                "ran": true,
+                "ms": 1
+              }
+            ],
+            "n_recalled": 47,
+            "requested_window": {
+              "start_year": 2010
+            },
+            "capability_version": "cap_0b4c1884ab0d27d2"
+          },
+          "confidence": "high",
+          "available_at_place": true,
+          "measure_label_axes": []
+        }
+      }
+    }
+  ],
+  "rendered_sentence": "Total population in Guatemala, since 2010, according to World Development Indicators, Wikidata Population, and Subnational Demographics Stats.",
+  "sentence_plan": [
+    {
+      "kind": "slot",
+      "text": "Total population",
+      "axis": "what",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "age",
+      "binding_ref": "how:age",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "armedForcesStatus",
+      "binding_ref": "how:armedForcesStatus",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "educationalAttainment",
+      "binding_ref": "how:educationalAttainment",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "employment",
+      "binding_ref": "how:employment",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "gender",
+      "binding_ref": "how:gender",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "literacyStatus",
+      "binding_ref": "how:literacyStatus",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "nativity",
+      "binding_ref": "how:nativity",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "placeOfBirth",
+      "binding_ref": "how:placeOfBirth",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "placeOfResidenceClassification",
+      "binding_ref": "how:placeOfResidenceClassification",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "race",
+      "binding_ref": "how:race",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "religion",
+      "binding_ref": "how:religion",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "",
+      "axis": "how",
+      "property_dcid": "residenceType",
+      "binding_ref": "how:residenceType",
+      "entity_refs": [],
+      "part_index": 0
+    },
+    {
+      "kind": "text",
+      "text": " in ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "Guatemala",
+      "axis": "where",
+      "binding_ref": "where:",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ", ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "since 2010",
+      "axis": "when",
+      "binding_ref": "when:",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ", according to ",
+      "entity_refs": []
+    },
+    {
+      "kind": "slot",
+      "text": "World Development Indicators, Wikidata Population, and Subnational Demographics Stats",
+      "axis": "source",
+      "entity_refs": []
+    },
+    {
+      "kind": "text",
+      "text": ".",
+      "entity_refs": []
+    }
+  ],
+  "status": "definite"
+}

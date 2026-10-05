@@ -1,0 +1,240 @@
+{
+  "eval_set_id": "harness-planner-skills-v1",
+  "name": "harness-planner-skills-v1",
+  "description": "Whether the planner loads the skill a question needs before it drafts. Each case hands the planner the brief the harness renders: a resolve envelope whose `skills` names candidate skills, then the question. The skills_loaded_before_plan metric reads the recorded tool calls and passes a turn when propose_plan was called and every skill the turn's tool_uses names was loaded with get_skill before the first propose_plan, and no skill the case forbids (cases.py) was. A named skill in neither set may be loaded or skipped. workflow_outcome checks that a propose_plan was accepted. No judge model scores this set.",
+  "eval_cases": [
+    {
+      "eval_id": "grant-equivalent-measure",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nResolve envelope:\n- status: definite\n- spec_id: spec_11111111111111111111111111111111\n- parts: 1\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (3):\n  - oda-dac1 -- Context for working with the OECD DAC1 table, the donor-level totals of ODA, OOF, export credits and private flows by aid type. Covers who reports, the flow ty\u2026\n  - oda-measures -- How the OECD DAC measures and reports ODA. Covers the flow types (gross disbursements, net disbursements, grant equivalents and commitments) and which question\u2026\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n- warnings (0):\n\nQuestion: How much ODA did Germany give in 2023 on a grant-equivalent basis, and how does that compare with its net disbursements?\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "oda-measures"
+                }
+              }
+            ],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "oda-gni-target",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nResolve envelope:\n- status: definite\n- spec_id: spec_22222222222222222222222222222222\n- parts: 1\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (3):\n  - oda-dac1 -- Context for working with the OECD DAC1 table, the donor-level totals of ODA, OOF, export credits and private flows by aid type. Covers who reports, the flow ty\u2026\n  - oda-concepts -- Core definitions, measures and classifications in ODA analysis. Covers the 0.7% ODA/GNI target and how ODA/GNI is calculated, the grant equivalent methodology \u2026\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n- warnings (0):\n\nQuestion: Which DAC members met the 0.7% ODA/GNI target in 2023?\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "oda-concepts"
+                }
+              }
+            ],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "gender-marker-share",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nResolve envelope:\n- status: definite\n- spec_id: spec_33333333333333333333333333333333\n- parts: 1\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (3):\n  - oda-crs -- Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy \u2026\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n  - oda-dac2a -- Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting\u2026\n- warnings (0):\n\nQuestion: What share of the UK's bilateral ODA in 2022 had gender equality as its principal objective?\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "policy-markers"
+                }
+              }
+            ],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "crs-purpose-code-sector",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nResolve envelope:\n- status: definite\n- spec_id: spec_44444444444444444444444444444444\n- parts: 1\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (3):\n  - oda-crs -- Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy \u2026\n  - oda-dac2a -- Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting\u2026\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n- warnings (0):\n\nQuestion: How much bilateral aid did donors give for basic education in Kenya in 2022, using the CRS purpose codes, broken down by donor?\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "oda-crs"
+                }
+              }
+            ],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "grant-equivalent-and-purpose-codes",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nThis question has 2 parts. The envelope's spec_id ran once, question-wide, before any part existed, so it can be right for at most one of them and is left out of the envelope below. Pin each part from its own discovery.\n\nResolve envelope:\n- status: definite\n- parts: 2\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (4):\n  - oda-crs -- Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy \u2026\n  - oda-measures -- How the OECD DAC measures and reports ODA. Covers the flow types (gross disbursements, net disbursements, grant equivalents and commitments) and which question\u2026\n  - oda-dac1 -- Context for working with the OECD DAC1 table, the donor-level totals of ODA, OOF, export credits and private flows by aid type. Covers who reports, the flow ty\u2026\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n- warnings (0):\n\nQuestion: Compare France's grant-equivalent ODA in 2022 with the amount of its bilateral aid that went to health, by CRS purpose code.\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "oda-crs"
+                }
+              },
+              {
+                "name": "get_skill",
+                "args": {
+                  "skill_id": "oda-measures"
+                }
+              }
+            ],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "population-needs-no-skill",
+      "conversation": [
+        {
+          "invocation_id": "ask",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Context for this question. The search step has already run, so what is already known about the dataset is named below. A candidate a referral names for a requirement is an allowed source for that requirement -- pin it from its own discovery. Never invent a spec_id or a source that neither the envelope nor a referral has named.\n\nResolve envelope:\n- status: definite\n- spec_id: spec_77777777777777777777777777777777\n- parts: 1\n- choice_points: 0\n- wide: false\n- candidates (0):\n- skills (2):\n  - policy-markers -- Covers OECD DAC policy markers used to classify bilateral ODA in the Creditor Reporting System (CRS). Use when the user asks what a policy marker is, which mar\u2026\n  - oda-dac2a -- Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting\u2026\n- warnings (0):\n\nQuestion: What was Nigeria's total population in 2020?\n"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "tool_responses": [
+              {
+                "name": "propose_plan",
+                "response": {
+                  "outcome": "ok"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "harness_planner_skills_v1",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    }
+  ]
+}

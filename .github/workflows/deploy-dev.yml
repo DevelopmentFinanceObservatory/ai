@@ -1,0 +1,64 @@
+name: Deploy dev
+
+# Auto-deploys on every push to dev that touches the ai image's inputs --
+# packages/, services/, deploy/Dockerfile.ai, this workflow file, or
+# build-deploy.yml.
+# The workspace services (harness, data-mcp, analysis-mcp,
+# presentation-mcp) build and deploy as one Cloud Run service.
+#
+# The build and deploy steps live in build-deploy.yml, which deploy-prod.yml
+# runs too. They only swap the image on a Cloud Run service that already
+# exists. dfo-infra owns creating/configuring the service itself; see
+# deploy/README.md for the full division of responsibility and the
+# vars/secrets this workflow needs.
+#
+# Staging is not wired up yet (the staging GCP project doesn't exist). Once
+# dfo-infra provisions it, add "staging" to the `matrix.environment` list
+# below and create the matching GitHub Environment with its own vars/secrets
+# -- everything else in this file is written to be reused as-is.
+#
+# Dev deploys run in the ONEcampaign org only. The DevelopmentFinanceObservatory
+# copy of this repo deploys prod through deploy-prod.yml.
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ai: ${{ steps.filter.outputs.ai }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            ai:
+              - 'packages/**'
+              - 'services/**'
+              - 'deploy/Dockerfile.ai'
+              - '.github/workflows/deploy-dev.yml'
+              - '.github/workflows/build-deploy.yml'
+
+  deploy:
+    needs: changes
+    if: github.repository_owner == 'ONEcampaign' && needs.changes.outputs.ai == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev]
+    uses: ./.github/workflows/build-deploy.yml
+    with:
+      environment: ${{ matrix.environment }}
+    secrets: inherit

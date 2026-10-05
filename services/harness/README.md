@@ -1,0 +1,215 @@
+# harness
+
+`harness` runs the agent powering DFO Studio's chat-and-canvas workspace. The service wraps Google Agent Development Kit (ADK), mounts sibling Model Context Protocol (MCP) servers in-process, serves the studio wire contract over SSE, and provides session state management.
+
+## Overview
+
+The harness serves the studio (`docs/studio-contract-v1.md`). A deterministic workflow graph is the agent's spine: routing, depth policy, retries, and the approval gate are code; the generative seams draft with a model, and the planner seam runs the planner-translator pair behind `harness.planner_seam`. The studio layer translates the graph's run into the frozen wire contract the frontend builds against.
+
+## Modules
+
+| Module                                                                      | Owns                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `harness.server`                                                            | `create_app`: mounts the MCP apps in-process, assembles the live or scripted seams, includes the studio router                                                                                           |
+| `harness.studio`                                                            | the studio routes, the `StudioRunner` that drives one graph turn, the SSE transport (heartbeats, cancel, disconnect)                                                                                     |
+| `harness.studio_state`                                                      | `ConversationState` and `StudioStore`: seq, pending interrupts, plan lineage, turn records, digests, and every composition-manifest change                                                               |
+| `harness.studio_translate`                                                  | the executor recorder and the translator from ADK events to wire frames                                                                                                                                  |
+| `harness.studio_edit`                                                       | the Edit Card route: describe, one model decision, revise or recreate, block replaced in place                                                                                                           |
+| `harness.wire`                                                              | the v1 frame and request models and their boundary adapters                                                                                                                                              |
+| `harness.graph`                                                             | the workflow graph, the seam protocols (`GenerativeNodes`), and plan validation                                                                                                                          |
+| `harness.depth`, `harness.depth_hints`                                      | the depth decision and the model call that feeds it hints                                                                                                                                                |
+| `harness.tool_contracts`                                                    | the resolver's refusal type, the search-envelope digest the graph decides on, and the presentation tool names `McpExecutor` routes on                                                                    |
+| `harness.orchestrator_tools`                                                | the orchestrator engine's tools: `search`, `fetch`, `make_charts`, `ask_user`, `plan`, `get_skill`, `get_skill_file` and `explain_dfo`, over the same resolver, executor and tool surface the graph uses |
+| `harness.mcp_client`                                                        | `McpResolver` and `McpExecutor` over the loopback mounts, with refusal and result normalisation                                                                                                          |
+| `harness.generative`                                                        | the constrained Gemini calls behind the converse, compose, narrate, refusal, and edit seams                                                                                                              |
+| `harness.planner_seam`                                                      | `PlannerSeam`, the graph's planner seam over `harness.agents.create_planner_with_translator`                                                                                                             |
+| `harness.wiring`                                                            | `build_generative_nodes`: which implementation stands behind each seam on the live server                                                                                                                |
+| `harness.scripted`, `harness.dfo_faq`                                       | deterministic seams, and the read of `dfo-faq`, the skill converse's reply and `explain_dfo` answer a question about DFO from                                                                            |
+| `harness.auth`, `harness.conversation`, `harness.settings`, `harness.usage` | bearer principal, the conversation contextvar, settings, token-usage logging                                                                                                                             |
+
+## The studio surface
+
+Four routes under `/api/studio` (see the contract doc for the full protocol):
+
+- `POST /api/studio/turn`: runs one turn, streams contract frames as SSE. A `component_ref` with `intent: "edit"` takes the Edit Card route instead (no search, no plan; see below).
+- `POST /api/studio/interrupt`: resumes a paused turn (plan approval, elicitation answer/skip) on a NEW stream.
+- `POST /api/studio/composition`: canvas mutations (add / reorder / remove / pin / unpin / set_layout_hints / set_card_meta), applied transactionally.
+- `POST /api/studio/cancel`: aborts the conversation's in-flight segment (the Stop button).
+
+Every request carries `Authorization: Bearer <token>` (`harness.auth`: presence required, optional shared secret via `STUDIO_API_TOKEN`) and a client-minted `conversation_id`. Each graph turn runs in a fresh per-turn ADK session (Edit Card turns bypass ADK entirely); the composition manifest, a canvas digest, and per-turn conversation records persist across turns in a per-conversation ADK "ledger" session, through the same ADK session service the runner itself uses (`harness.studio_state.StudioStore`); state is scoped to the (principal, conversation) pair. Any harness instance can load and continue a conversation another instance started, provided that session service is durable (`DATABASE_URL` or `SESSION_STORE_*` set); left unset, sessions live only in the process that created them and are lost on restart. A conversation streams at most one segment at a time, across every instance: a durable segment lease in the ledger (`studio:segment`, 45 s expiry, renewed every 5 s by its owner) backs the `/turn` and `/interrupt` claims, and a claim against a live segment answers the existing 409 `TRANSIENT_UNAVAILABLE` with `retry_after_seconds` set to the lease's remaining time; `/cancel` reaches a segment on any instance the same way, and the owning instance's heartbeat stops the stream within one heartbeat interval. The owning instance checkpoints the conversation's full state into the ledger before any frame that tells the client "paused" or "done" goes out; a checkpoint that fails ends the stream with a stream-fatal error in that frame's place instead. An `/interrupt` answer stays durable and retryable across a crash: the answer is saved before the resume starts, a retry of the same answer after the dead segment's lease expires resumes the turn again (its `seq` jumping 1000 past whatever the dead stream already sent), and a retry with a different answer is refused with `edit_conflict`. `/composition` can land on a different instance than the one streaming a turn; both sides reconcile through the ledger, so a concurrent canvas edit and the turn's own composition changes both survive. What a stalled owner still writes after losing its segment stays unfenced: its per-turn ADK session writes race the new owner's (ADK's own compare-and-swap fails one of the two), and a presentation-platform write already in flight can land as an orphaned component. Editing a card works from any instance. The component id grants reads, and the write token the platform returned on the card's create, held in the conversation's ledger state (`ConversationState.write_tokens`), grants revises; a card the conversation holds no token for is recreated in its slot instead.
+
+## The workflow graph
+
+`harness.graph.create_root_workflow` implements the control-flow diagram 1:1: converse → probe (data-mcp search) → route on resolve status → depth policy → direct fetch OR plan → approval interrupt → execute → compose → narrate. Canvas questions ("what's on my canvas?") route from converse straight to a digest-grounded answer, skipping search entirely.
+
+Everything external is injected: `harness.mcp_client.McpResolver` / `McpExecutor` call the loopback MCP mounts (presentation clients are held per conversation and send that conversation's caller), and `harness.generative` supplies the model seams (converse, compose, narrate, refusal, edit) as JSON-constrained generations. The resolver and executor seams are async; a sync seam would deadlock the loopback mounts.
+
+The planner seam is `harness.planner_seam.PlannerSeam`, which `harness.wiring` builds over `harness.agents.create_planner_with_translator`. The pair drafts a plan, translates and compiles it, and calls its own tools along the way, so one plan costs several sequential model calls. The seam supplies the resolve envelope as context in the opening user message, so a fresh question grounds in what search already found. What a plan may name is fixed downstream of the planner: the translator proposes typed operations and the compiler's capability table maps each to a tool, checked against the live MCP schemas. The graph's own state is the plan's authoritative record; the seam's session is authoritative only for drafting. Whenever the graph hands the seam a prior plan, the seam seeds it into its own ADK session before the turn runs, and the graph's planner node validates the `planner.plan.Plan` the seam returns. An amendment arrives as a real next user turn: the seam reuses the pair's session, so the pair's own amend path runs.
+
+The planner reads skills through data-mcp's `get_skill` and `get_skill_file`, wrapped as its own function tools over the same tool surface the translator uses (`planner.skills`). The resolve envelope's `skills` field, built by `harness.tool_contracts.graph_envelope` from every part of the search result, names each skill by id and description in the order data-mcp's search digest lists them. The seam's brief shows the first five and counts the rest, as that digest does, and the planner loads one when its description bears on the question. For a question about DFO itself, the planner's instruction sends it to `get_skill("dfo-faq")`. When data-mcp has no Skills API, both tools refuse `capability_unavailable` and the planner drafts without skills.
+
+Converse answers a question about DFO itself from the same skill. Its first draft marks the turn a reply about DFO, and `harness.generative.GeminiConverse` then reads `dfo-faq` through `harness.dfo_faq` and drafts the reply again with the skill's text, so only those turns read it. A deployment with no Skills API or no `dfo-faq` gets a reply saying the assistant cannot describe DFO on this deployment, and a read that does not complete gets one asking the user to try again; the turn completes either way. The orchestrator's `explain_dfo` reads the skill the same way.
+
+## The orchestrator engine
+
+With `STUDIO_ENGINE=orchestrator`, a live turn opens with `orchestrator.agent`'s agent in place of converse, probe, clarify, the depth policy, fetch, compose and narrate. The agent decides what a question needs by calling tools (`harness.orchestrator_tools`): `search` sends the question and every part it names to data-mcp in one call and returns each part's reading; `fetch` retrieves one dataset (a family of indicators summed by the compiler's own rule) and describes its frames; `make_charts` draws as many charts as help, through the graph's own binding check and the same recording executor; `get_skill` loads a skill a search result named and `get_skill_file` reads a file it links or the next page of a long one; `explain_dfo` answers a question about DFO itself. Greetings and the like get a reply with no tool call. Each tool's calls per turn are capped, and the download surface fetches one dataset and never plans.
+
+`ask_user` and `plan` record one pending action, and the graph's `route` node acts on it once the agent's turn ends: `ask` pauses with the clarify interrupt, its options as candidates under generated ids, and hands the user's answer back to the agent in the option's words; `plan` hands the brief to the graph's own `planner`, `approve` and `execute` nodes, edges and all, under the orchestrator's own state key, and `plan_done` hands the executed plan's final-step frames back under ids the agent can chart. A plan that cannot be made or run hands its reason back (`harness.wiring.handing_back_planner_failures`) with the plan's steps and their spec ids, gives the plan call back once, and the agent retrieves what it still can; a skipped question closes the turn with an offer to help with something else.
+
+The agent streams: thought summaries as a running `activity.step` labelled with the thought's latest heading, each tool call as a running step labelled from its arguments, answer text as `message.delta` chunks. The plan path's status lines, step progress and pauses are the graph's own. Routes, sessions, the canvas and the Edit Card route are the same for both engines.
+
+## The Edit Card route
+
+`component_ref.intent: "edit"` bypasses the graph: describe the component, one constrained model call decides between a revise PATCH (title/select, the fields the hosted platform accepts in a revision) and a full RECREATE (type/window changes → new component, block replaced in place), then the platform write streams back as `component.revised` or `component.created`.
+
+## Context discipline
+
+Models see digests, never rows: the resolver returns a decision envelope, the executor returns frame references, compose sees per-frame dimension views, narrate sees component fact summaries plus per-step result summaries, and cross-turn context is two digests fed to the opening and planning calls: the canvas digest (block titles + fact summaries, newest 16 blocks) and the conversation digest (newest 10 turn records, byte-capped). Context past either bound is served by a bounded recall round (`harness.studio_state.make_recall`): converse may ask once per turn, the store answers mechanically with turn records or full card fact summaries, digests, never rows. A turn that cannot be answered closes through the refusal seam (plain-language rewrite of the resolver's diagnostics; the raw diagnostics ride the resolve step's `detail`). Indicator names come from data-mcp `describe`, cached per dcid.
+
+## In-process MCP server mounting
+
+`harness.server.create_app` mounts the `data-mcp`, `analysis-mcp`, and `presentation-mcp` FastMCP applications as ASGI sub-apps under `/mcp/data`, `/mcp/analysis`, and `/mcp/presentation`.
+
+Mounting sub-apps in-process lets all services run within a single Cloud Run instance over loopback HTTP.
+
+```python
+from fastmcp.utilities.lifespan import combine_lifespans
+
+app = FastAPI(
+    title="harness",
+    lifespan=combine_lifespans(
+        data_mcp_app.lifespan,
+        analysis_mcp_app.lifespan,
+        presentation_mcp_app.lifespan,
+        _lifespan,
+    ),
+)
+```
+
+Each mounted FastMCP application relies on an internal `StreamableHTTPSessionManager` initialised during its lifespan. `combine_lifespans` runs the harness lifespan alongside every mounted sub-app lifespan so all session managers start cleanly. The harness lifespan runs last so its own startup self-check (below) finds every mount already up.
+
+Each mount requires a bearer token (`FastMCP(auth=...)`, `common.auth`). `create_app` calls `common.auth.apply_gate` on all three before building their ASGI apps. Because fastmcp's auth wrapper covers only the streamable-HTTP MCP route, `custom_route` health probes like `/mcp/data/healthz` are unaffected. A 401 from a mount is an HTTP-layer rejection rather than an MCP protocol error (`raise_on_error=False` on `call_tool` doesn't catch it), so `_lifespan` opens an in-process client against the data-mcp mount and calls `list_tools` before yielding. A misconfigured token then fails startup instead of a user's first turn.
+
+The three direct mounts answer only loopback clients, apart from their `/healthz` routes and presentation-mcp's `/theme-<hash>.css`, which a view's iframe loads from the host's browser. The harness's own clients reach them at `http://127.0.0.1:{port}`, and any other client address gets 403 before the bearer check (`_loopback_only` in `harness.server`). On Cloud Run an outside request arrives from the front end's address, which is never loopback, and uvicorn trusts `X-Forwarded-For` only from the addresses in `FORWARDED_ALLOW_IPS` (127.0.0.1 by default). Outside MCP clients use the combined server at `/mcp/`.
+
+Every MCP call the harness itself makes carries a caller in the `x-dfo-caller` header (`common.caller`, `compiler.caller_clients.caller_transport`): `conversation:<digest>` derived from the studio conversation id inside a turn, no header outside one. data-mcp and analysis-mcp record it as the writer of each frame they store (`common.caller.current_writer`). presentation-mcp does not read it: the component id grants reads, and the write token held in conversation state grants revises.
+
+## The combined server
+
+`harness.combined_mcp.build_combined_mcp` mounts data-mcp's, analysis-mcp's and presentation-mcp's `FastMCP` objects, unnamespaced, into one parent that `harness.server.create_app` serves at `/mcp/` alongside the three direct mounts. `mount()` runs a child's tool in process through the child's own middleware, with no second MCP session, so an outside client sees one server carrying every data, analysis and presentation tool and presentation-mcp's `ui://presentation-mcp/renderer-{version}.html` resource. The theme stylesheet a view's iframe loads stays on the presentation-mcp mount, at `/mcp/presentation/theme-<hash>.css`. `combined_http_app` builds it with `path="/"` (the MCP endpoint sits at the mount prefix itself; FastMCP's default path would stack a second `/mcp` under it) and `stateless_http=True` (any instance serves any request, no `Mcp-Session-Id` needed). A bare `/mcp` answers Starlette's 307 to `/mcp/`.
+
+Middleware runs only for calls through the combined server, outermost first:
+
+- `_ExternalCallBudget` runs the call under data-mcp's `EXTERNAL_CALL_BUDGET`, whose `get_data` deadline is 42 s, 3 s inside the call limit, so `get_data`'s own refusal (`operation_still_processing`, `mint_unanswered`) reaches the caller before `_CallLimit` stops the call (`data_mcp.deadline`).
+
+- `_RequestLog` logs the tool name or resource URI, the outcome (`ok`, the refusal's `code`, or the raised exception's name), the protocol revision, the caller, the trace id, and four host fields: `client` and `client_version` from the client's `clientInfo`, `views` (`declared`, `undeclared` or `unknown`, from `presentation_mcp.server.view_support`, the reading presentation-mcp's tools answer by) and `view_mime_types`, the mime types the client listed under the `io.modelcontextprotocol/ui` extension. It logs each initialize request with the same host fields. A 2025-11-25 client declares itself on initialize alone, so its calls to the stateless `/mcp/` log `client=None` and `views=unknown`; a 2026-07-28 client sends its capabilities, and usually its client info, with every request. Client-supplied strings are cut to 128 characters and written as JSON strings, except a tool name of letters, digits, `_`, `.` and `-`, which is written bare so `tool=search` matches. A `ui://` URI is logged whole and any other URI as its scheme and host, without any userinfo, since a `dfo://artifact` URI is a bearer credential; a URI with no `://` logs as `""`. No line carries a header, a tool's arguments or its result. For example:
+
+  ```text
+  combined mcp initialize outcome=ok revision=2025-11-25 caller=ip:3f9a2c1b client="claude-ai" client_version="0.1.0" views=declared view_mime_types=["text/html;profile=mcp-app"]
+  combined mcp call resource outcome=ok revision=2025-11-25 caller=ip:3f9a2c1b trace_id=4bf92f3577b34da6a3ce929d0e0e4736 client=None client_version=None views=unknown view_mime_types=None uri="ui://presentation-mcp/renderer-c7b950ab.html"
+  ```
+
+  It runs each tool call, resource read and `resources/list` in a span the telemetry backend records (`common.telemetry.use_request_span`): fastmcp's own SERVER span per request under plain OTel, a Langfuse observation in that trace under Langfuse, which exports only its own spans, and one random id when no tracer provider is set.
+
+- `_InFlightLimit` refuses a tool call `rate_limited` at once, without queueing, while `combined_mcp_max_in_flight` (default 16, per instance) tool calls, resource reads, `resources/list` requests and Skills over MCP extension methods are already running. A resource read over the cap fails with `rate_limited: ` text, and a `resources/list` with JSON-RPC `-32603` and the same text, since FastMCP answers any other exception a listing raises with fixed text.
+
+- `_ToolCallRateLimit` draws every tool call from one token bucket, sized by `combined_mcp_requests_per_s` and `combined_mcp_burst` (per instance, one bucket for every caller). A tool call over the limit refuses `rate_limited`. Initialize, `tools/list`, resource reads and pings do not draw on it.
+
+- `_CallLimit` cancels a tool call or resource read still running at 45 s (`data_mcp.deadline.EXTERNAL_CALL_LIMIT_S`). A tool call refuses `service_unavailable` with `retry_after_delay`, naming the tool and the limit. A resource read fails with `service_unavailable: ` text. `search`, `describe`, `get_skill`, `get_skill_file` and the artifact resource have no deadline of their own beyond the upstream client's 120 s retry budget, so this limit is what bounds them for an outside caller. A `resources/list` reads the skill catalogue from the Skills API (`data_mcp.skills_resources`), on every listing, the same uncached read a Skills over MCP extension method makes, so it is cancelled at that method's 10 s (`_SKILLS_READ_LIMIT_S`) and fails with `-32603` and `service_unavailable: ` text. `resources/templates/list` reads nothing upstream and is not limited.
+
+- `_ShapeResults` drops `structuredContent` from a successful result and `outputSchema` from `tools/list`, so a client sees only the digest text `content` carries. A tool whose `tools/list` entry declares `_meta.ui.resourceUri`, presentation-mcp's `write_component` and `describe_component`, is an MCP App tool, and its results pass whole: `structuredContent` carries the view's layout and `_meta` the values it binds. From every other tool, `_meta` passes without `search`'s envelope.
+
+- `_RefuseRaisedErrors` turns a raised error into a refusal in the same envelope: `tool_not_found` for a name no tool carries, `request_invalid` for arguments that fail a tool's input schema, `internal_error` for anything else a tool raised. A resource read that raised an unexpected exception fails with fixed `internal_error: ` text; the artifact resource's own refusals pass through unchanged.
+
+The in-flight cap and the token bucket sit outside the call limit, so a call they refuse is answered at once, and the in-flight cap sits outside the token bucket, so a call it refuses spends no token. An `internal_error` carries none of the exception's text, which can name a bucket or a service account. `common.refusal.log_unexpected_error` logs the exception with its traceback under the call's trace id, the same id `_RequestLog` logs, and the refusal names only that id. analysis-mcp's backstop and presentation-mcp's safety net answer the same way.
+
+Every refusal the parent writes itself, and every one data-mcp's and analysis-mcp's own `to_tool_result` write, carries its `code`, `retry_mode` and `fix` in `content` as one line of compact JSON after the message (`common.refusal.refusal_text`), so a client that shows its model only `content` still reads the whole envelope. data-mcp caps the dfo-apis mint slots an outside `get_data` call can hold, per process, with `EXTERNAL_MINT_CONCURRENCY` (`data_mcp.settings.Settings.external_mint_concurrency`, default 1); a call over the cap refuses `service_unavailable`.
+
+## Refused cards
+
+A `write_component` refusal reaches the model as one of fourteen closed-vocabulary reasons (`REFUSED_WRITE_VOCABULARY` in `harness.graph`) in place of the refusal's code, message and fix. `McpExecutor` stamps every refusal it returns with an `origin`: `service` when an MCP service refused, `harness` when the harness minted the refusal. Five codes are harness-minted. `McpExecutor` mints `unknown_tool` (a tool it does not route), `resolved_revision_unavailable` (a card it withholds because the `write_component` result carries no resolved revision to draw) and `provenance_unavailable` (a card it withholds because no citable source could be tied to the frame), and the compose node in `harness.graph` mints `component_missing` when a write answers `ok` with no component, and `component_invalid` when the returned component fails the full `component.created` wire check (`harness.wire.usable_component`). `harness.scripted` has one frame for each origin case.
+
+`_refused_write_reason` reads `origin` first. A `harness` refusal maps by code (`provenance_unavailable` to "withheld", any other harness code to "the assistant could not build the card"). A `service` refusal reads `retry_mode == "retry_after_delay"` first, then the code, and lands on "the card could not be added" for a code it does not list. A `retry_after_delay` refusal whose `fix` carries `rows_requested` came from the process's frame row budget (`common.row_budget`) and says the assistant was busy with other large requests; any other says the platform was temporarily unavailable. A data-view code promises that asking again re-runs the query only when `retry_mode` is `refresh_then_retry`. A refusal with no `origin`, or one no executor stamps, reads as "the card could not be added" for every code and retry mode. The closing text therefore names the platform only for a refusal stamped `service`.
+
+The raw code, origin, retry mode and advice (the carrier of the violated constraint id) are recorded on the turn's trace as `compose.write_refused` and `compose.describe_frame_refused`. The platform's own `platform_trace_id`, when the refusal carries one, appears in that trace event and in the harness's log line for the refusal, which lets an operator match a refused write to the platform's log. The platform's message appears in the Activity step detail (`<code>: <message>`, cut to 400 characters) and in the Edit Card closing text, which read the refusal directly.
+
+## Health and telemetry state
+
+`GET /healthz` returns `service`, `version` and `telemetry`, the backend `common.telemetry` resolved at startup (`langfuse`, `otel` or `off`). On Cloud Run the Google Frontend answers the exact path `/healthz` itself, so `GET /status/telemetry` returns `{"telemetry": ...}` from a path that reaches the app, and both routes are unauthenticated and report telemetry as the state alone.
+
+## The planner and its translator sub-agent
+
+`create_planner_with_translator` in `harness.agents` builds the pair that carries the plan-approve-execute workflow. The planner (`planner`, a second top-level module in this service) settles methodology with the user and records each choice as a `Decision` and what evidence the answer rests on as `EvidenceRequirement`s. The translator (`translator`, a third) finds the data each requirement needs and proposes the operations that carry the decisions out; the compiler (`compiler`, a fourth, code rather than an agent) turns those into the workflow the user approves, checked against the plan and the live MCP schemas.
+
+They form one agent tree rather than two peers. The translator is attached with `mode="single_turn"`, so ADK wraps it as one more tool on the planner, `dfo_translator`, a seventh alongside the planner's six (`get_skill`, `get_skill_file` and the four plan tools `src/planner/README.md` lists), and the planner calls it inside its own turn. The plan travels between them through session state, under `planner.plan.PLAN_STATE_KEY`, so nothing has to schedule two agents or relay between them. Wrapped this way the translator sees only its own input turn rather than the planner's conversation, and one function response comes back rather than its internal turns. It is not background work: ADK awaits a sub-agent dispatch inline, so the planner is paused while the translator runs.
+
+That function response is a typed result rather than prose. `dfo_translator` answers `{"outcome": "ok"}` once it compiles the plan and moves it to PENDING_APPROVAL, or the referral itself, carrying `kind`, `reason`, and whichever of `requirement_id`, `decision_id` and `candidates` that kind names, for the planner to take to the user as a choice.
+
+- `settings`: The service settings, read for the MCP URLs `build_tool_surface` covers.
+- `agent_settings`: Both models, from `planner.settings.AgentSettings`. Defaults to reading the environment.
+- `surface`: The tool surface the translator discovers on and the compiler checks against, and the one the planner's skill tools call through. Tests pin one so the pair builds with no reachable MCP server.
+
+Nothing computes or retrieves until the user approves. The planner's own `submit_plan` tool approves nothing and asks nothing of the user itself: it declares the plan's compiled workflow ready for the user's answer and returns the revision that answer is checked against. The gate that actually withholds execution is the studio's own graph, downstream of this pair (`harness.graph`, `harness.planner_seam.PlannerSeam`). `PENDING_APPROVAL` is the translator's status to write and no planner tool can produce it. `harness.wiring.build_generative_nodes` wires this pair into the studio's graph. See `src/planner/README.md`, `src/translator/README.md` and `src/compiler/README.md`.
+
+## Structured content and the model boundary
+
+An MCP tool's response splits `content` (the digest the tool renders for a model) from the envelope for calling code, which `structuredContent` carries for most tools and `_meta` carries for a `search` success, whose `structuredContent` is a small answer a host may show a model. Every model call site reads an envelope in code and consumes it there, leaving only the rendered digest for a model to see:
+
+- `harness.mcp_client.McpResolver` and `McpExecutor` read a result's `structuredContent` (a `search` success carries a small model-facing answer there, so `McpResolver` reads its envelope from `_meta[SEARCH_ENVELOPE_META_KEY]`, `data_mcp.search_result`) to decide an outcome and return the graph's own `frame_refs` and one-line `summary`, or a typed `refusal`. The digest text rides along only as a fallback `message` on an arg-validation error that carries no structured body.
+- `harness.mcp_client.McpExecutor._indicators_for` reads `describe`'s `nodes` for the More Info panel's names and descriptions.
+- `translator.discovery.discover_source` reads a `search` envelope from the result's `_meta` (`ToolCallResult.meta`) through `compiler.sources.outcome_from_envelope` and answers with `compact_source`'s own field set. `fetch_definitions` keeps one `definition` string per source out of a `describe` answer.
+- `harness.mcp_client.McpExecutor._get_data` stores the mint manifest in the provenance store and answers with `_manifest_summary`'s one line, read off the manifest, not the digest. `executor.run` keeps each server's digest text as its step's `StepRecord.digest`, and `harness.graph` carries that into `narrate`'s `step_summaries`. `harness.studio_translate._surface_call_outcome` narrows a direct-fetch call to `_first_line(result.text)`.
+
+The planner's and translator's models are reached by `FunctionTool`s over these Python functions (`harness.agents.create_planner_with_translator`). ADK's `McpTool` plays no part, so no `CallToolResult` dump is built on the served path. `after_tool_callback`s registered there (`harness.planner_seam.PlannerSeam`) count events and set tracker flags. `translator.agent`'s own closes the translator on its recorded referral. Every envelope is consumed before a model call, so stripping `structuredContent` is unnecessary.
+
+## Session service
+
+`harness.session_store.build_session_service` chooses the ADK session backend from `Settings`, in this order:
+
+- Both `database_url` and `session_store_instance_connection_name` unset: an `InMemorySessionService`. Sessions live only in this process and are lost on restart. The right default for local dev.
+- `database_url` set: ADK's `DatabaseSessionService` over that plain SQLAlchemy URL (local Postgres or sqlite).
+- `session_store_instance_connection_name` set: `DatabaseSessionService` over an async engine built on the Cloud SQL Python Connector (PSC, IAM auth), the deployed `ai` Cloud Run instance's path to the platform Postgres instance. `session_store_database` and `session_store_runtime_db_user` are required alongside it. `session_store_pool_size` and `session_store_max_overflow` size that engine's connection pool; `session_store_connect_timeout_s` bounds one connector dial attempt.
+
+Setting both `database_url` and `session_store_instance_connection_name` is a construction-time error. This same session service backs both the runner's per-turn ADK sessions and the studio layer's per-conversation ledger session (`harness.studio_state.StudioStore`), so a durable backend here lets both a conversation's wire state and its plan-drafting state survive a restart or move to another instance. `harness.server.create_app` builds the service eagerly and disposes it (`SessionServiceHandle.aclose`) from the harness lifespan's shutdown phase.
+
+The connector-backed engine opens 2 pooled connections per instance and no overflow (`session_store_pool_size`, `session_store_max_overflow`); a rollout can leave an old revision still draining SSE streams running alongside the new one, so up to four instances hold connections at once, and four times two stays within the ten connections dfo-infra's platform Postgres instance reserves for it. The harness lifespan calls `DatabaseSessionService.prepare_tables` at startup and retries it with exponential backoff for up to 120 s, inside Cloud Run's default 240 s startup probe window, before failing the probe, so a runtime identity's IAM grant still propagating does not kill a fresh revision.
+
+google-adk 2.10.0 declares a new index on the `events` table, `idx_events_app_user_session_ts_id`. When the index is missing, `prepare_tables()` creates it at startup with a plain `CREATE INDEX`, which blocks writes to `events` until the build finishes and counts against the 120 s startup budget. A small table builds in well under a second and needs no manual step. Before deploying to a database whose `events` table is large enough for the build to approach that budget, create the index out of band as the table's owner, outside a transaction:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_app_user_session_ts_id
+  ON events (app_name, user_id, session_id, timestamp DESC, id DESC);
+```
+
+`prepare_tables()` then finds the index and creates nothing. ADK leaves the index it replaces, `idx_events_app_user_session_ts`, in place. Drop it with `DROP INDEX CONCURRENTLY` once no revision running google-adk 2.9 is serving.
+
+## Settings
+
+`Settings` in `harness.settings` extends `BaseServiceSettings` from `common`.
+
+- `port`: Port integer for the HTTP server, defaulting to 8080.
+- `model_name`: Gemini model id used by every model call, pinned to a specific version so behaviour changes only when the pin does. `.env.example` ships the default.
+- `data_mcp_url`: URL for the data MCP service. Defaults to `http://127.0.0.1:{port}/mcp/data/mcp`.
+- `analysis_mcp_url`: URL for the analysis MCP service. Defaults to `http://127.0.0.1:{port}/mcp/analysis/mcp`.
+- `presentation_mcp_url`: URL for the presentation MCP service. Defaults to `http://127.0.0.1:{port}/mcp/presentation/mcp`.
+- `PRESENTATION_PUBLIC_URL` (read by the mounted presentation-mcp's `Settings`, not by the harness's): the URL at which a browser reaches presentation-mcp, `<public https URL>/mcp/presentation`. It is required and has no default. The harness fails at import when it is unset or not a valid absolute `http(s)` URL. Views load their theme stylesheet from it. `just dev`, `just studio-scripted` and `just studio-live` set it from `PORT`.
+- `database_url`: Optional SQLAlchemy URL for a durable session store (local Postgres or sqlite). Mutually exclusive with `session_store_instance_connection_name`.
+- `session_store_instance_connection_name`, `session_store_database`, `session_store_runtime_db_user`: Together select the Cloud SQL Connector session-store path over `database_url`'s plain-URL path; required together, and refused together with `database_url`.
+- `session_store_pool_size`, `session_store_max_overflow`: Pooled connections the connector-backed engine opens (defaults 2 and 0, two per instance).
+- `session_store_connect_timeout_s`: Bounds one Cloud SQL Connector dial attempt, in seconds (default 30).
+- `studio_api_token`: Shared secret for the studio routes; when set, studio requests must present exactly this bearer token (`harness.auth`). **Placeholder access control:** unset, any non-empty bearer token is accepted and the live server logs `STUDIO AUTH IS OPEN` at startup. Set it on every server reachable beyond the developer's machine.
+- `studio_scripted`: Serve the studio from deterministic scripted seams (`harness.scripted`): no model, no MCP, no upstream, sequential wire ids. `just studio-scripted` runs it; for frontend development and testing only.
+- `studio_engine`: Which agent answers a live studio turn: `graph` (the default) or `orchestrator` (see "The orchestrator engine" above).
+- `studio_cors_origins`: Comma-separated browser origins a live server answers CORS preflights for, e.g. `http://localhost:8091` for a locally served page testing against the real agent. Empty (the default, and the deployed posture) sends no CORS headers; the deployed service is reached same-origin through the website's proxy.
+- `mcp_api_token` (inherited from `BaseServiceSettings`): Shared bearer token the three MCP mounts require (`common.auth`). Unset (the default) mints one at startup and hands it to the harness's own MCP clients, so a local run needs no configuration. Set it before pointing `DATA_MCP_URL` / `ANALYSIS_MCP_URL` / `PRESENTATION_MCP_URL` off loopback. Construction refuses that combination without it, and refuses an off-loopback URL over anything but `https` even with it set, since that bearer is attached to every request.
+- `mcp_auth_disabled` (inherited from `BaseServiceSettings`): Turns the MCP mount gate off entirely, for a raw client with no bearer token to present. Logged at error level. Never set on a server reachable beyond the developer's machine.
+- `combined_mcp_requests_per_s`, `combined_mcp_burst`: Size the combined server's one token bucket per instance (defaults 5.0 and 20), refilled at `combined_mcp_requests_per_s` and holding at most `combined_mcp_burst`. Every outside tool call to `/mcp/` draws on it, and no other request does. There is one bucket for every caller.
+
+Setting explicit environment variables for `DATA_MCP_URL`, `ANALYSIS_MCP_URL`, or `PRESENTATION_MCP_URL` redirects agent tool calls to external endpoints.
+
+`model_name` drives the graph's generative seams (converse, compose, narrate, refusal, edit) and the depth-hint extractor. The planner and translator read their own models from `AgentSettings` in `planner.settings`, which this service and the eval agents share.
+
+- `planner_model_name`: Model the planner runs, pinned to `gemini-3.8-flash`. Override with `PLANNER_MODEL_NAME`.
+- `translator_model_name`: Model the translator runs, pinned to `gemini-3.8-flash`. Override with `TRANSLATOR_MODEL_NAME`.
+
+Both pin a concrete version rather than a floating alias, so an eval score stays attributable to one model.
