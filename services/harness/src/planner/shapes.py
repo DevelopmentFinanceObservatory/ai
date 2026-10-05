@@ -128,12 +128,16 @@ class RoleDimension:
     this dimension. `breakdown` marks the dimension a requirement's
     breakdown adds, whose values are codes of a classification rather than
     entities, and which an aggregate grouping by breakdown keeps alone.
+    `open` marks the dimension a requirement's `across` adds, which holds
+    every member of a party nobody named. An aggregate sums it away whatever
+    it groups by, and every other verb carries it as it does a named role.
     """
 
     role: str | None
     requirement_id: Identifier
     narrowed: bool = False
     breakdown: bool = False
+    open: bool = False
 
 
 # The measure count of a family read separately whose source lists none of its
@@ -330,17 +334,20 @@ def aggregated(
     """The shape `aggregate` produces, reducing `shape` by `reduction` per entity and/or period.
 
     Role dimensions survive only when the group keeps entity apart, except
-    the breakdown's, which a group by breakdown keeps alone. The frame
+    the breakdown's, which a group by breakdown keeps alone. A group by
+    entity keeps the parties the requirement names and sums an open
+    dimension away, as it sums the periods a group without period. The frame
     becomes one row per entity exactly when the group does not keep
     period apart. `measures`, `value` and `period` carry through unchanged --
     aggregate reduces rows, not what they measure. `cut_per_period` survives
     only a group by both entity and period, which keeps the gaps; a group by
     period alone totals each period's kept rows, and a group by entity alone
-    is refused over a cut frame. Mixed levels survive a group that keeps
-    entity apart; a group across entities is refused over them. A group
-    that keeps period apart keeps the input's own period labels, a `SPAN`
-    included. Any other group labels each row with the period that supplied
-    its value under a `max` or `min`, as analysis-mcp does: over a series
+    is refused over a cut frame. Mixed levels survive only a group by
+    entity that sums no open dimension. A group summing the open place
+    dimension is refused over them. A group that keeps period apart keeps
+    the input's own period labels, a `SPAN` included. Any other group
+    labels each row with the period that supplied its value under a `max`
+    or `min`, as analysis-mcp does: over a series
     of years that is one `PICKED` year per row (a single year when the
     period holds one), and over a `SPAN` it is the span itself. A `sum` or
     `mean` over any other group collapses the periods into a `SPAN`. Over a
@@ -357,7 +364,7 @@ def aggregated(
         if shape.time is TimeLabel.PICKED:
             period = None
     if by_entity:
-        roles = shape.roles
+        roles = tuple(role for role in shape.roles if not role.open)
     elif by_breakdown:
         roles = tuple(role for role in shape.roles if role.breakdown)
     else:
@@ -756,12 +763,21 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     A frame with no role dimension that rests on two retrievals, a
     `sum_of`'s or an unkeyed `share_of`'s, holds one series, so a group by
     entity reduces that series whole: a total over a span of two sources'
-    yearly sum.
+    yearly sum. A group by entity keeps only the parties a requirement
+    names, so over a frame whose every party is open it would keep none.
     """
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
             "aggregate cannot group by entity over a frame with no role dimension; group by "
             "entity in the step that collapsed the roles"
+        )
+    open_roles = [role.role for role in shape.roles if role.open]
+    if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):
+        return (
+            "aggregate grouping by entity keeps the parties the requirement names apart and "
+            f"sums its open {open_roles!r} away, and this input names no entity, so the group "
+            "keeps nothing; group by period alone to total every member per year, or rank "
+            "with a reduction to set each member's total beside the others"
         )
     if by_breakdown and not any(role.breakdown for role in shape.roles):
         return (
@@ -777,10 +793,11 @@ def _rejects_aggregate(
     several = _several_measures("aggregate", shape)
     if several is not None:
         return several
-    if not by_entity and (mixed := _mixed_levels("a total or an average across places", shape)):
-        return mixed
     if missing := _missing_group_roles(shape, by_entity=by_entity, by_breakdown=by_breakdown):
         return missing
+    sums_open = not by_entity or any(role.open for role in shape.roles)
+    if sums_open and (mixed := _mixed_levels("a total or an average across places", shape)):
+        return mixed
     if by_period and shape.time is TimeLabel.PICKED:
         return (
             f"an aggregate by period reduces each year's rows, and {_PICKED}, so each year "
@@ -817,8 +834,9 @@ def _rejects_growth(shape: FrameShape, *, change: GrowthChange) -> str | None:
         return reason
     if shape.cut_per_period:
         return (
-            f"growth reads every year of each entity's series, and {_CUT_PER_PERIOD}; "
-            "compute the growth first, then rank its result with the limit"
+            f"growth reads each entity's endpoint years, and {_CUT_PER_PERIOD}, so its "
+            "endpoints say whether it made the cut, not how it grew; compute the growth "
+            "first, then rank its result with the limit"
         )
     unnarrowed = (
         [role.role for role in shape.roles if not role.narrowed]
@@ -836,9 +854,9 @@ def _rejects_growth(shape: FrameShape, *, change: GrowthChange) -> str | None:
     if unnarrowed:
         return (
             "an absolute growth over a rank position has to be about one entity, because "
-            "run_growth refuses the whole call at the first entity missing a year and a "
-            f"population-wide rank series has holes by nature; add a filter narrowing "
-            f"{unnarrowed!r} before this growth"
+            "each year's rank position depends on which entities reported that year, so a "
+            "change in position across a population mixes movement with reporting; add a "
+            f"filter narrowing {unnarrowed!r} before this growth"
         )
     return None
 

@@ -112,12 +112,15 @@ from planner.plan import (
     Plan,
     PlanStatus,
     SessionState,
+    UnsupportedOperation,
     clear_unsupported,
+    current_discovery_time_left,
     cut_user_text,
     load_asks,
     load_plan,
     load_plan_rounds,
     pin_sources,
+    record_unsupported,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
@@ -143,6 +146,7 @@ from harness.graph import (
     ORCHESTRATOR_SPECS_KEY,
     frame_row_ceiling,
 )
+from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.turn_records import (
     SearchReading,
@@ -341,7 +345,7 @@ discovery."""
 # `spec_id` names only the first, so it is left out and each seed is named
 # in its own block (`_render_seeds`). The pin is the user's choice, recorded
 # as such; `propose_plan` traces it to the seed and pins the seed over the
-# requirement's period (`planner.agent._window_seeded_pins`), so the period
+# requirement's period (`planner.agent._window_pins`), so the period
 # is the window the plan retrieves. `ceiling` is data-mcp's row ceiling as
 # this process configures it (`harness.graph.frame_row_ceiling`). The series
 # cap is the platform's: a chart or table component draws at most 24
@@ -409,6 +413,21 @@ _KEEP_SEEDS_SENTENCE = (
     "Search, so keep each pinned and propose it again."
 )
 
+# The run-time refusal codes that mean no operation computes what the refused
+# step was asked to, each with the `unsupported` answer it stands for. A replan
+# entry over one starts with that answer recorded (`_earned_by_refusal`), so a
+# plan may decline the ask it served, as it may after `propose_plan` or
+# `translate` answers `unsupported`. `cross_frame_unit_unbound`: one side of a
+# `share_of`, `compare` or `sum_of` declares no unit while the other does, so
+# no operation combines the two. A source declaring a unit would also clear
+# it, and the decline leaves the planner free to pin one instead. Codes whose
+# `fix` offers a choice (a common unit, a facet, matching periods, a window, a
+# denominator, an entity) are method choices, and a stop
+# (`executor.classify.STOP_CODES`) never replans.
+_UNSUPPORTED_BY_RUN_TIME_CODE: Mapping[str, UnsupportedOperation] = {
+    "cross_frame_unit_unbound": UnsupportedOperation.NO_OPERATION_COVERS,
+}
+
 _NO_SUBMIT_NUDGE = (
     "You have not called submit_plan. Propose the plan with propose_plan "
     "(and have it translated with translate, if it is not yet compiled), "
@@ -420,6 +439,12 @@ _NO_SUBMIT_NUDGE = (
 # `propose_plan` response. `_refusal_text` compares against this to route to
 # `_deadline_text`, and nothing outside this module ever sees it.
 _DEADLINE_REFUSAL_CODE = "planner_deadline_exceeded"
+
+# The seconds of an entry's deadline a discovery call leaves for the planner's
+# next model call, which reads what the call answered. A search that runs into
+# this margin is cut off (`planner.plan.discovery_time_left`), so a search that
+# succeeds still leaves the planner time to use it before the deadline.
+_NEXT_MODEL_CALL_MARGIN_S = 10.0
 
 # The `refused["code"]` `_track_tool_call` stamps once `translate` answers
 # with an `internal` referral, a fault no correction round repairs, so it
@@ -594,6 +619,7 @@ class PlannerSeam:
         surface: ToolSurface | None = None,
         clock: Callable[[], float] = time.monotonic,
         thinking_sample_rng: Callable[[], float] = random.random,
+        prefix_cache: PrefixCache | None = None,
     ) -> None:
         # `planner_entry_deadline_seconds`/`thinking_sample_rate` are read once
         # here rather than per call, matching the default
@@ -622,6 +648,7 @@ class PlannerSeam:
             # `QUESTION_FIXED` instead, handled below the same way
             # `BUDGET_EXHAUSTED` is.
             question_fixed=True,
+            prefix_cache=prefix_cache,
         )
         # The callbacks are assigned exactly once, here, as bound methods,
         # and read the call they belong to off `_active_call` (a
@@ -707,6 +734,8 @@ class PlannerSeam:
             # `MAX_PLAN_ROUNDS` bounds would run unbounded for the rest of it.
             save_plan_rounds(cast(SessionState, ctx.session.state), 0)
             clear_unsupported(cast(SessionState, ctx.session.state))
+            for operation in _earned_by_refusal(refusal):
+                record_unsupported(cast(SessionState, ctx.session.state), operation)
             clear_compile_failures(ctx.session.state)
             if prior_plan is None and refusal is None and amendment is None:
                 # This shape -- no `prior_plan`, no `refusal`, no
@@ -1032,11 +1061,15 @@ class PlannerSeam:
         """
         tracker = _RunTracker(deadline_at)
         token = _active_call.set(_CallState(tracker=tracker, on_progress=on_progress))
+        time_left_token = current_discovery_time_left.set(
+            lambda: deadline_at - self._clock() - _NEXT_MODEL_CALL_MARGIN_S
+        )
         before = len(ctx.session.events)
         try:
             content = types.Content(role="user", parts=[types.Part(text=message)])
             await ctx.run_node(self._agent, content, override_branch=_PLANNER_BRANCH)
         finally:
+            current_discovery_time_left.reset(time_left_token)
             _active_call.reset(token)
             # Also checked when the run raised. A planner-side ask suspends it
             # by raising through `ctx.run_node`.
@@ -1094,10 +1127,7 @@ class PlannerSeam:
         The deadline is checked first, and only while the tracker has not
         already been told to break some other way: a `ready_to_break` already
         set (the version cap, a repeating referral) names its own reason
-        instead. `tracker.submitted` set is the same kind of already-settled
-        outcome: `submit_plan` already recorded the plan, so a deadline that
-        passes before the closing generation this call still owes the model
-        must not discard that submission with a refusal.
+        instead.
         """
         del llm_request
         call = _active_call.get()
@@ -1105,11 +1135,7 @@ class PlannerSeam:
             logger.warning("planner before_model_callback fired with no active call")
             return None
         tracker = call.tracker
-        if (
-            not tracker.ready_to_break
-            and tracker.submitted is None
-            and self._clock() >= tracker.deadline_at
-        ):
+        if not tracker.ready_to_break and self._clock() >= tracker.deadline_at:
             return self._deadline_response(callback_context, tracker)
         if not tracker.ready_to_break:
             return None
@@ -1150,9 +1176,9 @@ class PlannerSeam:
         `_pinnable_candidates`), this refuses instead: `tracker.refused` is
         set the way a `propose_plan` `BUDGET_EXHAUSTED` refusal is, so
         `_propose` and `__call__` report it immediately, with no correction
-        round. `_before_planner_model` excludes a `tracker.submitted` entry
-        from the deadline check, so this never runs once `submit_plan` has
-        already recorded a plan.
+        round. `submit_plan`'s ok answer ends the planner's run
+        (`skip_summarization`), so no model call, and so no deadline, follows
+        a submitted plan.
         """
         candidates = _pinnable_candidates(tracker.last_referral)
         if candidates:
@@ -1588,10 +1614,15 @@ class PlannerSeam:
             )
         elif refusal:
             refused, kept = _split_seeded(_refused_specs(refusal), seed_of)
-            avoid = _avoid_sentence(refused) + _keep_seeds_sentence(kept)
+            avoid = (
+                _avoid_sentence(refused)
+                + _keep_seeds_sentence(kept)
+                + _earned_decline_sentence(_earned_by_refusal(refusal))
+            )
+            stop = {key: value for key, value in refusal.items() if key != "computed_asks"}
             ask = (
-                "\nExecuting the approved plan failed and nothing was kept. "
-                f"Refusal: {cut_user_text(json.dumps(refusal), MAX_QUESTION_CHARS)}\n"
+                f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
+                f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
                 f"Call propose_plan again with a plan that avoids it.{avoid}\n"
             )
         nudge = f"\n{problem}\n" if problem is not None else ""
@@ -1619,6 +1650,22 @@ class PlannerSeam:
         )
 
 
+def _failed_run_sentence(computed: Sequence[int] | None) -> str:
+    """What a replan's failed run computed: the asks its finished terminal
+    steps answer (`harness.graph._computed_asks`), by number, or `None` for
+    a plan held to no asks. The new plan runs from the start, so it still
+    answers every ask."""
+    if computed is None:
+        return "Executing the approved plan failed, and the new plan runs from the start."
+    if not computed:
+        return "Executing the approved plan failed before it computed any ask."
+    numbers = ", ".join(str(number) for number in computed)
+    return (
+        f"Executing the approved plan failed after it computed asks {numbers}. The new plan "
+        "runs from the start, so it still answers every ask."
+    )
+
+
 def _asks_section(asks: Sequence[str]) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none."""
     if not asks:
@@ -1626,8 +1673,8 @@ def _asks_section(asks: Sequence[str]) -> str:
     lines = "".join(f"{number}. {ask}\n" for number, ask in enumerate(asks))
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
-        "`answered`, or, only when `propose_plan` or `translate` answered `unsupported` for "
-        "it, decline it in `declined` with its number as `ask_ref`. When the plan computes "
+        "`answered`, or, when an `unsupported` answer earned its decline (see `declined`), "
+        "decline it in `declined` with its number as `ask_ref`. When the plan computes "
         "part of an ask, do both: answer it with what is computed and decline the rest, "
         "naming that part in the decline's `ask`.\n" + lines
     )
@@ -2380,6 +2427,38 @@ def _truncate(text: str, cap: int) -> str:
     inside the cap, so the rendered length is the cap and not the cap plus one.
     """
     return text if len(text) <= cap else text[: cap - 1] + "…"
+
+
+def _earned_by_refusal(refusal: dict[str, Any] | None) -> set[UnsupportedOperation]:
+    """The declines a replan's `refusal` earns: one per stop in it, the
+    primary's or an `also_stopped` sibling's, whose `code` is in
+    `_UNSUPPORTED_BY_RUN_TIME_CODE`.
+
+    Only `MethodChoiceNeeded`'s shape (`graph.py`'s `_refusal_shape`)
+    carries a tool's `code` at its top level.
+    """
+    if not isinstance(refusal, dict):
+        return set()
+    also_stopped = refusal.get("also_stopped")
+    payloads = [refusal, *(also_stopped if isinstance(also_stopped, list) else ())]
+    return {
+        _UNSUPPORTED_BY_RUN_TIME_CODE[code]
+        for payload in payloads
+        if isinstance(payload, dict)
+        and isinstance(code := payload.get("code"), str)
+        and code in _UNSUPPORTED_BY_RUN_TIME_CODE
+    }
+
+
+def _earned_decline_sentence(earned: Collection[UnsupportedOperation]) -> str:
+    """What a replan's message says about the declines its refusal earned. Empty when none."""
+    if not earned:
+        return ""
+    codes = ", ".join(f"`{operation.value}`" for operation in sorted(earned))
+    return (
+        f" The refusal means no operation computes what that step was asked to, so the "
+        f"plan may decline the ask it served in `declined` with code {codes}."
+    )
 
 
 def _refused_specs(refusal: dict[str, Any] | None) -> list[tuple[str, str]]:

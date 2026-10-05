@@ -84,6 +84,7 @@ from functools import partial
 from typing import Annotated, Any, Literal, Protocol, cast
 
 from analysis_mcp import digest as analysis_digest
+from common.materialisation import FrameRef
 from common.telemetry import record_event, record_span
 from compiler.evidence import errors
 from compiler.frame_columns import FRAME_PARAMETER
@@ -107,6 +108,8 @@ from executor.outcomes import (
     RediscoveryNeeded,
     RefusalKind,
     Refused,
+    RunOutcome,
+    StepRecord,
 )
 from executor.run import (
     FetchSeriesStats,
@@ -133,6 +136,7 @@ from planner.plan import (
     ResolvedBy,
     SeededSource,
     dropped_seeds,
+    load_asks,
     names_dropped_seed,
     plan_revision,
     save_dropped_seeds,
@@ -257,6 +261,10 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
 ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
+# Ask number -> the terminal frames of the latest run of this plan call that
+# computed that ask (`_kept_asks`), written by `execute` when a run stops and
+# read by `plan_done`; cleared by `plan_start` and `plan_done`.
+ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `_OrchestratorTranslator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
@@ -349,6 +357,66 @@ def _ask_status(
             "reason": plan_display.DECLINE_REASONS[ask.declined],
         }
     return status
+
+
+# The `_ask_status` statuses of a step that produced no frame.
+_NOT_COMPUTED = frozenset({"failed", "not_run"})
+
+
+def _computed(ask: Mapping[str, Any]) -> bool:
+    """Whether every step answering `ask` (an `_ask_status` entry) produced its frame."""
+    entries = ask.get("answered_by") or ()
+    return bool(entries) and not any(entry["status"] in _NOT_COMPUTED for entry in entries)
+
+
+def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
+    """What a stopped plan computed, as `plan_done` states it: the asks whose
+    every answering frame holds series (`data`) and can be charted, the asks
+    computed with a frame that holds none or cannot be drawn, those an
+    earlier plan computed, and the asks a failed or unrun step leaves not
+    computed. An ask computed in part is named with the part not computed
+    and its reason. Without a computed ask, whether any frame is listed."""
+    computed = [ask for ask in asks or () if _computed(ask)]
+
+    def computed_part(ask: Mapping[str, Any]) -> str:
+        """`ask` quoted, with the part its plan declined and the reason."""
+        declined = ask.get("not_computed")
+        if declined is None:
+            return json.dumps(ask["ask"])
+        return (
+            f"{json.dumps(ask['ask'])} except {json.dumps(declined['part'])}, "
+            f"not computed because {declined['reason']}"
+        )
+
+    charted = [
+        ask for ask in computed if all(entry["status"] == "data" for entry in ask["answered_by"])
+    ]
+    uncharted = [ask for ask in computed if ask not in charted]
+    earlier = [ask["ask"] for ask in computed if ask.get("earlier_plan")]
+    missing = [ask["ask"] for ask in asks or () if ask.get("answered_by") and not _computed(ask)]
+    sentences = []
+    if charted:
+        sentences.append(
+            "The frames listed compute these asks and can be charted: "
+            + "; ".join(computed_part(ask) for ask in charted)
+            + "."
+        )
+    if uncharted:
+        sentences.append(
+            "Computed, with a frame that holds no series or cannot be drawn, as each "
+            "step's status says: " + "; ".join(computed_part(ask) for ask in uncharted) + "."
+        )
+    if earlier:
+        sentences.append(
+            "Of these, an earlier plan that stopped computed "
+            + "; ".join(json.dumps(ask) for ask in earlier)
+            + "; their steps are not in the plan record."
+        )
+    if not computed and frames:
+        sentences.append("The frames listed are the results computed before the stop.")
+    if missing:
+        sentences.append("Not computed: " + "; ".join(json.dumps(ask) for ask in missing) + ".")
+    return " ".join(sentences) or "Its result is not available."
 
 
 def _stopped_steps(workflow: PlanWorkflow | None, failed_step: str | None) -> set[str]:
@@ -1701,8 +1769,22 @@ def _carried_parts(
     return frozenset(retrievals), frozenset(sums)
 
 
+def _ran(outcome: RunOutcome) -> tuple[StepRecord, ...]:
+    """Every step of `outcome`'s run that finished, in the plan's own step order."""
+    return outcome.steps if isinstance(outcome, Accepted) else outcome.completed
+
+
+def _answer_frames(outcome: RunOutcome) -> dict[str, FrameRef]:
+    """Each terminal frame that stands as an answer, by step id, in the
+    workflow's terminal order: every terminal step's on an accepted run
+    (`Accepted.results`), and on a stopped run each finished terminal step's
+    that passed the same answer check (`answers`, `executor.run._Run.
+    _answer_refusal`)."""
+    return dict(outcome.results if isinstance(outcome, Accepted) else outcome.answers)
+
+
 def _link_evidence_to_terminal_frames(
-    tool_surface: ToolSurface | None, outcome: Accepted, *, workflow: PlanWorkflow
+    tool_surface: ToolSurface | None, outcome: RunOutcome, *, workflow: PlanWorkflow
 ) -> None:
     """Link each terminal frame's provenance to every retrieval that feeds it.
 
@@ -1715,6 +1797,10 @@ def _link_evidence_to_terminal_frames(
     (`harness.studio_translate._RecordingSurface._remember_manifest`).
     Without this, `McpExecutor._assemble_component` would never find a
     terminal frame's provenance on the approved-plan path.
+
+    A stopped run links the terminal frames it finished (`_answer_frames`)
+    the same way, from the evidence its finished retrievals recorded, so a
+    partial answer's cards keep their sources.
 
     Attribution is per frame: `_upstream_retrievals` walks each terminal
     step's own `bindings` back to the retrieval(s) under it, so two
@@ -1746,7 +1832,7 @@ def _link_evidence_to_terminal_frames(
     steps_by_id = {step.id: step for step in workflow.steps}
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    stat_var_counts = {record.step_id: record.stat_var_count for record in outcome.steps}
+    stat_var_counts = {record.step_id: record.stat_var_count for record in _ran(outcome)}
     memo: dict[str, frozenset[str]] = {}
     sum_of_sides = _sum_of_sides(
         outcome,
@@ -1755,7 +1841,7 @@ def _link_evidence_to_terminal_frames(
         step_order=step_order,
         memo=memo,
     )
-    for step_id, frame_ref in outcome.results.items():
+    for step_id, frame_ref in _answer_frames(outcome).items():
         sources = sorted(
             _upstream_retrievals(
                 step_id,
@@ -1806,7 +1892,7 @@ def _link_evidence_to_terminal_frames(
 
 
 def _sum_of_sides(
-    outcome: Accepted,
+    outcome: RunOutcome,
     *,
     steps_by_id: dict[str, WorkflowStep],
     retrieval_step_ids: frozenset[str],
@@ -1821,7 +1907,7 @@ def _sum_of_sides(
     """
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     sides: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
-    for record in outcome.steps:
+    for record in _ran(outcome):
         step = steps_by_id.get(record.step_id)
         if step is None or step.tool.name != "sum_of":
             continue
@@ -1853,9 +1939,14 @@ _RECIPIENT_AXIS = "destination"
 
 
 def _stat_var_totals(
-    tool_surface: ToolSurface | None, outcome: Accepted, *, plan: PlannerPlan
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
 ) -> list[str]:
-    """One sentence per summed family an answer frame carries, for `narrate`.
+    """One sentence per summed family an answer frame carries, for `narrate`,
+    over every answer frame (`_answer_frames`) or only those of `terminals`.
 
     Walks the retrievals whose StatVars each answer frame carries
     (`_carried_retrievals`, the walk the card counts its indicators by), so
@@ -1879,9 +1970,11 @@ def _stat_var_totals(
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
     decisions = {decision.slot: decision for decision in plan.decisions}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    role_keys_by_step = {record.step_id: record.role_keys for record in outcome.steps}
+    role_keys_by_step = {record.step_id: record.role_keys for record in _ran(outcome)}
     sentences: list[str] = []
-    for terminal_id in outcome.results:
+    for terminal_id in _answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
         carried = _carried_retrievals(
             terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
         )
@@ -2120,6 +2213,57 @@ def _mark_masked_step_failed(
             code=failed["code"],
             detail=failed["message"],
         )
+
+
+def _computed_asks(plan: PlannerPlan, answers: Collection[str]) -> list[int]:
+    """The number of each ask `plan` answers whose answering steps all
+    finished as terminal steps (`answers`, `_answer_frames`'s keys)."""
+    return [
+        number
+        for number, row in enumerate(plan_display.ask_rows(plan))
+        if row["answered_by"]
+        and all(step in answers for step in cast("list[str]", row["answered_by"]))
+    ]
+
+
+def _kept_asks(
+    kept: Mapping[str, Any] | None,
+    tool_surface: ToolSurface | None,
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
+    *,
+    plan: PlannerPlan,
+) -> dict[str, Any]:
+    """`kept` with each ask `outcome`'s run computed (`_computed_asks`) set to
+    that run's answer frames for it: per answering step its id, tool, frame
+    ref and digest, the family totals those frames carry, and for an ask
+    `plan` answers in part, the part not computed with its reason, as
+    `_ask_status` reports it. A plan call's asks are fixed (`plan_start`), so
+    an ask's number names the same ask in every plan the call runs."""
+    answers = _answer_frames(outcome)
+    records = {record.step_id: record for record in outcome.completed}
+    rows = plan_display.ask_rows(plan)
+    kept = dict(kept or {})
+    for number in _computed_asks(plan, answers):
+        row = rows[number]
+        steps = cast("list[str]", row["answered_by"])
+        kept[str(number)] = {
+            "steps": [
+                {
+                    "step_id": step,
+                    "tool": records[step].tool.name,
+                    "frame_ref": answers[step].model_dump(),
+                    "digest": records[step].digest,
+                }
+                for step in steps
+            ],
+            "totals": _stat_var_totals(tool_surface, outcome, plan=plan, terminals=steps),
+        }
+        if row["declined"] is not None:
+            kept[str(number)]["not_computed"] = {
+                "part": row["not_computed"],
+                "reason": row["reason"],
+            }
+    return kept
 
 
 def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
@@ -3036,9 +3180,8 @@ def create_root_workflow(
         instead (`PLANNER_STARTED_KEY`). A seam that raises on the replan after
         `execute` dropped a seed takes the same `"refused"` route with no
         reason of its own, so that drop is explained; on any other draft a
-        raise fails the turn. No frame the first plan fetched is shown on that
-        route: like any run that stops before a terminal step, the turn draws
-        no card from a partial run.
+        raise fails the turn. On that route `plan_done` lists the asks an
+        earlier run of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
 
         `models.planner(...)` is awaited directly here, with no
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
@@ -3309,7 +3452,14 @@ def create_root_workflow(
         one, only `workflow.terminal_steps`). `MethodChoiceNeeded` and
         `RediscoveryNeeded` route "replan" while the budget allows and "ok"
         with `failed_step` once it is spent, the same as any other
-        `Refused` -- except a plain `Refused` whose own `payload` is a
+        `Refused`. A stopped run's answer frames (`_answer_frames`) have
+        their provenance linked as an accepted run's are, and the asks they
+        compute are kept for the plan call (`_kept_asks`), so `plan_done`
+        can list them whichever later run or planner refusal ends the call.
+        The "ok" route carries those frames as final; the "replan" refusal
+        names the asks they compute (`computed_asks`), since the new plan
+        runs from the start.
+        The exception is a plain `Refused` whose own `payload` is a
         `ToolFailure` `executor.classify.classify_refusal` calls
         `Disposition.STOP`: that is a dead end no replan reaches, so the
         turn closes right there with the refusal's own remedy, no replan
@@ -3358,9 +3508,10 @@ def create_root_workflow(
         finally:
             await _stop(task)
         ctx.state["plan"] = finished.model_dump_json()
+        workflow = plan.workflow
+        assert workflow is not None, "an approved plan always carries a workflow"
         if isinstance(outcome, Accepted):
-            assert plan.workflow is not None, "an approved plan always carries a workflow"
-            _link_evidence_to_terminal_frames(tool_surface, outcome, workflow=plan.workflow)
+            _link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
             step_order = {record.step_id: index for index, record in enumerate(outcome.steps)}
             yield Event(
                 output={
@@ -3404,7 +3555,7 @@ def create_root_workflow(
         # replans from the other seeds, when one is left to plan from and no
         # other stop in the wave is a dead end the replan would meet again.
         seeded = seeded_sources(ctx.state)
-        stale = stale_seeds(outcome, workflow=plan.workflow, seeded=seeded)
+        stale = stale_seeds(outcome, workflow=workflow, seeded=seeded)
         drops = (
             bool(stale)
             and any(
@@ -3420,13 +3571,19 @@ def create_root_workflow(
         # planner's re-proposal (which would reproduce this exact failing
         # call) never runs.
         dead_end = not drops and _is_dead_end(outcome)
+        answers = _answer_frames(outcome)
+        _link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
+        if finished.asks:
+            ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = _kept_asks(
+                ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY), tool_surface, outcome, plan=finished
+            )
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            output: dict[str, Any] = {
-                "refusal": _replan_refusal(outcome, dropped=stale if drops else None),
-                "plan_version": finished.version,
-            }
+            refusal = _replan_refusal(outcome, dropped=stale if drops else None)
+            if finished.asks:
+                refusal["computed_asks"] = _computed_asks(finished, answers)
+            output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}
             if drops:
                 _drop_seeds_from_turn(ctx, set(stale.values()), surface=surface)
             yield Event(output=output, route="replan")
@@ -3435,22 +3592,25 @@ def create_root_workflow(
         yield Event(
             output={
                 "frame_refs": [step.frame_ref.model_dump() for step in completed],
-                # Parallel to frame_refs above: which plan step (index +
-                # tool) produced each ref, and whether it is final. The plan
-                # stopped before reaching a real terminal step, so no entry
-                # here is final -- not even the last one to run, which is an
-                # intermediate step's raw frame, never the question's answer.
-                # `is_final_step: False` for every entry means
-                # `_admissible_intents` admits nothing on this path: compose
-                # writes no card, and the turn reports the failure through
-                # `failed_step` and `step_summaries` alone rather than
-                # illustrating it with the wrong frame.
+                # Parallel to frame_refs above: which plan step (index, id,
+                # tool) produced each ref, and whether it is final. A
+                # terminal step that finished before the stop is final
+                # (`_answer_frames`): its frame answers the asks it serves,
+                # so `compose` and `plan_done` take it as they would on an
+                # accepted run. Any other step's frame is an intermediate,
+                # and `_admissible_intents` admits no card of it.
                 "frame_ref_steps": [
-                    {"step": index, "tool": step.tool.name, "is_final_step": False}
+                    {
+                        "step": index,
+                        "step_id": step.step_id,
+                        "tool": step.tool.name,
+                        "is_final_step": step.step_id in answers,
+                    }
                     for index, step in enumerate(completed)
                 ],
                 "plan_version": finished.version,
                 "step_summaries": [step.digest for step in completed if step.digest],
+                "stat_var_totals": _stat_var_totals(tool_surface, outcome, plan=finished),
                 "failed_step": _failed_step(outcome),
             },
             route="ok",
@@ -3801,65 +3961,124 @@ def create_root_workflow(
         """Hand the agent's brief to the planner under the orchestrator's own
         key, leaving the graph's `question` alone. This call's asks go under
         `ASKS_STATE_KEY`, cleared when it lists none so no plan is held to an
-        earlier call's asks. The planner's first-draft entry is an empty
-        payload."""
+        earlier call's asks, and no earlier call's kept asks are listed. The
+        planner's first-draft entry is an empty payload."""
         ctx.state[ORCHESTRATOR_BRIEF_KEY] = node_input["brief"]
         ctx.state[ASKS_STATE_KEY] = node_input.get("asks") or None
+        ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
         return {}
 
     async def plan_done(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
         """What the agent reads once its plan has run, or could not be made:
         the final-step frames, described and registered under ids it can
-        chart (never an intermediate step's, the rule `compose` applies),
+        chart (never an intermediate step's, the rule `compose` applies; on
+        a stopped plan, each terminal step that finished before the stop),
         the step summaries, the family totals, what failed, each cut, and
         each ask the brief listed with its outputs' status or its decline
         (`_ask_status`), then the plan record
         (`harness.turn_records.PlanRecord`). A step refused
         `capability_unavailable` marks its spec_id unavailable to `fetch`
-        for the rest of the turn and does not give the plan call back."""
-        if "text" in node_input:
-            # A final refusal (an internal or repeated failure, or a question
-            # declined whole) fails the same way for any brief.
-            again = not node_input.get("final") and _give_plan_back(ctx)
-            return {
-                "status": "Reading the planner's answer",
-                "text": "The planner could not make a plan: "
-                f"{str(node_input['text'])[:_HAND_BACK_CAP]}\nAnswer with search and fetch "
-                "where you can, and say plainly what could not be calculated."
-                + (" A brief that avoids the problem may be planned once more." if again else ""),
-            }
+        for the rest of the turn and does not give the plan call back.
+
+        When the plan call's last run stopped, or the planner refused after
+        a run stopped, each ask that run did not compute but an earlier run
+        of the call did is listed from that earlier run's kept frames
+        (`ORCHESTRATOR_KEPT_ASKS_KEY`), marked `earlier_plan`, with their
+        step summaries and family totals, and an ask that earlier run
+        computed in part with the part not computed and its reason."""
+        kept: dict[str, Any] = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY) or {}
+        ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
         described: list[tuple[dict[str, Any], dict[str, Any]]] = []
         not_chartable: list[dict[str, Any]] = []
-        # Final step id -> its output's status, as `_ask_status` reports it.
-        ran: dict[str, dict[str, Any]] = {}
-        steps = node_input.get("frame_ref_steps", [])
-        for ref, step in zip(node_input.get("frame_refs", []), steps, strict=True):
-            if not step.get("is_final_step"):
-                continue
+        summaries: list[str] = list(node_input.get("step_summaries", []))
+        totals: list[str] = list(node_input.get("stat_var_totals", []))
+        frames: dict[str, Any] = dict(ctx.state.get(ORCHESTRATOR_FRAMES_KEY) or {})
+
+        async def describe(ref: dict[str, Any], *, tool: str) -> dict[str, Any]:
+            """Describe one final frame for listing, and return its status as
+            `_ask_status` reports it."""
             view = await executor(tool="describe_frame", args={"frame_ref": ref})
             if view.get("outcome") == "ok":
                 described.append((ref, view.get("view") or {}))
                 empty = (view.get("view") or {}).get("series_count") == 0
-                status = {"status": "empty"} if empty else {"status": "data"}
-                ran[step.get("step_id", "")] = {**status, "frame": frame_id_for(ref)}
-            else:
-                # The same closed vocabulary `compose` hands narrate: never
-                # the platform's own text.
-                reason = _frame_unavailable_reason(view.get("refusal") or {})
-                not_chartable.append({"step": step.get("tool"), "reason": reason})
-                ran[step.get("step_id", "")] = {"status": "not_chartable", "reason": reason}
-        frames: dict[str, Any] = dict(ctx.state.get(ORCHESTRATOR_FRAMES_KEY) or {})
-        result: dict[str, Any] = {
-            "frames": register_frames(frames, described),
-            "step_summaries": [
-                _without_noise(str(summary))[:_HAND_BACK_CAP]
-                for summary in node_input.get("step_summaries", [])
-            ],
-            "totals": node_input.get("stat_var_totals", []),
-        }
-        if not_chartable:
-            result["frames_not_chartable"] = not_chartable
-        ctx.state[ORCHESTRATOR_FRAMES_KEY] = frames
+                return {"status": "empty" if empty else "data", "frame": frame_id_for(ref)}
+            # The same closed vocabulary `compose` hands narrate: never the
+            # platform's own text.
+            reason = _frame_unavailable_reason(view.get("refusal") or {})
+            not_chartable.append({"step": tool, "reason": reason})
+            return {"status": "not_chartable", "reason": reason}
+
+        async def earlier(number: int, ask: str) -> dict[str, Any]:
+            """Ask `number` as an earlier run of this plan call computed it,
+            from its kept frames, adding their summaries and totals."""
+            entry = kept[str(number)]
+            summaries.extend(step["digest"] for step in entry["steps"] if step["digest"])
+            totals.extend(total for total in entry["totals"] if total not in totals)
+            status: dict[str, Any] = {
+                "ask": ask,
+                "answered_by": [
+                    {
+                        "step": step["step_id"],
+                        **await describe(step["frame_ref"], tool=step["tool"]),
+                    }
+                    for step in entry["steps"]
+                ],
+            }
+            if "not_computed" in entry:
+                status["not_computed"] = entry["not_computed"]
+            status["earlier_plan"] = True
+            return status
+
+        def listing(asks: list[dict[str, Any]] | None) -> dict[str, Any]:
+            """The frames, summaries, totals and asks the agent reads, the
+            described frames registered under their ids."""
+            result: dict[str, Any] = {
+                "frames": register_frames(frames, described),
+                "step_summaries": [
+                    _without_noise(str(summary))[:_HAND_BACK_CAP] for summary in summaries
+                ],
+                "totals": totals,
+            }
+            if not_chartable:
+                result["frames_not_chartable"] = not_chartable
+            if asks is not None:
+                result["asks"] = asks
+            ctx.state[ORCHESTRATOR_FRAMES_KEY] = frames
+            return result
+
+        if "text" in node_input:
+            # A final refusal (an internal or repeated failure, or a question
+            # declined whole) fails the same way for any brief.
+            again = not node_input.get("final") and _give_plan_back(ctx)
+            computed = listed = ""
+            if kept:
+                brief_asks = load_asks(ctx.state)
+                result = listing(
+                    [
+                        await earlier(int(number), brief_asks[int(number)])
+                        for number in sorted(kept, key=int)
+                    ]
+                )
+                computed = (
+                    f"{_partial_result(result['asks'], frames=bool(result['frames']))} "
+                    "Every other ask was not computed. "
+                )
+                listed = f"\n{json.dumps(result)}"
+            return {
+                "status": "Reading the planner's answer",
+                "text": "The planner could not make a plan: "
+                f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
+                "and fetch where you can, and say plainly what could not be calculated."
+                + (" A brief that avoids the problem may be planned once more." if again else "")
+                + listed,
+            }
+        # Final step id -> its output's status, as `_ask_status` reports it.
+        ran: dict[str, dict[str, Any]] = {}
+        steps = node_input.get("frame_ref_steps", [])
+        for ref, step in zip(node_input.get("frame_refs", []), steps, strict=True):
+            if step.get("is_final_step"):
+                ran[step.get("step_id", "")] = await describe(ref, tool=step.get("tool", ""))
+        asks: list[dict[str, Any]] | None = None
         failed = node_input.get("failed_step")
         missing_capability = bool(
             failed and failed.get("code") == ToolErrorCode.CAPABILITY_UNAVAILABLE.value
@@ -3904,15 +4123,22 @@ def create_root_workflow(
             record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
             if plan_record.asks:
                 stopped = _stopped_steps(plan.workflow, failed.get("step_id") if failed else None)
-                result["asks"] = [
-                    _ask_status(ask, ran, failed, stopped) for ask in plan_record.asks
-                ]
+                asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
+        if failed and asks:
+            asks = [
+                await earlier(number, status["ask"])
+                if str(number) in kept and not _computed(status)
+                else status
+                for number, status in enumerate(asks)
+            ]
+        result = listing(asks)
         if failed:
             result["failed_step"] = {
                 key: str(failed[key])[:_HAND_BACK_CAP]
                 for key in ("step_id", "tool", "code", "message", "remedy")
                 if failed.get(key)
             }
+            partial = _partial_result(result.get("asks"), frames=bool(result["frames"]))
             if missing_capability:
                 # No brief avoids a capability the question needs, so the
                 # plan call is not given back.
@@ -3921,16 +4147,16 @@ def create_root_workflow(
                     "cannot do what that step needs, so the part of the question it serves "
                     "is unavailable. Its data fetched without the refused option, or a chart "
                     "of other data, does not answer it. Say that this part is unavailable "
-                    "and why, in the user's terms."
+                    f"and why, in the user's terms. {partial}"
                 )
             else:
                 lead = (
-                    "The approved plan stopped at the step marked failed, and its result is "
-                    "not available. Some other parts of the question may still be "
-                    "retrievable on their own with fetch, by the spec_id a step names: show "
-                    "what can be shown, labelled as what it is, never as the derived "
-                    "result; do not repeat the failed request unchanged; and say plainly "
-                    "what remains unanswered and why, in the user's terms."
+                    f"The approved plan stopped at the step marked failed. {partial} Some "
+                    "other parts of the question may still be retrievable on their own with "
+                    "fetch, by the spec_id a step names: show what can be shown, labelled as "
+                    "what it is, never as the derived result; do not repeat the failed "
+                    "request unchanged; and say plainly what remains unanswered and why, in "
+                    "the user's terms."
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."

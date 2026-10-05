@@ -129,6 +129,10 @@ class SelectedSource(StrictModel):
     `measure_label` is `resolved.shape.label`, the name `search` gives what
     the definition measures; `None` when the envelope states none.
 
+    `unit_per_series` is `True` when `resolved.facets.unit` selects a unit
+    per series (`selection: per_series`), so each series states its own unit
+    and the source names no one `unit_ref`; `None` otherwise.
+
     `stat_vars` are the dcids `resolved.stat_vars.items` named: members of
     the definition's binding that `search` confirmed at the resolve's place,
     capped upstream at `SEARCH_RESOLVED_STAT_VARS_MAX`.
@@ -209,6 +213,7 @@ class SelectedSource(StrictModel):
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
     unit_ref: str | None = None
     unit_label: str | None = None
+    unit_per_series: Annotated[bool | None, HASHED_WHEN_SET] = None
     provenance_ref: str | None = None
     provenance_label: str | None = None
     coverage_kind: str | None = None

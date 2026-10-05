@@ -33,9 +33,11 @@ output row is one period's sum of two values both present, a total over
 exactly two series for that period, and a period one side lacks is left
 out rather than summed with a zero. `share_of` refuses on any period-set
 difference: its denominator is a claimed total, and a missing period
-silently changes what "total" means. `growth` refuses on any gap year
-inside the window: a growth row spans the whole window by construction
-(`value_start` to `value_end`), so a gap makes the row itself incomplete.
+silently changes what "total" means. `growth` proceeds for every entity
+holding both endpoint years. A growth row reads only `value_start` and
+`value_end`, so it is complete whatever interior years the entity lacks. An
+entity missing an endpoint has no complete row and is excluded, and the call
+refuses only when no entity holds both.
 `join` proceeds, dropping unmatched keys with counts reported: a joined row
 is one matched key, complete on its own, claiming no total over either side.
 """
@@ -67,16 +69,22 @@ from analysis_mcp.engine.columnar import count_distinct, distinct, repeated
 # The closed set of reasons a narrowing step drops rows: `narrow_and_resolve`'s
 # unit narrowing (`unit_unbound`, `unit_not_selected`) and entity narrowing
 # (`entity_not_selected`), `engine.growth`'s and `engine.rank`'s window
-# filters (`outside_window`), `engine.filter`'s predicate loop (`predicate`),
-# `engine.join`'s unmatched-key sets (`unmatched_key`), `engine.compare`'s
-# unintersected periods (`period_unmatched`), and `engine.rank`'s limit
-# (`beyond_limit`). A heterogeneous facet always refuses with
-# `FacetHeterogeneousError`; this set carries no facet reason.
+# filters (`outside_window`), `engine.growth`'s entities lacking a row in
+# either endpoint year (`endpoint_missing`), with a zero or sign-crossing base
+# under a relative change (`zero_or_sign_crossing_base`), or overflowing to a
+# non-finite value (`non_finite`), `engine.filter`'s predicate loop
+# (`predicate`), `engine.join`'s unmatched-key sets (`unmatched_key`),
+# `engine.compare`'s unintersected periods (`period_unmatched`), and
+# `engine.rank`'s limit (`beyond_limit`). A heterogeneous facet always refuses
+# with `FacetHeterogeneousError`, so this set carries no facet reason.
 ExclusionReason = Literal[
     "unit_unbound",
     "unit_not_selected",
     "entity_not_selected",
     "outside_window",
+    "endpoint_missing",
+    "zero_or_sign_crossing_base",
+    "non_finite",
     "predicate",
     "unmatched_key",
     "period_unmatched",

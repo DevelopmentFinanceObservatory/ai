@@ -94,19 +94,61 @@ async def test_unregistered_pair_refuses_frame_not_held(seeded) -> None:
     assert result.structured_content["code"] == "frame_not_held"
 
 
-async def test_gap_year_inside_window_refuses(seeded) -> None:
-    _store, handles = seeded
+async def test_gap_year_inside_window_computes_and_reports_the_gap(seeded) -> None:
+    store, handles = seeded
     result = await growth(
         frame_ref=handles.time_series_with_gap,
         window_start="2017",
         window_end="2022",
         entity_by=("reporter",),
     )
-    assert result.structured_content["code"] == "growth_gap_year"
-    assert result.structured_content["fix"]["entity_key"] == {"reporter": "dcid:USA"}
-    assert result.structured_content["fix"]["gap_years"] == ["2021"]
-    assert result.structured_content["fix"]["longest_gap_free_window"] == ["2017", "2020"]
-    assert "reporter=dcid:USA" in result.content[0].text
+    assert result.is_error is not True
+    _frame, trace = await store.get(
+        FrameRef(
+            spec_id=result.structured_content["spec_id"],
+            content_version=result.structured_content["content_version"],
+        )
+    )
+    assert trace.time == Interval(
+        start="2017", end="2022", contiguous=False, absent=("2021",), absent_count=1
+    )
+    assert trace.applied_policy.realised_coverage_fraction == pytest.approx(5 / 6)
+    digest = result.content[0].text
+    assert "1 of 1 entit(y/ies) have no row in some year between 2017 and 2022" in digest
+    assert "2021 absent" in digest
+
+
+async def test_entity_missing_an_endpoint_is_excluded_and_listed(seeded) -> None:
+    store, _handles = seeded
+    frame = Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {"stat_var": "dcid:X", "reporter": reporter, "time_period": year, "value": value}
+            for reporter, year, value in (
+                ("dcid:USA", "2020", 10.0),
+                ("dcid:USA", "2022", 15.0),
+                ("dcid:GBR", "2021", 7.0),
+                ("dcid:GBR", "2022", 8.0),
+            )
+        ],
+    )
+    result = await growth(
+        frame_ref=await _seed_custom_frame(store, frame),
+        window_start="2020",
+        window_end="2022",
+        entity_by=("reporter",),
+    )
+    assert result.is_error is not True
+    _stored, trace = await store.get(
+        FrameRef(
+            spec_id=result.structured_content["spec_id"],
+            content_version=result.structured_content["content_version"],
+        )
+    )
+    assert [(exclusion.reason, exclusion.entities) for exclusion in trace.exclusions] == [
+        ("endpoint_missing", {"reporter": ("dcid:GBR",)})
+    ]
+    assert "reporter=dcid:GBR" in result.content[0].text
 
 
 async def test_span_input_refuses_derived_input_unusable_before_the_engine(seeded) -> None:
@@ -158,19 +200,21 @@ async def test_output_rows_and_trace_carry_the_window_as_a_span(seeded) -> None:
     )
 
 
-async def test_gap_year_with_no_entity_by_names_the_entity_less_frame(seeded) -> None:
+async def test_window_with_no_endpoint_rows_refuses_growth_gap_year(seeded) -> None:
     _store, handles = seeded
     result = await growth(
-        frame_ref=handles.time_series_with_gap, window_start="2017", window_end="2022"
+        frame_ref=handles.time_series_with_gap, window_start="2015", window_end="2021"
     )
     assert result.structured_content["code"] == "growth_gap_year"
-    assert result.structured_content["fix"]["entity_key"] == {}
-    # `content` is `message`, a blank line, then the refusal envelope as compact JSON --
-    # the envelope legitimately renders `"entity_key":{}` for an empty dict, so the "no
-    # bare {}" assertion below is scoped to the message itself, not the whole content.
-    message = result.content[0].text.split("\n\n", 1)[0]
-    assert "(all rows)" in message
-    assert "{}" not in message
+    assert result.structured_content["fix"] == {
+        "window_start": "2015",
+        "window_end": "2021",
+        "entity_count": 1,
+        "missing_start": 1,
+        "missing_end": 1,
+        "suggested_window": ["2017", "2020"],
+        "suggested_window_entities": 1,
+    }
 
 
 async def test_relative_growth_over_a_per_period_rank_refuses_derived_input_ordinal(
@@ -238,6 +282,11 @@ async def test_zero_base_refuses_non_finite_result(seeded) -> None:
         frame_ref=custom_ref, window_start="2020", window_end="2021", entity_by=("reporter",)
     )
     assert result.structured_content["code"] == "non_finite_result"
+    assert result.structured_content["fix"] == {
+        "entity_count": 1,
+        "zero_or_sign_crossing_base": 1,
+        "non_finite": 0,
+    }
 
 
 # Absolute change --------------------------------------------------------------

@@ -54,6 +54,7 @@ from harness.planner_seam import (
     _ENVELOPE_SKILL_CAP,
     _ENVELOPE_SKILL_DESCRIPTION_CAP,
     _MAX_CORRECTIONS,
+    _NEXT_MODEL_CALL_MARGIN_S,
     _PLANNER_BRANCH,
     PlannerSeam,
     PlannerSeamError,
@@ -94,6 +95,7 @@ from planner.plan import (
     SessionState,
     Unit,
     current_earlier_block,
+    discovery_time_left,
     load_plan,
     pin_sources,
     plan_revision,
@@ -133,9 +135,9 @@ class ScriptedPlannerLlm(BaseLlm):
     A script entry is either a list of `(tool_name, args)` function calls, a
     string of final text, or a callable that reads the `LlmRequest` and
     returns one of the other two; ADK asks for one more generation after
-    every tool response, and a text answer is what ends a run. Past the end
-    of the script it says "done", so an unscripted extra generation stops the
-    agent rather than looping.
+    every tool response but `submit_plan`'s ok answer, and a text answer is
+    what ends a run. Past the end of the script it says "done", so an
+    unscripted extra generation stops the agent rather than looping.
 
     The callable entry is what lets a script compute a function call's args
     from what the model has already been shown and answered -- an
@@ -705,6 +707,82 @@ async def test_the_brief_lists_the_asks_and_propose_plan_holds_the_plan_to_them(
     assert [d.ask_ref for d in recorded.declined] == [1]
 
 
+def _unit_refusal(code: str) -> dict[str, Any]:
+    """A `MethodChoiceNeeded` replan payload (`graph.py`'s `_replan_refusal`)
+    for `share_of` refusing a pair of sides on their units."""
+    return {
+        "kind": "method_choice_needed",
+        "step_id": "per_person",
+        "tool": "analysis-mcp.share_of",
+        "code": code,
+        "candidates": None,
+        "refusal": {"code": code, "message": "refused", "retry_mode": "correct_and_retry"},
+        "also_stopped": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("refusal", "outcome"),
+    [
+        pytest.param(_unit_refusal("cross_frame_unit_unbound"), ("ok", None), id="no-operation"),
+        pytest.param(
+            {
+                **_unit_refusal("growth_gap_year"),
+                "also_stopped": [_unit_refusal("cross_frame_unit_unbound")],
+            },
+            ("ok", None),
+            id="sibling",
+        ),
+        pytest.param(
+            _unit_refusal("cross_frame_unit_mismatch"),
+            ("invalid_input", "decline_unearned"),
+            id="method-choice",
+        ),
+        pytest.param(None, ("invalid_input", "decline_unearned"), id="no-refusal"),
+    ],
+)
+async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
+    decision: Any, requirement: Any, refusal: dict[str, Any] | None, outcome: tuple[str, Any]
+) -> None:
+    """A replan entry whose refusal means no operation computes the step may
+    decline the ask it served as `no_operation_covers`. With a refusal that
+    offers a choice, or none, the decline is unearned, and the refusal steers to
+    no other output."""
+    asks = ["GDP", "population", "GDP divided by population"]
+    draft = {
+        "question": "GDP per person",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [
+            requirement(id="gdp").model_dump(mode="json"),
+            requirement(id="people", measure="population").model_dump(mode="json"),
+        ],
+        "answered": [{"ask": 0, "outputs": ["gdp"]}, {"ask": 1, "outputs": ["people"]}],
+        "declined": [{"ask": asks[2], "code": "no_operation_covers", "ask_ref": 2}],
+    }
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=[[("propose_plan", draft)], "Planned."])
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    with pytest.raises(PlannerSeamError, match="submit_plan"):
+        await harness.run(seam, question="GDP per person", envelope={}, refusal=refusal)
+
+    answered = [
+        part.function_response.response
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    assert [(r["outcome"], r.get("code")) for r in answered] == [outcome]
+    assert ("`no_operation_covers`" in _prompt_text(llm.captured_requests[0])) is (
+        outcome[0] == "ok"
+    )
+    if outcome[0] != "ok":
+        assert "action" not in answered[0]
+        assert "answer the ask" not in answered[0]["message"]
+
+
 async def test_a_stopped_run_names_the_problem_it_stopped_on(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -1105,6 +1183,26 @@ def test_a_wave_with_two_refused_specs_names_and_omits_both() -> None:
     assert SPEC_B not in envelope_json
     assert SPEC in before_question and SPEC_B in before_question
     assert "again" in message and "refused" in message
+
+
+def test_a_replan_names_the_asks_the_failed_run_computed() -> None:
+    """`computed_asks` (`harness.graph._computed_asks`) becomes the sentence
+    the replan opens with, and stays out of the refusal it quotes."""
+    refusal = {**_rediscovery_refusal(SPEC), "computed_asks": [0, 2]}
+
+    message = _seam()._message(
+        fresh=False,
+        question="malaria grants for kenya",
+        envelope={"status": "definite", "spec_id": SPEC, "parts": 1},
+        prior_plan=None,
+        refusal=refusal,
+        amendment=None,
+        canvas_digest=None,
+        conversation_digest=None,
+    )
+
+    assert "failed after it computed asks 0, 2." in message
+    assert "computed_asks" not in message
 
 
 # -- `_exposed_spec_id`, read by `propose_plan` off `PIN_SOURCES_STATE_KEY` ----------
@@ -3992,6 +4090,30 @@ async def test_a_deadline_that_has_already_passed_refuses_before_any_generation(
     assert llm.captured_requests == []
 
 
+async def test_discovery_inside_an_entry_gets_the_deadline_less_the_next_model_calls_margin() -> (
+    None
+):
+    """Inside the run a discovery call reads the entry's remaining time less
+    the margin its next model call needs; outside it, none is set."""
+    seen: list[float | None] = []
+
+    def _read_time_left(_request: Any) -> str:
+        seen.append(discovery_time_left())
+        return "done"
+
+    seam = _seam(
+        agent_settings=AgentSettings(planner_entry_deadline_seconds=100.0), clock=lambda: 5.0
+    )
+    seam._agent.model = ScriptedPlannerLlm(script=[_read_time_left] * (_MAX_CORRECTIONS + 1))
+
+    with pytest.raises(PlannerSeamError):
+        await _run_seam(seam, question="kenya debt", envelope={})
+
+    assert seen
+    assert set(seen) == {100.0 - _NEXT_MODEL_CALL_MARGIN_S}
+    assert discovery_time_left() is None
+
+
 async def test_a_deadline_hit_after_a_draft_survives_a_correction_round_and_names_the_unmet_requirements(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -4000,14 +4122,10 @@ async def test_a_deadline_hit_after_a_draft_survives_a_correction_round_and_name
     -- never a correction round's own retry, and never the untranslated
     draft itself.
 
-    The clock is scripted so `propose_plan` and the blocked `submit_plan`
-    (`WORKFLOW_MISSING`) each pass their own check, and the closing text
-    that ends that call -- `test_a_stopped_run_names_the_problem_it_stopped_
-    on`'s own shape -- skips its check entirely, since `tracker.submitted`
-    already holds the blocked response by then (`_before_planner_model`
-    short-circuits on `tracker.submitted is None` before it ever reads the
-    clock). Only the correction round's own first check -- on a fresh
-    tracker, `submitted` reset to `None` -- reads the clock again and trips
+    The clock is scripted so `propose_plan`, the blocked `submit_plan`
+    (`WORKFLOW_MISSING`) and the closing text that ends that call --
+    `test_a_stopped_run_names_the_problem_it_stopped_on`'s own shape -- each
+    pass their own check. Only the correction round's own first check trips
     it. That check reads the same `deadline_at` `__call__` anchored once,
     before either `_propose` call, not a fresh one an incorrectly reset
     deadline would instead compute from this check's own (much later) clock
@@ -4022,7 +4140,7 @@ async def test_a_deadline_hit_after_a_draft_survives_a_correction_round_and_name
         "decisions": [made_decision.model_dump(mode="json")],
         "evidence_requirements": [r.model_dump(mode="json") for r in requirements],
     }
-    clock = _ScriptedClock([0.0, 0.0, 0.0, 10_000.0])
+    clock = _ScriptedClock([0.0, 0.0, 0.0, 0.0, 10_000.0])
     seam = _seam(agent_settings=AgentSettings(planner_entry_deadline_seconds=100.0), clock=clock)
     llm = ScriptedPlannerLlm(
         script=[[("propose_plan", proposal)], [("submit_plan", {"version": 1})]]
@@ -4070,7 +4188,8 @@ async def test_a_deadline_hit_on_a_referral_with_candidates_asks_the_user_and_th
             derived_requirement(input_id="gdp_gtm"),
         ],
     )
-    clock = _ScriptedClock([0.0, 0.0, 10_000.0])
+    # The third reading is the search's own (`planner.plan.discovery_time_left`).
+    clock = _ScriptedClock([0.0, 0.0, 0.0, 10_000.0])
     seam = _translator_seam(
         responses={"search": _TWO_CANDIDATES_SEARCH_RESPONSE},
         agent_settings=AgentSettings(planner_entry_deadline_seconds=100.0),
@@ -4182,29 +4301,25 @@ async def test_a_resumed_entry_gets_a_fresh_deadline_not_the_paused_ones(
     assert resumed["plan"]["version"] == plan.version
 
 
-async def test_a_deadline_hit_after_submit_plan_succeeds_still_returns_the_submission(
+async def test_a_submitted_plan_ends_the_planner_run_with_no_further_model_call(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
-    """A deadline that passes between a successful `submit_plan` and the
-    closing generation ADK still owes the model must not discard the
-    submission: `tracker.submitted` is already recorded by the time the
-    second check runs, so `_before_planner_model` lets that closing
-    generation through instead of substituting a refusal.
+    """`submit_plan`'s ok answer is the planner's last event: ADK asks the
+    model for nothing after it, so a deadline that has passed by then has no
+    generation to refuse and the submission stands.
     """
     plan = _translated_plan(decision, requirement, derived_requirement)
     clock = _ScriptedClock([0.0, 0.0, 10_000.0])
     seam = _seam(agent_settings=AgentSettings(planner_entry_deadline_seconds=100.0), clock=clock)
-    seam._agent.model = ScriptedPlannerLlm(script=[[("submit_plan", {"version": plan.version})]])
+    llm = ScriptedPlannerLlm(script=[[("submit_plan", {"version": plan.version})]])
+    seam._agent.model = llm
 
     result = await _run_seam(
         seam, question=plan.question, envelope={}, prior_plan=plan.model_dump(mode="json")
     )
 
-    assert result is not None and "plan" in result, (
-        "the recorded submission should win over a deadline that only passed "
-        "on the closing generation"
-    )
-    assert result["plan"]["version"] == plan.version
+    assert len(llm.captured_requests) == 1
+    assert result is not None and result["plan"]["version"] == plan.version
 
 
 async def test_a_sampled_turn_does_not_refuse_at_a_budget_the_unsampled_one_would(

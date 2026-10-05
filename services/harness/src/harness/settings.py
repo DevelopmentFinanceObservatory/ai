@@ -94,23 +94,12 @@ class Settings(BaseServiceSettings):
     exists to prevent, and a negative or non-finite value has no sane
     meaning as a deadline either.
 
-    `studio_context_cache` and `studio_cache_intervals` feed the
-    `ContextCacheConfig` that `harness.studio.StudioRunner` attaches to the
-    one `App` behind the whole graph. `studio_context_cache` defaults off:
-    Gemini's implicit caching serves the studio. It needs no create call and
-    matches a prefix across sessions, while ADK's explicit cache is built from
-    one session's own events and so is per session and per agent. Setting
-    `STUDIO_CONTEXT_CACHE=true` switches the explicit cache on; the planner and
-    the translator run through the same session (`ctx.run_node`), so one
-    config covers both. ADK caches the system instruction, the tool
-    declarations and every content before the last run of user contents
-    (`GeminiContextCacheManager._find_count_of_contents_to_cache`).
-    `studio_cache_intervals` is bounded 1..100 to match ADK's own bound on
-    `ContextCacheConfig.cache_intervals`. ADK counts it in invocations, not
-    model calls (`context_cache_processor` advances it only when an event's
-    `invocation_id` changes), and the session is minted per turn
-    (`harness.studio_state`), so each turn creates its own cache and a turn
-    never reaches the interval.
+    `studio_prefix_cache` turns on the shared explicit cache of each agent's
+    static prompt prefix (`harness.prefix_cache`). The planner's and the
+    orchestrator's system instruction and tool declarations are cached once
+    per process and read from the cache on every call, in every
+    conversation. Off, each call sends its whole prompt and Gemini's implicit
+    caching serves whatever prefix it matches.
 
     `combined_mcp_requests_per_s` and `combined_mcp_burst` bound what outside
     clients can ask of the combined server at `/mcp/` (`harness.combined_mcp`).
@@ -175,13 +164,9 @@ class Settings(BaseServiceSettings):
     # real agent on another port). Empty sends no CORS headers: the deployed
     # service is reached same-origin through the website's proxy.
     studio_cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    # Opts the graph's one `App` (`harness.studio.StudioRunner`) into ADK's
-    # explicit context caching. Default off: implicit caching is the default
-    # -- see the class docstring.
-    studio_context_cache: bool = False
-    # How many turns ADK waits before refreshing the cached prefix
-    # (`ContextCacheConfig.cache_intervals`).
-    studio_cache_intervals: int = 10
+    # The shared cache of the agents' static prompt prefixes; see the class
+    # docstring.
+    studio_prefix_cache: bool = True
     # How many of one plan's wave's tool calls `executor.run._Run` may hold
     # in flight against the MCP servers at once (`harness.graph.
     # create_root_workflow(max_concurrent_steps=...)`); a wave wider than
@@ -206,16 +191,6 @@ class Settings(BaseServiceSettings):
                 "A zero, negative, or non-finite deadline either has no sane meaning or is "
                 "FastMCP's own signal for an unbounded wait -- exactly what these settings "
                 "exist to rule out."
-            )
-        return value
-
-    @field_validator("studio_cache_intervals")
-    @classmethod
-    def _bounded_cache_intervals(cls, value: int) -> int:
-        if not 1 <= value <= 100:
-            raise ValueError(
-                f"studio_cache_intervals must be between 1 and 100 (ADK's own bound on "
-                f"ContextCacheConfig.cache_intervals), got {value!r}."
             )
         return value
 

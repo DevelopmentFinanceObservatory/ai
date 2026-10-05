@@ -43,7 +43,7 @@ result, with nothing here to fetch it back a second time.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from compiler.surface import ToolSurface
 from google.adk.agents import LlmAgent
@@ -80,6 +80,7 @@ from planner.plan import (
     SeededSource,
     UnsettledFixError,
     UnsupportedPlanError,
+    WindowedPin,
     cut_user_text,
     is_search_pin,
     load_asks,
@@ -87,21 +88,29 @@ from planner.plan import (
     load_plan_rounds,
     load_unsupported,
     names_dropped_seed,
+    period_window,
     pin_sources,
     plan_revision,
     record_unsupported,
+    recorded_identity,
     save_plan,
     save_plan_rounds,
     save_seeded_sources,
+    save_windowed_pins,
     search_pin_slot,
     seeded_sources,
     settle_decisions,
     windowed_copy,
+    windowed_pin,
+    windowed_pins,
 )
-from planner.records import Identifier, Period
+from planner.records import Identifier
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
+
+if TYPE_CHECKING:
+    from harness.prefix_cache import PrefixCache
 
 AGENT_NAME = "dfo_planner"
 
@@ -191,15 +200,19 @@ _PLANNING = (
     "State what the answer rests on as evidence requirements: one dataset "
     "requirement per measure and source the answer needs, naming every "
     "entity the answer needs for that measure, and one derived requirement "
-    "per calculation the answer needs: `aggregate`, `growth`, "
-    "`comparison`, `sum_of`, `rank`, `share_of`, `join` or `filter`. "
+    "per calculation the answer needs. "
     "When a flow source spans a party the question "
     "leaves unnamed (aid from named donors to every recipient) and the "
     "measure is an additive amount, add an `aggregate` with "
-    "`reduction='sum'` grouped by the named party and period before any "
-    "`growth`, `rank` or `comparison`: it collapses the unnamed party alone "
-    "and keeps every entity the question ranks, so each named entity has one "
-    "value per year. A rate, index or per-person figure is never summed. "
+    "`reduction='sum'` grouped by `entity` and period before any "
+    "`growth`, `rank` or `comparison`: a group by `entity` keeps the parties "
+    "the requirement names apart and sums its `across` party, so each named "
+    "entity has one value per year. Grouped by period alone, it totals every "
+    "party into one series per year, which a `share_of` reads as a whole "
+    "side. Over a requirement that names no entity, a group by `entity` "
+    "keeps nothing and is refused: group by period, or `rank` with a "
+    "`reduction` to set each member's total beside the others. "
+    "A rate, index or per-person figure is never summed. "
     'A party the question names no member of, such as the donors of "top '
     'donors", goes in `across` (see `across`). '
     "A result's open axes "
@@ -207,12 +220,10 @@ _PLANNING = (
     "(an entity `role` of donor, creditor or exporter), `destination` the receiving "
     "party (recipient, debtor or importer), `observationAbout` the place. "
     "A requirement whose `across` is the place, such as `'country'`, names "
-    "no place, and its retrieval holds every place with data at every "
-    "level: the world, regions, World Bank groups, countries and their "
-    "subdivisions. Before a `rank`, an `aggregate` across places or a "
-    "`share_of` reads it, keep one level with a `filter` reading that "
-    "requirement directly, whose predicate is `place_level`, such as "
-    '`{"kind": "place_level", "level": "Country"}`. Take the level the '
+    "no place, so its retrieval holds every level (see `PlaceType`). Before "
+    "a `rank`, an `aggregate` across places or a `share_of` reads it, keep "
+    "one level with a `filter` reading that requirement directly, whose "
+    "predicate is `place_level`. Take the level the "
     'question names ("top 10 countries"). When it names none and reads as '
     'a comparison of countries ("top 10 by GDP"), choose `Country` in a '
     "`Decision` resolved by `planner_default` whose `fixes` names "
@@ -223,18 +234,18 @@ _PLANNING = (
     "`change='absolute'` on a `growth` "
     "whenever its input is itself a rank position, since a rank moves by "
     "places, not by a percentage. Several entities of one measure are one "
-    "dataset requirement, and that requirement can itself be the answer "
-    "when the question asks to see the series -- the frame it names carries "
-    "one series per entity, which is what a chart draws. Reach for "
-    "`comparison` only when the question asks for a difference or a ratio, "
-    "and for `join` only across different measures, since neither keeps the "
-    "separate series a chart of one measure over several entities shows. "
+    "dataset requirement, which under `answer_mode='series'` is itself the "
+    "answer. Reach for "
+    "`comparison` only when the question asks for a difference, for "
+    "`share_of` only for a ratio whose two sources declare one unit or both "
+    "declare none, and for `join` only across different measures, since "
+    "none of them keeps the separate series a chart of one measure over "
+    "several entities shows. "
     "A family of StatVars is read summed or separately: see `stat_vars`. "
     "When the question asks which members of a classification hold the most, "
     'such as "which sectors received the most aid", state `breakdown` on the '
-    "dataset requirement, with `dimension` `'sector'` and `level` 0 for the "
-    "top-level groups unless the question names a finer level, and "
-    "`stat_vars='separate'`; then an `aggregate` with `reduction='sum'` and "
+    "dataset requirement, at `level` 0 unless the question names a finer "
+    "one; then an `aggregate` with `reduction='sum'` and "
     "`group_by` period and breakdown, which totals the parties the question "
     "leaves open within each sector, and a `rank` with `axis='sector'` and a "
     "`limit`. To "
@@ -261,17 +272,15 @@ _PLANNING = (
     "the two yearly series with a `sum_of` first, and then sums the years "
     "of that one series with an `aggregate` grouped by `entity`; the "
     "`sum_of` adds the years both sources report and names any year one "
-    "lacks. When `propose_plan` answers "
-    "`unsupported`, the system cannot compute that part, such as a "
-    "calculation over a comparison or a join: state it in `declined` and "
-    "plan what can still be answered, or propose `declined` alone when "
-    "nothing can. "
+    "lacks. When a part of the question earns a decline (see `declined`), "
+    "such as a calculation over a comparison or a join, state it in "
+    "`declined` and plan what can still be answered, or propose `declined` "
+    "alone when nothing can. "
     "Decide the "
     "methodology and leave the mechanics alone: which data and which "
     "operations carry your decisions out is worked out separately, after "
     "you propose, so name no tool. "
-    "A rank naming `among='named'` needs a visible `filter` step narrowing "
-    "to those entities first; `among='population'` is a claim over "
+    "A rank's `among='population'` is a claim over "
     "entities nobody named, so cite a `Decision` whose `fixes` names "
     "`among`, as a `share_of` stating `denominator_scope='pooled'` cites "
     "one whose `fixes` names `denominator_scope`. "
@@ -340,9 +349,7 @@ _TRANSLATING = (
     "user's answer, propose with the `amends_version` the last "
     "`propose_plan` call answered with, so the patch lands on that plan, and "
     "call `translate` again. When `translate` answers that the plan "
-    "compiled, call `submit_plan`, then invite the user's approval in one "
-    "or two sentences -- the plan itself is on their screen, so do not "
-    "restate its decisions, requirements, sources or steps. Otherwise it "
+    "compiled, call `submit_plan`. Otherwise it "
     "answers with the referral. `choice_required` "
     "(`source_ambiguous`, or `pinned_source_not_found` when the pinned source "
     "was not found) means a requirement's source is not settled: "
@@ -378,9 +385,8 @@ _TRANSLATING = (
     "`requirement_needs_repair` names the `constraint` the requirement breaks and "
     "the `repair` you may make, so make it and propose again; "
     "`no_operation_covers` means no operation carries that requirement out; "
-    "`unsupported_ask` and `no_operation_covers` are `unsupported`, so the plan "
-    "states the ask in `declined` with the referral's `kind` as its code, as "
-    "for `propose_plan`'s own `unsupported` answer; `discovery_budget_exhausted` means the plan asks "
+    "`unsupported_ask` and `no_operation_covers` are `unsupported` answers, "
+    "which earn a decline (see `declined`); `discovery_budget_exhausted` means the plan asks "
     "for too much at once; `discovery_unavailable` or `surface_unavailable` means "
     "the data service "
     "could not answer just now, so nothing about the requirement needs to "
@@ -546,8 +552,9 @@ def _asks_unaccounted(exc: AsksUnaccountedError) -> dict[str, object]:
     return problem(
         ProblemCode.ASKS_UNACCOUNTED,
         f"{exc}. Answer an ask in `answered` with the ids of the requirements whose results "
-        "answer it, or, when `propose_plan` answered `unsupported` for it, decline it in "
-        "`declined` with its number as `ask_ref`; an ask the plan computes in part takes one "
+        "answer it, or, when an `unsupported` answer earned its decline (see `declined`), "
+        "decline it in `declined` with its number as `ask_ref`; an ask the plan computes in "
+        "part takes one "
         "of each. A patch that answers or declines an ask replaces whatever accounted for it "
         "before, so state each once.",
         outcome=Outcome.INVALID_INPUT,
@@ -595,8 +602,9 @@ def _decline_unearned(
     """Return the refusal for a plan declining what no tool answered `unsupported`.
 
     A decline this plan adds needs its code among the `unsupported` answers
-    `propose_plan` or `translate` gave in this planner entry
-    (`load_unsupported`). A decline carried unchanged from `previous`, the
+    recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
+    `translate`'s, or one a replan's run-time refusal stands for
+    (`harness.planner_seam._earned_by_refusal`). A decline carried unchanged from `previous`, the
     plan this one amends, was earned when it was recorded; one restated with
     the same `Decline.key` in other words is the same decline.
     """
@@ -613,10 +621,11 @@ def _decline_unearned(
         return None
     return problem(
         ProblemCode.DECLINE_UNEARNED,
-        f"`declined` names {unearned!r}, and neither `propose_plan` nor `translate` answered "
-        "`unsupported` with that code in this turn. Decline a part only when one of them "
-        "answered `unsupported` for it; answer the ask with the requirements that compute "
-        "it instead.",
+        f"`declined` names {unearned!r}, and nothing in this planner entry earned that "
+        "code. A decline is earned when `propose_plan` or `translate` answers `unsupported` "
+        "with its code, or when the refusal this entry replans from means no operation "
+        "covers the step. To earn it, propose the computation the ask states; if nothing "
+        "carries it out, that answer names the code.",
         outcome=Outcome.INVALID_INPUT,
         detail={"operations": unearned},
     )
@@ -1177,7 +1186,7 @@ def _election_untraceable(
     call on record in this session (`_elected_spec_ids`), or a dataset the user
     handed to Studio from Search, or a copy of one over another window
     (`planner.plan.seeded_sources`, which only `harness.graph`'s `seed` node
-    and `_window_seeded_pins` write). A pin naming a spec_id that was never
+    and `_window_pins` write). A pin naming a spec_id that was never
     offered, was offered but not chosen, or was offered with no answer on
     record yet is refused. `Plan`'s own validators have no session to read
     (see `planner.plan.DatasetRequirement`), so they cannot check this. A pin
@@ -1332,150 +1341,224 @@ def _unrecordable(
     )
 
 
+# The option a decision `propose_plan` writes for a search pin leaves the
+# source unpinned by (`_synthesize_source_decisions`).
+_UNPINNED_CHOICE = "leave the source unpinned"
+
+
+def _pin_choice(spec_id: str) -> str:
+    """The option a decision `propose_plan` writes for a search pin pins `spec_id` by."""
+    return f"pin {spec_id}"
+
+
 def _repinned(
     decisions: Sequence[Decision],
     requirements: Sequence[EvidenceRequirement],
     *,
     decision_pins: Mapping[str, str],
     requirement_pins: Mapping[str, str],
+    slots: Mapping[str, str] = {},
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
-    """`decisions` and `requirements` with each source pin moved as the two maps say.
+    """`decisions` and `requirements` with each source pin moved as the maps say.
 
     `decision_pins` maps a decision's slot, `requirement_pins` a dataset
-    requirement's id, to the spec_id it pins after the move; anything either map does
-    not name is returned as it was.
+    requirement's id, to the spec_id it pins after the move; anything either
+    map does not name is returned as it was. `slots` maps the slot of a
+    decision `propose_plan` wrote for a search pin (`planner.plan.
+    is_search_pin`) to the one its moved pin takes (`search_pin_slot`): that
+    decision is rewritten for its new pin, and every citation of it cites the
+    new slot, so it stays a search pin `harness.plan_display` leaves out.
     """
-    moved_decisions = [
-        decision.model_copy(
-            update={
-                "fixes": decision.fixes.model_copy(
-                    update={"source_spec_id": decision_pins[decision.slot]}
-                )
+    moved_decisions: list[Decision] = []
+    for decision in decisions:
+        if decision.fixes is None or decision.slot not in decision_pins:
+            moved_decisions.append(decision)
+            continue
+        pin = decision_pins[decision.slot]
+        update: dict[str, object] = {
+            "fixes": decision.fixes.model_copy(update={"source_spec_id": pin})
+        }
+        if is_search_pin(decision) and decision.slot in slots:
+            update |= {
+                "slot": slots[decision.slot],
+                "options": (_pin_choice(pin), _UNPINNED_CHOICE),
+                "chosen": _pin_choice(pin),
             }
-        )
-        if decision.fixes is not None and decision.slot in decision_pins
-        else decision
-        for decision in decisions
-    ]
-    moved_requirements = [
-        requirement.model_copy(update={"source_spec_id": requirement_pins[requirement.id]})
-        if isinstance(requirement, DatasetRequirement) and requirement.id in requirement_pins
-        else requirement
-        for requirement in requirements
-    ]
+        moved_decisions.append(decision.model_copy(update=update))
+    moved_requirements: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        update = {}
+        if isinstance(requirement, DatasetRequirement) and requirement.id in requirement_pins:
+            update["source_spec_id"] = requirement_pins[requirement.id]
+        if slots.keys() & set(requirement.decision_ids):
+            update["decision_ids"] = tuple(
+                slots.get(slot, slot) for slot in requirement.decision_ids
+            )
+        moved_requirements.append(requirement.model_copy(update=update) if update else requirement)
     return moved_decisions, moved_requirements
 
 
-def _seed_pins(
+def _unwindowed_pins(
     decisions: Sequence[Decision],
     requirements: Sequence[EvidenceRequirement],
-    seeded: Sequence[SeededSource],
+    to_origin: Mapping[str, str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
-    """`decisions` and `requirements` with every pin of a windowed seed moved back to the seed.
+    """`decisions` and `requirements` with every pin of a windowed copy moved back to the pin it copies.
 
-    `propose_plan` reasons about a seeded pin by the seed's own spec_id, the
-    one the planner was shown, whatever window an earlier call recorded it
-    over (`_window_seeded_pins`), so a patch and the plan it amends always
-    agree on what they pin.
+    `to_origin` maps each copy's spec_id to the pin it copies over another
+    period: a seed's (`planner.plan.SeededSource.windowed_from`) or a
+    recorded pin's (`planner.plan.WindowedPin.windowed_from`).
+    `propose_plan` reasons about a pin by the spec_id the planner was shown,
+    whatever period an earlier call recorded it over (`_window_pins`), so a
+    patch and the plan it amends always agree on what they pin.
     """
-    to_seed = {
-        item.source.spec_id: item.windowed_from for item in seeded if item.windowed_from is not None
-    }
     return _repinned(
         decisions,
         requirements,
         decision_pins={
-            decision.slot: to_seed[decision.fixes.source_spec_id]
+            decision.slot: origin
             for decision in decisions
-            if decision.fixes is not None and decision.fixes.source_spec_id in to_seed
+            if decision.fixes is not None
+            and (origin := to_origin.get(decision.fixes.source_spec_id or ""))
         },
         requirement_pins={
-            requirement.id: to_seed[requirement.source_spec_id]
+            requirement.id: origin
             for requirement in requirements
-            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id in to_seed
+            if isinstance(requirement, DatasetRequirement)
+            and (origin := to_origin.get(requirement.source_spec_id or ""))
+        },
+        slots={
+            search_pin_slot(copy): search_pin_slot(origin) for copy, origin in to_origin.items()
         },
     )
 
 
-def _period_window(period: Period) -> dict[str, object]:
-    """`period` as an identity's `requested_window`."""
-    return {"kind": "range", "start_year": period.start, "end_year": period.end}
+def _copied_spec_id(copy: SeededSource | WindowedPin) -> str:
+    """The spec_id a copy of a pin over another period retrieves."""
+    return copy.source.spec_id if isinstance(copy, SeededSource) else copy.spec_id
 
 
-def _window_seeded_pins(
+def _window_pins(
     plan: Plan, seeded: Sequence[SeededSource]
-) -> tuple[Plan, list[SeededSource]]:
-    """`plan` with each seeded pin moved to the seed over the requirement's own period.
+) -> tuple[Plan, list[SeededSource], list[WindowedPin]]:
+    """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
 
-    A seed's identity carries the years the user saw in Search, often every
-    year with data, and a plan's retrieval mints the pinned spec_id as it is
-    (`compiler.compile`'s `_retrieve_arguments`). So a dataset requirement
-    pinned to a seed over another period is pinned instead to the seed's
-    identity over that period (`data_mcp.definition_writes.windowed_identity`,
-    the spec_id `get_data`'s `scope.window` would mint), and so is the
-    decision that fixes the pin.
+    A pin's identity carries the years of the search that found it: the
+    years the user saw in Search for a seed, often every year with data, or
+    the window of the question an earlier search answered. A plan's
+    retrieval mints the pinned spec_id as it is (`compiler.compile`'s
+    `_retrieve_arguments`). So a dataset requirement whose pin's identity is
+    over another period is pinned instead to that identity over its own
+    (`data_mcp.definition_writes.windowed_identity`, the spec_id `get_data`'s
+    `scope.window` would mint), and so is the decision that fixes the pin.
 
-    Returns the moved plan and every copy of a seed over another window it
-    pins: the one `seeded` holds for that spec_id, or a new one
-    (`planner.plan.windowed_copy`), which states nothing Search stated for
-    the seed's own years. The translator reads those from Search's answer
-    for the copy when it honours the pin (`translator.discovery`'s
-    `_seeded_source`).
+    The identity on record is a seed's own (`seeded`), or else the one a
+    search in the conversation recorded (`planner.plan.recorded_identity`).
+    One of a `latest` window is copied like any other: the copy replaces
+    the window whole, as `get_data`'s scope surgery does, and the translator
+    confirms the copy through Search before it is retrieved.
+
+    Returns the moved plan and every copy it pins: of a seed, the one
+    `seeded` holds for that spec_id or a new one (`planner.plan.
+    windowed_copy`); of any other pin, a `planner.plan.WindowedPin`. Neither
+    states what Search stated for the original's years; the translator
+    reads those from Search's answer for the copy when it honours the pin
+    (`translator.discovery`).
+
+    One decision fixing the pin of requirements over different periods
+    cannot name every copy with its one `source_spec_id`. Those
+    requirements keep the pin as the planner wrote it, and the translator
+    searches for each, unless the pin is a seed's.
 
     Raises:
-        ValueError: If one decision fixes the pin of two requirements over
-            different periods, since its one `source_spec_id` cannot name both.
+        ValueError: If one decision fixes a seed's pin for requirements over
+            different periods.
     """
     seeds = {item.source.spec_id: item for item in seeded if item.windowed_from is None}
-    copies = {item.source.spec_id: item for item in seeded if item.windowed_from is not None}
-    requirement_pins: dict[str, str] = {}
-    targets: dict[str, set[str]] = {}
-    windows: dict[str, SeededSource] = {}
+    pinning: dict[str, str] = {}
+    copies: dict[str, SeededSource | WindowedPin | None] = {}
     for requirement in plan.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement):
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
-        seed = seeds.get(requirement.source_spec_id or "")
-        if seed is None or seed.source.identity is None:
+        pin = requirement.source_spec_id
+        seed = seeds.get(pin)
+        recorded = None if seed is not None else recorded_identity(pin)
+        if seed is not None:
+            identity = seed.source.identity
+        else:
+            identity = recorded.identity if recorded is not None else None
+        if identity is None:
             continue
-        window = _period_window(requirement.period)
-        target = seed.source.spec_id
-        if seed.source.identity.get("requested_window") != window:
-            copy = windowed_copy(seed, window)
-            target = copy.source.spec_id
-            requirement_pins[requirement.id] = target
-            if target in copies:
-                windows[target] = copies[target]
-            elif target not in seeds and target not in windows:
-                # Two seeds over one dataset copy to one spec_id over a
-                # shared period; the first to pin it is the copy recorded.
-                windows[target] = copy
+        pinning[requirement.id] = pin
+        window = period_window(requirement.period)
+        if identity.get("requested_window") == window:
+            copies[requirement.id] = None
+        elif seed is not None:
+            copies[requirement.id] = windowed_copy(seed, window)
+        elif recorded is not None:
+            copies[requirement.id] = windowed_pin(pin, recorded, requirement.period)
+    targets: dict[str, set[str]] = {}
+    for requirement in plan.evidence_requirements:
+        if requirement.id not in copies:
+            continue
+        copy = copies[requirement.id]
+        target = pinning[requirement.id] if copy is None else _copied_spec_id(copy)
         for slot in requirement.decision_ids:
             targets.setdefault(slot, set()).add(target)
+    origins = set(pinning.values())
     decision_pins: dict[str, str] = {}
+    slots: dict[str, str] = {}
     for decision in plan.decisions:
-        if decision.fixes is None or decision.fixes.source_spec_id not in seeds:
+        pin = decision.fixes.source_spec_id if decision.fixes is not None else None
+        if pin is None or pin not in origins:
             continue
         pinned = targets.get(decision.slot, set())
         if len(pinned) > 1:
-            raise ValueError(
-                f"decision {decision.slot!r} fixes the pin of requirements over different "
-                "periods, which retrieve different spec_ids; give each of those requirements "
-                "its own decision"
-            )
-        if pinned and pinned != {decision.fixes.source_spec_id}:
+            if pin in seeds:
+                raise ValueError(
+                    f"decision {decision.slot!r} fixes the pin of requirements over different "
+                    "periods, which retrieve different spec_ids; give each of those requirements "
+                    "its own decision"
+                )
+            for requirement in plan.evidence_requirements:
+                if decision.slot in requirement.decision_ids:
+                    copies.pop(requirement.id, None)
+            continue
+        if pinned and pinned != {pin}:
             decision_pins[decision.slot] = next(iter(pinned))
+            if is_search_pin(decision):
+                slots[decision.slot] = search_pin_slot(decision_pins[decision.slot])
+    requirement_pins = {
+        requirement_id: _copied_spec_id(copy)
+        for requirement_id, copy in copies.items()
+        if copy is not None
+    }
     if not requirement_pins and not decision_pins:
-        return plan, []
+        return plan, [], []
+    seed_copies: dict[str, SeededSource] = {}
+    recorded_copies: dict[str, WindowedPin] = {}
+    for copy in copies.values():
+        if isinstance(copy, SeededSource) and copy.source.spec_id not in seeds:
+            # Two seeds over one dataset copy to one spec_id over a shared
+            # period. One copy is recorded for both.
+            seed_copies.setdefault(copy.source.spec_id, copy)
+        elif isinstance(copy, WindowedPin):
+            recorded_copies.setdefault(copy.spec_id, copy)
     decisions, requirements = _repinned(
         plan.decisions,
         plan.evidence_requirements,
         decision_pins=decision_pins,
         requirement_pins=requirement_pins,
+        slots=slots,
     )
     moved = plan.model_copy(
         update={"decisions": tuple(decisions), "evidence_requirements": tuple(requirements)}
     )
-    return Plan.model_validate(moved.model_dump()), list(windows.values())
+    return (
+        Plan.model_validate(moved.model_dump()),
+        list(seed_copies.values()),
+        list(recorded_copies.values()),
+    )
 
 
 def _synthesize_source_decisions(
@@ -1587,8 +1670,8 @@ def _synthesize_source_decisions(
         known[slot] = Decision(
             slot=slot,
             description="Whether to pin the source a search settled on.",
-            options=(f"pin {pin}", "leave the source unpinned"),
-            chosen=f"pin {pin}",
+            options=(_pin_choice(pin), _UNPINNED_CHOICE),
+            chosen=_pin_choice(pin),
             resolved_by=ResolvedBy.PLANNER_DEFAULT,
             rationale=(
                 "A fresh search found this source in place of the one pinned before."
@@ -1749,8 +1832,10 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "out of a patch keeps it."
     ),
     "declined": (
-        "Each part of the question left unanswered because `propose_plan` or "
-        "`translate` answered `unsupported`, one per `code` and `ask_ref`."
+        "Each part of the question no operation computes, one per `code` and "
+        "`ask_ref`. Only an `unsupported` answer earns a decline, with that "
+        "answer's code: one from `propose_plan` or `translate`, or a run-time "
+        "refusal the plan is replanned from that names the code."
     ),
     "answered": (
         "When the brief lists asks, the requirements that answer each one, "
@@ -1909,11 +1994,16 @@ def build_planner_tools(
         if isinstance(resolved, dict):
             return resolved
         previous, rounds = resolved
-        if seeded:
-            _, evidence_requirements = _seed_pins((), evidence_requirements, seeded)
-        if previous is not None and seeded:
-            unwindowed, unwindowed_requirements = _seed_pins(
-                previous.decisions, previous.evidence_requirements, seeded
+        held_copies = windowed_pins(tool_context.state)
+        to_origin = {
+            **{copy.spec_id: copy.windowed_from for copy in held_copies.values()},
+            **{item.source.spec_id: item.windowed_from for item in seeded if item.windowed_from},
+        }
+        if to_origin:
+            _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
+        if previous is not None and to_origin:
+            unwindowed, unwindowed_requirements = _unwindowed_pins(
+                previous.decisions, previous.evidence_requirements, to_origin
             )
             previous = previous.model_copy(
                 update={
@@ -1991,7 +2081,7 @@ def build_planner_tools(
                     asks=load_asks(tool_context.state),
                     answered=answered,
                 )
-            plan, windows = _window_seeded_pins(plan, seeded)
+            plan, windows, copies = _window_pins(plan, seeded)
         except (ValidationError, ValueError) as exc:
             # The plan-level rules: unique slots and ids, every citation naming
             # a decision, every decision cited,
@@ -1999,7 +2089,7 @@ def build_planner_tools(
             # blank, and the size limit on the whole. A removal naming an item
             # the plan does not state is a `ValueError` from `Plan.amend` itself,
             # and a first draft or restart with no `question`/`answer_mode` is
-            # one raised above. `_window_seeded_pins` raises one for a decision
+            # one raised above. `_window_pins` raises one for a decision
             # fixing two seeded pins over different periods.
             cause = _unsupported_cause(exc)
             if cause is not None:
@@ -2017,6 +2107,9 @@ def build_planner_tools(
                 tool_context.state,
                 [*(item for item in seeded if item.windowed_from is None), *windows],
             )
+        if copies or held_copies:
+            # Likewise the copies of pins no seed names, which hold only those this plan pins.
+            save_windowed_pins(tool_context.state, copies)
         save_plan(tool_context.state, plan)
         save_plan_rounds(tool_context.state, rounds)
         # A new proposal supersedes whatever the translator referred back.
@@ -2081,6 +2174,9 @@ def build_planner_tools(
         blocked = _execution_blocked(plan, version, tool_context, has_translator=has_translator)
         if blocked is not None:
             return blocked
+        # The submitted plan ends the run. The harness asks the user, so no
+        # model call follows to restate the plan the user already sees.
+        tool_context.actions.skip_summarization = True
         return ok(
             status=plan.status.value,
             version=plan.version,
@@ -2110,6 +2206,7 @@ def create_planner_agent(
     translate: FunctionTool | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
+    prefix_cache: PrefixCache | None = None,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
 
@@ -2132,13 +2229,19 @@ def create_planner_agent(
             `_resolve_intent`. False, the default, is the standalone
             planner's and `harness_pair_v1`'s own behaviour: a restart begins
             a fresh plan.
+        prefix_cache: The process's shared cache of static prompt prefixes.
+            Given, and `model_name` naming a Gemini model, every call reads
+            the instruction and tool declarations from it. The model keeps
+            ADK's single attempt either way, so a transient error ends the
+            generation inside the entry's deadline rather than spending it
+            on retries.
 
     Returns:
         The configured `LlmAgent`.
     """
     return LlmAgent(
         name=AGENT_NAME,
-        model=model_name,
+        model=model_name if prefix_cache is None else prefix_cache.model_for(model_name),
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,

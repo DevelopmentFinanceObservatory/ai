@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from compiler.surface import FixtureSurface
+from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.settings import Settings
 from harness.wiring import build_generative_nodes
 
@@ -54,3 +55,19 @@ def test_defaults_the_surface_to_none_so_the_seam_builds_its_own(monkeypatch: An
     build_generative_nodes(settings=Settings(), model_name="gemini-test")
 
     assert captured["surface"] is None
+
+
+def test_the_planner_model_reads_the_prefix_cache_it_is_given() -> None:
+    """The served planner's model is built on the process's one prefix cache."""
+    prefix_cache = PrefixCache()
+
+    nodes = build_generative_nodes(
+        settings=Settings(),
+        model_name="gemini-test",
+        surface=FixtureSurface(schemas=[]),
+        prefix_cache=prefix_cache,
+    )
+
+    model = nodes.planner._agent.model
+    assert isinstance(model, PrefixCachedGemini)
+    assert model.prefix_cache is prefix_cache

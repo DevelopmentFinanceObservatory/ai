@@ -93,6 +93,22 @@ def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
     assert outcome.warnings == ()
 
 
+@pytest.mark.parametrize(
+    ("unit", "read"),
+    [
+        ({"basis": "bound", "selection": "per_series"}, (None, True)),
+        ({"basis": "declared_default", "ref": "usd", "label": "US dollars"}, ("usd", None)),
+    ],
+    ids=["per-series", "one-unit"],
+)
+def test_a_unit_that_varies_per_series_is_read_as_such(
+    unit: dict[str, Any], read: tuple[str | None, bool | None]
+) -> None:
+    source = source_from_spec_block(_spec(facets={"unit": unit}))
+
+    assert (source.unit_ref, source.unit_per_series) == read
+
+
 def test_stat_vars_is_read_as_the_object_the_wire_actually_sends() -> None:
     # `resolved.stat_vars` is an object -- `items`, `member_count`,
     # `truncated` -- never a bare list. A reader that went back to treating

@@ -834,8 +834,16 @@ def test_a_source_issue_points_at_discovery() -> None:
     assert action.arguments == {"requirement_id": "annual_debt_service"}
 
 
-def test_an_uncovered_operation_kind_refers_its_requirement_as_unsupported() -> None:
-    issues = [CompileIssue(code=CompileIssueCode.NO_CAPABILITY, reason="r", operation_id="op")]
+@pytest.mark.parametrize(
+    "code", [CompileIssueCode.NO_CAPABILITY, CompileIssueCode.FRAME_UNIT_UNBOUND]
+)
+def test_an_uncovered_operation_refers_its_requirement_as_unsupported_before_a_repair(
+    code: CompileIssueCode,
+) -> None:
+    issues = [
+        CompileIssue(code=CompileIssueCode.FRAME_UNITS_DIFFER, reason="repair", operation_id="op"),
+        CompileIssue(code=code, reason="r", operation_id="op", requirement_id="side"),
+    ]
 
     action = _compile_failure_action(issues, requirement_of={"op": "req"})
 

@@ -14,7 +14,8 @@ reaching the wire; this backstop complements the typed handling below
 rather than replacing it.
 
 A growth result is a rate (`change="relative"`) or a difference
-(`change="absolute"`) over `[window_start, window_end]`, and its output
+(`change="absolute"`) between each entity's values in `window_start` and
+`window_end`, computed for every entity with a row in both; its output
 row's own `time_period` is that window as a span, `2018/2022`
 (`engine/growth.py`). Two growth results over different windows carry
 different labels, so `compare` and `join` match only results over the same
@@ -30,7 +31,6 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
-from analysis_mcp.artifact import Interval
 from analysis_mcp.digest import render_growth_digest
 from analysis_mcp.engine.common import (
     FacetHeterogeneousError,
@@ -41,11 +41,12 @@ from analysis_mcp.engine.common import (
 )
 from analysis_mcp.engine.growth import (
     GrowthAmbiguousEntityError,
-    GrowthGapYearError,
+    GrowthEndpointsMissingError,
     GrowthNonFiniteResultError,
     run_growth,
 )
 from analysis_mcp.frame_ref_resolution import (
+    build_interval,
     canonical_columns_and_resolved_frame,
     derive_frame_content_version,
     derived_marker_detail,
@@ -73,8 +74,8 @@ if TYPE_CHECKING:
     from analysis_mcp.frame_ref_resolution import AdmittedFrame
 
 # Every typed exception `run_growth` can raise maps to exactly one
-# refusal by `_refusal_for_engine_error` below. Every code reused here
-# already exists on `ToolRefusal`; only `growth_gap_year` is new.
+# refusal by `_refusal_for_engine_error` below. `growth_gap_year` is the
+# one code only growth raises.
 _EngineError = (
     UnknownEntityColumnError
     | StatVarUnresolvedError
@@ -82,7 +83,7 @@ _EngineError = (
     | UnitHeterogeneousError
     | FacetHeterogeneousError
     | GrowthAmbiguousEntityError
-    | GrowthGapYearError
+    | GrowthEndpointsMissingError
     | GrowthNonFiniteResultError
 )
 
@@ -100,9 +101,9 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     `StatVarUnresolvedError`, `UnitNotPresentError`, `UnitHeterogeneousError`,
     and `FacetHeterogeneousError` reuse `aggregate`'s existing refusal
     factories directly -- their shapes already fit a second verb with the
-    identical resolution rule. `GrowthNonFiniteResultError` reuses
-    `non_finite_result`, the same non-finite discipline extended here to a
-    zero/sign-crossing growth base rather than an overflowing sum.
+    identical resolution rule. `GrowthNonFiniteResultError` carries
+    `non_finite_result`'s code through `growth_non_finite_result`, which
+    counts the excluded entities by cause in place of one group key.
     """
     # An if/elif chain with one assignment and one return, rather than one
     # early return per branch, matching
@@ -128,15 +129,22 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         refusal = ToolRefusal.unit_heterogeneous(parameter="unit", units=list(exc.units))
     elif isinstance(exc, FacetHeterogeneousError):
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
-    elif isinstance(exc, GrowthGapYearError):
+    elif isinstance(exc, GrowthEndpointsMissingError):
         refusal = ToolRefusal.growth_gap_year(
-            entity_key=exc.entity_key,
-            entity_label=entity_label(tuple(exc.entity_key.items())),
-            gap_years=list(exc.gap_years),
-            longest_gap_free_window=list(exc.longest_gap_free_window),
+            window_start=exc.window_start,
+            window_end=exc.window_end,
+            entity_count=exc.entity_count,
+            missing_start=exc.missing_start,
+            missing_end=exc.missing_end,
+            suggested_window=list(exc.suggested_window),
+            suggested_window_entities=exc.suggested_window_entities,
         )
     else:
-        refusal = ToolRefusal.non_finite_result(group_key=exc.entity_key, aggregation="growth_rate")
+        refusal = ToolRefusal.growth_non_finite_result(
+            entity_count=exc.entity_count,
+            zero_or_sign_crossing_base=exc.zero_or_sign_crossing_base,
+            non_finite=exc.non_finite,
+        )
     return refusal
 
 
@@ -146,7 +154,7 @@ def _unreadable_input_refusal(
     """The refusal for an input growth cannot read, checked before the engine.
 
     Growth reads one row per period, so a span input has nothing to window.
-    The engine would report it as one gap year per period it cannot find.
+    The engine would find no entity with a row in either endpoint year.
     A relative growth rate over a rank position is meaningless, since a rank
     moves by places. Only `change="relative"` refuses it, since
     `change="absolute"` is the retry the refusal names, and `run_growth`
@@ -212,8 +220,8 @@ async def growth(
             default="relative",
             description=(
                 "'relative' (the default) computes (value_end - value_start) / value_start; "
-                "refused over a zero or sign-crossing base, since a percentage change is "
-                "undefined there. 'absolute' computes value_end - value_start directly, "
+                "an entity with a zero or sign-crossing base is excluded, since a percentage "
+                "change is undefined there. 'absolute' computes value_end - value_start directly, "
                 "keeping the input's own unit; defined over any base, including zero or a "
                 "sign crossing."
             ),
@@ -225,13 +233,21 @@ async def growth(
     `change="relative"` (the default) computes
     `growth_rate = (value_end - value_start) / value_start`, the total
     percentage change across the window; a zero or sign-crossing base makes
-    that undefined and refuses (`non_finite_result`) before any division is
-    attempted. `change="absolute"` computes `value_end - value_start`
-    directly, in the input's own unit; that arithmetic is defined over any
-    base, so the zero/sign-crossing refusal does not apply. Either mode
-    treats a gap year inside the window as a break, not skipped: the whole
-    call refuses (`growth_gap_year`), naming the missing years and the
-    longest gap-free sub-window an entity actually has.
+    that undefined, so such an entity is excluded as
+    `zero_or_sign_crossing_base` before any division is attempted.
+    `change="absolute"` computes `value_end - value_start` directly, in the
+    input's own unit; that arithmetic is defined over any base. Either mode
+    excludes an entity whose value overflows as `non_finite`, and the call
+    refuses (`non_finite_result`) only when every entity is excluded so.
+
+    Both modes read only each entity's rows in `window_start` and
+    `window_end`. Every entity with a row in both is computed, whatever
+    years between them it lacks; a warning counts the entities with such
+    gaps. An entity missing either endpoint year is left out and listed
+    under exclusions as `endpoint_missing`. When no entity has both, the
+    call refuses (`growth_gap_year`), counting the entities missing each
+    endpoint and suggesting a window at least one entity holds both ends of,
+    when one exists.
 
     Each output row's `time_period` is the window as a span, such as
     `2020/2023`. A frame whose rows already carry a span, such as an
@@ -249,7 +265,8 @@ async def growth(
             in the input's own unit.
 
     Returns:
-        A digest: each entity's growth value and its endpoint values, and the
+        A digest: each computed entity's growth value and its endpoint
+        values, the entities excluded for a missing endpoint, and the
         result's {spec_id, content_version} pair and identity fields. A
         relative growth rate is dimensionless -- `unit` only selected which
         input rows `value_start`/`value_end` were read from, it does not
@@ -303,7 +320,7 @@ async def growth(
         UnitHeterogeneousError,
         FacetHeterogeneousError,
         GrowthAmbiguousEntityError,
-        GrowthGapYearError,
+        GrowthEndpointsMissingError,
         GrowthNonFiniteResultError,
     ) as exc:
         return to_tool_result(_refusal_for_engine_error(exc))
@@ -334,10 +351,15 @@ async def growth(
         inherited_stat_var=True,
     )
     # The input is a frame of points (a span input refused above) collapsed to
-    # the window. A gap year inside the window refuses, so the window is
-    # contiguous by construction.
+    # the window. Every computed entity holds both endpoints, so the observed
+    # periods run from `window_start` to `window_end`. A year no computed
+    # entity holds makes the window non-contiguous.
     time_fact = merged_time(
-        own_interval=Interval(start=op_spec.window_start, end=op_spec.window_end, contiguous=True),
+        own_interval=build_interval(
+            start=op_spec.window_start,
+            end=op_spec.window_end,
+            observed=result.observed_periods,
+        ),
         inherited=[admitted],
     )
     detail: dict[str, object] = {
@@ -358,14 +380,11 @@ async def growth(
         op_spec_hash=op_spec_hash,
         execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
         applied_policy=AppliedPolicy(
-            policy_name="growth_refuse_gap_year",
+            policy_name="growth_endpoint_years",
             # The worst of the per-entity fractions already in `detail`
-            # above, not a bare `1.0` literal -- see `engine/growth.py`'s
-            # `EntityGrowth.realised_coverage_fraction` for why this stays
-            # truthful even though every entity here today always carries
-            # exactly 1.0. `default=1.0` only matters for the vacuous
-            # empty-window case, itself a refusal (`GrowthGapYearError`)
-            # before any entity exists to average over.
+            # above: below 1.0 when a computed entity lacks interior years.
+            # `run_growth` refuses when no entity is computed, so `default`
+            # is never reached.
             realised_coverage_fraction=min(
                 (growth_.realised_coverage_fraction for growth_ in result.entity_growths),
                 default=1.0,

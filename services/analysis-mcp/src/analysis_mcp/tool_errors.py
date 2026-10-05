@@ -21,8 +21,8 @@ column-list parameter the calling verb actually has in `fix["parameter"]`,
 never a hardcoded name borrowed from `aggregate`.
 
 `comparison_periods_disjoint` fires when compare's two sides share no
-overlapping period; `growth_gap_year` fires on a gap year inside growth's
-window. `cross_frame_unit_mismatch`/`cross_frame_unit_unbound`/
+overlapping period; `growth_gap_year` fires when no entity has a row in
+both of growth's endpoint years. `cross_frame_unit_mismatch`/`cross_frame_unit_unbound`/
 `cross_frame_facet_mismatch` fire when two independently-resolved sides
 (`compare`'s left/right, `share_of`'s numerator/denominator) disagree on
 unit or facet -- distinct from `unit_heterogeneous`/`facet_heterogeneous`,
@@ -156,7 +156,6 @@ from analysis_mcp.disambiguation import (
     MAX_LABEL_CHARS,
     DisambiguationCandidate,
     DisambiguationPayload,
-    truncate_value,
 )
 from analysis_mcp.units import converted_unit_label, unit_json, unit_name
 
@@ -711,31 +710,75 @@ class ToolRefusal:
     def growth_gap_year(
         cls,
         *,
-        entity_key: dict[str, str],
-        entity_label: str,
-        gap_years: list[str],
-        longest_gap_free_window: list[str],
+        window_start: str,
+        window_end: str,
+        entity_count: int,
+        missing_start: int,
+        missing_end: int,
+        suggested_window: list[str],
+        suggested_window_entities: int,
     ) -> Self:
-        """`entity_label` is built from row-derived role values
-        (`tool_pipeline.entity_label`), not a schema name or a fixed
-        vocabulary term the way `gap_years`/`longest_gap_free_window` (year
-        strings) are, so it is the one piece of this message that needs
-        `truncate_value`'s escaping and length cap before it reaches the
-        message text -- the same guard `analysis_mcp.digest`'s renderers
-        apply to every row-derived value they interpolate.
+        """No entity has a row in both endpoint years. The counts cover every
+        entity the input holds. `suggested_window` is a window
+        `suggested_window_entities` entities hold both ends of, `[]` when no
+        entity holds two years inside the requested window.
         """
+        if suggested_window:
+            retry = (
+                f"{suggested_window_entities} entit(y/ies) have rows in both "
+                f"{suggested_window[0]} and {suggested_window[1]}; retry with window_start and "
+                "window_end set to those years."
+            )
+        else:
+            retry = (
+                "No entity has rows in two years inside the window; retry with window_start "
+                "and window_end set to years the entities report."
+            )
         return cls(
             code=ToolErrorCode.GROWTH_GAP_YEAR,
             message=(
-                f"Entity {truncate_value(entity_label)} is missing year(s) {gap_years} inside "
-                f"the requested window -- a gap year is treated as a break, not skipped. The "
-                f"longest gap-free window for this entity is {longest_gap_free_window or '(none)'}; "
-                "retry with window_start/window_end narrowed to it."
+                f"No entity has rows in both {window_start} and {window_end}, and growth reads "
+                f"each entity's value in those two endpoint years. Of {entity_count} "
+                f"entit(y/ies), {missing_start} have no row in {window_start} and {missing_end} "
+                f"have no row in {window_end}. {retry}"
             ),
             fix={
-                "entity_key": entity_key,
-                "gap_years": gap_years,
-                "longest_gap_free_window": longest_gap_free_window,
+                "window_start": window_start,
+                "window_end": window_end,
+                "entity_count": entity_count,
+                "missing_start": missing_start,
+                "missing_end": missing_end,
+                "suggested_window": suggested_window,
+                "suggested_window_entities": suggested_window_entities,
+            },
+        )
+
+    @classmethod
+    def growth_non_finite_result(
+        cls, *, entity_count: int, zero_or_sign_crossing_base: int, non_finite: int
+    ) -> Self:
+        """Every entity holding both endpoints was excluded for a growth value
+        that is undefined or not finite. `non_finite_result`'s own code,
+        with growth's per-cause entity counts in place of one group key."""
+        causes = []
+        if zero_or_sign_crossing_base:
+            causes.append(
+                f"{zero_or_sign_crossing_base} have a zero or sign-crossing base, which leaves "
+                "a relative change undefined (change='absolute' is defined there)"
+            )
+        if non_finite:
+            causes.append(f"{non_finite} compute to a non-finite value")
+        return cls(
+            code=ToolErrorCode.NON_FINITE_RESULT,
+            message=(
+                f"No entity has a finite growth value. Of the {entity_count} entit(y/ies) with "
+                f"rows in both endpoint years, {' and '.join(causes)}. Retrying the same call "
+                "would reach the same result; change the request instead."
+            ),
+            fix={
+                "entity_count": entity_count,
+                "zero_or_sign_crossing_base": zero_or_sign_crossing_base,
+                "non_finite": non_finite,
             },
         )
 

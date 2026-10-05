@@ -109,7 +109,7 @@ _ODA_SINGLE_REPORTER_TIME_SERIES: dict[str, float] = {
     "2018": 34_728_000_000.0,
     "2019": 34_620_000_000.0,
     "2020": 35_575_000_000.0,
-    # 2021 deliberately absent -- the gap year `growth` must refuse across.
+    # 2021 is deliberately absent, an interior gap `growth` computes across and reports.
     "2022": 55_303_000_000.0,
     "2023": 63_575_000_000.0,
     "2024": 65_000_000_000.0,
@@ -293,7 +293,7 @@ def two_source_sum_frame_pair() -> tuple[Frame, Frame]:
 
 def time_series_with_gap_year_frame() -> Frame:
     """One reporter's own series across seven years with 2021 missing --
-    a genuine gap year, for `growth`'s gap-year refusal."""
+    a genuine interior gap, which `growth` computes across and reports."""
     return Frame.build(
         role_keys=["reporter"],
         rows=[

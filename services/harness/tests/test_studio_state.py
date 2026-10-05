@@ -34,10 +34,12 @@ import sqlite3
 import time
 from contextlib import closing
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from compiler.sources import source_from_spec_block
 from fastapi.responses import JSONResponse
 from google.adk.errors import StaleSessionError
 from google.adk.sessions import DatabaseSessionService, InMemorySessionService
@@ -57,8 +59,9 @@ from harness.studio_state import (
     _PendingInterrupt,
     land_component,
 )
-from harness.turn_records import SearchReading
+from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from planner.workflow import SelectedSource
 
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
@@ -767,6 +770,144 @@ def test_a_closed_turn_keeps_no_block_for_a_spec_id_only_offered_as_a_candidate(
     assert state.earlier_block(candidate) is None
 
 
+# The definitions dfo-apis served for Guatemala's nominal GDP over every year
+# (turn 0's orchestrator search) and over 1960 to 2024 (turn 2's translator
+# discovery) in a recorded Studio session. They differ only in
+# `requested_window`.
+_GDP_ALL_YEARS, _GDP_1960_2024 = json.loads(
+    (Path(__file__).parent / "fixtures" / "gdp_guatemala_definitions.json").read_text()
+)
+_GDP_STAT_VAR = "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+# Recorded `search` spec blocks: Kenya's population elects one StatVar,
+# German ODA to Kenya is a family of 200 listed StatVars in a 55 KB block.
+_SPEC_BLOCKS = json.loads(
+    (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
+)
+_ONE_STAT_VAR_BLOCK = _SPEC_BLOCKS["population_kenya"]["parts"][0]["spec"]
+_FAMILY_BLOCK = _SPEC_BLOCKS["germany_oda_to_kenya"]["parts"][0]["spec"]
+
+
+@pytest.mark.parametrize(
+    ("block", "stat_vars"),
+    [(_ONE_STAT_VAR_BLOCK, ["Count_Person"]), (_FAMILY_BLOCK, [])],
+    ids=["one_stat_var", "family"],
+)
+def test_a_source_a_turn_only_fetched_keeps_its_identity_and_nothing_else_of_its_block(
+    block, stat_vars
+):
+    spec_id = block["spec_id"]
+    identity = block["definition"]["identity"]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_readings = [
+        SearchReading.from_part(
+            {"variable": "x", "status": "definite", "spec_id": spec_id}
+        ).model_dump(mode="json")
+    ]
+    state.turn_specs = {spec_id: block}
+
+    assert state.recorded_identity(spec_id) == RecordedIdentity(
+        identity=identity, stat_vars=tuple(stat_vars)
+    )
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+
+    (record,) = state.turns
+    assert "specs" not in record
+    # The bound: the identity and at most one StatVar, without the block around them.
+    assert record["identities"] == {spec_id: {"identity": identity, "stat_vars": stat_vars}}
+    assert state.recorded_identity(spec_id) == RecordedIdentity(
+        identity=identity, stat_vars=tuple(stat_vars)
+    )
+    assert state.earlier_block(spec_id) is None
+
+
+def _plan_json_retrieving(source: SelectedSource) -> dict[str, Any]:
+    """The record of `_PLAN`'s plan retrieving `source` in place of its own."""
+    plan = _top_donors()[0]
+    assert plan.workflow is not None
+    (binding,) = plan.workflow.evidence_bindings
+    workflow = plan.workflow.model_copy(
+        update={
+            "sources": (source,),
+            "evidence_bindings": (binding.model_copy(update={"spec_id": source.spec_id}),),
+        }
+    )
+    record = PlanRecord.from_plan(plan.model_copy(update={"workflow": workflow}))
+    return record.model_dump(mode="json")
+
+
+def _gdp_plan_json() -> dict[str, Any]:
+    """`_PLAN`'s plan retrieving instead the 1960 to 2024 GDP definition its
+    translator found, which elects one StatVar, the family's root."""
+    (source,) = _top_donors()[0].workflow.sources
+    return _plan_json_retrieving(
+        source.model_copy(
+            update={
+                "spec_id": _GDP_1960_2024["spec_id"],
+                "identity": _GDP_1960_2024["identity"],
+                "stat_vars": (_GDP_STAT_VAR,),
+                "pinned": True,
+                "stat_var_reading": None,
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("block", [_ONE_STAT_VAR_BLOCK, _FAMILY_BLOCK], ids=["one", "family"])
+def test_a_search_block_and_a_plan_source_record_the_same_stat_vars(block):
+    spec_id = block["spec_id"]
+    searched = ConversationState(conversation_id=CONVERSATION)
+    searched.turn_specs = {spec_id: block}
+    planned = ConversationState(conversation_id=CONVERSATION)
+    planned.turn_plans = [_plan_json_retrieving(source_from_spec_block(block))]
+
+    assert searched.recorded_identity(spec_id) == planned.recorded_identity(spec_id) is not None
+
+
+@pytest.mark.parametrize(
+    ("plan_json", "stat_vars"),
+    [(_PLAN_JSON, ()), (_gdp_plan_json(), (_GDP_STAT_VAR,))],
+    ids=["family", "gdp"],
+)
+def test_a_source_only_the_translator_found_keeps_its_identity_into_the_next_turn(
+    plan_json, stat_vars
+):
+    (source,) = plan_json["sources"]
+    assert source["origin"] == "translator" and source["identity"] is not None
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_plans = [plan_json]
+
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+
+    assert state.recorded_identity(source["spec_id"]) == RecordedIdentity(
+        identity=source["identity"], stat_vars=stat_vars
+    )
+    assert state.earlier_block(source["spec_id"]) is None
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        _GDP_1960_2024["identity"],  # hashes to another spec_id
+        {**_ONE_STAT_VAR_BLOCK["definition"]["identity"], "padding": "x" * 70_000},  # past 64 KiB
+    ],
+    ids=["another_spec_id", "past_the_cap"],
+)
+def test_an_identity_resolve_definition_would_refuse_is_not_recorded(identity):
+    block = _ONE_STAT_VAR_BLOCK
+    spec_id = block["spec_id"]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_specs = {
+        spec_id: {**block, "definition": {**block["definition"], "identity": identity}}
+    }
+
+    state.close_turn(final_text="Done.")
+
+    assert "identities" not in state.turns[0]
+    assert state.recorded_identity(spec_id) is None
+
+
 def test_begin_turn_clears_the_previous_turns_plans_and_readings():
     state = ConversationState(conversation_id=CONVERSATION)
     state.turn_plans = [_PLAN_JSON]
@@ -911,10 +1052,22 @@ def test_the_prior_ledger_keeps_each_spec_ids_newest_reading_and_its_turns_block
     assert ConversationState(conversation_id=CONVERSATION).prior_ledger_state() is None
 
 
-def test_recall_leaves_out_a_turns_plans_and_readings():
+def test_recall_leaves_out_a_turns_plans_readings_blocks_and_identities():
     state = ConversationState(conversation_id=CONVERSATION)
     state.turns = [
-        {"user": "q", "assistant": "a", "plans": [_PLAN_JSON], "readings": [], "specs": {}}
+        {
+            "user": "q",
+            "assistant": "a",
+            "plans": [_PLAN_JSON],
+            "readings": [],
+            "specs": {},
+            "identities": {
+                _GDP_ALL_YEARS["spec_id"]: {
+                    "identity": _GDP_ALL_YEARS["identity"],
+                    "stat_vars": [_GDP_STAT_VAR],
+                }
+            },
+        }
     ]
 
     assert state.recall_state(scope="conversation", query="")["turns"] == [

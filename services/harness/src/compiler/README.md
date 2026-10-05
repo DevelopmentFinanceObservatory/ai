@@ -67,13 +67,15 @@ reduction, a window, a side's entity, an unresolved upstream reference) is
 `operation_mismatch`, naming the fields. Beyond that: every operation feeds a
 terminal one (`operation_unreachable`); every input names an operation whose
 frame rests on one requirement, and no operation reads itself, directly or
-through others (`dangling_input`, `input_is_a_comparison`, `cycle`); and a
-retrieved frame is a legal terminal here because the plan already is one --
-under `answer_mode="series"`, `Plan` accepts a dataset requirement no
-calculation reads, and this module carries that acceptance through rather
-than re-checking it; under `answer_mode="computed"`, `Plan` itself refuses
-the unread requirement, so no translation naming it terminal ever reaches
-here. A comparison's result answers the question and feeds nothing further.
+through others (`dangling_input`, `input_is_a_comparison`, `cycle`). A
+retrieved frame is a legal terminal when it answers a question that asks to
+see a level or a trend: under `answer_mode="series"` whether or not a
+calculation reads it, and under `answer_mode="computed"` only when one does
+and an ask names it in `Plan.answered`. `Plan` already refuses an unread
+dataset requirement under `computed`, so this module checks no answer mode of
+its own. Any terminal may also be read by another operation, since an ask
+answered by an interior result still gets that result. A comparison's result
+answers the question and feeds nothing further.
 Decisions are covered because the plan's requirements cite them.
 
 **A requirement a source cannot meet is refused before approval.**

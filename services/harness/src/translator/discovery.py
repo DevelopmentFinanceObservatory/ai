@@ -75,11 +75,13 @@ recorded the same way but, like every
 describe record, spends neither budget -- `_described_source_ids` is what
 stops a failing describe being retried on every `COMPILE_FAILED` pass within
 the same revision. The worst case the lock and the search budget buy
-together is one `search` deadline -- 30 s, the deadline `search` and
-`describe` share (per the capability row) -- per wave of concurrent calls
+together is one `search` deadline, 60 s (the `call_timeout_s` of the `search`
+capability row), per wave of concurrent calls
 the budget admits, rather than one deadline per call. A turn discovering
 `DISCOVERY_CALL_BUDGET` requirements at once waits out that one deadline
-together. Once the search budget is spent, a caller sees the same
+together. Inside a planner entry a call is also cut off when the entry
+needs the rest of its deadline (`_call_within_entry`), and recorded as a
+timeout. Once the search budget is spent, a caller sees the same
 `budget_exhausted` refusal (`_budget_error`, action `return_to_planner`)
 whether it was spent on answers or on timeouts. The referral it names is
 the transient `discovery_unavailable` when the most recent call that spent
@@ -120,12 +122,16 @@ from planner.plan import (
     SessionState,
     Unit,
     dataset_of,
+    discovery_time_left,
     load_plan,
     names_dropped_seed,
+    period_window,
     pin_sources,
     plan_revision,
+    recorded_identity,
     seeded_source,
     seeded_sources,
+    windowed_pins,
 )
 from planner.records import Identifier, SpecId, StrictModel
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
@@ -233,7 +239,8 @@ class DiscoveryRecord(StrictModel):
 
     `tool == "pin"` records a pin honoured with no `search` call
     (`_source_from_resolve_pin`): a requirement pinning the id the turn's own
-    resolve settled on, or a dataset the user handed over from Search. Like
+    resolve settled on, a dataset the user handed over from Search, or a
+    dataset whose identity is on record over the requirement's period. Like
     a `describe` record, it spends neither budget (`calls`/`requirement_calls`
     count only `search`). It carries `status == DEFINITE` and one `spec_ids`
     entry, or `status == NO_DATA`, Search's `reason` and no `spec_ids` when
@@ -1355,6 +1362,36 @@ class DefinitionNotResolvedError(RuntimeError):
         self.code = code
 
 
+async def _call_within_entry(
+    surface: ToolSurface, *, tool: ToolId, arguments: Mapping[str, object]
+) -> ToolCallResult:
+    """Call `tool` on `surface`, cut off when the planner entry it serves needs the time.
+
+    Inside a planner entry the call may take `planner.plan.discovery_time_left`
+    seconds, and the surface's own timeout, the capability row's
+    `call_timeout_s`, caps it as everywhere else. With no time left the call is
+    not issued. Outside an entry it takes the row's timeout alone.
+
+    Raises:
+        ToolSurfaceUnavailableError: If the call did not complete, including
+            one cut off for, or never issued for lack of, the entry's time.
+    """
+    time_left = discovery_time_left()
+    if time_left is None:
+        return await surface.call_tool(tool=tool, arguments=arguments)
+    if time_left <= 0:
+        raise ToolSurfaceUnavailableError(
+            f"{tool.name!r} was not called: the planner entry has no time left for it"
+        )
+    try:
+        async with asyncio.timeout(time_left):
+            return await surface.call_tool(tool=tool, arguments=arguments)
+    except TimeoutError as exc:
+        raise ToolSurfaceUnavailableError(
+            f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left"
+        ) from exc
+
+
 async def resolve_definition(
     surface: ToolSurface,
     *,
@@ -1377,7 +1414,7 @@ async def resolve_definition(
     if stat_vars:
         arguments["stat_vars"] = list(stat_vars)
     try:
-        answer = await surface.call_tool(tool=RESOLVE_DEFINITION, arguments=arguments)
+        answer = await _call_within_entry(surface, tool=RESOLVE_DEFINITION, arguments=arguments)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(str(exc), retryable=True) from exc
     if answer.is_error:
@@ -1579,6 +1616,56 @@ async def _seeded_source(
     )
 
 
+async def _recorded_source(
+    tool_context: ToolContext, *, requirement: DatasetRequirement, surface: ToolSurface
+) -> SelectedSource | dict[str, object] | None:
+    """The source of the dataset `requirement` pins, read from Search's answer for its identity on record.
+
+    The identity is the copy over the requirement's period that
+    `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
+    the one a search in the conversation recorded for the pin itself
+    (`planner.plan.recorded_identity`) when its window is that period. It
+    is resolved with its recorded StatVars through data-mcp
+    (`resolve_definition`), which stores the
+    definition for the plan's `get_data`, and the source is read from
+    Search's part (`resolved_spec`), so its sentence, coverage and StatVars
+    are the ones Search states for that period.
+
+    `None` when no such identity is on record, when it names a dataset the
+    turn dropped (`planner.plan.names_dropped_seed`), or when Search does
+    not answer it with that one dataset: the caller then searches as for a
+    pin with nothing on record. When data-mcp or Search could not be
+    reached it is `SURFACE_UNAVAILABLE` with no `action`, as for a seed's
+    copy (`_seeded_source`).
+    """
+    spec_id = requirement.source_spec_id or ""
+    recorded = windowed_pins(tool_context.state).get(spec_id) or recorded_identity(spec_id)
+    identity = recorded.identity if recorded is not None else None
+    if (
+        recorded is None
+        or identity is None
+        or identity.get("requested_window") != period_window(requirement.period)
+        or names_dropped_seed(tool_context.state, spec_id=spec_id, identity=identity)
+    ):
+        return None
+    try:
+        part = await resolve_definition(
+            surface, spec_id=spec_id, identity=identity, stat_vars=recorded.stat_vars
+        )
+        return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
+    except DefinitionNotResolvedError as exc:
+        if not exc.retryable:
+            return None
+        return problem(
+            ProblemCode.SURFACE_UNAVAILABLE,
+            f"Search could not be asked for {spec_id!r} over {requirement.period.start} to "
+            f"{requirement.period.end}: {exc}",
+            outcome=Outcome.REFUSED,
+        )
+    except (PartNotResolvedError, ValueError):
+        return None
+
+
 def _resolve_pin_block(
     tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
 ) -> Mapping[str, object] | None:
@@ -1612,6 +1699,22 @@ def _resolve_pin_block(
     return source.spec_block(pin)
 
 
+def _block_source(
+    tool_context: ToolContext, *, plan: Plan, requirement: DatasetRequirement
+) -> SelectedSource | None:
+    """The source of the pinned dataset's block as the planner was shown it, when it covers `requirement.period` exactly; `None` otherwise."""
+    block = _resolve_pin_block(tool_context, plan=plan, requirement=requirement)
+    if block is None:
+        return None
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return None
+    if source.coverage_kind != EXACT_COVERAGE or source.coverage_window != requirement.period:
+        return None
+    return source
+
+
 async def _source_from_resolve_pin(
     tool_context: ToolContext,
     *,
@@ -1630,31 +1733,30 @@ async def _source_from_resolve_pin(
     problem `_seeded_source` met is returned as it is.
 
     Otherwise the source is the pinned dataset's block as the planner was
-    shown it (`_resolve_pin_block`), when it parses as a source whose
+    shown it (`_block_source`), when it parses as a source whose
     `coverage_kind` is `exact` and whose `coverage_window` equals
     `requirement.period`. That check exists because a search's identity
     carries the question's own window and the
     plan's retrieval writes no `scope` (`compiler.compile._retrieve_arguments`),
-    so a requirement over other years needs another spec, which a fresh
-    search finds. A `breadth`, `bare` or `latest` block states no window to
-    compare. Returns `None`, not a raised problem, when the block is
-    missing, does not parse, or fails the window check. The caller falls
-    through to a fresh `search`, the existing, tested path for a pin
-    `search` itself must confirm.
+    so a requirement over other years needs another spec. A `breadth`,
+    `bare` or `latest` block states no window to compare.
+
+    Otherwise the source is Search's answer for the pin's identity on record
+    over the requirement's period (`_recorded_source`), which is how a pin
+    `propose_plan` moved to a copy over that period is honoured. Returns
+    `None`, not a raised problem, when none of these holds a source. The
+    caller falls through to a fresh `search`, the path for a pin with
+    nothing on record, which `search` itself must confirm.
     """
     source = await _seeded_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    if source is None:
+        source = _block_source(tool_context, plan=plan, requirement=requirement)
+    if source is None:
+        source = await _recorded_source(tool_context, requirement=requirement, surface=surface)
+    if source is None:
+        return None
     if isinstance(source, dict):
         return source
-    if source is None:
-        block = _resolve_pin_block(tool_context, plan=plan, requirement=requirement)
-        if block is None:
-            return None
-        try:
-            source = source_from_spec_block(block)
-        except ValueError:
-            return None
-        if source.coverage_kind != EXACT_COVERAGE or source.coverage_window != requirement.period:
-            return None
     variable = requirement.measure
     source = source.model_copy(update={"searched_as": variable})
     revision = plan_revision(plan)
@@ -1855,7 +1957,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             )
 
         try:
-            answer = await surface.call_tool(tool=SEARCH, arguments={"parts": [part]})
+            answer = await _call_within_entry(surface, tool=SEARCH, arguments={"parts": [part]})
         except ToolSurfaceUnavailableError as exc:
             # A timeout still spends the call: recorded, so it counts
             # against the budget exactly like an answer, and marked

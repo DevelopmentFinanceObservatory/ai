@@ -17,6 +17,7 @@ from google.genai import Client
 from harness.generative import GeminiCompose, GeminiConverse, GeminiNarrate, GeminiRefusal
 from harness.graph import GenerativeNodes, PlannerModel
 from harness.planner_seam import PlannerSeam, PlannerSeamError
+from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ def build_generative_nodes(
     model_name: str,
     client: Client | None = None,
     surface: ToolSurface | None = None,
+    prefix_cache: PrefixCache | None = None,
 ) -> GenerativeNodes:
     """The seams as a `GenerativeNodes`.
 
@@ -44,11 +46,13 @@ def build_generative_nodes(
     builds its own from `settings`, for callers with no surface of their own
     to share (tests, the scripted-mode wiring), and converse answers a
     question about DFO with `harness.dfo_faq.CANNOT_DESCRIBE_DFO`.
+    `prefix_cache` is the process's shared prompt-prefix cache, passed on
+    to the planner's model.
     """
     shared = client
     return GenerativeNodes(
         converse=GeminiConverse(model_name=model_name, client=shared, surface=surface),
-        planner=PlannerSeam(settings=settings, surface=surface),
+        planner=PlannerSeam(settings=settings, surface=surface, prefix_cache=prefix_cache),
         compose=GeminiCompose(model_name=model_name, client=shared),
         narrate=GeminiNarrate(model_name=model_name, client=shared),
         refusal=GeminiRefusal(model_name=model_name, client=shared),

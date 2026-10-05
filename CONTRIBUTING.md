@@ -85,8 +85,9 @@ nothing. Use `just sync` to install every member into the shared `.venv`.
 
 `dev` is the trunk. Branch off it, and open pull requests into it. CI
 (`lint`, `test`, `docker`) runs on every pull request into `dev` or `main` in
-ONEcampaign. In the DevelopmentFinanceObservatory copy, the sync check admits
-the pull request instead.
+ONEcampaign once it is marked ready, and again on each push to `dev`. A draft
+pull request runs no CI. In the DevelopmentFinanceObservatory copy, the sync
+check admits the pull request instead.
 
 Merging to `dev` deploys to the dev Cloud Run service.
 
@@ -159,8 +160,7 @@ foreign-agent relay in the planner's context at exactly zero chars, and
 so the zero is a measurement, not a bucket that stopped reading.
 `test_the_cached_prefix_is_stable_across_a_run` holds the planner's static prefix
 byte-identical across a run, which is what Gemini's implicit caching matches across
-requests and what the explicit cache (`STUDIO_CONTEXT_CACHE=true`) fingerprints
-(`google.adk.models.gemini_context_cache_manager`).
+requests and what the shared explicit cache keys on (`harness.prefix_cache.prefix_key`).
 
 A failure here after a bump means ADK changed one of those behaviours. The failing test's
 own docstring names the mechanism it asserts, and `.venv/lib/python3.*/site-packages/google/adk`

@@ -284,7 +284,6 @@ async def _propose_mapping_case(case_id: str) -> None:
         "maps-an-annual-total-onto-aggregate",
         "maps-a-window-onto-growth",
         "compares-two-entities",
-        "maps-a-per-head-figure-onto-share_of",
     ],
 )
 async def test_a_mapping_cases_expected_outcome_is_reachable(case_id: str) -> None:
@@ -313,6 +312,36 @@ async def test_the_constant_price_referral_is_reachable() -> None:
         kind=ReferralKind(action["arguments"]["kind"]),
         reason="no operation restates a series in another year's prices",
         requirement_id=action["arguments"].get("requirement_id"),
+        tool_context=context,
+    )
+
+    assert matches_subset(_expected_response(case)["response"], referred)
+
+
+async def test_the_unit_less_denominator_referral_is_reachable() -> None:
+    case = _TRANSLATOR_CASES["refers-a-per-head-figure-with-a-unit-less-denominator"]
+    plan = _plan_from(case)
+    context = _context_holding(plan)
+    core = _core()
+
+    spec_ids = {
+        requirement.id: await _discover_definite(core, context, requirement.id)
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    proposed = await core.propose_operations(
+        translation=mirror(plan, spec_ids), tool_context=context
+    )
+
+    assert proposed["outcome"] == "invalid_input", proposed
+    assert [issue["code"] for issue in proposed["detail"]["issues"]] == ["frame_unit_unbound"]
+    action = proposed["action"]
+    assert action["call"] == "return_to_planner"
+
+    referred = core.return_to_planner(
+        kind=ReferralKind(action["arguments"]["kind"]),
+        reason="no operation divides a unit-less count into a value in US dollars",
+        requirement_id=action["arguments"]["requirement_id"],
         tool_context=context,
     )
 
