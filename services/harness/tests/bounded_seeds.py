@@ -54,15 +54,14 @@ def bounded_seed(
     number: int,
     *,
     entities: int = 0,
-    stat_vars: int = 0,
     open_members: bool = False,
     identity_bytes: int = 0,
 ) -> dict[str, Any]:
     """One `harness.wire.Seed` whose identity hashes to its spec_id.
 
     Every string is at its bound, and the sentence starts with `number`, so
-    two seeds describe two datasets. `entities` and `stat_vars` count the
-    resolved entities and the listed StatVars; `open_members` adds the members
+    two seeds describe two datasets. `entities` counts the resolved entities;
+    `open_members` adds the members
     the planner's envelope states at their own bounds (coverage dimensions,
     open axes, roles, operations); `identity_bytes` pads the identity to that
     size.
@@ -95,12 +94,9 @@ def bounded_seed(
         },
         "coverage": {"kind": "exact", "has_data": True, "window": {"start": 1000, "end": 9999}},
         "stat_vars": {
-            "items": [
-                {"ref": seed_text_at(f"v{index:03d}"), "slot_values": []}
-                for index in range(stat_vars)
-            ],
             "member_count": MAX_SEED_COUNT,
-            "truncated": True,
+            "member_count_exact": True,
+            "served_count": MAX_SEED_COUNT,
         },
         "shape": {"member_digest": seed_text_at("g"), "member_count": MAX_SEED_COUNT},
         "headline": {"year": MAX_SEED_COUNT, "year_named": False, "observations": MAX_SEED_COUNT},

@@ -28,6 +28,9 @@ side, not landing in the stop bucket by omission:
   mode. `definition_not_held` is `correct_and_retry` on the wire, but the
   approved `spec_id` has left the definition store and nothing this loop
   can do brings it back; its `fix` says `search`, which is discovery.
+  `open_role_unavailable` is `correct_and_retry` too. The identity keeps an
+  open role the StatVars it elects do not declare, so the same identity
+  refuses every time, and its `fix` says `search`.
 - `TRANSIENT_CODES`: waiting helps; retried up to the attempt limit.
 - `COMPILER_PROVABLE_CODES`: stops, because the compiler already rules them
   out. It writes every column list (`group_by`, `entity_by`, `rank_by`,
@@ -104,7 +107,9 @@ METHOD_CHOICE_CODES = frozenset(
     }
 )
 
-REDISCOVERY_CODES = frozenset({"upstream_version_changed", "definition_not_held"})
+REDISCOVERY_CODES = frozenset(
+    {"upstream_version_changed", "definition_not_held", "open_role_unavailable"}
+)
 
 TRANSIENT_CODES = frozenset(
     {
@@ -146,10 +151,9 @@ STOP_CODES = frozenset(
         "default_facet_undefined",
         "over_ceiling",
         # The spec mints no dataset as posted: it describes a family with
-        # nothing to export, the graph cannot resolve its StatVars, or a
-        # StatVar posted in `resolved_stat_var_dcids` is no longer one of
-        # its members. `do_not_retry` on the wire, and no scope edit
-        # reaches it: a different spec is a different plan.
+        # nothing to export, or the graph cannot resolve its StatVars.
+        # `do_not_retry` on the wire, and no scope edit reaches it: a
+        # different spec is a different plan.
         "spec_not_exportable",
         "capability_unavailable",
         "entity_not_found",

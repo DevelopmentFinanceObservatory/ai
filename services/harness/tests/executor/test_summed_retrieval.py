@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from compiler.sources import member_digest
 from compiler.surface import ToolSchema
 from executor.classify import FAMILY_NOT_SUMMED, Disposition, classify_refusal
 from executor.outcomes import Accepted, RefusalKind, Refused
@@ -31,7 +32,9 @@ ManifestFactory = Callable[..., dict[str, Any]]
 def summed_family(source: Callable[..., SelectedSource]) -> SelectedSource:
     """A family of three StatVars open only on a summable axis, which the rule reads `sum`."""
     return source(
-        stat_vars=("Debt_0", "Debt_1", "Debt_2"),
+        served_count=3,
+        shape_member_count=3,
+        shape_member_digest=member_digest(["Debt_0", "Debt_1", "Debt_2"]),
         open_axes=(OpenAxis(property="crsPurpose", summable=True),),
     )
 

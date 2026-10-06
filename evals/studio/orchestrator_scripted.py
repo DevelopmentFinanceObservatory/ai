@@ -275,16 +275,10 @@ def _spec_block(part: Mapping[str, Any]) -> dict[str, Any]:
                 "window": {"start_year": first, "end_year": last},
             },
             "stat_vars": {
-                "items": [
-                    {
-                        "ref": "LifeExpectancy_Person",
-                        "label": part["sentence"],
-                        "slot_values": [],
-                        "data_date_range": {"start": str(first), "end": str(last)},
-                    }
-                ],
                 "member_count": 1,
-                "truncated": False,
+                "member_count_exact": True,
+                "served_count": 1,
+                "data_date_range": {"start": str(first), "end": str(last)},
             },
             "entities": [
                 {"role": "observationAbout", "label": label, "ref": f"country/{label[:3].upper()}"}

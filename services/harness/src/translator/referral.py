@@ -50,15 +50,18 @@ translator handed the plan back without it riding along on the plan itself.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from enum import StrEnum
 
 from compiler.compile import CompileIssueCode
 from planner.plan import SessionState
-from planner.records import Identifier, StrictModel
+from planner.records import Identifier, StrictModel, warn_left_out
 from planner.tool_results import Outcome
 from planner.workflow import SelectedSource
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
+
+logger = logging.getLogger(__name__)
 
 # The session-state slot holding the last `Referral`. One key, since only the
 # most recent referral is ever pending -- a new one replaces it.
@@ -225,9 +228,22 @@ def save_referral(state: SessionState, referral: Referral) -> None:
 
 
 def load_referral(state: SessionState) -> Referral | None:
-    """Return the session's pending referral, or `None` when none is."""
+    """Return the session's pending referral, or `None` when none is.
+
+    A referral stored in a shape `Referral` rejects, one a release with
+    other fields wrote, is no referral, and the omission is logged. The
+    sources it offered are in that stored shape too, so nothing can be
+    pinned from it: the plan is translated again and discovery refers it
+    back with what Search answers now.
+    """
     raw = state.get(REFERRAL_STATE_KEY)
-    return Referral.model_validate_json(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        return Referral.model_validate_json(raw)
+    except ValidationError as exc:
+        warn_left_out(logger, REFERRAL_STATE_KEY, [exc])
+        return None
 
 
 def clear_referral(state: SessionState) -> None:

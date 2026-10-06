@@ -1,5 +1,5 @@
 {
-  "comment": "One spec block of a `search` answer from dfo-apis at 74150da8 reading the dev graph, for a place-less part, {\"variable\": \"health spending per person\"}: it resolved `definite` to spec_b606479ee85689bf3aa04db903b4d94e with no named entity, and `resolved.scope` lists the 193 countries Search defaulted on `observationAbout`.",
+  "comment": "One spec block of a `search` answer from dfo-apis at 74150da8 reading the dev graph, for a place-less part, {\"variable\": \"health spending per person\"}: it resolved `definite` to spec_b606479ee85689bf3aa04db903b4d94e with no named entity, and `resolved.scope` lists the 193 countries Search defaulted on `observationAbout`. Converted to the wire that lists no members: `resolved.stat_vars` states the one StatVar the mint serves as `served_count`.",
   "spec": {
     "spec_id": "spec_b606479ee85689bf3aa04db903b4d94e",
     "definition": {
@@ -185,59 +185,13 @@
       "inapplicable_slots": [],
       "unresolved_slots": [],
       "stat_vars": {
-        "items": [
-          {
-            "ref": "Amount_EconomicActivity_ExpenditureActivity_HealthcareExpenditure_AsFractionOf_Count_Person",
-            "label": "Healthcare expenditure per person",
-            "slot_values": [
-              {
-                "key": {
-                  "axis": "how",
-                  "property": {
-                    "dcid": "activitySource",
-                    "label": "activitySource"
-                  },
-                  "label": "activity source"
-                },
-                "value": {
-                  "ref": {
-                    "dcid": "ExpenditureActivity",
-                    "label": "ExpenditureActivity"
-                  },
-                  "value_kind": "enum_value"
-                }
-              },
-              {
-                "key": {
-                  "axis": "how",
-                  "property": {
-                    "dcid": "expenditureType",
-                    "label": "expenditureType"
-                  },
-                  "label": "expenditure type"
-                },
-                "value": {
-                  "ref": {
-                    "dcid": "HealthcareExpenditure",
-                    "label": "HealthcareExpenditure"
-                  },
-                  "value_kind": "enum_value"
-                }
-              }
-            ],
-            "constraint_properties": [
-              "activitySource",
-              "expenditureType"
-            ],
-            "data_date_range": {
-              "start": "2000",
-              "end": "2024"
-            }
-          }
-        ],
         "member_count": 1,
         "member_count_exact": false,
-        "truncated": false
+        "served_count": 1,
+        "data_date_range": {
+          "start": "2000",
+          "end": "2024"
+        }
       },
       "entities": [],
       "coverage": {
@@ -1614,12 +1568,6 @@
         }
       ],
       "trace": {
-        "resolved_stat_vars": [
-          {
-            "dcid": "Amount_EconomicActivity_ExpenditureActivity_HealthcareExpenditure_AsFractionOf_Count_Person",
-            "label": "Healthcare expenditure per person"
-          }
-        ],
         "resolved_entities": [],
         "resolved_sources": [
           {
@@ -1701,38 +1649,6 @@
           }
         ],
         "query_qualifiers": [],
-        "pipeline_trace": [
-          {
-            "step": "extract",
-            "ran": false
-          },
-          {
-            "step": "recall",
-            "ran": true,
-            "ms": 906
-          },
-          {
-            "step": "shape",
-            "ran": true,
-            "ms": 1936
-          },
-          {
-            "step": "bind",
-            "ran": true,
-            "ms": 964
-          },
-          {
-            "step": "materialise",
-            "ran": true,
-            "ms": 367
-          },
-          {
-            "step": "answer",
-            "ran": true,
-            "ms": 182
-          }
-        ],
-        "n_recalled": 59,
         "capability_version": "cap_a71dd3a39765e8e5"
       },
       "confidence": "high",

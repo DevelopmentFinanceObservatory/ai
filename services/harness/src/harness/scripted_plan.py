@@ -28,7 +28,6 @@ from compiler.compile import compile_plan
 from compiler.surface import ToolSchema
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
-from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     MAX_QUESTION_CHARS,
@@ -63,11 +62,6 @@ _GET_DATA_PARAMETERS: dict[str, Any] = {
     "properties": {
         "spec_id": {"type": "string"},
         "scope": {"type": "object"},
-        "resolved_stat_var_dcids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": MAX_RESOLVED_STAT_VAR_DCIDS,
-        },
     },
     "required": ["spec_id"],
     "additionalProperties": False,
@@ -137,7 +131,7 @@ def _scripted_source(spec_id: str) -> SelectedSource:
         sentence="life expectancy at birth in Kenya, 1960 to 2023",
         confidence="high",
         has_data=True,
-        stat_vars=("LifeExpectancy_Person",),
+        served_count=1,
         entities=(ResolvedEntity(role="country", ref="country/KEN", label="Kenya"),),
         coverage_window=Period(start=1960, end=2023),
         identity={"stat_var": "LifeExpectancy_Person"},

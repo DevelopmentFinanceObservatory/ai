@@ -36,6 +36,7 @@ import typing
 from collections.abc import Sequence
 
 from compiler.evidence import open_axis_for
+from compiler.sources import stat_var_count
 from planner.parties import across_party, singular
 from planner.phrasing import (
     among_phrase,
@@ -575,30 +576,22 @@ def _population_count(requirement: DatasetRequirement, plan: Plan) -> int | None
 def _reading_clause(source: SelectedSource) -> str | None:
     """How the retrieval reads `source`'s family of StatVars, or `None` for a source binding one.
 
-    Counts the family as the source does: the members `search` reports,
-    which exceed the listed StatVars when the list was capped. A family
-    `search` confirmed fewer than two members of is named without a count,
-    since its retrieval holds every member with data. Says when the reading
-    is the compiler's default (`ReadingSetBy.RULE`), so the user knows the
-    plan can be amended to read it the other way.
+    Counts the family as the source does (`stat_var_count`). A family
+    counted at fewer than two members is named without a count, since its
+    retrieval holds every member with data. Says when the reading is the
+    compiler's default (`ReadingSetBy.RULE`), so the user knows the plan can
+    be amended to read it the other way.
 
-    A family read separately states no clause when its list holds one
-    StatVar, is complete (`stat_var_truncated` is false) and the family
+    A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
     nothing on it to keep apart. The retrieval's arguments still state the
-    reading. A list of one that is capped, or that does not say whether it
-    is, a longer list, and a family with an open axis all keep the clause.
+    reading.
     """
     if source.stat_var_reading is None:
         return None
-    if (
-        source.stat_var_reading is StatVarReading.SEPARATE
-        and len(source.stat_vars) == 1
-        and source.stat_var_truncated is False
-        and not source.open_axes
-    ):
+    count = stat_var_count(source)
+    if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
-    count = max(len(source.stat_vars), source.stat_var_member_count or 0)
     summed = source.stat_var_reading is StatVarReading.SUM
     if count < 2:
         clause = "summed over its StatVars" if summed else "kept as separate StatVars"

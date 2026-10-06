@@ -106,6 +106,10 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
             Disposition.REDISCOVER,
         ),
         (
+            {"code": "open_role_unavailable", "retry_mode": "correct_and_retry"},
+            Disposition.REDISCOVER,
+        ),
+        (
             {"code": "unit_heterogeneous", "retry_mode": "correct_and_retry"},
             Disposition.METHOD_CHOICE,
         ),
@@ -216,6 +220,7 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         "operation-still-processing-delay",
         "refresh",
         "definition-gone",
+        "open-role-gone",
         "unit-choice",
         "entity-choice",
         "cross-frame-choice",

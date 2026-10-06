@@ -86,6 +86,7 @@ import logging
 import random
 import re
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -987,7 +988,15 @@ def _wire_fact_summary(
 ) -> dict[str, Any]:
     """The wire fact summary. `indicator_count` is the frame's StatVar count,
     which the label states. `indicators` lists the StatVars the chart draws,
-    so a list shorter than the count is a partial one."""
+    so a list shorter than the count is a partial one. Each series carries
+    the periods of its first and last values, read from the drawn points:
+    a series with gaps starts or ends inside the window."""
+    platform_ids = Counter(entry.get("id") for entry in platform_facts.get("series") or [])
+    periods = {
+        series_id: dated
+        for series_id, dated in _endpoint_periods(component).items()
+        if platform_ids[series_id] == 1
+    }
     series = [
         {
             "id": str(entry.get("id", "")),
@@ -1000,6 +1009,7 @@ def _wire_fact_summary(
             },
             "first": _float_or_none(entry.get("first_value")),
             "last": _float_or_none(entry.get("last_value")),
+            **periods.get(str(entry.get("id", "")), {}),
         }
         for entry in platform_facts.get("series") or []
     ]
@@ -1025,6 +1035,35 @@ def _wire_fact_summary(
             {"pointer": str(entry["pointer"]), "detail": str(entry["detail"])} for entry in defaults
         ]
     return summary
+
+
+def _endpoint_periods(component: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """`{first_period, last_period}` for each drawn series, by id: the
+    periods of its first and last observed points, chosen as the platform
+    chooses the points its `first_value` and `last_value` come from (a point
+    holding a `value`; one marked missing holds none). Only these two
+    periods leave the points, never the values between. An endpoint without
+    a period gets none, and a series whose id is missing or repeated gets
+    nothing, so a period is never attached to another value. Stat cards and
+    tables draw no `series` and get nothing."""
+    drawn_series = component.get("series") or []
+    ids = Counter(drawn.get("id") for drawn in drawn_series)
+    periods: dict[str, dict[str, str]] = {}
+    for drawn in drawn_series:
+        series_id = drawn.get("id")
+        if not isinstance(series_id, str) or not series_id or ids[series_id] != 1:
+            continue
+        observed = [point for point in drawn.get("points") or [] if "value" in point]
+        if not observed:
+            continue
+        endpoints = {
+            key: str(point["period"])
+            for key, point in (("first_period", observed[0]), ("last_period", observed[-1]))
+            if point.get("period") is not None
+        }
+        if endpoints:
+            periods[series_id] = endpoints
+    return periods
 
 
 def _manifest_stat_vars(manifest: dict[str, Any] | None) -> list[str]:

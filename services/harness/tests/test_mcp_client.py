@@ -1544,6 +1544,54 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary(
     FactSummary.model_validate(with_defaults["fact_summary"])
 
 
+async def test_each_series_states_the_periods_of_its_first_and_last_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, describing, envelope, facts = _assembled_summary(drawn=4, resolved=4, series_cut=0)
+    facts["series"][0] |= {"point_count": 3, "first_value": "173.6", "last_value": "60.1"}
+    envelope["component"]["series"] = [
+        {
+            # Missing points at both ends: the first and last values fall inside
+            # the window, and only their two periods leave the points.
+            "id": "s0",
+            "points": [
+                {"period": "1960", "status": "missing"},
+                {"period": "1964", "value": 173.6},
+                {"period": "1990", "value": 125.0},
+                {"period": "2023", "value": 60.1},
+                {"period": "2024", "status": "missing"},
+            ],
+        },
+        # The first observed point carries no period: its period is withheld,
+        # never borrowed from the next point.
+        {"id": "s1", "points": [{"value": 10.0}, {"period": "2020", "value": 20.0}]},
+        # A repeated id cannot say which series a period belongs to.
+        {"id": "s2", "points": [{"period": "2001", "value": 1.0}]},
+        {"id": "s2", "points": [{"period": "2002", "value": 2.0}]},
+        # No point carries a period.
+        {"id": "s3", "points": [{"category": "Health", "value": 4.0}]},
+    ]
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    )
+
+    assert component is not None
+    gapped, partly_dated, repeated, undated = component["fact_summary"]["series"]
+    assert {key: gapped[key] for key in ("first", "first_period", "last", "last_period")} == {
+        "first": 173.6,
+        "first_period": "1964",
+        "last": 60.1,
+        "last_period": "2023",
+    }
+    assert "first_period" not in partly_dated and partly_dated["last_period"] == "2020"
+    for series in (repeated, undated):
+        assert "first_period" not in series and "last_period" not in series
+    FactSummary.model_validate(component["fact_summary"])
+
+
 # --- progress: a get_data call's MCP progress reaches the caller ------------
 
 

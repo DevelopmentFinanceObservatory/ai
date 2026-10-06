@@ -24,7 +24,6 @@ def _manifest_payload(
     citation_sources: list[dict[str, Any]] | None = None,
     warnings: list[dict[str, Any]] | None = None,
     requested_window: dict[str, Any] | None = None,
-    as_collection: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -48,9 +47,6 @@ def _manifest_payload(
         "warnings": warnings if warnings is not None else [],
         "artifacts": [],
     }
-    if as_collection:
-        payload["collection"] = {"collection_id": "col_" + "0" * 32, "members": []}
-        return payload
     payload["definition"] = {
         "schema_version": 1,
         "spec_id": spec_id,
@@ -193,6 +189,50 @@ def test_acknowledgement_joins_multiple_dcids_under_one_role() -> None:
     )
 
     assert "recipient Kenya, Uganda" in digest
+
+
+@pytest.mark.parametrize(
+    ("dimensions", "noun"),
+    [
+        # No dimension sits on the open axis, so the axis noun stands.
+        ([{"count": 1, "label": "recipient", "axis": "destination"}], "provider"),
+        # A CRS-shaped response declares the financingProvider column on the open axis.
+        (
+            [
+                {"count": 4, "label": "financingProvider", "axis": "origin"},
+                {"count": 1, "label": "recipient", "axis": "destination"},
+            ],
+            "financingProvider",
+        ),
+        # An IDS-shaped response declares a creditor column there.
+        (
+            [
+                {"count": 4, "label": "creditor", "axis": "origin"},
+                {"count": 1, "label": "debtor", "axis": "destination"},
+            ],
+            "creditor",
+        ),
+    ],
+    ids=["no-axis-column", "crs", "ids"],
+)
+def test_acknowledgement_names_an_open_role_beside_the_bound_entities(
+    dimensions: list[dict[str, Any]], noun: str
+) -> None:
+    payload = _manifest_payload(entities={"destination": ["country/NGA"]}, dimensions=dimensions)
+    payload["definition"]["identity"]["open_roles"] = ["origin"]
+    manifest = strip_manifest(payload)
+
+    digest = render_get_data_digest(
+        manifest=manifest,
+        frame_ref=_frame_ref(manifest),
+        entity_labels={"country/NGA": "Nigeria"},
+        dropped_roles=[],
+        unheld_regions=[],
+    )
+
+    assert digest.splitlines()[0] == (
+        f"Retrieved MalariaGrantDisbursements for destination Nigeria · every {noun}."
+    )
 
 
 def test_acknowledgement_omits_a_role_with_no_entities() -> None:
@@ -386,22 +426,6 @@ def test_unheld_region_note_caps_names_and_reports_the_remainder() -> None:
     assert "Country2" in digest
     assert "Country3" not in digest
     assert "42 more" in digest
-
-
-# Collection manifest guard
-
-
-def test_a_collection_manifest_raises_rather_than_silently_misrendering() -> None:
-    manifest = strip_manifest(_manifest_payload(as_collection=True))
-
-    with pytest.raises(ValueError, match="definition"):
-        render_get_data_digest(
-            manifest=manifest,
-            frame_ref=_frame_ref(manifest),
-            entity_labels={},
-            dropped_roles=[],
-            unheld_regions=[],
-        )
 
 
 # Per-series statistics

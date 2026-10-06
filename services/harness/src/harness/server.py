@@ -476,9 +476,14 @@ def create_app(
                     generative = dataclasses.replace(
                         generative, planner=handing_back_planner_failures(generative.planner)
                     )
+                logger.info(
+                    "orchestrator thinking level: %s",
+                    resolved_settings.orchestrator_thinking_level,
+                )
                 orchestrator = create_orchestrator_agent(
                     model_name=resolved_settings.model_name,
                     prefix_cache=prefix_cache,
+                    thinking_level=resolved_settings.orchestrator_thinking_level,
                     tools=build_orchestrator_tools(
                         resolver=McpResolver(settings=resolved_settings),
                         executor=recorder,

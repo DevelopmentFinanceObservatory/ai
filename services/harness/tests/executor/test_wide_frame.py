@@ -21,6 +21,7 @@ import pytest
 from analysis_mcp import server as analysis_server
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, MaterialisationTrace
 from compiler.compile import compile_plan
+from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.frame_materialisation import observed_shape
 from dfo_frame_grammar import Frame
@@ -125,13 +126,26 @@ def _source(
         sentence="bilateral ODA from Germany and France to Kenya, 2000 to 2023",
         confidence="high",
         has_data=True,
-        stat_vars=("Oda",),
+        served_count=1,
+        shape_member_digest=member_digest(["Oda"]),
         entities=entities,
         unit_ref="usd",
         unit_label="US dollars",
         coverage_window=Period(start=2000, end=2023),
-        identity={"stat_var": "Oda", "spec": spec_id},
+        identity=_pinning("Oda", spec_id),
     )
+
+
+def _pinning(stat_var: str, spec_id: str) -> dict[str, Any]:
+    """An identity pinning `stat_var`, told apart per spec_id."""
+    return {"shape": {"kind": "stat_var", "id": stat_var}, "spec": spec_id}
+
+
+def _pinned(source: SelectedSource) -> str:
+    """The StatVar `source`'s identity pins."""
+    stat_var = pinned_stat_var(source.identity)
+    assert stat_var is not None
+    return stat_var
 
 
 def _requirement(
@@ -277,7 +291,9 @@ def retrieved(
             "applied_window": None,
             "graph_revision": "rev_2026_10_01",
             "source_revisions": [{"source": "oecd_crs", "revision": "2026-10-01"}],
-            "resolved_stat_vars": [{"ref": f"dcid:{ref}", "roles": []} for ref in source.stat_vars],
+            "resolved_stat_vars": [{"ref": f"dcid:{_pinned(source)}", "roles": []}],
+            "family_member_digest": source.shape_member_digest,
+            "family_member_count": 1,
             "facets": [{"axis": "unit", "ref": "usd", "basis": "declared_default"}],
         }
         await frame_store.put(
@@ -290,7 +306,7 @@ def retrieved(
         )
         statistics = [
             {
-                "stat_var": f"dcid:{source.stat_vars[0]}",
+                "stat_var": f"dcid:{_pinned(source)}",
                 "entities": [
                     {"role": PROVIDER, "ref": provider.ref},
                     {"role": RECIPIENT, "ref": KENYA.ref},
@@ -793,7 +809,7 @@ async def test_which_sectors_received_the_most_aid_in_kenya_ranks_the_frames_sec
         entities=(KENYA,), open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),)
     ).model_copy(
         update={
-            "stat_vars": ("OdaHealth", "OdaEducation"),
+            "served_count": None,
             "open_axes": (OpenAxis(property="crsPurpose", summable=True),),
         }
     )
@@ -942,7 +958,10 @@ async def test_a_sum_of_two_sources_pins_each_sides_unit_and_yields_one_series(
     # are added year by year.
     bilateral = _source(entities=(GERMANY, KENYA))
     imputed = _source(spec_id=SPEC_CRS_HEALTH, entities=(GERMANY, KENYA)).model_copy(
-        update={"stat_vars": ("OdaImputed",)}
+        update={
+            "identity": _pinning("OdaImputed", SPEC_CRS_HEALTH),
+            "shape_member_digest": member_digest(["OdaImputed"]),
+        }
     )
     total = SumOfRequirement(
         id="total",

@@ -57,9 +57,7 @@ def _spec(fixture: str) -> dict[str, Any]:
 
 
 async def test_a_searched_definition_is_stored_as_its_identity_alone() -> None:
-    """The block's elected StatVars travel with the caller to `get_data`, not into the store."""
     spec = _spec("resolve_health_spending_broad.json")
-    assert spec["resolved"]["stat_vars"]["items"]
 
     definition = stored_definition(spec)
     assert definition is not None

@@ -140,7 +140,7 @@ def _validate_uri_parts(*, subject_id: str, content_version: str, artifact_diges
     locally and never reaches the network.
     """
     if not re.fullmatch(_SPEC_ID_PATTERN, subject_id):
-        _refuse(_REQUEST_INVALID, f"subject_id {subject_id!r} is not a valid spec_/col_ id")
+        _refuse(_REQUEST_INVALID, f"subject_id {subject_id!r} is not a valid spec_ id")
     if not _CONTENT_VERSION_PATTERN.fullmatch(content_version):
         _refuse(
             _REQUEST_INVALID, f"content_version {content_version!r} does not look like a cv_ id"
@@ -213,7 +213,12 @@ def _marker_for_upstream_error(exc: UpstreamError) -> tuple[str, str]:
 
 
 def _select_raw_artifact(payload: dict[str, Any], *, artifact_digest: str) -> dict[str, Any]:
-    """Pick the one raw artifact entry matching `artifact_digest` out of `payload["artifacts"]`.
+    """Pick the first raw artifact entry matching `artifact_digest` out of `payload["artifacts"]`.
+
+    An artifact digest names its bytes, so every entry sharing one serves the
+    same content, even when upstream lists it under several renderings (a frame
+    file is byte-identical to the long file of the same version and options).
+    The first match in manifest order is taken; any entry would read the same.
 
     Runs over the raw payload, since `strip_manifest` has already dropped
     every `url`/`url_expires_at`. This is the one place in the module that
@@ -229,15 +234,6 @@ def _select_raw_artifact(payload: dict[str, Any], *, artifact_digest: str) -> di
         # gives no way to tell these apart, so the marker stays neutral
         # between them rather than asserting either.
         _refuse(_ARTIFACT_NOT_IN_SNAPSHOT, _NOT_IN_SNAPSHOT_PROSE)
-    if len(matches) > 1:
-        # Upstream fans out per (artifact_digest, rendering_key); two
-        # renderings sharing one digest would mean two different renderings
-        # produced identical bytes -- a broken invariant, with no principled
-        # way to pick which one was meant.
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            "more than one artifact entry in this snapshot shares this digest",
-        )
     return matches[0]
 
 
@@ -288,14 +284,14 @@ async def read_artifact(
     """Read one artifact's freshly signed URL and expiry off dfo-apis' snapshot route.
 
     Reading this resource re-signs the artifact identified by `subject_id`
-    (a `spec_`/`col_` id), `content_version`, and `artifact_digest` -- a
+    (a `spec_` id), `content_version`, and `artifact_digest` -- a
     metadata lookup plus re-sign, with no graph call and no re-derivation.
     The returned URL is short-lived (`expires_in_s`, bounded by
     `_MAX_ADVERTISED_TTL_S`) and must not be cached: read this resource again
     to mint a fresh one.
 
     Args:
-        subject_id: The `spec_`/`col_` id this artifact's manifest was minted
+        subject_id: The `spec_` id this artifact's manifest was minted
             under.
         content_version: The `cv_` id naming the exact retrieval.
         artifact_digest: The `sha256:` digest identifying this one artifact,

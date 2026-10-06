@@ -638,6 +638,20 @@ async def test_upstream_version_changed_maps_to_refresh_then_retry() -> None:
     assert refusal.retry_mode == RetryMode.REFRESH_THEN_RETRY
 
 
+async def test_open_role_unavailable_maps_to_a_fresh_search() -> None:
+    refusal = await _refusal_from(
+        422, code="open_role_unavailable", retryable=False, pointer="/input/identity/open_roles"
+    )
+    assert refusal.code == ToolErrorCode.OPEN_ROLE_UNAVAILABLE
+    assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
+    assert refusal.upstream_code is None
+    assert refusal.fix == {
+        "pointer": "/input/identity/open_roles",
+        "detail": "because",
+        "next_step": "search",
+    }
+
+
 async def test_service_unavailable_maps_through_a_real_parse() -> None:
     # dfo-apis carries no `store`/`service` extension key at any raise site
     # for this code, so the mapped path uses a fixed label rather than
@@ -856,34 +870,8 @@ async def test_unmapped_non_retryable_code_does_not_claim_a_numeric_wait() -> No
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 
-async def test_member_not_resolvable_on_a_posted_selection_lists_the_outsiders_in_fix() -> None:
-    refusal = await _refusal_from(
-        422,
-        code="member_not_resolvable",
-        retryable=False,
-        issues=[
-            {"pointer": "/input/resolved_stat_var_dcids/1", "member": "Count_Household"},
-            {"pointer": "/input/resolved_stat_var_dcids/2", "member": "Count_Death"},
-        ],
-    )
-
-    assert refusal.code == ToolErrorCode.SPEC_NOT_EXPORTABLE
-    assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
-    assert refusal.fix["not_members"] == ["Count_Household", "Count_Death"]
-    # Rebased onto `get_data`'s own argument, which it posts unchanged.
-    assert refusal.fix["pointers"] == [
-        "/resolved_stat_var_dcids/1",
-        "/resolved_stat_var_dcids/2",
-    ]
-    assert "Search for the question again" in refusal.fix["remedy"]
-    assert refusal.fix["remedy"] in refusal.message
-    assert "2 StatVars" in refusal.message
-    assert "Count_Household" not in refusal.message
-    assert "Count_Death" not in refusal.message
-
-
 async def test_member_not_resolvable_from_the_graph_lists_the_unresolved_members_in_fix() -> None:
-    """Inconsistent arcs for a walked candidate: no issue points into the selection."""
+    """Inconsistent arcs for a walked candidate."""
     refusal = await _refusal_from(
         422,
         code="member_not_resolvable",
@@ -1512,6 +1500,10 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
         (
             ToolRefusal.over_ceiling(detail="over the ceiling", ceiling_kind=None),
             {"detail"},
+        ),
+        (
+            ToolRefusal.open_role_unavailable(pointer=None, detail=None),
+            {"pointer", "detail", "next_step"},
         ),
     ]
     for refusal, expected_keys in cases:

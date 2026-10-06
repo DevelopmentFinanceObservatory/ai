@@ -333,3 +333,29 @@ def test_executor_max_concurrent_steps_reads_from_env(monkeypatch) -> None:
 def test_executor_max_concurrent_steps_below_one_is_refused() -> None:
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         Settings(executor_max_concurrent_steps=0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, "LOW"),
+        ("", "LOW"),
+        ("  ", "LOW"),
+        ("low", "LOW"),
+        (" Medium ", "MEDIUM"),
+        ("HIGH", "HIGH"),
+    ],
+)
+def test_orchestrator_thinking_level_reads_from_env(monkeypatch, raw, expected) -> None:
+    if raw is not None:
+        monkeypatch.setenv("ORCHESTRATOR_THINKING_LEVEL", raw)
+
+    assert Settings().orchestrator_thinking_level == expected
+
+
+@pytest.mark.parametrize("value", ["minimal", "max", "0"])
+def test_an_unknown_orchestrator_thinking_level_is_refused(monkeypatch, value) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_THINKING_LEVEL", value)
+
+    with pytest.raises(ValueError, match="orchestrator_thinking_level"):
+        Settings()

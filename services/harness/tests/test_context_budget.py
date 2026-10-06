@@ -939,7 +939,7 @@ def _capped_envelope() -> dict[str, Any]:
         "stat_var_shape_kind": "statvar_schema",
         "stat_var_item_count": 0,
         "entity_roles": ["observationAbout"],
-        "stat_var_truncated": False,
+        "stat_var_served_count": None,
         "candidates": [
             {
                 "spec_id": f"spec_{index:032x}",
@@ -1313,7 +1313,7 @@ def _maximal_envelope() -> dict[str, Any]:
         "stat_var_item_count": long,
         "stat_var_member_count_exact": True,
         "entity_roles": [long] * 8,
-        "stat_var_truncated": long,
+        "stat_var_served_count": long,
         "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
         "candidates": [{"spec_id": long, "label": long, "wide": True} for _ in range(50)],
         "skills": [{"id": long, "description": long} for _ in range(50)],
@@ -1330,7 +1330,7 @@ def _maximal_envelope() -> dict[str, Any]:
                 "stat_var_item_count": long,
                 "stat_var_member_count_exact": True,
                 "entity_roles": [long] * 8,
-                "stat_var_truncated": long,
+                "stat_var_served_count": long,
                 "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
                 "operations": [
                     {"verb": long, "phrase": long, "over": long, "target_year": long}

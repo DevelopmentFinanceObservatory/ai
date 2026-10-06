@@ -17,12 +17,14 @@ tests stay about the planner's own transitions.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import json
+import logging
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from compiler.compile import CompileIssueCode
@@ -34,6 +36,7 @@ from google.adk.agents import LlmAgent
 from google.adk.events import Event, EventActions, RequestInput
 from google.adk.features import FeatureName
 from google.adk.features._feature_registry import temporary_feature_override
+from google.adk.models.google_llm import Gemini
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
@@ -41,9 +44,9 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_event,
     create_request_input_response,
 )
-from google.genai import types
-from harness.graph import _drop_seeds_from_turn
+from google.genai import _api_client, errors, types
 from harness.planner_seam import PlannerSeam
+from harness.prefix_cache import PrefixCache
 from harness.turn_records import RecordedIdentity
 from planner import agent as planner_agent
 from planner.agent import (
@@ -61,7 +64,6 @@ from planner.operations import (
 from planner.parties import PARTY_ROLES, flow_side, party_role
 from planner.plan import (
     ASKS_STATE_KEY,
-    DROPPED_SEEDS_STATE_KEY,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
@@ -72,6 +74,7 @@ from planner.plan import (
     PLAN_STATE_KEY,
     SEEDED_SOURCES_STATE_KEY,
     SEEDS_STATE_KEY,
+    WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
     AskAnswer,
@@ -90,9 +93,9 @@ from planner.plan import (
     SeededSource,
     UnsupportedOperation,
     WindowedPin,
+    _parsed_sources,
     clear_unsupported,
     current_recorded_identity,
-    dropped_seeds,
     is_dataset,
     is_search_pin,
     load_plan,
@@ -107,10 +110,8 @@ from planner.plan import (
     save_plan_rounds,
     save_seeded_sources,
     search_pin_slot,
-    seed_of,
     seeded_source,
     seeded_sources,
-    split_dropped,
     windowed_pins,
 )
 from planner.records import (
@@ -1675,6 +1676,38 @@ def test_create_planner_agent_defaults_question_fixed_to_false() -> None:
     assert "nothing further is needed from you" not in str(default.instruction)
 
 
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "prefix-cached"])
+async def test_the_planner_model_retries_a_503_before_the_turn_sees_it(
+    cached: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fault goes in under the SDK's retry loop, so the attempts counted
+    # are the ones the SDK makes.
+    attempts = 0
+
+    async def unavailable(self: Any, http_request: Any, stream: bool = False) -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE"}})
+
+    async def no_wait(seconds: float) -> None:
+        return None
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(_api_client.BaseApiClient, "_async_request_once", unavailable)
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    agent = create_planner_agent(
+        model_name="gemini-3.8-flash", prefix_cache=PrefixCache() if cached else None
+    )
+    assert isinstance(agent.model, Gemini)
+
+    with pytest.raises(errors.ServerError):
+        await agent.model.api_client.aio.models.generate_content(
+            model=agent.model.model, contents="question"
+        )
+
+    assert attempts == 3
+
+
 def _arguments(tools: dict[str, FunctionTool], name: str = "propose_plan") -> dict[str, Any]:
     declaration = tools[name]._get_declaration()
     assert declaration is not None
@@ -3049,36 +3082,7 @@ def _over(start: int, end: int) -> SeededSource:
     return _seeded({**_SEED_IDENTITY, "requested_window": window})
 
 
-def test_a_drop_takes_a_seed_and_its_copies_and_leaves_another_seed_over_the_same_dataset() -> None:
-    seed, sibling = _seeded(), _over(2015, 2024)
-    copy_id, copy_identity = windowed_identity(
-        _SEED_IDENTITY, {"kind": "range", "start_year": 2024, "end_year": 2024}
-    )
-    copied = SeededSource(
-        source=seed.source.model_copy(update={"spec_id": copy_id, "identity": copy_identity}),
-        windowed_from=_SEED_SPEC,
-    )
-
-    kept, taken = split_dropped([seed, sibling, copied], {_SEED_SPEC})
-
-    assert kept == [sibling]
-    assert taken == [seed, copied]
-    assert [seed_of(item) for item in (seed, sibling, copied)] == [
-        _SEED_SPEC,
-        sibling.source.spec_id,
-        _SEED_SPEC,
-    ]
-
-
 _WINDOW_2010_2023 = {"kind": "range", "start_year": 2010, "end_year": 2023}
-
-
-def _seed_with_stat_vars() -> SeededSource:
-    """`_seeded()` with the StatVars Search elected for it."""
-    seed = _seeded()
-    return seed.model_copy(
-        update={"source": seed.source.model_copy(update={"stat_vars": ("Var_a", "Var_b")})}
-    )
 
 
 def _stored_copy_state(
@@ -3097,10 +3101,10 @@ def test_the_state_stores_a_copy_as_its_seed_and_window(
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
     """A copy is its seed over another window: the state holds the seed's spec_id
-    and the window, and none of the copy's identity, StatVars or name."""
+    and the window, and none of the copy's identity or name."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    seed = _seed_with_stat_vars()
+    seed = _seeded()
     save_seeded_sources(ctx.state, [seed])
 
     result = _propose_seeded(
@@ -3121,8 +3125,8 @@ def test_the_state_stores_a_copy_as_its_seed_and_window(
 
 def test_a_copy_reads_back_as_its_seed_over_its_window() -> None:
     """The copy's spec_id and identity are the seed's over the window, and its
-    StatVars and name are the seed's, rebuilt where the state is read."""
-    seed = _seed_with_stat_vars()
+    name is the seed's, rebuilt where the state is read."""
+    seed = _seeded()
 
     (held, copy) = seeded_sources(_stored_copy_state([seed]))
 
@@ -3133,7 +3137,6 @@ def test_a_copy_reads_back_as_its_seed_over_its_window() -> None:
             spec_id=copy_id,
             sentence=seed.source.sentence,
             has_data=None,
-            stat_vars=("Var_a", "Var_b"),
             identity=copy_identity,
         ),
         windowed_from=_SEED_SPEC,
@@ -3143,7 +3146,7 @@ def test_a_copy_reads_back_as_its_seed_over_its_window() -> None:
 def test_a_copy_whose_seed_is_missing_is_refused() -> None:
     """A copy is nothing without its seed, so a list holding one without the other
     is refused where it is read and where it is written."""
-    seed, other = _seed_with_stat_vars(), _seeded({**_SEED_IDENTITY, "seed": "population"})
+    seed, other = _seeded(), _seeded({**_SEED_IDENTITY, "seed": "population"})
 
     with pytest.raises(ValueError, match=rf"names the seed '{_SEED_SPEC}', which the stored"):
         seeded_sources(_stored_copy_state([other]))
@@ -3156,10 +3159,43 @@ def test_a_copy_whose_seed_is_missing_is_refused() -> None:
     assert state == {}
 
 
+def test_a_seed_stored_with_member_lists_is_left_out_with_its_copy(
+    stored_with_member_list: Callable[[SelectedSource], dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session that crosses the release holds a seed with fields
+    `SelectedSource` no longer has. It and the copy that names it are dropped,
+    and the seed stored in the current shape beside it is kept."""
+    seed, other = _seeded(), _seeded({**_SEED_IDENTITY, "seed": "population"})
+    state = _stored_copy_state([seed, other])
+    stored = json.loads(state[SEEDED_SOURCES_STATE_KEY])
+    stored["seeds"][0]["source"] = stored_with_member_list(seed.source)
+    state[SEEDED_SOURCES_STATE_KEY] = json.dumps(stored)
+    # The stored text is read once per process, so a repeat of this test
+    # would find it already read and logged.
+    _parsed_sources.cache_clear()
+
+    with caplog.at_level(logging.WARNING, logger="planner.plan"):
+        held = seeded_sources(state)
+        # A turn reads the slot many times and logs what it leaves out once.
+        assert seeded_sources(state) == held
+
+    assert held == [other]
+    (logged,) = caplog.records
+    assert logged.levelno == logging.WARNING
+    assert logged.args == (
+        SEEDED_SOURCES_STATE_KEY,
+        2,
+        1,
+        1,
+        "source.pinned, source.stat_var_truncated, source.stat_vars",
+    )
+
+
 def test_a_copy_that_is_not_its_seed_over_its_window_is_refused() -> None:
     """The state rebuilds a copy from its seed, so a copy stating anything else
     would read back changed, and is refused where it is written."""
-    seed = _seed_with_stat_vars()
+    seed = _seeded()
     (_, copy) = seeded_sources(_stored_copy_state([seed]))
     renamed = copy.model_copy(
         update={"source": copy.source.model_copy(update={"sentence": "another name"})}
@@ -3167,26 +3203,6 @@ def test_a_copy_that_is_not_its_seed_over_its_window_is_refused() -> None:
 
     with pytest.raises(ValueError, match="is not its seed"):
         save_seeded_sources({}, [seed, renamed])
-
-
-def test_a_drop_of_a_stored_seed_takes_its_copies_into_the_dropped_state() -> None:
-    """A seed and its copy read back from the state go to the dropped datasets
-    together, stored the same way, while another seed stays."""
-    seed, other = _seed_with_stat_vars(), _seeded({**_SEED_IDENTITY, "seed": "population"})
-    state = _stored_copy_state([seed, other])
-    held = seeded_sources(state)
-
-    kept, taken = split_dropped(held, {_SEED_SPEC})
-    save_seeded_sources(state, kept)
-    save_dropped_seeds(state, taken)
-
-    (_, copy) = taken
-    assert copy.windowed_from == _SEED_SPEC
-    assert seeded_sources(state) == [other]
-    assert dropped_seeds(state) == [seed, copy]
-    assert json.loads(state[DROPPED_SEEDS_STATE_KEY])["copies"] == [
-        {"windowed_from": _SEED_SPEC, "window": _WINDOW_2010_2023}
-    ]
 
 
 def test_one_rule_says_which_dataset_the_turn_dropped() -> None:
@@ -3244,15 +3260,15 @@ def test_two_seeds_over_one_dataset_pinned_over_one_period_share_the_first_seed_
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
     """Both pins move to the one spec_id the dataset has over that period, and the
-    copy recorded for it is the first seed's, with the first seed's StatVars."""
+    copy recorded for it is the first seed's, under the first seed's name."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     first, second = _over(2000, 2005), _over(2015, 2024)
     first = first.model_copy(
-        update={"source": first.source.model_copy(update={"stat_vars": ("Var_first",)})}
+        update={"source": first.source.model_copy(update={"sentence": "the first seed"})}
     )
     second = second.model_copy(
-        update={"source": second.source.model_copy(update={"stat_vars": ("Var_second",)})}
+        update={"source": second.source.model_copy(update={"sentence": "the second seed"})}
     )
     save_seeded_sources(ctx.state, [first, second])
     period = Period(start=2010, end=2010)
@@ -3280,7 +3296,7 @@ def test_two_seeds_over_one_dataset_pinned_over_one_period_share_the_first_seed_
     assert result["outcome"] == Outcome.OK.value, result
     (copied,) = [item for item in seeded_sources(ctx.state) if item.windowed_from]
     assert copied.windowed_from == first.source.spec_id
-    assert copied.source.stat_vars == ("Var_first",)
+    assert copied.source.sentence == "the first seed"
 
 
 def test_propose_plan_takes_a_pin_on_a_seed_whose_sibling_over_other_years_was_dropped(
@@ -3408,7 +3424,6 @@ def test_the_copy_of_a_seed_over_another_period_records_nothing_search_stated_fo
             spec_id=answered["2010-2023"]["spec_id"],
             sentence=seed.sentence,
             has_data=None,
-            stat_vars=seed.stat_vars,
             identity=answered["2010-2023"]["definition"]["identity"],
         ),
         windowed_from=seed.spec_id,
@@ -3582,8 +3597,8 @@ def test_a_patch_that_carries_a_dropped_pin_forward_is_refused(
     )
     assert first["outcome"] == Outcome.OK.value
     recorded = ctx.state[PLAN_STATE_KEY]
-    # What `harness.graph._drop_seeds_from_turn` does: the seed and its copy
-    # over the plan's period move from the seeded sources to the dropped ones.
+    # The turn drops the seed: it and its copy over the plan's period move from
+    # the seeded sources to the dropped ones.
     save_dropped_seeds(ctx.state, seeded_sources(ctx.state))
     save_seeded_sources(ctx.state, [])
 
@@ -3611,72 +3626,6 @@ def test_a_patch_that_carries_a_dropped_pin_forward_is_refused(
 
 
 # --- the envelope's own spec_id, synthesized into a Decision ---------------------------
-
-
-class _NodeContext:
-    """The part of a graph node's context `_drop_seeds_from_turn` reads: its state."""
-
-    def __init__(self, state: dict[str, Any]) -> None:
-        self.state = state
-
-
-def test_windowed_copy_keeps_statvars_and_a_drop_blocks_its_pin(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-    decision: DecisionFactory,
-) -> None:
-    """A plan pins a seed through its copy over the plan's period. The copy posts the
-    seed's StatVars, and dropping the seed drops the copy with it, so a patch that
-    carries the copy's pin forward is refused."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    seed = _seeded()
-    seed = seed.model_copy(
-        update={"source": seed.source.model_copy(update={"stat_vars": ("Var_a", "Var_b")})}
-    )
-    kept = _seeded({**_SEED_IDENTITY, "seed": "population"})
-    save_seeded_sources(ctx.state, [seed, kept])
-    other = requirement(id="other", decision_ids=["scope"])
-    first = tools["propose_plan"].func(
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        decisions=drafts([pinning_decision(_SEED_SPEC), decision(slot="scope")]),
-        evidence_requirements=[
-            requirement(source_spec_id=_SEED_SPEC, period=Period(start=2024, end=2024)),
-            other,
-        ],
-        tool_context=ctx,
-    )
-    assert first["outcome"] == Outcome.OK.value
-    (copy,) = [item for item in seeded_sources(ctx.state) if item.windowed_from]
-    assert copy.source.spec_id != _SEED_SPEC
-    assert copy.source.stat_vars == ("Var_a", "Var_b")
-
-    ctx.state["resolve_envelope"] = json.dumps(
-        {
-            "seeds": [
-                {"spec_id": _SEED_SPEC, "sentence": "education aid", "operations": []},
-                {"spec_id": kept.source.spec_id, "sentence": "population", "operations": []},
-            ]
-        }
-    )
-    _drop_seeds_from_turn(cast(Any, _NodeContext(ctx.state)), {_SEED_SPEC}, surface="studio")
-
-    assert json.loads(ctx.state["dropped_untold"]) == [{"name": "education aid", "reason": None}]
-    assert {item.source.spec_id for item in dropped_seeds(ctx.state)} == {
-        _SEED_SPEC,
-        copy.source.spec_id,
-    }
-    assert [item.source.spec_id for item in seeded_sources(ctx.state)] == [kept.source.spec_id]
-    carried = tools["propose_plan"].func(
-        evidence_requirements=[other.model_copy(update={"measure": "debt stock"})],
-        amends_version=int(first["version"]),
-        tool_context=ctx,
-    )
-    assert carried["code"] == ProblemCode.SEED_DROPPED.value
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert plan.version == int(first["version"])
 
 
 @pytest.mark.parametrize(
@@ -3844,14 +3793,12 @@ def test_a_re_pin_to_the_one_source_found_in_place_of_a_stale_pin_needs_no_decis
 _GDP_ALL, _GDP_1960_2024 = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "gdp_guatemala_definitions.json").read_text()
 )
-# The one StatVar the source elected, which Search needs to resolve either.
-_GDP_STAT_VAR = "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
 
 
 @pytest.fixture
 def gdp_on_record() -> Iterator[None]:
     """`_GDP_ALL`'s identity on record, as `harness.studio` sets the lookup for a segment."""
-    recorded = RecordedIdentity(identity=_GDP_ALL["identity"], stat_vars=(_GDP_STAT_VAR,))
+    recorded = RecordedIdentity(identity=_GDP_ALL["identity"])
     token = current_recorded_identity.set({_GDP_ALL["spec_id"]: recorded}.get)
     yield
     current_recorded_identity.reset(token)
@@ -3914,7 +3861,6 @@ def test_propose_plan_pins_a_recorded_identity_over_the_requirements_period(
         copied: WindowedPin(
             spec_id=copied,
             identity=_GDP_1960_2024["identity"],
-            stat_vars=(_GDP_STAT_VAR,),
             windowed_from=_GDP_ALL["spec_id"],
         )
     }
@@ -3964,6 +3910,29 @@ def test_propose_plan_keeps_a_pin_with_no_identity_on_record(
     pin = _GDP_ALL["spec_id"]
     assert _source_pins(load_plan(ctx.state)) == (pin, [search_pin_slot(pin)])
     assert windowed_pins(ctx.state) == {}
+
+
+def test_a_windowed_pin_stored_with_member_lists_is_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session that crosses the release holds a copy with `stat_vars`, which
+    `WindowedPin` no longer has. It is dropped, and the copy stored in the
+    current shape beside it is kept."""
+    kept = WindowedPin(
+        spec_id=_GDP_1960_2024["spec_id"],
+        identity=_GDP_1960_2024["identity"],
+        windowed_from=_GDP_ALL["spec_id"],
+    )
+    stale = kept.model_dump(mode="json") | {"spec_id": "spec_" + "9" * 32, "stat_vars": ["GDP"]}
+    state: dict[str, Any] = {WINDOWED_PINS_STATE_KEY: [stale, kept.model_dump(mode="json")]}
+
+    with caplog.at_level(logging.WARNING, logger="planner.plan"):
+        held = windowed_pins(state)
+
+    assert held == {kept.spec_id: kept}
+    (logged,) = caplog.records
+    assert logged.levelno == logging.WARNING
+    assert logged.args == (WINDOWED_PINS_STATE_KEY, 1, "stat_vars")
 
 
 # --- Decisions as the model writes them ---------------------------------------------
@@ -4832,7 +4801,8 @@ def test_create_planner_agent_wires_name_model_and_tools() -> None:
 
     assert isinstance(agent, LlmAgent)
     assert agent.name == "dfo_planner"
-    assert agent.model == "gemini-3.8-flash"
+    assert isinstance(agent.model, Gemini)
+    assert agent.model.model == "gemini-3.8-flash"
     assert {tool.name for tool in agent.tools} == {  # type: ignore[union-attr]
         "adk_request_input",
         "propose_plan",

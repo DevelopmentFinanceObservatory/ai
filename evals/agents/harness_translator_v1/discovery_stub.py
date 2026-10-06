@@ -100,15 +100,15 @@ def _spec(
             "rendered_sentence": sentence,
             "confidence": "high",
             "coverage": _WINDOW,
-            "stat_vars": {
-                "items": [{"ref": stat_var, "label": stat_var, "slot_values": []}],
-                "member_count": 1,
-                "truncated": False,
-            },
+            "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
             "entities": entities,
             "facets": {"unit": unit} if unit else {},
         },
-        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": {"stat_var": stat_var}},
+        "definition": {
+            "schema_version": 1,
+            "spec_id": spec_id,
+            "identity": {"shape": {"kind": "stat_var", "id": stat_var}},
+        },
     }
 
 

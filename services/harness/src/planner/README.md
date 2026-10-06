@@ -124,9 +124,9 @@ requirement pinned to the seed's spec_id. `propose_plan` moves that pin to
 the seed's identity over the requirement's own period
 (`_window_pins`, `data_mcp.definition_writes.windowed_identity`), so
 the plan retrieves the years it states, and records the copy beside the seed.
-One decision cannot fix a seed over two periods. When a seed's StatVars have
-left its dataset, the turn drops it (`planner.plan.dropped_seeds`) and tells
-the user the plan leaves it out; `propose_plan` then refuses any plan that
+One decision cannot fix a seed over two periods. When Search's answer for a
+seed's identity is not the seed's dataset, the turn drops it
+(`planner.plan.dropped_seeds`) and tells the user the plan leaves it out; `propose_plan` then refuses any plan that
 pins it or its copy, whoever the decision says resolved it, as
 `seed_dropped`, and checks an amended plan whole, since a patch carries
 forward what it does not name. `planner.plan.names_dropped_seed` is the one

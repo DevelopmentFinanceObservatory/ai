@@ -169,55 +169,13 @@
           "inapplicable_slots": [],
           "unresolved_slots": [],
           "stat_vars": {
-            "items": [
-              {
-                "ref": "Amount_EconomicActivity_ExpenditureActivity_HealthcareExpenditure_AsFractionOf_Count_Person",
-                "label": "Healthcare expenditure per person",
-                "slot_values": [
-                  {
-                    "key": {
-                      "axis": "how",
-                      "property": {
-                        "dcid": "activitySource",
-                        "label": "activitySource"
-                      },
-                      "label": "activity source"
-                    },
-                    "value": {
-                      "ref": {
-                        "dcid": "ExpenditureActivity",
-                        "label": "ExpenditureActivity"
-                      },
-                      "value_kind": "enum_value"
-                    }
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "property": {
-                        "dcid": "expenditureType",
-                        "label": "expenditureType"
-                      },
-                      "label": "expenditure type"
-                    },
-                    "value": {
-                      "ref": {
-                        "dcid": "HealthcareExpenditure",
-                        "label": "HealthcareExpenditure"
-                      },
-                      "value_kind": "enum_value"
-                    }
-                  }
-                ],
-                "data_date_range": {
-                  "start": "2000",
-                  "end": "2024"
-                }
-              }
-            ],
             "member_count": 1,
             "member_count_exact": false,
-            "truncated": false
+            "served_count": null,
+            "data_date_range": {
+              "start": "2000",
+              "end": "2024"
+            }
           },
           "entities": [],
           "coverage": {
@@ -1594,12 +1552,6 @@
             }
           ],
           "trace": {
-            "resolved_stat_vars": [
-              {
-                "dcid": "Amount_EconomicActivity_ExpenditureActivity_HealthcareExpenditure_AsFractionOf_Count_Person",
-                "label": "Healthcare expenditure per person"
-              }
-            ],
             "resolved_entities": [],
             "resolved_sources": [
               {
@@ -1673,38 +1625,6 @@
               }
             ],
             "query_qualifiers": [],
-            "pipeline_trace": [
-              {
-                "step": "extract",
-                "ran": false
-              },
-              {
-                "step": "recall",
-                "ran": true,
-                "ms": 677
-              },
-              {
-                "step": "shape",
-                "ran": true,
-                "ms": 1098
-              },
-              {
-                "step": "bind",
-                "ran": true,
-                "ms": 1234
-              },
-              {
-                "step": "materialise",
-                "ran": true,
-                "ms": 232
-              },
-              {
-                "step": "answer",
-                "ran": true,
-                "ms": 102
-              }
-            ],
-            "n_recalled": 67,
             "capability_version": "cap_a71dd3a39765e8e5"
           },
           "confidence": "high",

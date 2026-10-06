@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -52,10 +52,12 @@ from executor.outcomes import (
 )
 from executor.run import StepProgressCallback, current_step_id, execute_approved_plan
 from fastmcp import Client
-from google.adk.events import Event
+from google.adk import Context
+from google.adk.events import Event, RequestInput
 from google.adk.runners import InMemoryRunner
 from google.adk.workflow._errors import NodeInterruptedError
 from google.adk.workflow.utils._workflow_hitl_utils import (
+    create_request_input_event,
     create_request_input_response,
     get_request_input_interrupt_ids,
 )
@@ -71,9 +73,10 @@ from harness.graph import (
     PLANNER_STARTED_KEY,
     REFUSED_WRITE_VOCABULARY,
     STEP_PROGRESS_KEY,
+    UNREADABLE_PLAN_NOTE,
+    UNREADABLE_PLAN_UNPLANNED_NOTE,
     GenerativeNodes,
     GraphState,
-    _drop_seeds_from_turn,
     _failed_step,
     _frame_unavailable_reason,
     _mark_masked_step_failed,
@@ -89,7 +92,6 @@ from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import (
     NO_OPERATIONS_ON_DOWNLOAD,
     ONE_DATASET_PER_DOWNLOAD,
-    SEED_DROPPED,
     SEED_DUPLICATE,
     SEED_REFERENCE_UNUSED,
     SEED_STEP_TOOL,
@@ -100,7 +102,6 @@ from harness.seeds import (
     resolve_seed,
     seeded_envelope,
     stale_reason,
-    stale_seeds,
     unplanned_seeds_text,
 )
 from harness.tool_contracts import graph_envelope
@@ -117,8 +118,6 @@ from planner.plan import (
     Period,
     PlanStatus,
     ResolvedBy,
-    SeededSource,
-    dropped_seeds,
     plan_revision,
     seeded_sources,
 )
@@ -2295,18 +2294,14 @@ async def test_fetch_relays_its_get_data_report_under_the_fetch_step_id() -> Non
     assert _output_of(events, "fetch")["frame_refs"] == [REF_A]
 
 
-def _searched_block(spec_id: str, *refs: object) -> dict[str, Any]:
-    """The `definite` spec block a resolver carries beside its digest, electing `refs`."""
+def _searched_block(spec_id: str, *, served_count: int | None) -> dict[str, Any]:
+    """The `definite` spec block a resolver carries beside its digest."""
     return {
         "spec_id": spec_id,
         "resolved": {
             "rendered_sentence": "Total population in Kenya",
             "coverage": {"kind": "exact", "has_data": True},
-            "stat_vars": {
-                "items": [{"ref": ref, "slot_values": []} for ref in refs],
-                "member_count": len(refs),
-                "truncated": False,
-            },
+            "stat_vars": {"member_count": 2, "served_count": served_count},
         },
     }
 
@@ -2326,44 +2321,17 @@ async def _fetch_args(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("member_digest", "posted"),
-    [
-        (None, {"resolved_stat_var_dcids": ["Count_Person", "Count_Person_Female"]}),
-        # A family Search states a member digest for is elected again by the
-        # mint, so its listed StatVars are exemplars and none is posted.
-        ("d", {}),
-    ],
-    ids=["listed-membership", "digest-family"],
-)
-async def test_fetch_posts_the_statvars_the_searched_block_elected(
-    member_digest: str | None, posted: dict[str, Any]
-) -> None:
-    block = _searched_block(SPEC_A, "Count_Person", "Count_Person_Female")
-    if member_digest is not None:
-        block["resolved"]["shape"] = {"member_count": 2, "member_digest": member_digest}
-
-    args = await _fetch_args(_envelope(spec_block=block))
-
-    assert args == {"spec_id": SPEC_A, **posted}
-
-
-@pytest.mark.parametrize(
     "block",
     [
         None,
-        _searched_block(SPEC_A),
-        _searched_block(SPEC_B, "Count_Person"),
-        _searched_block(SPEC_A, "dcid:Count_Person"),
-        _searched_block(SPEC_A, 7),
+        _searched_block(SPEC_A, served_count=1),
+        _searched_block(SPEC_A, served_count=None),
+        _searched_block(SPEC_B, served_count=2),
     ],
-    ids=["no-block", "none-elected", "another-spec", "a-prefixed-ref", "a-ref-that-is-no-dcid"],
+    ids=["no-block", "one-served", "unsettled", "another-spec"],
 )
-async def test_fetch_posts_no_statvars_it_cannot_read_off_the_block_for_its_spec(
-    block: dict[str, Any] | None,
-) -> None:
-    """`get_data` then resolves the family with nothing posted. A block that
-    cannot be read as a source posts nothing: a list cut to the readable
-    entries would differ from the one a plan's retrieval posts."""
+async def test_fetch_posts_the_spec_id_alone(block: dict[str, Any] | None) -> None:
+    """The mint resolves the family's members itself, whatever the block states."""
     assert await _fetch_args(_envelope(spec_block=block)) == {"spec_id": SPEC_A}
 
 
@@ -2399,44 +2367,52 @@ async def test_a_refused_fetch_names_the_refusal_and_keeps_no_frame() -> None:
     }
 
 
+def test_a_session_saved_before_search_stopped_listing_members_still_validates() -> None:
+    """A session saved at an interrupt before the cutover holds
+    `spec_id_stat_vars`, the StatVars `clarify` stored for its chosen
+    candidate. The state schema validates it, and leaves the key unread."""
+    saved = {"question": "population of guatemala", "spec_id": "spec_" + "a" * 32}
+    saved["spec_id_stat_vars"] = json.dumps(
+        {"spec_id": saved["spec_id"], "stat_vars": ["Count_Person"]}
+    )
+
+    state = GraphState.model_validate(saved)
+
+    assert state.spec_id == saved["spec_id"]
+    assert "spec_id_stat_vars" not in state.model_dump()
+
+
 def test_every_graph_state_field_has_a_default() -> None:
     """A session saved at an interrupt resumes under the current schema, so a
     field it does not hold has to validate from its default."""
     required = [name for name, field in GraphState.model_fields.items() if field.is_required()]
 
     assert required == []
-    assert GraphState().model_dump()["spec_id_stat_vars"] is None
     assert GraphState().model_dump()["seeds"] is None
 
 
 def _two_candidates() -> dict[str, Any]:
-    """A `candidates` answer offering two narrow readings, each with the StatVars `search` elected."""
+    """A `candidates` answer offering two narrow readings."""
     return _envelope(
         status="candidates",
         spec_id=None,
         candidates=[
-            {"spec_id": SPEC_A, "label": "reading A", "stat_vars": ["Count_Person"]},
-            {"spec_id": SPEC_B, "label": "reading B", "stat_vars": ["Count_Person_Female"]},
+            {"spec_id": SPEC_A, "label": "reading A"},
+            {"spec_id": SPEC_B, "label": "reading B"},
         ],
     )
 
 
 @pytest.mark.parametrize(
     ("answer", "posted"),
-    [
-        (
-            {"spec_id": SPEC_B},
-            {"spec_id": SPEC_B, "resolved_stat_var_dcids": ["Count_Person_Female"]},
-        ),
-        ({"skip": True}, {"spec_id": SPEC_A, "resolved_stat_var_dcids": ["Count_Person"]}),
-    ],
+    [({"spec_id": SPEC_B}, {"spec_id": SPEC_B}), ({"skip": True}, {"spec_id": SPEC_A})],
     ids=["the-chosen-candidate", "the-default-candidate-on-a-skip"],
 )
-async def test_fetch_posts_the_statvars_search_elected_for_the_candidate_clarify_settled(
+async def test_fetch_retrieves_the_candidate_clarify_settled(
     answer: dict[str, Any], posted: dict[str, Any]
 ) -> None:
-    """The re-entry resolve searches nothing and carries no block, so the
-    candidate's own elected StatVars are what `fetch` posts."""
+    """The re-entry resolve searches nothing and carries no block; `fetch`
+    retrieves the settled candidate's spec_id."""
     resolver = ScriptedResolver([_two_candidates(), _envelope(spec_id=posted["spec_id"])])
     executor = ScriptedExecutor()
     runner, session_id, events = await _start(
@@ -2444,17 +2420,14 @@ async def test_fetch_posts_the_statvars_search_elected_for_the_candidate_clarify
         "population of guatemala",
     )
     assert _pending_interrupt(events) == CLARIFY_INTERRUPT
-    # The interrupt reaches models, so it names no candidate's StatVars.
-    (asked,) = [call.args for call in events[-1].get_function_calls()]
-    assert "Count_Person" not in json.dumps(asked)
 
     await _resume(runner, session_id, CLARIFY_INTERRUPT, answer)
 
     assert executor.calls == [{"tool": "get_data", "args": posted}]
 
 
-async def test_fetch_posts_the_statvars_of_the_candidate_the_round_bound_took() -> None:
-    """Past `MAX_CLARIFY_ROUNDS` the top candidate is taken, with its own StatVars."""
+async def test_fetch_retrieves_the_candidate_the_round_bound_took() -> None:
+    """Past `MAX_CLARIFY_ROUNDS` the top candidate is taken."""
     resolver = ScriptedResolver(
         [_two_candidates(), _two_candidates(), _two_candidates(), _envelope(spec_id=SPEC_A)]
     )
@@ -2467,12 +2440,7 @@ async def test_fetch_posts_the_statvars_of_the_candidate_the_round_bound_took() 
     for _ in range(MAX_CLARIFY_ROUNDS):
         await _resume(runner, session_id, CLARIFY_INTERRUPT, {"spec_id": SPEC_B})
 
-    assert executor.calls == [
-        {
-            "tool": "get_data",
-            "args": {"spec_id": SPEC_A, "resolved_stat_var_dcids": ["Count_Person"]},
-        }
-    ]
+    assert executor.calls == [{"tool": "get_data", "args": {"spec_id": SPEC_A}}]
 
 
 async def test_fetch_posts_no_candidate_statvars_for_a_spec_the_re_entry_resolve_renamed() -> None:
@@ -4937,22 +4905,24 @@ async def test_the_planner_node_announces_a_draft_before_the_seam_returns() -> N
     assert seam.drafted
 
 
-async def test_the_approve_node_refuses_an_old_shaped_plan_record(
+async def test_the_approve_node_drafts_again_over_an_old_shaped_plan_record(
     real_schemas: list[ToolSchema],
 ) -> None:
     """`ctx.state["plan"]` must hold a `planner.plan.Plan`. A record with a
     `tool_calls` sequence and an integer version, instead of a compiled
     workflow and a revision hash, is a strict-schema mismatch (`tool_calls`
-    is not a `planner.plan.Plan` field), and the `approve` node must raise
-    on it rather than quietly parsing it as a stand-in and keying approval
-    on its version integer.
+    is not a `planner.plan.Plan` field). The `approve` node approves
+    nothing on it, never parsing it as a stand-in and keying approval on its
+    version integer: the record is cleared, the planner drafts the question
+    from the start, and the new card says why.
     """
     plan = _seam_plan(schemas=real_schemas)
     seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     resolver = ScriptedResolver([_envelope(choice_points=2)])
+    executor = ScriptedExecutor()
     workflow = create_root_workflow(
         resolver=resolver,
-        executor=ScriptedExecutor(),
+        executor=executor,
         generative=GenerativeNodes(planner=seam),
         tool_surface=_fixture_surface(real_schemas),
     )
@@ -4974,14 +4944,111 @@ async def test_the_approve_node_refuses_an_old_shaped_plan_record(
     session = runner.session_service.sessions[runner.app_name]["u"][session_id]
     session.state["plan"] = json.dumps(old_shape)
 
-    with pytest.raises(ValidationError) as excinfo:
-        await _resume(runner, session_id, APPROVE_INTERRUPT, {"approved": old_shape["version"]})
+    events = await _resume(
+        runner, session_id, APPROVE_INTERRUPT, {"approved": old_shape["version"]}
+    )
 
-    # Pinned to the `approve` node itself, not to some other strict parse
-    # downstream: a fallback silently accepting the old shape here would
-    # instead route "approved" or "amend" and raise nothing at all, or
-    # raise from `execute` instead.
-    assert any(frame.name == "approve" for frame in excinfo.traceback)
+    assert _output_of(events, "approve") == {"unreadable_plan": True}
+    assert executor.calls == []
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert seam.calls[1]["prior_plan"] is None
+    redrafted = _output_of(events, "planner")
+    assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert redrafted["restarted"] is True
+    assert redrafted["revision"] == plan_revision(plan)
+    assert PlannerPlan.model_validate_json(session.state["plan"]) == plan
+
+
+async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_discarded(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The user approved a plan the release cannot read, and the planner
+    refuses to draft it again. No card follows to say what became of the plan
+    they approved, so the closing text opens with it."""
+    plan = _seam_plan(schemas=real_schemas)
+    seam = _Seam(
+        [
+            {"plan": plan.model_dump(mode="json"), "summary": {}},
+            {"refused": {"text": "The draft budget is spent.", "final": True}},
+        ]
+    )
+    workflow = create_root_workflow(
+        resolver=ScriptedResolver([_envelope(choice_points=2)]),
+        executor=ScriptedExecutor(),
+        generative=GenerativeNodes(planner=seam),
+        tool_surface=_fixture_surface(real_schemas),
+    )
+    runner, session_id, _ = await _start(workflow, "kenya debt")
+    session = runner.session_service.sessions[runner.app_name]["u"][session_id]
+    session.state["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+
+    events = await _resume(runner, session_id, APPROVE_INTERRUPT, {"approved": 1})
+
+    refused = _output_of(events, "planner")
+    assert refused == {
+        "text": f"{UNREADABLE_PLAN_UNPLANNED_NOTE} The draft budget is spent.",
+        "final": True,
+    }
+    assert _pending_interrupt(events) is None
+
+
+_PLANNER_ASK = "planner_ask"
+
+
+def _ask_the_user(ctx: Context) -> Iterator[Any]:
+    """A node that pauses on a question and outputs the answer it is resumed with."""
+    answer = (ctx.resume_inputs or {}).get(_PLANNER_ASK)
+    if answer is None:
+        yield create_request_input_event(
+            RequestInput(interrupt_id=_PLANNER_ASK, message="Which years?")
+        )
+        return
+    yield Event(output=answer)
+
+
+class _AskingOnAmendSeam(_Seam):
+    """A `PlannerModel` that drafts its first plan outright and asks the user
+    a question, through a real `ctx.run_node` pause, on every later call."""
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        if len(self.calls) > 1:
+            await kwargs["ctx"].run_node(_ask_the_user)
+        return self._plans[0]
+
+
+async def test_a_planner_ask_resumed_over_an_unreadable_plan_drafts_from_the_start(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The planner asks the user a question while amending a plan, and the
+    plan on record is unreadable when the answer resumes it. The `planner`
+    node finds that itself: nothing is left to amend, so the seam is handed
+    no amendment and no prior plan, and the card says why."""
+    plan = _seam_plan(schemas=real_schemas)
+    seam = _AskingOnAmendSeam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    workflow = create_root_workflow(
+        resolver=ScriptedResolver([_envelope(choice_points=2)]),
+        executor=ScriptedExecutor(),
+        generative=GenerativeNodes(planner=seam),
+        tool_surface=_fixture_surface(real_schemas),
+    )
+    runner, session_id, _ = await _start(workflow, "kenya debt")
+    events = await _resume(
+        runner, session_id, APPROVE_INTERRUPT, {"approved": None, "amendment": "only 2020"}
+    )
+    assert [get_request_input_interrupt_ids(event) for event in events].count([_PLANNER_ASK]) == 1
+    assert seam.calls[1]["amendment"] == "only 2020"
+    session = runner.session_service.sessions[runner.app_name]["u"][session_id]
+    session.state["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
+
+    events = await _resume(runner, session_id, _PLANNER_ASK, {"answer": "2020"})
+
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert seam.calls[2]["amendment"] is None
+    assert seam.calls[2]["prior_plan"] is None
+    redrafted = _output_of(events, "planner")
+    assert redrafted["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert redrafted["restarted"] is True
 
 
 async def test_an_approval_for_a_superseded_revision_routes_to_amend(
@@ -5048,36 +5115,14 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
 # The scripted plan as the code at commit 2563638 serialised it, beside the
 # revision that code computed (`tests/planner/test_revision_format.py`). Its
 # workflow is pinned to the schemas `ScriptedSurface` served at that commit,
-# which `_BaseFormatSurface` serves.
+# which it still serves.
 _BASE_FORMAT_PLAN: dict[str, Any] = json.loads(
     (Path(__file__).parent / "fixtures" / "revision_base_plans.json").read_text()
 )["aggregate"]
 
 
-class _BaseFormatSurface(ScriptedSurface):
-    """`ScriptedSurface` declaring `get_data` as it did at commit 2563638, when the
-    tool took no `resolved_stat_var_dcids`."""
-
-    async def list_tools(self) -> list[ToolSchema]:
-        return [
-            schema.model_copy(
-                update={
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"spec_id": {"type": "string"}, "scope": {"type": "object"}},
-                        "required": ["spec_id"],
-                        "additionalProperties": False,
-                    }
-                }
-            )
-            if schema.name == "get_data"
-            else schema
-            for schema in await super().list_tools()
-        ]
-
-
-async def test_the_base_format_surface_declares_the_schemas_the_saved_plan_names() -> None:
-    declared = {schema.name: schema for schema in await _BaseFormatSurface().list_tools()}
+async def test_the_scripted_surface_declares_the_schemas_the_saved_plan_names() -> None:
+    declared = {schema.name: schema for schema in await ScriptedSurface().list_tools()}
 
     for step in _BASE_FORMAT_PLAN["plan"]["workflow"]["steps"]:
         assert declared[step["tool"]["name"]].input_schema_hash == step["input_schema_hash"]
@@ -5088,7 +5133,7 @@ async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unam
     saved. A plan saved without the fields its models have since gained
     still hashes to that revision, so the answer approves it and it runs."""
     seam = _Seam([{"plan": _BASE_FORMAT_PLAN["plan"], "summary": {}}])
-    surface = _CallRecordingSurface(_BaseFormatSurface())
+    surface = _CallRecordingSurface(ScriptedSurface())
     workflow = create_root_workflow(
         resolver=ScriptedResolver([_envelope(choice_points=2)]),
         executor=ScriptedExecutor(),
@@ -5125,37 +5170,16 @@ async def test_an_approved_plan_saved_at_the_base_revision_format_executes() -> 
     )
 
     finished, outcome = await execute_approved_plan(
-        approved, surface=_BaseFormatSurface(), fetch_series_stats=scripted_fetch_series_stats
+        approved, surface=ScriptedSurface(), fetch_series_stats=scripted_fetch_series_stats
     )
 
     assert isinstance(outcome, Accepted), outcome
     assert finished.status is PlanStatus.COMPLETED
 
 
-async def test_a_saved_plan_whose_retrieval_posts_no_statvars_runs_while_get_data_is_unchanged() -> (
-    None
-):
-    """The saved retrieval step carries `spec_id` alone, and `get_data` takes
-    the elected StatVars as an optional argument, so the call is made as
-    saved."""
-    approved = PlannerPlan.model_validate(
-        _BASE_FORMAT_PLAN["plan"]
-        | {"status": "approved", "approved_revision": _BASE_FORMAT_PLAN["revision"]}
-    )
-    surface = _CallRecordingSurface(_BaseFormatSurface())
-
-    _, outcome = await execute_approved_plan(
-        approved, surface=surface, fetch_series_stats=scripted_fetch_series_stats
-    )
-
-    assert isinstance(outcome, Accepted), outcome
-    assert surface.calls[0] == ("get_data", {"spec_id": "spec_" + "f" * 32})
-
-
-async def test_a_saved_plan_is_refused_for_reapproval_once_get_data_takes_statvars() -> None:
-    """The surface a plan runs against now declares `resolved_stat_var_dcids`,
-    so the saved step's argument schema is no longer the tool's. The run
-    stops before any call and says the plan needs approving again."""
+async def test_a_saved_plan_whose_retrieval_posts_its_spec_id_alone_runs_as_saved() -> None:
+    """The saved retrieval step carries `spec_id` alone, as `get_data` takes
+    it, so the call is made as saved."""
     approved = PlannerPlan.model_validate(
         _BASE_FORMAT_PLAN["plan"]
         | {"status": "approved", "approved_revision": _BASE_FORMAT_PLAN["revision"]}
@@ -5166,34 +5190,25 @@ async def test_a_saved_plan_is_refused_for_reapproval_once_get_data_takes_statva
         approved, surface=surface, fetch_series_stats=scripted_fetch_series_stats
     )
 
-    assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.SURFACE_CHANGED
-    assert outcome.step_id == "retrieve"
-    assert outcome.detail == (
-        "'get_data' takes different arguments than the plan was compiled against; "
-        "the plan needs compiling and approving again"
-    )
-    assert surface.calls == []
+    assert isinstance(outcome, Accepted), outcome
+    assert surface.calls[0] == ("get_data", {"spec_id": "spec_" + "f" * 32})
 
 
 # A population rank as the code at commit 2563638 compiled it against the tool
-# schemas the servers declared then, when `get_data` took no
-# `resolved_stat_var_dcids`.
+# schemas the servers declared then.
 _BASE_FORMAT_LIVE_PLAN: dict[str, Any] = json.loads(
     (Path(__file__).parent / "fixtures" / "revision_base_plans.json").read_text()
 )["rank"]
 
 
-async def test_an_approved_plan_compiled_before_get_data_took_statvars_is_refused_for_reapproval(
+async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_for_reapproval(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """Its retrieval step posts no `resolved_stat_var_dcids` and names the
-    argument schema `get_data` declared when it was compiled. The run stops
-    before any call, with the step and the remedy named, and the plan keeps
-    its revision."""
+    """Its retrieval step names the argument schema `get_data` declared when it
+    was compiled. The run stops before any call, with the step and the remedy
+    named, and the plan keeps its revision."""
     saved = _BASE_FORMAT_LIVE_PLAN["plan"]
     (retrieval,) = (s for s in saved["workflow"]["steps"] if s["tool"]["name"] == "get_data")
-    assert "resolved_stat_var_dcids" not in retrieval["args"]
     approved = PlannerPlan.model_validate(
         saved | {"status": "approved", "approved_revision": _BASE_FORMAT_LIVE_PLAN["revision"]}
     )
@@ -6435,7 +6450,7 @@ def _seed(
                     "has_data": True,
                     "dimensions": [{"label": "recipients", "count": 199}],
                 },
-                "stat_vars": {"items": [{"ref": f"Var_{name}", "slot_values": []}]},
+                "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
                 **(resolved or {}),
             },
         },
@@ -6577,7 +6592,7 @@ async def test_a_seeded_turn_stores_each_seed_through_data_mcp_and_mints_nothing
             "stat_var_item_count": 1,
             "stat_var_member_count_exact": True,
             "entity_roles": [],
-            "stat_var_truncated": False,
+            "stat_var_served_count": 1,
             "open_entity_axes": [],
             "choice_points": 0,
             "warnings": [],
@@ -6594,7 +6609,7 @@ async def test_a_seeded_turn_stores_each_seed_through_data_mcp_and_mints_nothing
             "stat_var_item_count": 1,
             "stat_var_member_count_exact": True,
             "entity_roles": [],
-            "stat_var_truncated": False,
+            "stat_var_served_count": 1,
             "open_entity_axes": [],
             "choice_points": 0,
             "warnings": [],
@@ -6808,7 +6823,6 @@ async def test_a_no_year_seed_on_the_fetch_path_fetches_the_year_search_showed(
             "tool": "get_data",
             "args": {
                 "spec_id": _spec_id(seed),
-                "resolved_stat_var_dcids": ["Var_education"],
                 "scope": {"window": {"kind": "range", "start_year": 2024, "end_year": 2024}},
             },
             "step_id": FETCH_STEP_ID,
@@ -6826,23 +6840,22 @@ _KENYA_SEED = {
 }
 
 
-@pytest.mark.parametrize("digested", [True, False], ids=["digest-family", "recall-sample"])
-async def test_a_seed_resubmit_posts_its_stat_vars_only_for_a_family_without_a_member_digest(
-    definition_store: InMemoryDefinitionStore, digested: bool
+async def test_a_seed_resubmit_posts_its_identity_alone(
+    definition_store: InMemoryDefinitionStore,
 ) -> None:
-    """Search elects a family with a member digest again from its code index and
-    ignores a posted list for it; a recall sample is re-read from the list."""
+    """Search derives the population from the identity, so the resubmit posts
+    the spec_id and the identity and nothing of the block the browser sent."""
+    del definition_store
     seed = copy.deepcopy(_KENYA_SEED)
-    listed = [item["ref"] for item in seed["spec"]["resolved"]["stat_vars"]["items"]]
-    assert seed["spec"]["resolved"]["shape"]["member_digest"] and listed
-    if not digested:
-        del seed["spec"]["resolved"]["shape"]["member_digest"]
     surface = DataMcpDefinitions(served=[seed["spec"]])
 
     await resolve_seed(surface, TakenSeed(index=0, seed=Seed.model_validate(seed)))
 
     (call,) = surface.calls
-    assert call.get("stat_vars", []) == ([] if digested else listed)
+    assert call == {
+        "spec_id": seed["spec"]["spec_id"],
+        "identity": seed["spec"]["definition"]["identity"],
+    }
 
 
 async def test_a_served_flow_seed_with_no_operation_plans_on_studio(
@@ -6966,7 +6979,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
     repeat = copy.deepcopy(first)
     if contradicts:
         repeat["spec"]["resolved"]["rendered_sentence"] = "another reading"
-        repeat["spec"]["resolved"]["stat_vars"] = {"items": [{"ref": "Var_OTHER"}]}
+        repeat["spec"]["resolved"]["stat_vars"] = {"member_count": 3, "served_count": 3}
         repeat["operations"] = [_RANK_DONORS]
 
     runner, session_id, _ = await _start_seeded(
@@ -6985,7 +6998,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
     )
     state = await _state(runner, session_id)
     (seeded,) = seeded_sources(state)
-    assert seeded.source.stat_vars == ("Var_education",)
+    assert seeded.source.sentence == "the reading education"
     assert state["parts"] == 1
     (planned,) = json.loads(state["resolve_envelope"])["seeds"]
     assert (planned["sentence"], planned["operations"]) == ("the reading education", [])
@@ -7168,54 +7181,26 @@ async def test_a_seed_whose_question_named_its_year_fetches_without_asking(
     assert executor.calls == [
         {
             "tool": "get_data",
-            "args": {"spec_id": _spec_id(seed), "resolved_stat_var_dcids": ["Var_education"]},
+            "args": {"spec_id": _spec_id(seed)},
             "step_id": FETCH_STEP_ID,
         }
     ]
 
 
-_MINT_REFUSED_SELECTION = json.loads(
-    (
-        Path(__file__).parents[2]
-        / "data-mcp"
-        / "tests"
-        / "fixtures"
-        / "mint_refused_selection.json"
-    ).read_text()
-)
-
-
-def _recorded_stale_seed(*, operations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """The seed of the recorded mint refusal: its identity, and the StatVars it posted,
-    one of which has left the identity's family."""
-    definition = _MINT_REFUSED_SELECTION["request"]["definition"]
-    stale = _MINT_REFUSED_SELECTION["request"]["resolved_stat_var_dcids"]
-    return {
-        "spec": {
-            "spec_id": definition["spec_id"],
-            "definition": definition,
-            "resolved": {
-                "rendered_sentence": "the population of Kenya",
-                "stat_vars": {"items": [{"ref": ref, "slot_values": []} for ref in stale]},
-            },
-        },
-        "operations": operations or [],
-    }
-
-
-def _recorded_refusal(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis's recorded 422 `member_not_resolvable`, answering a `spec_id` mint."""
+def _refused_mint(request: httpx2.Request) -> httpx2.Response:
+    """dfo-apis's 409 `spec_not_exportable`, answering a `spec_id` mint."""
     assert request.url.path == "/api/datasets"
-    response = _MINT_REFUSED_SELECTION["response"]
-    return httpx2.Response(response["status"], json=response["body"])
-
-
-class _DropsTheRemedy:
-    """A narrator whose closing text leaves out the failed step's remedy."""
-
-    async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-        del question, facts
-        return {"text": "The data could not be fetched."}
+    return httpx2.Response(
+        409,
+        json={
+            "type": "/codes/spec_not_exportable",
+            "title": "Spec Not Exportable",
+            "status": 409,
+            "detail": "the identity enumerates no member",
+            "code": "spec_not_exportable",
+            "retryable": False,
+        },
+    )
 
 
 class _DataMcpExecutor(_SeedExecutor):
@@ -7260,13 +7245,13 @@ async def test_a_seed_is_stored_in_the_data_mcp_whose_get_data_retrieves_it(
     holds, as when it runs as its own service. The seed is stored in data-mcp's,
     and the download's `get_data` there posts its definition to the mint."""
     service = InMemoryDefinitionStore()
-    seed = _recorded_stale_seed()
+    seed = _seed("population")
     definition = seed["spec"]["definition"]
     posted: list[dict[str, Any]] = []
 
     def respond(request: httpx2.Request) -> httpx2.Response:
         posted.append(json.loads(request.content))
-        return _recorded_refusal(request)
+        return _refused_mint(request)
 
     surface = DataMcpDefinitions(service, served=[seed])
     workflow = create_root_workflow(
@@ -7285,566 +7270,10 @@ async def test_a_seed_is_stored_in_the_data_mcp_whose_get_data_retrieves_it(
     assert [call["spec_id"] for call in surface.calls] == [definition["spec_id"]]
 
 
-async def test_a_seed_whose_statvar_left_its_dataset_closes_the_fetch_with_the_remedy(
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    """The recorded dfo-apis 422 for a posted StatVar outside the identity's
-    family, met on the no-plan path. Nothing replans there, so the remedy is
-    the turn's answer: it reaches the closing text by code even when the
-    narrator drops it. The download surface takes `fetch` whatever the
-    block's width."""
-    recorded = _MINT_REFUSED_SELECTION
-    definition = recorded["request"]["definition"]
-    stale = recorded["request"]["resolved_stat_var_dcids"]
-    seed = _recorded_stale_seed()
-    posted: list[dict[str, Any]] = []
-
-    def respond(request: httpx2.Request) -> httpx2.Response:
-        posted.append(json.loads(request.content))
-        return _recorded_refusal(request)
-
-    executor = _DataMcpExecutor(definition_store, respond)
-    workflow = create_root_workflow(
-        resolver=ScriptedResolver([_envelope()]),
-        executor=executor,
-        generative=GenerativeNodes(narrate=_DropsTheRemedy()),
-        tool_surface=None,
-        definition_surface=DataMcpDefinitions(served=[seed]),
-        surface="download",
-    )
-    _, _, events = await _start_seeded(workflow, "population of Kenya", [seed])
-
-    assert spec_id_for(canonicalize(definition["identity"])) == definition["spec_id"]
-    assert [call["args"] for call in executor.calls] == [
-        {"spec_id": definition["spec_id"], "resolved_stat_var_dcids": stale}
-    ]
-    (mint,) = posted
-    assert mint["input"]["resolved_stat_var_dcids"] == stale
-    (refusal,) = executor.refusals
-    assert refusal["code"] == "spec_not_exportable"
-    assert refusal["fix"]["not_members"]
-    remedy = refusal["fix"]["remedy"]
-    assert isinstance(remedy, str) and remedy
-    fetched = _output_of(events, "fetch")
-    assert fetched["frame_refs"] == []
-    assert fetched["failed_step"] == {
-        "step_id": FETCH_STEP_ID,
-        "tool": "get_data",
-        "code": refusal["code"],
-        "message": refusal["message"],
-        "remedy": remedy,
-    }
-    narrated = _output_of(events, "narrate")
-    assert narrated["text"] == f"The data could not be fetched. {remedy}"
-
-
-class _SeedRetrievalSurface:
-    """`get_data` over the real schema, answered per spec_id: a stale seed's through
-    data-mcp in process, its mint answered by the recorded 422, any other's with a
-    manifest. `calls` records each call's arguments."""
-
-    def __init__(
-        self, schemas: list[ToolSchema], store: InMemoryDefinitionStore, *, stale: set[str]
-    ) -> None:
-        self._schemas = [schema for schema in schemas if schema.name == "get_data"]
-        self._store = store
-        self._stale = stale
-        # data-mcp's lifespan installs a store of its own on each client's entry, so
-        # the wave's concurrent stale calls go through it one at a time.
-        self._lock = asyncio.Lock()
-        self.calls: list[dict[str, Any]] = []
-
-    async def list_tools(self) -> list[ToolSchema]:
-        return self._schemas
-
-    async def call_tool(
-        self,
-        *,
-        tool: ToolId,
-        arguments: Mapping[str, Any],
-        on_progress: ProgressCallback | None = None,
-    ) -> ToolCallResult:
-        del on_progress
-        assert tool.name == "get_data"
-        self.calls.append(dict(arguments))
-        spec_id = arguments["spec_id"]
-        if spec_id not in self._stale:
-            return ToolCallResult(
-                is_error=False, structured_content=_get_data_manifest(spec_id=spec_id), text="ok"
-            )
-        async with self._lock:
-            upstream = UpstreamClient(
-                settings=DataMcpSettings(), transport=httpx2.MockTransport(_recorded_refusal)
-            )
-            client_holder.set_client(upstream)
-            try:
-                async with Client(data_mcp) as client:
-                    set_definition_store(self._store)
-                    result = await client.call_tool(
-                        "get_data", dict(arguments), raise_on_error=False
-                    )
-            finally:
-                client_holder.set_client(None)
-                set_definition_store(self._store)
-        assert result.is_error, result
-        return ToolCallResult(
-            is_error=True, structured_content=result.structured_content, text="refused"
-        )
-
-
-def _seeded_plan(
-    *,
-    schemas: list[ToolSchema],
-    seeds: list[dict[str, Any]],
-    bound: set[str],
-    version: int = 1,
-) -> PlannerPlan:
-    """A translated plan retrieving each of `seeds` under its own step, posting the
-    StatVars its block elected. A step retrieving a spec_id in `bound` is bound as its
-    requirement's evidence; a succeeding step is left unbound, since its evidence check
-    is not what these tests are about."""
-    decision = Decision(
-        slot="window",
-        description="Which years?",
-        options=["2015-2024", "2018-2024"],
-        chosen="2015-2024",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="a full decade covers the series",
-    )
-    get_data_schema = next(schema for schema in schemas if schema.name == "get_data")
-    requirements: list[DatasetRequirement] = []
-    operations: list[RetrieveOperation] = []
-    steps: list[WorkflowStep] = []
-    bindings: list[EvidenceBinding] = []
-    for index, seed in enumerate(seeds):
-        spec_id = _spec_id(seed)
-        requirement = DatasetRequirement(
-            id=f"part_{index}",
-            decision_ids=["window"],
-            measure=seed["spec"]["resolved"]["rendered_sentence"],
-            entities=[Entity(name="Kenya", role="recipient")],
-            period=Period(start=2015, end=2024),
-        )
-        step_id = f"get_{index}"
-        requirements.append(requirement)
-        operations.append(
-            RetrieveOperation(id=step_id, requirement_id=requirement.id, spec_id=spec_id)
-        )
-        steps.append(
-            WorkflowStep(
-                id=step_id,
-                operation_id=step_id,
-                tool=ToolId(server="data-mcp", name="get_data"),
-                args={
-                    "spec_id": spec_id,
-                    "resolved_stat_var_dcids": [
-                        item["ref"] for item in seed["spec"]["resolved"]["stat_vars"]["items"]
-                    ],
-                },
-                input_schema_hash=get_data_schema.input_schema_hash,
-                output_schema_hash=get_data_schema.output_schema_hash,
-                implementation_version=get_data_schema.version,
-            )
-        )
-        if spec_id in bound:
-            bindings.append(
-                EvidenceBinding(requirement_id=requirement.id, step_id=step_id, spec_id=spec_id)
-            )
-    draft = PlannerPlan(
-        question="population and education aid in Kenya",
-        decisions=[decision],
-        evidence_requirements=requirements,
-        version=version,
-    )
-    translation = Translation(
-        operations=operations, terminal=[operation.id for operation in operations]
-    )
-    workflow = Workflow(
-        steps=steps,
-        sources=[
-            SelectedSource(
-                spec_id=_spec_id(seed),
-                sentence=seed["spec"]["resolved"]["rendered_sentence"],
-                has_data=True,
-            )
-            for seed in seeds
-        ],
-        evidence_bindings=bindings,
-        terminal_steps=[step.id for step in steps],
-    )
-    return draft.with_translation(translation=translation, workflow=workflow)
-
-
-def _seed_plan_turn(
-    seam: _Seam,
-    surface: _SeedRetrievalSurface,
-    served: Sequence[Mapping[str, Any]],
-    *,
-    narrate: Any | None = None,
-) -> Any:
-    return create_root_workflow(
-        resolver=ScriptedResolver([_envelope()]),
-        executor=_SeedExecutor(),
-        generative=GenerativeNodes(planner=seam, narrate=narrate),
-        tool_surface=surface,
-        definition_surface=DataMcpDefinitions(served=served),
-    )
-
-
-@pytest.mark.parametrize("stale_first", [False, True], ids=["stale-last", "stale-first"])
-async def test_a_stale_seed_among_others_is_dropped_and_the_turn_replans_from_the_rest(
-    definition_store: InMemoryDefinitionStore,
-    real_schemas: list[ToolSchema],
-    stale_first: bool,
-) -> None:
-    """One seed's retrieval meets the recorded 422: its StatVars left its dataset. The
-    turn drops that seed and offers a plan built from the other, whose card names the
-    dropped seed. The approved replan retrieves the other seed alone."""
-    good = _seed("education", operations=[_RANK_DONORS])
-    stale = _recorded_stale_seed()
-    seeds = [stale, good] if stale_first else [good, stale]
-    first = _seeded_plan(schemas=real_schemas, seeds=seeds, bound={_spec_id(stale)})
-    second = _seeded_plan(schemas=real_schemas, seeds=[good], bound=set(), version=2)
-    seam = _Seam(
-        [
-            {"plan": first.model_dump(mode="json"), "summary": {}},
-            {"plan": second.model_dump(mode="json"), "summary": {}},
-        ]
-    )
-    surface = _SeedRetrievalSurface(real_schemas, definition_store, stale={_spec_id(stale)})
-    runner, session_id, events = await _start_seeded(
-        _seed_plan_turn(seam, surface, seeds), "education aid and the population of Kenya", seeds
-    )
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(first)}
-    )
-
-    assert sorted(call["spec_id"] for call in surface.calls) == sorted(
-        [_spec_id(good), _spec_id(stale)]
-    )
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    refusal = seam.calls[-1]["refusal"]
-    assert {key: refusal[key] for key in ("kind", "step_id", "spec_id", "also_stopped")} == {
-        "kind": "seed_dropped",
-        "step_id": "get_0" if stale_first else "get_1",
-        "spec_id": _spec_id(stale),
-        "also_stopped": [],
-    }
-    assert refusal["refusal"]["code"] == "spec_not_exportable"
-    assert "Do not plan that dataset again in this turn" in refusal["refusal"]["message"]
-    posted = _MINT_REFUSED_SELECTION["request"]["resolved_stat_var_dcids"]
-    assert not [dcid for dcid in posted if dcid in refusal["refusal"]["message"]]
-    assert [seed["spec_id"] for seed in seam.calls[-1]["envelope"]["seeds"]] == [_spec_id(good)]
-    state = await _state(runner, session_id)
-    assert [item.source.spec_id for item in seeded_sources(state)] == [_spec_id(good)]
-    assert [item.source.spec_id for item in dropped_seeds(state)] == [_spec_id(stale)]
-    assert state["parts"] == 1
-    assert state["replans"] == 1
-    assert state["spec_id"] == _spec_id(good)
-    assert json.loads(state["resolve_envelope"])["spec_id"] == _spec_id(good)
-    replanned = _output_of(events, "planner")
-    assert replanned["revision"] == plan_revision(second)
-    assert replanned["refusal_note"] == (
-        'This plan leaves out "the population of Kenya": the variables Search listed for it '
-        "are no longer part of its dataset. Search for it again to add it."
-    )
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(second)}
-    )
-
-    assert _pending_interrupt(events) is None
-    assert [call["spec_id"] for call in surface.calls[2:]] == [_spec_id(good)]
-    executed = _output_of(events, "execute")
-    assert "failed_step" not in executed
-    assert [ref["spec_id"] for ref in executed["frame_refs"]] == [_spec_id(good)]
-
-
-@pytest.mark.parametrize(
-    "seeds",
-    [
-        [_recorded_stale_seed(operations=[_RANK_DONORS])],
-        [_seed("education", operations=[_RANK_DONORS]), _recorded_stale_seed()],
-    ],
-    ids=["one-seed", "every-seed-stale"],
-)
-async def test_a_turn_with_no_seed_left_to_plan_from_stops_with_the_remedy(
-    definition_store: InMemoryDefinitionStore,
-    real_schemas: list[ToolSchema],
-    seeds: list[dict[str, Any]],
-) -> None:
-    """With no other seed to plan from, a stale seed's refusal stops the turn without a
-    replan, and its remedy to search again closes it."""
-    plan = _seeded_plan(schemas=real_schemas, seeds=seeds, bound={_spec_id(seed) for seed in seeds})
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    surface = _SeedRetrievalSurface(
-        real_schemas, definition_store, stale={_spec_id(seed) for seed in seeds}
-    )
-    runner, session_id, _ = await _start_seeded(
-        _seed_plan_turn(seam, surface, seeds, narrate=_DropsTheRemedy()), "aid to Kenya", seeds
-    )
-
-    events = await _resume(runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
-
-    assert _pending_interrupt(events) is None
-    assert len(seam.calls) == 1
-    failed = _output_of(events, "execute")["failed_step"]
-    assert failed["code"] == "spec_not_exportable"
-    assert failed["remedy"].startswith("A variable search listed for this dataset")
-    assert _output_of(events, "narrate")["text"] == (
-        f"The data could not be fetched. {failed['remedy']}"
-    )
-    state = await _state(runner, session_id)
-    assert [item.source.spec_id for item in seeded_sources(state)] == [
-        _spec_id(seed) for seed in seeds
-    ]
-    assert state["replans"] == 0
-
-
-async def test_a_stale_seed_met_after_the_replan_budget_is_spent_stops_the_turn(
-    definition_store: InMemoryDefinitionStore, real_schemas: list[ToolSchema]
-) -> None:
-    """`MAX_REPLANS` bounds the drops: a second stale seed, met by the replanned plan,
-    closes the turn with its remedy rather than a third plan."""
-    good = _seed("education", operations=[_RANK_DONORS])
-    stale = _recorded_stale_seed()
-    later = _seed("water")
-    first = _seeded_plan(schemas=real_schemas, seeds=[good, stale], bound={_spec_id(stale)})
-    second = _seeded_plan(
-        schemas=real_schemas, seeds=[good, later], bound={_spec_id(later)}, version=2
-    )
-    seam = _Seam(
-        [
-            {"plan": first.model_dump(mode="json"), "summary": {}},
-            {"plan": second.model_dump(mode="json"), "summary": {}},
-        ]
-    )
-    surface = _SeedRetrievalSurface(
-        real_schemas, definition_store, stale={_spec_id(stale), _spec_id(later)}
-    )
-    runner, session_id, _ = await _start_seeded(
-        _seed_plan_turn(seam, surface, [good, stale, later], narrate=_DropsTheRemedy()),
-        "education aid, the population of Kenya, and water aid",
-        [good, stale, later],
-    )
-    await _resume(runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(first)})
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(second)}
-    )
-
-    assert _pending_interrupt(events) is None
-    assert len(seam.calls) == 2
-    failed = _output_of(events, "execute")["failed_step"]
-    assert (failed["step_id"], failed["code"]) == ("get_1", "spec_not_exportable")
-    assert _output_of(events, "narrate")["text"] == (
-        f"The data could not be fetched. {failed['remedy']}"
-    )
-    state = await _state(runner, session_id)
-    assert [item.source.spec_id for item in seeded_sources(state)] == [
-        _spec_id(good),
-        _spec_id(later),
-    ]
-
-
-async def test_a_replan_that_drafts_no_plan_after_a_drop_closes_naming_every_seed(
-    definition_store: InMemoryDefinitionStore, real_schemas: list[ToolSchema]
-) -> None:
-    """The planner drafts nothing from the seed left after a drop. The closing text names
-    the dropped seed and its remedy, says the other seed was not planned, and gives the
-    planner's reason. It claims no plan, and the turn draws no card."""
-    good = _seed("education", operations=[_RANK_DONORS])
-    stale = _recorded_stale_seed()
-    first = _seeded_plan(schemas=real_schemas, seeds=[good, stale], bound={_spec_id(stale)})
-    seam = _Seam(
-        [
-            {"plan": first.model_dump(mode="json"), "summary": {}},
-            {"refused": {"text": "I could not draft a plan within the budget."}},
-        ]
-    )
-    surface = _SeedRetrievalSurface(real_schemas, definition_store, stale={_spec_id(stale)})
-    runner, session_id, _ = await _start_seeded(
-        _seed_plan_turn(seam, surface, [good, stale]),
-        "education aid and the population of Kenya",
-        [good, stale],
-    )
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(first)}
-    )
-
-    assert _pending_interrupt(events) is None
-    good_name = json.loads((await _state(runner, session_id))["resolve_envelope"])["seeds"][0][
-        "sentence"
-    ]
-    assert _output_of(events, "deadend")["text"] == (
-        '"the population of Kenya" could not be retrieved: the variables Search listed for '
-        "it are no longer part of its dataset. Search for it again. No plan was drafted for "
-        f'"{good_name}", so nothing is shown for it. I could not draft a plan within the budget.'
-    )
-    assert "compose" not in _visited(events)
-
-
-def test_the_unplanned_seeds_text_names_several_seeds() -> None:
-    stale = [DroppedSeed(name=name, reason=None) for name in ("a", "b")]
-    assert unplanned_seeds_text(stale, ["c", "d"], "") == (
-        '"a" and "b" could not be retrieved: the variables Search listed for them are no '
-        "longer part of their datasets. Search for each again. No plan was drafted for "
-        '"c" and "d", so nothing is shown for them.'
-    )
-
-
-async def test_a_stale_step_on_a_seeds_copy_over_a_period_names_the_seed(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """A plan retrieves a seed over its own period as a copy of the seed
-    (`SeededSource.windowed_from`); the copy's stale refusal names the seed."""
-    seed = SeededSource(source=SelectedSource(spec_id=SPEC_A, sentence="seed", has_data=True))
-    copy = SeededSource(
-        source=SelectedSource(spec_id=SPEC_B, sentence="seed", has_data=True),
-        windowed_from=SPEC_A,
-    )
-    workflow = _seam_plan(schemas=real_schemas).workflow
-    failure = ToolFailure(
-        code="spec_not_exportable",
-        message="no longer members",
-        retry_mode="do_not_retry",
-        fix={"not_members": ["Count_Person_Female"]},
-    )
-    stop = Refused(
-        revision="r",
-        refusal=RefusalKind.STEP_REFUSED,
-        detail="refused",
-        step_id="get_data",
-        payload=failure,
-    )
-    assert workflow is not None
-    bound = workflow.model_copy(
-        update={
-            "evidence_bindings": (
-                EvidenceBinding(requirement_id="spending", step_id="get_data", spec_id=SPEC_B),
-            )
-        }
-    )
-
-    assert stale_seeds(stop, workflow=bound, seeded=[seed, copy]) == {"get_data": SPEC_A}
-    assert stale_seeds(stop, workflow=bound, seeded=[]) == {}
-    unnamed = stop.model_copy(update={"payload": failure.model_copy(update={"fix": {}})})
-    assert stale_seeds(unnamed, workflow=bound, seeded=[seed, copy]) == {}
-
-
-class _StateOnly:
-    """The part of a node's context `_drop_seeds_from_turn` reads: its state."""
-
-    def __init__(self, state: dict[str, Any]) -> None:
-        self.state = state
-
-
-@pytest.mark.parametrize(
-    ("dropped", "left", "wide", "choice_points"),
-    [(SPEC_A, SPEC_B, True, 2), (SPEC_B, SPEC_A, False, 0)],
-    ids=["the-first-seed", "the-wide-seed"],
-)
-def test_a_drop_builds_the_envelope_again_from_the_seeds_left(
-    dropped: str, left: str, wide: bool, choice_points: int
-) -> None:
-    """The top level states the turn, so what the dropped seed added to it goes with it."""
-    warning = {"code": "stale", "severity": "degraded", "message": "m"}
-    seeds = [
-        {
-            "spec_id": SPEC_A,
-            "sentence": "a",
-            "choice_points": 0,
-            "wide": False,
-            "warnings": [],
-            "operations": [],
-        },
-        {
-            "spec_id": SPEC_B,
-            "sentence": "b",
-            "choice_points": 2,
-            "wide": True,
-            "warnings": [warning],
-            "operations": [],
-        },
-    ]
-    state: dict[str, Any] = {"resolve_envelope": json.dumps(seeded_envelope(seeds))}
-
-    _drop_seeds_from_turn(cast(Any, _StateOnly(state)), {dropped}, surface="studio")
-
-    envelope = json.loads(state["resolve_envelope"])
-    assert json.loads(state["dropped_untold"]) == [
-        {"name": "a" if dropped == SPEC_A else "b", "reason": None}
-    ]
-    assert [seed["spec_id"] for seed in envelope["seeds"]] == [left]
-    assert (envelope["spec_id"], envelope["parts"]) == (left, 1)
-    assert (envelope["wide"], envelope["choice_points"]) == (wide, choice_points)
-    assert envelope["warnings"] == ([warning] if left == SPEC_B else [])
-    assert (state["spec_id"], state["parts"], state["spec_id_wide"]) == (left, 1, wide)
-    assert state["spec_id_elected_label"] == ("b" if left == SPEC_B else "a")
-    # The seed left is one part: wide and degraded when it is seed b, a plain
-    # single series when it is seed a. Neither is "more than one thing".
-    assert state["depth"] == ("deep" if left == SPEC_B else "none")
-    assert "2 part(s)" not in state["depth_reason"]
-    assert (state["depth_notice"] or "").startswith("There is a data quality issue") is (
-        left == SPEC_B
-    )
-
-
-class _FailsOnTheReplan:
-    """A `PlannerModel` that drafts the first plan and raises on the next call, as the
-    seam does when the pair never reaches `submit_plan`."""
-
-    def __init__(self, plan: dict[str, Any]) -> None:
-        self._plan = plan
-        self.calls = 0
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        self.calls += 1
-        if self.calls == 1:
-            return self._plan
-        raise RuntimeError("submit_plan was never called")
-
-
-async def test_a_replan_that_raises_after_a_drop_closes_naming_the_seed_and_the_remedy(
-    definition_store: InMemoryDefinitionStore,
-    real_schemas: list[ToolSchema],
-) -> None:
-    """The drop is already decided when the replan fails, so the turn closes with what the
-    user is owed: which dataset was left out, and to search for it again."""
-    good = _seed("education", operations=[_RANK_DONORS])
-    stale = _recorded_stale_seed()
-    first = _seeded_plan(schemas=real_schemas, seeds=[good, stale], bound={_spec_id(stale)})
-    seam = _FailsOnTheReplan({"plan": first.model_dump(mode="json"), "summary": {}})
-    surface = _SeedRetrievalSurface(real_schemas, definition_store, stale={_spec_id(stale)})
-    runner, session_id, _ = await _start_seeded(
-        _seed_plan_turn(cast(Any, seam), surface, [good, stale]),
-        "education aid and the population of Kenya",
-        [good, stale],
-    )
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(first)}
-    )
-
-    assert seam.calls == 2
-    assert _pending_interrupt(events) is None
-    assert _output_of(events, "deadend") == {
-        "text": (
-            '"the population of Kenya" could not be retrieved: the variables Search listed '
-            "for it are no longer part of its dataset. Search for it again. No plan was "
-            'drafted for "the reading education", so nothing is shown for it.'
-        )
-    }
-
-
 async def test_a_planner_that_raises_with_no_drop_still_raises(
     definition_store: InMemoryDefinitionStore,
 ) -> None:
-    """The control: only a replan after a drop is closed for the seam."""
+    """A planner seam that raises on a first draft fails the turn."""
     del definition_store
 
     class _Raises:
@@ -7864,47 +7293,6 @@ async def test_a_planner_that_raises_with_no_drop_still_raises(
         await _start_seeded(workflow, "top 5 donors", [seed])
 
 
-async def test_the_replanned_card_states_the_depth_of_the_seeds_left(
-    definition_store: InMemoryDefinitionStore,
-    real_schemas: list[ToolSchema],
-) -> None:
-    """Two seeds with no operation plan because they are two parts. With one dropped,
-    the card for the one left does not say the question asks for more than one thing."""
-    good = _seed("education")
-    stale = _recorded_stale_seed()
-    first = _seeded_plan(schemas=real_schemas, seeds=[good, stale], bound={_spec_id(stale)})
-    second = _seeded_plan(schemas=real_schemas, seeds=[good], bound=set(), version=2)
-    seam = _Seam(
-        [
-            {"plan": first.model_dump(mode="json"), "summary": {}},
-            {"plan": second.model_dump(mode="json"), "summary": {}},
-        ]
-    )
-    surface = _SeedRetrievalSurface(real_schemas, definition_store, stale={_spec_id(stale)})
-    runner, session_id, _ = await _start_seeded(
-        _seed_plan_turn(seam, surface, [good, stale]),
-        "education aid and the population of Kenya",
-        [good, stale],
-    )
-    before = await _state(runner, session_id)
-    assert "2 part(s)" in before["depth_reason"]
-    assert "more than one thing" in before["depth_notice"]
-
-    events = await _resume(
-        runner, session_id, APPROVE_INTERRUPT, {"approved": plan_revision(first)}
-    )
-
-    state = await _state(runner, session_id)
-    replanned = _output_of(events, "planner")
-    assert state["parts"] == 1
-    assert "2 part(s)" not in state["depth_reason"]
-    assert (replanned["depth"], replanned["depth_notice"]) == (
-        state["depth"],
-        state["depth_notice"],
-    )
-    assert "more than one thing" not in (replanned["depth_notice"] or "")
-
-
 def test_a_stale_reason_for_another_dataset_omits_a_spec_id_search_did_not_name() -> None:
     part = {"status": "definite"}
     unnamed = PartNotResolvedError(PartFault.ANOTHER_DATASET, part=part)
@@ -7913,56 +7301,24 @@ def test_a_stale_reason_for_another_dataset_omits_a_spec_id_search_did_not_name(
     assert stale_reason(named) == "Search now resolves it to another dataset (spec_x)"
 
 
-def test_the_dropped_seeds_note_names_each_seed() -> None:
-    stale = [DroppedSeed(name=name, reason=None) for name in ("a", "b", "c")]
-    assert dropped_seeds_note(stale) == (
-        'This plan leaves out "a", "b", and "c": the variables Search listed for them are no '
-        "longer part of their datasets. Search for each again to add it."
-    )
-    assert dropped_seeds_note(stale[:2]).startswith('This plan leaves out "a" and "b":')
-
-
-def test_the_dropped_seeds_note_gives_a_seed_dropped_as_it_was_taken_its_own_reason() -> None:
+def test_the_dropped_seeds_note_gives_each_seed_its_own_reason() -> None:
     drops = [
-        DroppedSeed(name="a", reason=None),
+        DroppedSeed(name="a", reason="Search no longer supports it: y"),
         DroppedSeed(name="dataset 2 from Search", reason="Search finds no data for it (x)"),
     ]
     assert dropped_seeds_note(drops) == (
-        'This plan leaves out "a": the variables Search listed for it are no longer part of '
-        'its dataset; "dataset 2 from Search": Search finds no data for it (x). Search for '
-        "each again to add it."
+        'This plan leaves out "a": Search no longer supports it: y; "dataset 2 from Search": '
+        "Search finds no data for it (x). Search for each again to add it."
     )
 
 
-async def test_a_seed_whose_statvar_carries_the_dcid_prefix_fails_its_own_step(
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    """An answer from Search with a selection `get_data` would refuse drops its seed,
-    with the reason, and the other seed plans."""
-    executor = _SeedExecutor()
-    good = _seed("education", operations=[_RANK_DONORS])
-    prefixed = _seed("kenya")
-    prefixed["spec"]["resolved"]["stat_vars"]["items"][0]["ref"] = "dcid:Var_kenya"
-    runner, session_id, events = await _start_seeded(
-        _seeded_workflow(executor, ScriptedResolver([_envelope()]), [prefixed, good]),
-        "top 5 donors for education aid, and aid to Kenya",
-        [prefixed, good],
+def test_the_unplanned_seeds_text_names_several_seeds() -> None:
+    drops = [DroppedSeed(name=name, reason="Search finds no data for it (x)") for name in "ab"]
+    assert unplanned_seeds_text(drops, ["c", "d"], "") == (
+        '"a" could not be retrieved: Search finds no data for it (x). "b" could not be '
+        "retrieved: Search finds no data for it (x). Search for each again. No plan was "
+        'drafted for "c" and "d", so nothing is shown for them.'
     )
-
-    assert executor.steps[0] == {
-        "tool": SEED_STEP_TOOL,
-        "step_id": "seed-0",
-        "outcome": "refusal",
-        "code": SEED_DROPPED,
-    }
-    assert executor.messages["seed-0"] == (
-        "seed 0 is left out: Search's answer for it cannot be read (ValueError: the spec "
-        "block is not usable as a source: resolved.stat_vars.items[0].ref 'dcid:Var_kenya' "
-        "is not a bare dcid: it carries the dcid: prefix). Search for it again to add it."
-    )
-    assert "probe" not in _visited(events)
-    state = await _state(runner, session_id)
-    assert [item.source.spec_id for item in seeded_sources(state)] == [_spec_id(good)]
 
 
 @pytest.mark.parametrize(

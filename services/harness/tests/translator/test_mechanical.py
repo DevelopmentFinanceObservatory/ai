@@ -45,8 +45,6 @@ from google.genai import types
 from harness.wire import (
     MAX_SEED_RECORD_CHARS,
     MAX_SEED_SOURCE_CHARS,
-    MAX_SEED_STAT_VARS,
-    MAX_SEED_TEXT_CHARS,
     MAX_SEEDS,
 )
 from planner.agent import _window_pins
@@ -822,14 +820,10 @@ TRANSLATE_SEEDED_RESULT_CEILING = (
 )
 # `planner:plan` holds the workflow, which keeps one source record and one
 # `get_data` step per retrieval: the record at most `MAX_SEED_RECORD_CHARS`
-# with its stamped phrase, the step's posted StatVars at most
-# `MAX_SEED_STAT_VARS` dcids, and 4,096 for the step, its binding and its
+# with its stamped phrase, and 4,096 for the step, its binding and its
 # operation. The plan's own text is at most `MAX_PLAN_RECORD_CHARS`.
 PLAN_STATE_SEEDED_CEILING = MAX_PLAN_RECORD_CHARS + MAX_PLAN_REQUIREMENTS * (
-    MAX_SEED_RECORD_CHARS
-    + MAX_MEASURE_CHARS
-    + MAX_SEED_STAT_VARS * (MAX_SEED_TEXT_CHARS + len('"", '))
-    + 4_096
+    MAX_SEED_RECORD_CHARS + MAX_MEASURE_CHARS + 4_096
 )
 
 
@@ -1560,17 +1554,24 @@ async def test_a_reused_block_whose_entities_miss_the_requirement_is_refused_at_
         assert result["referral"]["requirement_id"] == "annual_debt_service"
 
 
+@pytest.mark.parametrize(
+    "change",
+    [{"measure": "a different ask, never searched before"}, {"across": "creditor"}],
+    ids=["measure", "across-opening-a-role"],
+)
 async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
     draft: DraftFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     source: SourceFactory,
     context_holding: ContextHolding,
+    change: dict[str, str],
 ) -> None:
     """A settled record only covers the requirement's own searched content
     (`requirement_revision`): a requirement sharing the same id but asking
-    about a different `measure` earns a fresh `discover_source` call rather
-    than reusing a record settled for the old content.
+    about a different `measure`, or for an open role through `across`, earns
+    a fresh `discover_source` call rather than reusing a record settled for
+    the old content.
     """
     stale = requirement()
     plan = draft(evidence_requirements=[stale, derived_requirement()])
@@ -1584,7 +1585,7 @@ async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
         spec_ids=(SPEC_OTHER,),
     )
 
-    changed = requirement(measure="a different ask, never searched before")
+    changed = requirement(**change)
     save_plan(context.state, draft(evidence_requirements=[changed, derived_requirement()]))
 
     calls: list[str] = []
@@ -1623,13 +1624,14 @@ async def test_a_requirement_stating_across_rediscovers_a_source_recorded_withou
     recorded_axes: tuple[()] | None,
     rediscovered: bool,
 ) -> None:
-    """`across` is no part of `requirement_revision`, so a record settled
-    for the same searched content matches a requirement that states it. A
-    source whose open entity axes were never read cannot answer `across`, so
-    it is discovered again. A source that read them and found none open is
-    reused: the compiler refuses it with what it states.
+    """An `across` naming no side of a flow whole opens no role, so it is no
+    part of `requirement_revision`, and a record settled for the same searched
+    content matches a requirement that states it. A source whose open entity axes
+    were never read cannot answer `across`, so it is discovered again. A
+    source that read them and found none open is reused: the compiler refuses
+    it with what it states.
     """
-    across = requirement(across="creditor")
+    across = requirement(across="bilateral creditor")
     plan = draft(evidence_requirements=[across, derived_requirement()])
     context = context_holding(plan)
     _seed_settled(
@@ -1959,7 +1961,7 @@ async def test_two_ambiguities_refer_only_the_first_ones_candidates(
             status=DiscoveryStatus.CANDIDATES,
             spec_ids=spec_ids,
         )
-        candidates = tuple(source(spec_id=spec_id, stat_vars=()) for spec_id in spec_ids)
+        candidates = tuple(source(spec_id=spec_id, served_count=None) for spec_id in spec_ids)
         save_log(context.state, load_log(context.state).with_record(record, candidates))
 
     async def discover_source(*, requirement_id: str, tool_context: Any) -> dict[str, object]:

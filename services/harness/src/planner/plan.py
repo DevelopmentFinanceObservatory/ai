@@ -40,16 +40,18 @@ recorded.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from typing import Annotated, Any, Literal, Protocol
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from data_mcp.definition_writes import windowed_identity
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
 from planner.parties import PARTY_ROLES, across_party, role_party, singular
@@ -77,6 +79,7 @@ from planner.records import (
     TaggedModel,
     TitlelessEnum,
     Year,
+    warn_left_out,
 )
 from planner.shapes import (
     FrameShape,
@@ -96,6 +99,8 @@ from planner.shapes import (
 )
 from planner.shapes import rejects as shape_rejects
 from planner.workflow import SelectedSource, Workflow
+
+logger = logging.getLogger(__name__)
 
 # The session-state slot holding the current `Plan`. One key, because a plan is
 # filled in stages by more than one agent and each stage reads the last.
@@ -149,8 +154,9 @@ SEEDED_SOURCES_STATE_KEY = "planner:seeded_sources"
 
 # The session-state slot holding a `SeededSource` for every dataset the turn
 # dropped, each seed and each copy of it over another window
-# (`dropped_seeds`). `harness.graph`'s `execute` node writes it when a seed's
-# StatVars have left its dataset and the turn replans from the other seeds;
+# (`dropped_seeds`). `harness.graph`'s `seed` node writes it when Search's
+# answer for a seed's identity is not the seed's dataset and the turn plans
+# from the other seeds;
 # the user is then told the plan leaves that dataset out. For the rest of the
 # turn `planner.agent.propose_plan` refuses a plan that pins one, and
 # `translator.discovery.discover_source` takes no source from a search that
@@ -2648,9 +2654,9 @@ class SeededSource(StrictModel):
     Search showed no such headline. `windowed_from` is the spec_id of the
     seed this source copies over another window (`planner.agent`'s
     `propose_plan`); `None` on the seed itself. A copy is `windowed_copy`
-    of its seed: its spec_id, its identity, the seed's elected StatVars and
-    the seed's sentence, and no data or coverage, which the translator reads
-    from Search's answer for the copy (`translator.discovery`).
+    of its seed: its spec_id, its identity and the seed's sentence, and no
+    data or coverage, which the translator reads from Search's answer for the
+    copy (`translator.discovery`).
     """
 
     source: SelectedSource
@@ -2663,9 +2669,8 @@ def windowed_copy(seed: SeededSource, window: Mapping[str, Any]) -> SeededSource
 
     The copy's identity and spec_id are the seed's identity over `window`
     (`data_mcp.definition_writes.windowed_identity`), the ones `get_data`'s
-    `scope.window` would mint. It keeps the seed's elected StatVars and the
-    seed's sentence as a name, and states nothing Search stated for the
-    seed's own years.
+    `scope.window` would mint. It keeps the seed's sentence as a name, and
+    states nothing Search stated for the seed's own years.
 
     Raises:
         ValueError: If `seed` is a copy itself or states no identity.
@@ -2678,7 +2683,6 @@ def windowed_copy(seed: SeededSource, window: Mapping[str, Any]) -> SeededSource
             spec_id=spec_id,
             sentence=seed.source.sentence,
             has_data=None,
-            stat_vars=seed.source.stat_vars,
             identity=identity,
         ),
         windowed_from=seed.source.spec_id,
@@ -2693,9 +2697,14 @@ class _StoredCopy(StrictModel):
 
 
 class _StoredSources(StrictModel):
-    """Seeded sources as session state stores them: each seed whole, each copy by reference."""
+    """Seeded sources as session state stores them: each seed whole, each copy by reference.
 
-    seeds: list[SeededSource]
+    A seed is held as its own dump, a `SeededSource` once `_read_sources`
+    validates it, so one seed stored in a shape `SeededSource` rejects is
+    left out by itself.
+    """
+
+    seeds: list[dict[str, Any]]
     copies: list[_StoredCopy]
 
 
@@ -2725,42 +2734,85 @@ def _store_sources(sources: Sequence[SeededSource]) -> str:
                 "window (`windowed_copy`)"
             )
         copies.append(_StoredCopy(windowed_from=item.windowed_from, window=window))
-    stored = _StoredSources(seeds=seeds, copies=copies)
+    stored = _StoredSources(seeds=[seed.model_dump(mode="json") for seed in seeds], copies=copies)
     return json.dumps(stored.model_dump(mode="json"))
 
 
-def _read_sources(raw: str | None) -> list[SeededSource]:
-    """The sources `_store_sources` stored in `raw`, each copy rebuilt from its seed; empty when unset.
+def _read_sources(state: SessionState, state_key: str) -> list[SeededSource]:
+    """The sources `_store_sources` stored under `state_key`, each copy rebuilt from its seed; empty when unset.
+
+    A seed stored in a shape `SeededSource` rejects, one a release with other
+    fields wrote, is left out with every copy that names it. The dataset is
+    then none of the session's own: the turn searches for it, and the user
+    hands it over again to pin it. The omission is logged where the stored
+    text is first read (`_parsed_sources`), so a turn that reads the slot
+    many times logs it once.
 
     Raises:
-        ValueError: If a copy names a seed the stored sources do not hold.
+        ValueError: If a copy names a seed the stored sources never held.
     """
-    if not raw:
-        return []
+    raw = state.get(state_key)
+    return list(_parsed_sources(raw, state_key)) if raw else []
+
+
+@functools.lru_cache(maxsize=32)
+def _parsed_sources(raw: str, state_key: str) -> tuple[SeededSource, ...]:
+    """What `raw`, the text stored under `state_key`, reads as (`_read_sources`).
+
+    Kept by the stored text, which a turn leaves unchanged between its
+    reads of a slot, so one stored text is validated once and what it leaves
+    out is logged once.
+    """
     stored = _StoredSources.model_validate_json(raw)
-    seeds = {seed.source.spec_id: seed for seed in stored.seeds}
+    seeds: dict[str, SeededSource] = {}
+    rejected: set[str] = set()
+    errors: list[ValidationError] = []
+    for value in stored.seeds:
+        try:
+            seed = SeededSource.model_validate(value)
+        except ValidationError as exc:
+            source = value.get("source")
+            if isinstance(source, dict) and isinstance(source.get("spec_id"), str):
+                rejected.add(source["spec_id"])
+            errors.append(exc)
+        else:
+            seeds[seed.source.spec_id] = seed
     copies: list[SeededSource] = []
+    orphaned = 0
     for copy in stored.copies:
         seed = seeds.get(copy.windowed_from)
-        if seed is None:
+        if seed is not None:
+            copies.append(windowed_copy(seed, copy.window))
+        elif copy.windowed_from in rejected:
+            orphaned += 1
+        else:
             raise ValueError(
                 f"a stored copy over {copy.window!r} names the seed {copy.windowed_from!r}, "
                 "which the stored sources do not hold"
             )
-        copies.append(windowed_copy(seed, copy.window))
-    return [*stored.seeds, *copies]
+    if errors:
+        warn_left_out(
+            logger,
+            state_key,
+            errors,
+            entries=len(errors) + orphaned,
+            detail="%d seeds, %d copies of them",
+            counts=(len(errors), orphaned),
+        )
+    return (*seeds.values(), *copies)
 
 
 def seeded_sources(state: SessionState) -> list[SeededSource]:
     """The datasets `SEEDED_SOURCES_STATE_KEY` holds; empty when the seeds did not start this turn.
 
     The seeds come first, then the copies, each rebuilt from its seed
-    (`windowed_copy`).
+    (`windowed_copy`). A seed stored in a shape `SeededSource` rejects is
+    left out with its copies (`_read_sources`).
 
     Raises:
-        ValueError: If a copy names a seed the slot does not hold.
+        ValueError: If a copy names a seed the slot never held.
     """
-    return _read_sources(state.get(SEEDED_SOURCES_STATE_KEY))
+    return _read_sources(state, SEEDED_SOURCES_STATE_KEY)
 
 
 def save_seeded_sources(state: SessionState, sources: Sequence[SeededSource]) -> None:
@@ -2801,16 +2853,11 @@ def period_window(period: Period) -> dict[str, object]:
 class RecordedDefinition(Protocol):
     """A dataset's definition as a search in the conversation recorded it (`recorded_identity`).
 
-    `identity` is the identity document its spec_id hashes from, and
-    `stat_vars` the StatVars Search resolves it with: the one a dataset that
-    is no family elected, none for a family.
+    `identity` is the identity document its spec_id hashes from.
     """
 
     @property
     def identity(self) -> Mapping[str, Any]: ...
-
-    @property
-    def stat_vars(self) -> Sequence[str]: ...
 
 
 class WindowedPin(StrictModel):
@@ -2818,32 +2865,39 @@ class WindowedPin(StrictModel):
 
     `spec_id` and `identity` are the recorded identity of `windowed_from`
     over that period (`data_mcp.definition_writes.windowed_identity`), the
-    ones `get_data`'s `scope.window` would mint, and `stat_vars` the
-    recorded StatVars Search resolves it with (`windowed_pin`).
+    ones `get_data`'s `scope.window` would mint (`windowed_pin`).
     """
 
     spec_id: SpecId
     identity: dict[str, Any]
-    stat_vars: tuple[str, ...] = ()
     windowed_from: SpecId
 
 
 def windowed_pin(spec_id: str, recorded: RecordedDefinition, period: Period) -> WindowedPin:
     """The dataset `spec_id`, whose definition is `recorded`, over `period` in place of its own years."""
     copy_id, copied = windowed_identity(recorded.identity, period_window(period))
-    return WindowedPin(
-        spec_id=copy_id,
-        identity=copied,
-        stat_vars=tuple(recorded.stat_vars),
-        windowed_from=spec_id,
-    )
+    return WindowedPin(spec_id=copy_id, identity=copied, windowed_from=spec_id)
 
 
 def windowed_pins(state: SessionState) -> dict[str, WindowedPin]:
-    """The copies `WINDOWED_PINS_STATE_KEY` holds, by spec_id; empty when unset."""
-    stored = state.get(WINDOWED_PINS_STATE_KEY) or []
-    pins = (WindowedPin.model_validate(raw) for raw in stored)
-    return {pin.spec_id: pin for pin in pins}
+    """The copies `WINDOWED_PINS_STATE_KEY` holds, by spec_id; empty when unset.
+
+    A copy stored in a shape `WindowedPin` rejects, one a release with other
+    fields wrote, is left out, and the omission is logged. A requirement
+    pinned to it is then discovered through `search`.
+    """
+    pins: dict[str, WindowedPin] = {}
+    errors: list[ValidationError] = []
+    for raw in state.get(WINDOWED_PINS_STATE_KEY) or []:
+        try:
+            pin = WindowedPin.model_validate(raw)
+        except ValidationError as exc:
+            errors.append(exc)
+        else:
+            pins[pin.spec_id] = pin
+    if errors:
+        warn_left_out(logger, WINDOWED_PINS_STATE_KEY, errors, entries=len(errors))
+    return pins
 
 
 def save_windowed_pins(state: SessionState, pins: Iterable[WindowedPin]) -> None:
@@ -2937,30 +2991,18 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
     }
 
 
-def split_dropped(
-    sources: Sequence[SeededSource], seeds: Collection[str]
-) -> tuple[list[SeededSource], list[SeededSource]]:
-    """`sources` as those a drop of `seeds` keeps and those it takes.
-
-    A drop takes each named seed with every copy of it over another window
-    (`seed_of`), and nothing else: another seed over the same dataset and
-    other years is its own Search result and stays.
-    """
-    kept = [item for item in sources if seed_of(item) not in seeds]
-    taken = [item for item in sources if seed_of(item) in seeds]
-    return kept, taken
-
-
 def dropped_seeds(state: SessionState) -> list[SeededSource]:
     """The datasets `DROPPED_SEEDS_STATE_KEY` holds; empty when the turn dropped none.
 
     The seeds come first, then the copies, each rebuilt from its seed
-    (`windowed_copy`).
+    (`windowed_copy`). A seed stored in a shape `SeededSource` rejects is
+    left out with its copies (`_read_sources`), so the turn no longer holds
+    it as dropped.
 
     Raises:
-        ValueError: If a copy names a seed the slot does not hold.
+        ValueError: If a copy names a seed the slot never held.
     """
-    return _read_sources(state.get(DROPPED_SEEDS_STATE_KEY))
+    return _read_sources(state, DROPPED_SEEDS_STATE_KEY)
 
 
 def save_dropped_seeds(state: SessionState, sources: Sequence[SeededSource]) -> None:
@@ -2986,7 +3028,7 @@ def names_dropped_seed(
     The one rule every reader asks: `planner.agent.propose_plan` of a pin,
     with its spec_id alone, and `translator.discovery` of a source, with its
     identity too. A dataset the turn still holds as a seed or a copy of one
-    (`seeded_sources`, what `split_dropped` kept) is not dropped, whatever
+    (`seeded_sources`) is not dropped, whatever
     else matches: a second seed over the dropped one's dataset and other
     years stays usable. Otherwise it is dropped when its spec_id is a dropped
     one, or when its identity equals a dropped one's apart from
@@ -3020,10 +3062,27 @@ def load_asks(state: SessionState) -> tuple[str, ...]:
     return tuple(state.get(ASKS_STATE_KEY) or ())
 
 
+def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
+    """The plan `raw` holds, the text stored under `state_key`; `None` when it holds none.
+
+    A plan stored in a shape `Plan` rejects, one a release with other fields
+    wrote, is no plan, and the omission is logged. Its revision cannot be
+    computed, so the answer to its approval card names nothing, and its
+    workflow cannot run: the question is planned again. A caller that owns
+    the slot tells the two `None`s apart by `raw` and clears it.
+    """
+    if not raw:
+        return None
+    try:
+        return Plan.model_validate_json(raw)
+    except ValidationError as exc:
+        warn_left_out(logger, state_key, [exc])
+        return None
+
+
 def load_plan(state: SessionState) -> Plan | None:
-    """Return the plan held in session `state`, or `None` when none is."""
-    raw = state.get(PLAN_STATE_KEY)
-    return Plan.model_validate_json(raw) if raw else None
+    """Return the plan held in session `state`, or `None` when none is (`stored_plan`)."""
+    return stored_plan(state.get(PLAN_STATE_KEY), state_key=PLAN_STATE_KEY)
 
 
 def save_plan(state: SessionState, plan: Plan) -> None:
