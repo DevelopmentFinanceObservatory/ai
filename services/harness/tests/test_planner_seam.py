@@ -1584,7 +1584,7 @@ Resolve envelope:
 - stat_var_shape_kind: statvar_schema
 - stat_var_item_count: 1
 - entity_roles: ["observationAbout"]
-- stat_var_truncated: false
+- stat_var_served_count: 1
 - candidates (0):
 - skills (0):
 - warnings (0):
@@ -1707,7 +1707,7 @@ def test_a_seeded_envelope_prints_each_seed_s_width_and_facts_under_it() -> None
         stat_var_item_count=3,
         stat_var_member_count_exact=True,
         entity_roles=["destination"],
-        stat_var_truncated=False,
+        stat_var_served_count=None,
     )
     envelope["seeds"][1].update(
         wide=False,
@@ -1724,7 +1724,6 @@ def test_a_seeded_envelope_prints_each_seed_s_width_and_facts_under_it() -> None
         "  stat_var_shape_kind: statvar_schema\n"
         "  stat_var_item_count: 3\n"
         '  entity_roles: ["destination"]\n'
-        "  stat_var_truncated: false\n"
         "  open_entity_axes: origin (55 members)\n"
     ) in first
     assert "  wide: false\n" in second
@@ -2171,7 +2170,7 @@ def test_an_envelope_field_past_the_field_cap_is_cut_and_says_so() -> None:
         "stat_var_shape_kind": long,
         "stat_var_item_count": long,
         "entity_roles": [long, long],
-        "stat_var_truncated": long,
+        "stat_var_served_count": long,
         "open_entity_axes": [{"column": long, "members": 1}],
         "candidates": [{"spec_id": long, "label": "a label"}],
         "warnings": [{"code": long, "severity": long, "message": "a message"}],

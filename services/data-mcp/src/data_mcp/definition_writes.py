@@ -61,8 +61,7 @@ def stored_definition(node: Mapping[str, Any]) -> StoredDefinition | None:
     """The verified definition a Search API Spec block carries, or `None` when it carries none.
 
     A block with no `definition`, or a `definition` with no `spec_id`, carries
-    none. The StatVars the block elected stay out of the store: a caller
-    passes them to `get_data` as `resolved_stat_var_dcids`.
+    none.
 
     Raises:
         IdentityMismatch: If the definition's identity does not hash to its spec_id.

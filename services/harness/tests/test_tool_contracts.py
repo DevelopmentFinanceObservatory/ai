@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from compiler.sources import posted_stat_vars, source_from_spec_block
 from harness.planner_seam import _render_envelope
 from harness.tool_contracts import graph_envelope
 
@@ -21,16 +20,12 @@ def _definite(
     facets: dict | None = None,
     warnings: list | None = None,
     identity: dict | None = None,
-    items: list | None = None,
-    truncated: bool = False,
     member_count: int | None = None,
-    slots: list | None = None,
     member_count_exact: bool | None = None,
+    served_count: int | None = None,
+    data_date_range: dict | None = None,
 ) -> dict:
-    # `resolved.stat_vars` is always the real wire object -- `{items,
-    # member_count, truncated}` -- never a bare list. A hand-built helper
-    # that defaults it to `[]` masks the very field this predicate reads.
-    stat_vars: dict = {"items": items or [], "truncated": truncated}
+    stat_vars: dict = {"served_count": served_count, "data_date_range": data_date_range}
     if member_count is not None:
         stat_vars["member_count"] = member_count
     if member_count_exact is not None:
@@ -40,8 +35,6 @@ def _definite(
         "facets": facets or {},
         "stat_vars": stat_vars,
     }
-    if slots is not None:
-        resolved["slots"] = slots
     spec: dict = {"spec_id": spec_id, "resolved": resolved}
     if identity is not None:
         spec["definition"] = {"identity": identity}
@@ -53,12 +46,9 @@ def _definite(
     }
 
 
-# Shapes taken from two real resolve envelopes: "population for Guatemala
-# since 2010", every demographic slot unbound (the same envelope committed at
-# `services/data-mcp/tests/fixtures/resolve_population_guatemala.json`), and
-# "female population in Mexico" from dev search, with `gender` bound. Both
-# are `statvar_schema` with `observationAbout` only, and each elected one
-# item that is its family's root -- both must route narrow.
+# "Population for Guatemala since 2010", every demographic slot unbound (the
+# envelope committed at
+# `services/data-mcp/tests/fixtures/resolve_population_guatemala.json`).
 _STANDARD_IDENTITY = {
     "shape": {"kind": "statvar_schema"},
     "entities": {"observationAbout": ["country/GTM"]},
@@ -67,62 +57,11 @@ _STANDARD_IDENTITY = {
         {"property": "gender", "binding": {"state": "unbound"}},
     ],
 }
-_GENDER_BOUND_IDENTITY = {
-    "shape": {"kind": "statvar_schema"},
-    "entities": {"observationAbout": ["country/MEX"]},
-    "slots": [
-        {"property": "age", "binding": {"state": "unbound"}},
-        {"property": "gender", "binding": {"state": "value", "ref": "Female"}},
-    ],
-}
-# Search fills an item's `slot_values` from the identity's bound slots alone and lists
-# every constraint the StatVar asserts, bound or not, in `constraint_properties`.
-_GENDER_SLOT_VALUE = {"key": {"property": {"dcid": "gender"}}, "value": {"ref": {"dcid": "Female"}}}
-# The block's `resolved.slots` entry for the bound `gender` slot. `Female` has no
-# descendant codes, so Search serves it no `expansion`.
-_GENDER_BLOCK_SLOT = {
-    "key": {"axis": "how", "property": {"dcid": "gender", "label": "gender"}, "label": "gender"},
-    "binding": {"kind": "value", "value": {"ref": {"dcid": "Female", "label": "Female"}}},
-}
-_ELECTED_UNBOUND_ITEM = [
-    {
-        "ref": "Count_Person",
-        "label": "Total population",
-        "slot_values": [],
-        "constraint_properties": [],
-    }
-]
-_ELECTED_BOUND_ITEM = [
-    {
-        "ref": "Count_Person_Female",
-        "label": "Female population",
-        "slot_values": [_GENDER_SLOT_VALUE],
-        "constraint_properties": ["gender"],
-    }
-]
 _ROLE_BEARING_IDENTITY = {
     "shape": {"kind": "statvar_schema"},
     "entities": {"observationAbout": ["country/KEN"], "destination": ["country/KEN"]},
 }
-_DONOR_ROLE_IDENTITY = {
-    "shape": {"kind": "statvar_schema"},
-    "entities": {"observationAbout": ["country/KEN"], "donor": ["country/FRA"]},
-}
 _PINNED_IDENTITY = {"shape": {"kind": "stat_var", "id": "Count_Person"}}
-_ELECTED_TWO_CONSTRAINED_ITEMS = [
-    {
-        "ref": "Count_Person_Female",
-        "label": "Female population",
-        "slot_values": [],
-        "constraint_properties": ["gender"],
-    },
-    {
-        "ref": "Count_Person_Male",
-        "label": "Male population",
-        "slot_values": [],
-        "constraint_properties": ["gender"],
-    },
-]
 
 
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:
@@ -198,10 +137,10 @@ def test_every_part_is_kept_as_a_summary() -> None:
 _NO_IDENTITY_FACTS = {
     "wide": False,
     "stat_var_shape_kind": None,
-    "stat_var_item_count": 0,
+    "stat_var_item_count": None,
     "stat_var_member_count_exact": True,
     "entity_roles": [],
-    "stat_var_truncated": False,
+    "stat_var_served_count": None,
     "open_entity_axes": [],
 }
 
@@ -229,109 +168,9 @@ def test_candidates_part_lists_each_spec_with_its_sentence() -> None:
     assert digest["spec_id"] is None
     assert digest["choice_points"] == 2
     assert digest["candidates"] == [
-        {"spec_id": "spec_a", "label": "military spending", "stat_vars": [], **_NO_IDENTITY_FACTS},
-        {"spec_id": "spec_b", "label": "spec_b", "stat_vars": [], **_NO_IDENTITY_FACTS},
+        {"spec_id": "spec_a", "label": "military spending", **_NO_IDENTITY_FACTS},
+        {"spec_id": "spec_b", "label": "spec_b", **_NO_IDENTITY_FACTS},
     ]
-
-
-def test_each_candidate_carries_the_statvars_search_elected_for_it() -> None:
-    """A `get_data` call for the chosen candidate posts them as
-    `resolved_stat_var_dcids`, and a clarify re-entry holds no spec block to
-    read them from. A list the source reader refuses offers none of its
-    entries, as a searched block's does. A block whose retrieval posts none
-    (`compiler.sources.block_posts_stat_vars`) offers none."""
-    envelope = {
-        "status": "candidates",
-        "parts": [
-            {
-                "status": "candidates",
-                "candidates": {
-                    "specs": [
-                        {
-                            "spec_id": "spec_two",
-                            "resolved": {"stat_vars": {"items": _ELECTED_TWO_CONSTRAINED_ITEMS}},
-                        },
-                        {
-                            "spec_id": "spec_one",
-                            "resolved": {"stat_vars": {"items": _ELECTED_UNBOUND_ITEM}},
-                        },
-                        {
-                            "spec_id": "spec_malformed",
-                            "resolved": {
-                                "stat_vars": {"items": [{"ref": "Count_Person"}, {"ref": 7}]}
-                            },
-                        },
-                        {
-                            "spec_id": "spec_prefixed",
-                            "resolved": {"stat_vars": {"items": [{"ref": "dcid:Count_Person"}]}},
-                        },
-                        {
-                            "spec_id": "spec_digest",
-                            "resolved": {
-                                "stat_vars": {"items": _ELECTED_TWO_CONSTRAINED_ITEMS},
-                                "shape": {"member_digest": "d"},
-                            },
-                        },
-                        {
-                            "spec_id": "spec_digest_root",
-                            "definition": {"identity": _STANDARD_IDENTITY},
-                            "resolved": {
-                                "stat_vars": {"items": _ELECTED_UNBOUND_ITEM},
-                                "shape": {"member_digest": "d"},
-                            },
-                        },
-                    ]
-                },
-            }
-        ],
-    }
-
-    by_id = {c["spec_id"]: c["stat_vars"] for c in graph_envelope(envelope)["candidates"]}
-
-    assert by_id == {
-        "spec_two": ["Count_Person_Female", "Count_Person_Male"],
-        "spec_one": ["Count_Person"],
-        "spec_malformed": [],
-        "spec_prefixed": [],
-        # A family with a member digest is elected again by the mint, so it
-        # posts none of its StatVars; a pinned root posts itself.
-        "spec_digest": [],
-        "spec_digest_root": ["Count_Person"],
-    }
-
-
-@pytest.mark.parametrize(
-    ("block", "posted"),
-    [
-        (
-            json.loads((_DATA_MCP_FIXTURES / "resolve_population_guatemala.json").read_text())[
-                "parts"
-            ][0]["spec"],
-            ["Count_Person"],
-        ),
-        (
-            json.loads(
-                (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
-            )["france_education_grants"]["parts"][0]["spec"],
-            [],
-        ),
-    ],
-    ids=["listed-membership", "digest-family"],
-)
-def test_a_candidate_and_a_definite_block_state_the_same_statvars(
-    block: dict, posted: list[str]
-) -> None:
-    """One rule for both: the list a chosen candidate posts is the list the
-    same block posts when `search` returns it as the `definite` reading."""
-    envelope = {
-        "status": "candidates",
-        "parts": [{"status": "candidates", "candidates": {"specs": [block]}}],
-    }
-
-    (candidate,) = graph_envelope(envelope)["candidates"]
-
-    assert candidate["stat_vars"] == list(posted_stat_vars(source_from_spec_block(block)))
-    assert candidate["stat_vars"] == posted
 
 
 def test_candidates_carry_the_same_wide_verdict_a_definite_reading_would() -> None:
@@ -350,7 +189,7 @@ def test_candidates_carry_the_same_wide_verdict_a_definite_reading_would() -> No
                             "spec_id": "spec_role_bearing",
                             "resolved": {
                                 "rendered_sentence": "flows into Kenya",
-                                "stat_vars": {"items": _ELECTED_UNBOUND_ITEM},
+                                "stat_vars": {"member_count": 1, "served_count": None},
                             },
                             "definition": {"identity": _ROLE_BEARING_IDENTITY},
                         },
@@ -358,7 +197,7 @@ def test_candidates_carry_the_same_wide_verdict_a_definite_reading_would() -> No
                             "spec_id": "spec_single_series",
                             "resolved": {
                                 "rendered_sentence": "life expectancy in Kenya",
-                                "stat_vars": {"items": _ELECTED_UNBOUND_ITEM},
+                                "stat_vars": {"member_count": 3, "served_count": 1},
                             },
                             "definition": {"identity": _STANDARD_IDENTITY},
                         },
@@ -391,9 +230,7 @@ def test_unresolved_no_data_keeps_no_data_status_with_nearest_real_as_candidates
     }
     digest = graph_envelope(envelope)
     assert digest["status"] == "no_data"
-    assert digest["candidates"] == [
-        {"spec_id": "spec_n", "label": "near", "stat_vars": [], **_NO_IDENTITY_FACTS}
-    ]
+    assert digest["candidates"] == [{"spec_id": "spec_n", "label": "near", **_NO_IDENTITY_FACTS}]
 
 
 def test_absent_no_data_maps_to_unsupported_with_the_reason_as_a_warning() -> None:
@@ -500,288 +337,59 @@ def test_an_envelope_with_no_parts_is_unsupported() -> None:
 
 
 def test_the_captured_guatemala_fixture_is_narrow() -> None:
-    """The captured Guatemala resolve envelope's worked example
+    """The captured Guatemala resolve envelope
     (`services/data-mcp/tests/fixtures/resolve_population_guatemala.json`):
-    twelve unbound slots, one elected item (`Count_Person`,
-    `constraint_properties: []`), `observationAbout` only. The one elected member is the family's
-    root (`data_mcp.substitution.root_member`), so it must not reach the
-    planner and the approval gate as `wide`."""
+    twelve unbound slots, `observationAbout` only, and the mint serves one
+    StatVar, the family's root `Count_Person`. It must not reach the planner
+    and the approval gate as `wide`."""
+    envelope = json.loads((_DATA_MCP_FIXTURES / "resolve_population_guatemala.json").read_text())
+
+    assert graph_envelope(envelope)["wide"] is False
+
+
+@pytest.mark.parametrize(
+    ("identity", "served_count", "wide"),
+    [
+        pytest.param(_STANDARD_IDENTITY, 1, False, id="described-one-served"),
+        pytest.param(_ROLE_BEARING_IDENTITY, 1, False, id="role-bearing-one-served"),
+        pytest.param(_STANDARD_IDENTITY, 3, True, id="described-several-served"),
+        pytest.param(_STANDARD_IDENTITY, None, True, id="described-unsettled"),
+        pytest.param(_ROLE_BEARING_IDENTITY, None, True, id="role-bearing-unsettled"),
+        pytest.param(_PINNED_IDENTITY, None, False, id="pinned-arm"),
+        pytest.param(None, None, False, id="no-identity"),
+        pytest.param(None, 3, True, id="no-identity-several-served"),
+        pytest.param({"shape": {"kind": "something_new"}}, None, False, id="unknown-shape"),
+    ],
+)
+def test_a_spec_is_wide_unless_it_mints_one_series(
+    identity: dict | None, served_count: int | None, wide: bool
+) -> None:
+    """One series is a pinned arm, or any identity `search` states serves one
+    StatVar once its membership settled. A described identity is otherwise
+    wide, its membership unsettled included."""
     digest = graph_envelope(
         {
             "status": "definite",
             "parts": [
-                _definite("spec_1", identity=_STANDARD_IDENTITY, items=_ELECTED_UNBOUND_ITEM)
+                _definite("spec_1", identity=identity, member_count=3, served_count=served_count)
             ],
         }
     )
-    assert digest["wide"] is False
 
-
-def test_the_mexico_bound_slot_shape_is_also_narrow() -> None:
-    """ "Female population in Mexico" as dev search resolves it: `gender`
-    bound, one elected item constrained by `gender` alone, `member_count` 2
-    and `truncated` true. The item's constraint properties equal the bound
-    slot properties, so it is the root of the family the binding names and
-    this is narrow exactly like the all-unbound case, whatever `truncated`
-    says."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite(
-                    "spec_1",
-                    identity=_GENDER_BOUND_IDENTITY,
-                    items=_ELECTED_BOUND_ITEM,
-                    truncated=True,
-                    member_count=2,
-                    slots=[_GENDER_BLOCK_SLOT],
-                )
-            ],
-        }
-    )
-    assert digest["wide"] is False
-
-
-def test_a_bound_value_that_widens_to_descendant_codes_is_wide() -> None:
-    """The mint serves a hierarchical code's whole subtree, so the one elected
-    item is not the only series even though it is constrained by the bound
-    slots alone. The block's slot carries the `expansion` Search walked."""
-    widened = {**_GENDER_BLOCK_SLOT, "expansion": {"added": [{"dcid": "Female_Adult"}]}}
-    for slots in ([widened], None):
-        digest = graph_envelope(
-            {
-                "status": "definite",
-                "parts": [
-                    _definite(
-                        "spec_1",
-                        identity=_GENDER_BOUND_IDENTITY,
-                        items=_ELECTED_BOUND_ITEM,
-                        slots=slots,
-                    )
-                ],
-            }
-        )
-        assert digest["wide"] is True
-
-
-def test_an_elected_item_constrained_beyond_the_bound_slots_is_wide() -> None:
-    """`Count_Person_Female_Urban` is one of several members under the family
-    the `gender` binding names, and the root dominates it: the mint resolves
-    the rest too. Its `slot_values` show `gender` alone, so only
-    `constraint_properties` tells it from the root."""
-    item = {
-        "ref": "Count_Person_Female_Urban",
-        "slot_values": [_GENDER_SLOT_VALUE],
-        "constraint_properties": ["gender", "placeOfResidenceClassification"],
-    }
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=_GENDER_BOUND_IDENTITY, items=[item])],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_a_constrained_item_under_an_unbound_identity_is_wide() -> None:
-    """Nothing is bound, so Search serves `slot_values: []` for
-    `Count_Person_Female` too."""
-    item = {"ref": "Count_Person_Female", "slot_values": [], "constraint_properties": ["gender"]}
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=_STANDARD_IDENTITY, items=[item])],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_an_item_without_constraint_properties_is_wide() -> None:
-    """A dfo-apis Search that predates `constraint_properties` serves
-    `slot_values` alone, which cannot tell the root from a dominated member."""
-    item = {"ref": "Count_Person_Female", "slot_values": [_GENDER_SLOT_VALUE]}
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=_GENDER_BOUND_IDENTITY, items=[item])],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_a_set_bound_slot_is_wide() -> None:
-    identity = {
-        **_GENDER_BOUND_IDENTITY,
-        "slots": [{"property": "gender", "binding": {"state": "set", "refs": ["Female", "Male"]}}],
-    }
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, items=_ELECTED_BOUND_ITEM)],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_nothing_elected_is_wide() -> None:
-    """Described-arm with no `resolved.stat_vars.items` at all: nothing
-    is the root, so the mint will enumerate the whole family."""
-    digest = graph_envelope(
-        {"status": "definite", "parts": [_definite("spec_1", identity=_STANDARD_IDENTITY)]}
-    )
-    assert digest["wide"] is True
-
-
-def test_a_role_bearing_identity_is_wide_even_with_an_elected_item() -> None:
-    """The CRS `FinancialFlow` case: `entities` binds `destination` beyond
-    `observationAbout`, so the root test deliberately leaves it alone -- an
-    elected item does not make it narrow."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite("spec_1", identity=_ROLE_BEARING_IDENTITY, items=_ELECTED_UNBOUND_ITEM)
-            ],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_a_donor_role_identity_is_wide_even_with_an_elected_item() -> None:
-    """The role-bearing check is a whitelist of exactly `{"observationAbout"}`, not
-    a denylist of `origin`/`destination` alone -- an aid flow's `donor` role must
-    route wide the same way."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite("spec_1", identity=_DONOR_ROLE_IDENTITY, items=_ELECTED_UNBOUND_ITEM)
-            ],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_two_elected_items_are_wide() -> None:
-    """The single-series rule needs exactly one elected item
-    (`data_mcp.substitution.root_member`), so a non-empty `items` alone must not
-    read as narrow -- the mint enumerates the family."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite(
-                    "spec_1",
-                    identity=_STANDARD_IDENTITY,
-                    items=_ELECTED_TWO_CONSTRAINED_ITEMS,
-                )
-            ],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_a_pinned_arm_identity_is_narrow() -> None:
-    """Already a single series (`shape.kind == "stat_var"`) -- there is
-    nothing for the root test to apply to, and it needs none."""
-    digest = graph_envelope(
-        {"status": "definite", "parts": [_definite("spec_1", identity=_PINNED_IDENTITY)]}
-    )
-    assert digest["wide"] is False
-
-
-def test_no_identity_at_all_is_not_wide() -> None:
-    # An older upstream, or a fixture that never populated `definition`.
-    digest = graph_envelope({"status": "definite", "parts": [_definite("spec_1")]})
-    assert digest["wide"] is False
-
-
-def test_a_pinned_arm_wins_over_truncated() -> None:
-    """A pinned arm always wins over `truncated`, not just over an absent one:
-    `shape.kind == "stat_var"` already names a single series, so a `true`
-    here must not be allowed to route it to the planner as `wide`."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=_PINNED_IDENTITY, truncated=True)],
-        }
-    )
-    assert digest["wide"] is False
-
-
-def test_a_root_wins_over_truncated_for_a_described_identity() -> None:
-    """The post-#893 shape of the captured Guatemala fixture: dfo-apis#893
-    changes `member_count` from `len(items)` to the confirmed-at-place
-    population and makes `truncated` follow it (`len(items) < member_count`),
-    but `items` itself does not change -- an ordinary standard identity
-    still elects exactly one winner. If `truncated` could override a root,
-    this flagship case (the one the root test exists to keep off the
-    slow path) would flip wide the day #893 ships, and nothing in this
-    file's fixtures -- all built from today's values -- would catch it.
-    This is that regression, asserted directly: same identity and item as
-    `resolve_population_guatemala.json`, `member_count` and `truncated`
-    given their post-#893 values. It must still route narrow."""
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite(
-                    "spec_1",
-                    identity=_STANDARD_IDENTITY,
-                    items=_ELECTED_UNBOUND_ITEM,
-                    truncated=True,
-                    member_count=40,
-                )
-            ],
-        }
-    )
-    assert digest["wide"] is False
-
-
-def test_truncated_still_sharpens_for_an_unrecognised_shape() -> None:
-    """`truncated` keeps its sharpening role for the one case the root test
-    does not cover: an identity whose shape this predicate does not even recognise as
-    described-arm or pinned-arm (an older upstream, or a shape kind this
-    code does not yet know)."""
-    identity = {"shape": {"kind": "future_shape"}, "entities": {"observationAbout": ["x"]}}
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, truncated=True)],
-        }
-    )
-    assert digest["wide"] is True
-
-
-def test_truncated_false_never_narrows_a_role_bearing_identity() -> None:
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [
-                _definite(
-                    "spec_1",
-                    identity=_ROLE_BEARING_IDENTITY,
-                    items=_ELECTED_UNBOUND_ITEM,
-                    truncated=False,
-                )
-            ],
-        }
-    )
-    assert digest["wide"] is True
+    assert digest["wide"] is wide
 
 
 @pytest.mark.parametrize(
     ("member_count", "member_count_exact", "item_count", "exact"),
     [
-        (None, None, 1, True),
-        # A family listed in part counts its members, not the items listed.
+        (None, None, None, True),
         (1_454, None, 1_454, True),
         # Search counted at least this many.
         (3_687, False, 3_687, False),
     ],
 )
 def test_the_raw_facts_ride_alongside_the_derived_verdict(
-    member_count: int | None, member_count_exact: bool | None, item_count: int, exact: bool
+    member_count: int | None, member_count_exact: bool | None, item_count: int | None, exact: bool
 ) -> None:
     """A later change to the predicate must not need another trip into
     `mcp_client.py`'s raw envelope: the facts it was computed from are
@@ -793,9 +401,9 @@ def test_the_raw_facts_ride_alongside_the_derived_verdict(
                 _definite(
                     "spec_1",
                     identity=_STANDARD_IDENTITY,
-                    items=_ELECTED_UNBOUND_ITEM,
                     member_count=member_count,
                     member_count_exact=member_count_exact,
+                    served_count=member_count,
                 )
             ],
         }
@@ -804,7 +412,7 @@ def test_the_raw_facts_ride_alongside_the_derived_verdict(
     assert digest["stat_var_item_count"] == item_count
     assert digest["stat_var_member_count_exact"] is exact
     assert digest["entity_roles"] == ["observationAbout"]
-    assert digest["stat_var_truncated"] is False
+    assert digest["stat_var_served_count"] == member_count
 
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -843,15 +451,7 @@ _TWO_COUNTRY_ENVELOPE = (
 )
 
 
-_ITEM_WITH_COVERAGE = [
-    {
-        "ref": "LifeExpectancy_Person",
-        "label": "Life expectancy at birth",
-        "slot_values": [],
-        "constraint_properties": [],
-        "data_date_range": {"start": "1960", "end": "2023"},
-    }
-]
+_SERVED_1960_2023 = {"start": "1960", "end": "2023"}
 
 
 def test_the_captured_two_country_fixture_carries_the_coverage_window() -> None:
@@ -860,8 +460,8 @@ def test_the_captured_two_country_fixture_carries_the_coverage_window() -> None:
     text at all, so the identity's `requested_window` is `{"kind": "all"}`,
     data-mcp's own vocabulary for "no specific span"
     (`data_mcp.get_data_digest._coverage_window_text`), naming no range of
-    its own. The elected item's own `data_date_range`, `{"start": "1960",
-    "end": "2023"}`, is the resolver's actual coverage, so `graph_envelope`
+    its own. The spec-level `data_date_range` over the served members,
+    `{"start": "1960", "end": "2023"}`, is the resolver's actual coverage, so `graph_envelope`
     states that instead of leaving the planner to guess."""
     envelope = json.loads(_TWO_COUNTRY_ENVELOPE.read_text())
     digest = graph_envelope(envelope)
@@ -873,7 +473,7 @@ def test_a_range_window_with_both_endpoints_wins_over_coverage() -> None:
     `mint_statvar_set_guatemala.json`): `requested_window.kind == "range"`,
     with the years at `start_year`/`end_year`, not `start`/`end`. Both
     endpoints present is a complete answer the question named outright, so
-    it is stated as `source: "requested"` even though the item's own
+    it is stated as `source: "requested"` even though the served members'
     (different) coverage would otherwise be available."""
     identity = {
         **_STANDARD_IDENTITY,
@@ -882,37 +482,39 @@ def test_a_range_window_with_both_endpoints_wins_over_coverage() -> None:
     digest = graph_envelope(
         {
             "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, items=_ITEM_WITH_COVERAGE)],
+            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
         }
     )
     assert digest["window"] == {"start": 1990, "end": 2023, "source": "requested"}
 
 
-def test_window_is_left_out_when_the_identity_states_none_and_no_item_covers() -> None:
+def test_window_is_left_out_when_the_identity_states_none_and_nothing_served_covers() -> None:
     digest = graph_envelope(
         {"status": "definite", "parts": [_definite("spec_1", identity=_STANDARD_IDENTITY)]}
     )
     assert "window" not in digest
 
 
-def test_the_kind_is_all_falls_back_to_the_items_own_coverage() -> None:
+def test_the_kind_is_all_falls_back_to_the_served_coverage() -> None:
     identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "all"}}
     digest = graph_envelope(
         {
             "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, items=_ITEM_WITH_COVERAGE)],
+            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
         }
     )
     assert digest["window"] == {"start": 1960, "end": 2023, "source": "coverage"}
 
 
-def test_a_listing_cut_short_of_the_earliest_year_keeps_the_download_window() -> None:
-    """A family `search` lists in part: the listed item starts in 1990, the
-    family's points in 1973, which `resolved.download.window` states."""
+def test_the_download_window_wins_over_the_served_coverage() -> None:
+    """The points a mint writes start in 1973, which `resolved.download.window`
+    states; the served members' range is the narrower read."""
     identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "all"}}
-    later_item = [{**_ITEM_WITH_COVERAGE[0], "data_date_range": {"start": "1990", "end": "2024"}}]
     spec = _definite(
-        "spec_1", identity=identity, items=later_item, truncated=True, member_count=1_454
+        "spec_1",
+        identity=identity,
+        member_count=1_454,
+        data_date_range={"start": "1990", "end": "2024"},
     )
     spec["spec"]["resolved"]["download"] = {"window": {"start_year": 1973, "end_year": 2024}}
 
@@ -921,7 +523,7 @@ def test_a_listing_cut_short_of_the_earliest_year_keeps_the_download_window() ->
     assert digest["window"] == {"start": 1973, "end": 2024, "source": "coverage"}
 
 
-def test_the_kind_is_all_and_no_item_covers_leaves_window_out() -> None:
+def test_the_kind_is_all_and_nothing_served_covers_leaves_window_out() -> None:
     identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "all"}}
     digest = graph_envelope(
         {"status": "definite", "parts": [_definite("spec_1", identity=identity)]}
@@ -930,19 +532,19 @@ def test_the_kind_is_all_and_no_item_covers_leaves_window_out() -> None:
 
 
 def test_window_is_left_out_when_the_kind_is_latest_even_with_coverage() -> None:
-    """`latest` names a single most-recent observation. An item's own
+    """`latest` names a single most-recent observation. The served members'
     multi-year coverage must not be read as one."""
     identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "latest"}}
     digest = graph_envelope(
         {
             "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, items=_ITEM_WITH_COVERAGE)],
+            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
         }
     )
     assert "window" not in digest
 
 
-def test_an_open_ended_range_is_completed_from_the_items_own_coverage() -> None:
+def test_an_open_ended_range_is_completed_from_the_served_coverage() -> None:
     """ "Since 1990" is a `range` with a `start_year` and no `end_year`,
     the question's own lower bound. `graph_envelope` completes it with
     the coverage's own latest year."""
@@ -953,7 +555,7 @@ def test_an_open_ended_range_is_completed_from_the_items_own_coverage() -> None:
     digest = graph_envelope(
         {
             "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, items=_ITEM_WITH_COVERAGE)],
+            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
         }
     )
     assert digest["window"] == {"start": 1990, "end": 2023, "source": "coverage"}
@@ -985,8 +587,7 @@ def test_tool_contracts_import_stays_a_leaf() -> None:
     """`data_mcp.get_data_tool` drags `httpx2`, `fastmcp`, `mcp.types` and
     `data_mcp.client` into whatever imports it -- the upstream client, fastmcp's own
     tool machinery, and the mint call's request/response types. `harness.tool_contracts`
-    must reach the single-series rule through the leaf `data_mcp.substitution` module
-    instead, never through `data_mcp.get_data_tool` or `data_mcp.search_tool`.
+    must import neither `data_mcp.get_data_tool` nor `data_mcp.search_tool`.
 
     Run in a fresh interpreter, not in this test process: by the time any test here
     runs, pytest's own collection and other harness modules may already have imported

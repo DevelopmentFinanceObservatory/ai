@@ -26,7 +26,6 @@ from typing import Any
 import pytest
 from compiler.capabilities import CAPABILITIES, Phase, ToolCapability
 from compiler.surface import ToolSchema
-from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -44,11 +43,6 @@ GET_DATA_PARAMETERS: dict[str, Any] = {
         "spec_id": {"type": "string"},
         "scope": {"type": "object"},
         "stat_vars": {"type": "string", "enum": ["sum", "separate"], "default": "separate"},
-        "resolved_stat_var_dcids": {
-            "type": "array",
-            "items": {"type": "string"},
-            "maxItems": MAX_RESOLVED_STAT_VAR_DCIDS,
-        },
         "place_types": {"type": "boolean", "default": False},
         "breakdown": {
             "anyOf": [

@@ -18,6 +18,7 @@ from typing import Any
 
 from common.materialisation import FrameRef
 from compiler.compile import compile_plan
+from compiler.sources import member_digest
 from compiler.surface import ToolSchema
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
@@ -155,7 +156,11 @@ async def test_a_retrieval_terminal_card_counts_the_stat_vars_its_frame_holds(
 ) -> None:
     # The manifest resolves three StatVars and the frame `get_data` read holds
     # two of them, which is the count the card states.
-    family = source(stat_vars=("Debt_0", "Debt_1", "Debt_2"))
+    family = source(
+        served_count=3,
+        shape_member_count=3,
+        shape_member_digest=member_digest(["Debt_0", "Debt_1", "Debt_2"]),
+    )
     store = ProvenanceStore()
     surface = _RecordingSurface(
         ScriptedSurface(

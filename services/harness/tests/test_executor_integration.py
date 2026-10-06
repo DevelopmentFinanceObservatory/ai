@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 import pytest
 from common.materialisation import get_store as get_frame_store
 from compiler.compile import compile_plan
+from compiler.sources import member_digest
 from compiler.surface import McpSurface, ToolSurfaceUnavailableError
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.client import UpstreamClient
@@ -199,7 +200,7 @@ def _mint_response() -> dict[str, Any]:
         "artifacts": [
             {
                 "artifact_digest": f"sha256:{hashlib.sha256(_parquet_bytes()).hexdigest()}",
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": len(_parquet_bytes()),
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -233,7 +234,8 @@ def _approved_plan(
         spec_id=SPEC_ID,
         sentence="external debt service paid by Kenya, 2015 to 2024",
         has_data=True,
-        stat_vars=("DebtServicePaid",),
+        served_count=1,
+        shape_member_digest=member_digest(["DebtServicePaid"]),
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="USD",
         unit_label="US dollars",
@@ -393,7 +395,7 @@ def _donor_mint_response(
         "artifacts": [
             {
                 "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": len(parquet),
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -449,7 +451,8 @@ def _share_approved_plan(decision: Callable[..., Decision], schemas: dict[str, A
         spec_id=HEALTH_SPEC,
         sentence="ODA to health from the United States, the United Kingdom and France, 2023",
         has_data=True,
-        stat_vars=("OfficialDevelopmentAssistanceToHealth",),
+        served_count=1,
+        shape_member_digest=member_digest(["OfficialDevelopmentAssistanceToHealth"]),
         entities=focus,
         unit_ref="USD",
         unit_label="US dollars",
@@ -462,7 +465,8 @@ def _share_approved_plan(decision: Callable[..., Decision], schemas: dict[str, A
         spec_id=TOTAL_SPEC,
         sentence="total ODA from the United States, the United Kingdom and France, 2023",
         has_data=True,
-        stat_vars=("TotalOfficialDevelopmentAssistance",),
+        served_count=1,
+        shape_member_digest=member_digest(["TotalOfficialDevelopmentAssistance"]),
         entities=focus,
         unit_ref="USD",
         unit_label="US dollars",
@@ -668,7 +672,7 @@ def _rank_mint_response() -> dict[str, Any]:
         "artifacts": [
             {
                 "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": len(parquet),
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -725,7 +729,8 @@ def _rank_approved_plan(decision: Callable[..., Decision], schemas: dict[str, An
         spec_id=RANK_SPEC,
         sentence="aid received by Kenya, Uganda and Tanzania, 2010 to 2012",
         has_data=True,
-        stat_vars=("AidReceived",),
+        served_count=1,
+        shape_member_digest=member_digest(["AidReceived"]),
         entities=(KENYA_RECIPIENT, UGANDA_RECIPIENT, TANZANIA_RECIPIENT),
         unit_ref="USD",
         unit_label="US dollars",
@@ -950,7 +955,7 @@ def _top_donor_mint_response() -> dict[str, Any]:
         "artifacts": [
             {
                 "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": len(parquet),
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -982,7 +987,8 @@ def _top_donors_approved_plan(decision: Callable[..., Decision], schemas: dict[s
         spec_id=TOP_DONOR_SPEC,
         sentence="ODA disbursed by six DAC donors, 2023",
         has_data=True,
-        stat_vars=("OdaDisbursed",),
+        served_count=1,
+        shape_member_digest=member_digest(["OdaDisbursed"]),
         entities=TOP_DONORS,
         unit_ref="USD",
         unit_label="US dollars",
@@ -1180,7 +1186,7 @@ def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
     `content_version`, each with its own artifact and the request's options as its
     `rendering`."""
     parquet = _gdp_parquet_bytes(place_types=place_types)
-    rendering: dict[str, Any] = {"bundle": False, "format": "parquet"}
+    rendering: dict[str, Any] = {"bundle": False, "format": "parquet", "layout": "frame"}
     if place_types:
         rendering["columns"] = ["observationAbout_type"]
     stat_var = "dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"
@@ -1229,8 +1235,10 @@ def _top_countries_by_gdp_plan(decision: Callable[..., Decision], schemas: dict[
         spec_id=GDP_SPEC,
         sentence="Nominal GDP",
         has_data=True,
-        stat_vars=("Amount_EconomicActivity_GrossDomesticProduction_Nominal",),
-        stat_var_truncated=False,
+        served_count=1,
+        shape_member_digest=member_digest(
+            ["Amount_EconomicActivity_GrossDomesticProduction_Nominal"]
+        ),
         open_entity_axes=(OpenEntityAxis(column="observationAbout", member_count=1996),),
         unit_ref="USDollar",
         unit_label="US dollars",

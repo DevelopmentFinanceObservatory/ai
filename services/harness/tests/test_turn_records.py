@@ -1,8 +1,9 @@
 """Tests for `harness.turn_records`: plan records and search readings, and their text.
 
 The fixture holds two compiled plans from recorded Studio sessions (their
-StatVar member lists cut to three, their `stat_var_member_count` as
-recorded) and the `search` and `fetch` tool outputs of two recorded turns.
+`stat_var_member_count` as recorded, converted to the plan model that keeps
+no member list) and the `search` and `fetch` tool outputs of two recorded
+turns.
 """
 
 from __future__ import annotations
@@ -63,16 +64,6 @@ def _readings(name: str) -> list[SearchReading]:
                 for reading in readings
             ]
     return readings
-
-
-def _member_dcids(plan: Plan) -> set[str]:
-    assert plan.workflow is not None
-    members = {dcid for source in plan.workflow.sources for dcid in source.stat_vars}
-    for step in plan.workflow.steps:
-        dcids = step.args.get("resolved_stat_var_dcids")
-        if isinstance(dcids, list):
-            members.update(str(dcid) for dcid in dcids)
-    return members
 
 
 _TOP_DONORS = """\
@@ -179,18 +170,6 @@ def test_a_source_window_inside_the_years_asked_never_reads_as_its_coverage(
 
     assert [s.coverage_source for s in record.sources] == [coverage_source]
     assert f"; {fact};" in record.render(budget=10_000)
-
-
-@pytest.mark.parametrize("name", ["guatemala_top_donors", "france_guatemala_join"])
-@pytest.mark.parametrize("budget", [10_000, 900, 300])
-def test_plan_record_never_holds_or_renders_a_member_list(name: str, budget: int) -> None:
-    plan = _plan(name)
-    members = _member_dcids(plan)
-    assert len(members) >= 3
-    record = PlanRecord.from_plan(plan)
-    stored = record.model_dump_json()
-    rendered = record.render(budget=budget)
-    assert not [dcid for dcid in members if dcid in stored or dcid in rendered]
 
 
 @pytest.mark.parametrize("budget", range(150, 1800, 50))

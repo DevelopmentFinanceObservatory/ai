@@ -14,6 +14,7 @@ members, unknown discriminators, out-of-vocabulary enum values.
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -29,7 +30,6 @@ from harness.wire import (
     MAX_SEED_ROLES,
     MAX_SEED_SENTENCE_CHARS,
     MAX_SEED_SPEC_BYTES,
-    MAX_SEED_STAT_VARS,
     MAX_SEED_TEXT_CHARS,
     STUDIO_FRAME_ADAPTER,
     STUDIO_REQUEST_ADAPTER,
@@ -363,46 +363,39 @@ def test_a_seeded_turn_carries_each_search_spec_and_its_operations() -> None:
     (raw,) = request.seed_spec
     seed = Seed.model_validate(raw)
     assert seed.spec.spec_id == seed.spec.definition.spec_id
-    assert seed.spec.stat_vars == tuple(
-        item["ref"] for item in raw["spec"]["resolved"]["stat_vars"]["items"]
-    )
     assert [(op.verb, op.over) for op in seed.operations] == [
         (OperationVerb.RANK, OperationAxis.PLACE)
     ]
 
 
-def test_a_seed_keeps_only_the_spec_id_the_identity_the_statvars_the_digest_and_the_operations() -> (
-    None
-):
-    """Every other member of the block the browser posts, the sentence, labels,
-    coverage, headline and slots among them, is dropped as the seed is read."""
+def test_a_seed_keeps_only_the_spec_id_the_identity_and_the_operations() -> None:
+    """Every other member of the block the browser posts, `resolved` whole among
+    them, is dropped as the seed is read."""
     raw = _load("request-11-turn-seeded.json")["seed_spec"][0]
     assert raw["spec"]["resolved"]["rendered_sentence"]
 
     kept = Seed.model_validate(raw).model_dump(mode="json", exclude_none=True)
-    shape = raw["spec"]["resolved"].get("shape")
 
     assert kept == {
-        "spec": {
-            "spec_id": raw["spec"]["spec_id"],
-            "definition": raw["spec"]["definition"],
-            "resolved": {
-                "stat_vars": {
-                    "items": [
-                        {"ref": item["ref"]}
-                        for item in raw["spec"]["resolved"]["stat_vars"]["items"]
-                    ]
-                },
-                # Whether Search stated a member digest, and nothing else of the shape.
-                **(
-                    {"shape": {k: v for k, v in shape.items() if k == "member_digest"}}
-                    if shape is not None
-                    else {}
-                ),
-            },
-        },
+        "spec": {"spec_id": raw["spec"]["spec_id"], "definition": raw["spec"]["definition"]},
         "operations": raw["operations"],
     }
+
+
+def test_a_seed_posted_with_the_member_list_search_served_before_reads_the_same() -> None:
+    """A tab opened before Search stopped listing members posts its block with
+    `resolved.stat_vars.items`, `truncated` and a member digest; the seed reads
+    it as it reads one without them."""
+    raw = _load("request-11-turn-seeded.json")["seed_spec"][0]
+    listed = copy.deepcopy(raw)
+    listed["spec"]["resolved"]["stat_vars"] = {
+        "items": [{"ref": "Count_Person", "slot_values": []}],
+        "member_count": 1,
+        "truncated": False,
+    }
+    listed["spec"]["resolved"]["shape"] = {"member_digest": "0" * 64}
+
+    assert Seed.model_validate(listed) == Seed.model_validate(raw)
 
 
 def test_a_turn_without_seeds_parses_to_none() -> None:
@@ -569,17 +562,9 @@ _ANSWER_OVER_CAP: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
         ),
         r"resolved\.coverage\.dimensions\[0\]\.count is a number past the cap",
     ),
-    "stat-vars": (
-        lambda seed: _resolved(seed).update(
-            stat_vars={"items": [{"ref": "Count_Person"}] * (MAX_SEED_STAT_VARS + 1)}
-        ),
-        r"resolved\.stat_vars\.items holds 201 items, past the cap of 200",
-    ),
-    "stat-var-ref": (
-        lambda seed: _resolved(seed).update(
-            stat_vars={"items": [{"ref": "x" * (MAX_SEED_TEXT_CHARS + 1)}]}
-        ),
-        r"resolved\.stat_vars\.items\[0\]\.ref is 257 characters",
+    "served-count": (
+        lambda seed: _resolved(seed).update(stat_vars={"served_count": MAX_SEED_COUNT + 1}),
+        r"resolved\.stat_vars\.served_count is a number past the cap",
     ),
     "slots": (
         lambda seed: _resolved(seed).update(slots=[{}] * (MAX_SEED_LIST_ITEMS + 1)),
@@ -656,18 +641,6 @@ _SEED_OVER_CAP: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
         lambda seed: seed.update(operations=seed["operations"] * (MAX_SEED_OPERATIONS + 1)),
         "operations",
     ),
-    "listed-stat-vars": (
-        lambda seed: _resolved(seed).update(
-            stat_vars={"items": [{"ref": "Count_Person"}] * (MAX_SEED_STAT_VARS + 1)}
-        ),
-        r"resolved\.stat_vars\.items\n  List should have at most 200 items",
-    ),
-    "listed-stat-var-ref": (
-        lambda seed: _resolved(seed).update(
-            stat_vars={"items": [{"ref": "x" * (MAX_SEED_TEXT_CHARS + 1)}]}
-        ),
-        r"resolved\.stat_vars\.items\.0\.ref\n  String should have at most 256 characters",
-    ),
 }
 
 
@@ -693,10 +666,10 @@ def test_an_answer_with_a_member_past_its_bound_is_refused_whole(member: str) ->
         SpecBlock.model_validate(raw["seed_spec"][0]["spec"])
 
 
-@pytest.mark.parametrize("member", sorted(set(_ANSWER_OVER_CAP) - {"stat-vars", "stat-var-ref"}))
+@pytest.mark.parametrize("member", sorted(_ANSWER_OVER_CAP))
 def test_a_seed_ignores_a_member_it_does_not_keep_whatever_its_size(member: str) -> None:
-    """The browser's own sentence, labels, coverage, slots and headline are dropped
-    as the seed is read, so their size refuses nothing."""
+    """The browser's own `resolved` is dropped as the seed is read, so the size of
+    its members refuses nothing."""
     change, _ = _ANSWER_OVER_CAP[member]
     raw = _seeded_with(change)
 
@@ -708,7 +681,6 @@ def test_a_seed_at_every_bound_is_taken() -> None:
         _resolved(seed).update(
             rendered_sentence="x" * MAX_SEED_SENTENCE_CHARS,
             entities=[_entity("x" * MAX_SEED_TEXT_CHARS)] * MAX_SEED_ENTITIES,
-            stat_vars={"items": [{"ref": "x" * MAX_SEED_TEXT_CHARS}] * MAX_SEED_STAT_VARS},
         )
         seed["operations"] = [
             {"verb": "rank", "phrase": "x" * MAX_OPERATION_PHRASE_CHARS}
@@ -718,7 +690,6 @@ def test_a_seed_at_every_bound_is_taken() -> None:
     seed = Seed.model_validate(raw)
 
     assert len(seed.operations) == MAX_SEED_OPERATIONS
-    assert len(seed.spec.stat_vars) == MAX_SEED_STAT_VARS
     SpecBlock.model_validate(raw["spec"])
 
 

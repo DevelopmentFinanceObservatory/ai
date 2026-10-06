@@ -575,23 +575,9 @@ def _ref_or_refusal(
     manifest: Manifest, *, columns: tuple[str, ...]
 ) -> FrameRef | MaterialisationOutcome:
     """The reference this frame registers under (`frame_ref_for`), or the refused
-    outcome for a manifest that can't produce one: either no `definition` section at
-    all, or a `spec_id`/`content_version` combination that doesn't match `FrameRef`'s
-    own pair shape.
+    outcome for a manifest whose `spec_id`/`content_version` combination doesn't match
+    `FrameRef`'s own pair shape.
     """
-    if manifest.definition is None:
-        # get_data always mints via `kind: "spec_id"`, which the mint route answers with a
-        # definition manifest, never a collection one -- this would mean that contract
-        # changed underneath this module (mirrors `get_data_digest.py`'s own identical
-        # guard).
-        return MaterialisationOutcome(
-            status="refused",
-            attempts=0,
-            refusal=ToolRefusal.upstream_response_unusable(
-                detail="get_data's manifest carries no 'definition'; a collection manifest "
-                "here would mean the mint route's contract changed"
-            ),
-        )
     try:
         return frame_ref_for(
             spec_id=manifest.definition.spec_id,

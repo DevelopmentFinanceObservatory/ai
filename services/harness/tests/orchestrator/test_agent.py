@@ -36,6 +36,33 @@ def test_on_a_prefix_cache_the_orchestrator_keeps_its_retries(model_name):
     assert agent.model.retry_options.attempts == 3
 
 
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        ("LOW", types.ThinkingLevel.LOW),
+        ("MEDIUM", types.ThinkingLevel.MEDIUM),
+        ("HIGH", types.ThinkingLevel.HIGH),
+    ],
+)
+def test_the_thinking_level_reaches_the_generate_content_config(level, expected):
+    agent = create_orchestrator_agent(model_name="gemini-test", thinking_level=level)
+
+    config = agent.generate_content_config
+    assert config is not None
+    thinking = config.thinking_config
+    assert thinking is not None
+    assert thinking.thinking_level == expected
+    assert thinking.include_thoughts is True
+
+
+def test_an_agent_built_without_a_thinking_level_runs_at_low():
+    agent = create_orchestrator_agent(model_name="gemini-test")
+
+    assert agent.generate_content_config is not None
+    assert agent.generate_content_config.thinking_config is not None
+    assert agent.generate_content_config.thinking_config.thinking_level == types.ThinkingLevel.LOW
+
+
 async def _first_request(scripted_llm: Any, **state: Any) -> Any:
     model = scripted_llm()
     agent = create_orchestrator_agent(

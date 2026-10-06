@@ -42,7 +42,6 @@ import httpx2
 from compiler.sources import (
     default_reading,
     is_family,
-    posted_stat_vars,
     source_from_spec_block,
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
@@ -54,7 +53,7 @@ from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
 from planner.plan import MAX_ASK_CHARS, MAX_PLAN_ASKS, earlier_block
 from planner.skills import GET_SKILL, GET_SKILL_FILE
-from planner.workflow import SelectedSource, ToolId
+from planner.workflow import ToolId
 from pydantic import BaseModel, Field
 
 from harness.dfo_faq import DfoFaqUnavailable, read_dfo_faq
@@ -322,33 +321,29 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     ]
 
 
-def _fetch_key(
-    args: Mapping[str, Any], block: Mapping[str, Any] | None, source: SelectedSource | None
-) -> str:
+def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
     """What a `get_data` call with `args` retrieves, as a canonical JSON key.
 
     Two calls with one key retrieve the same data. A spec_id stands for its
     definition's identity, so the key holds the identity in its place, less
     what the call's own arguments settle: each scope member replaces its
-    identity member, and the StatVars posted from a listing `search` states
-    complete (`stat_var_truncated` false) stand for the identity's shape and
-    slots. Two spec_ids whose remaining identity members agree share a key.
+    identity member. Two spec_ids whose remaining identity members agree
+    share a key.
     A spec with no identity on record keys on its spec_id.
+
+    The identity's `open_roles` stay in the key whatever the scope binds, so
+    an open-origin spec and a plain one scoped to the same debtor key apart.
+    A scope that binds an open axis yields a key of its own, so the fetch
+    misses the cache and retrieves the matching data.
     """
     identity = ((block or {}).get("definition") or {}).get("identity")
     if not isinstance(identity, Mapping):
         return json.dumps(args, sort_keys=True)
     standing = dict(identity)
+    scope = args.get("scope") or {}
     for member, field in _SCOPE_REPLACES.items():
-        if member in (args.get("scope") or {}):
+        if member in scope:
             standing.pop(field, None)
-    if (
-        "resolved_stat_var_dcids" in args
-        and source is not None
-        and source.stat_var_truncated is False
-    ):
-        standing.pop("shape", None)
-        standing.pop("slots", None)
     retrieved = {key: value for key, value in args.items() if key != "spec_id"}
     return json.dumps({**retrieved, "identity": standing}, sort_keys=True)
 
@@ -494,8 +489,7 @@ def build_orchestrator_tools(
             args["scope"] = FetchScope.model_validate(scope).model_dump(exclude_none=True)
         # A stated reading wins, and a breakdown reads the family separately.
         # A spec a plan's step retrieved keeps the plan's reading; one a
-        # search returned is read by the compiler's own family rule, and
-        # posts the StatVars a plan's retrieval of its block would.
+        # search returned is read by the compiler's own family rule.
         reading = stat_vars or (
             "separate"
             if breakdown is not None
@@ -512,11 +506,9 @@ def build_orchestrator_tools(
             args["stat_vars"] = reading
         elif source is not None and is_family(source):
             args["stat_vars"] = default_reading(source).value
-        if source is not None and (posted := posted_stat_vars(source)):
-            args["resolved_stat_var_dcids"] = list(posted)
         if breakdown is not None:
             args["breakdown"] = Breakdown.model_validate(breakdown).model_dump()
-        key = _fetch_key(args, block, source)
+        key = _fetch_key(args, block)
         earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
             frames = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
@@ -532,9 +524,8 @@ def build_orchestrator_tools(
             data = await executor(tool="get_data", args=args)
         except (MCPError, httpx2.TransportError) as exc:
             logger.warning(
-                "fetch: get_data(%s, %d StatVars) did not complete: %s",
+                "fetch: get_data(%s) did not complete: %s",
                 spec_id,
-                len(args.get("resolved_stat_var_dcids") or ()),
                 exc,
                 exc_info=True,
             )

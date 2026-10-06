@@ -126,7 +126,8 @@ class _CountingSurface(FixtureSurface):
         return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-# The default `source()` fixture's own `stat_vars` is `("DebtServicePaid",)`.
+# A source whose identity pins `DebtServicePaid`, the one StatVar `describe` names.
+_PINNED = {"identity": {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}}}
 _DESCRIBE_RESPONSE = ToolCallResult(
     is_error=False,
     structured_content={
@@ -288,7 +289,7 @@ async def test_a_definite_sources_describe_definition_reaches_the_workflow(
     context_holding: ContextHolding,
 ) -> None:
     context = context_holding(draft())
-    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
+    _discovered(context, source(**_PINNED), status=DiscoveryStatus.DEFINITE)
     surface = FixtureSurface(schemas=real_schemas, responses={"describe": _DESCRIBE_RESPONSE})
     core = build_translator_core(surface=surface)
 
@@ -338,7 +339,7 @@ async def test_a_same_revision_retry_reads_the_describe_memo(
     # before `compile_plan` either way, so it runs on both calls; only the
     # second call's network hit should be skipped.
     context = context_holding(draft())
-    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
+    _discovered(context, source(**_PINNED), status=DiscoveryStatus.DEFINITE)
     surface = _CountingSurface(schemas=real_schemas, responses={"describe": _DESCRIBE_RESPONSE})
     core = build_translator_core(surface=surface)
     bad_translation = {

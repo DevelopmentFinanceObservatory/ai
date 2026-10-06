@@ -23,19 +23,9 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import ToolSurface
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
-from executor.classify import (
-    ToolFailure,
-)
-from executor.outcomes import (
-    MethodChoiceNeeded,
-    RediscoveryNeeded,
-    Refused,
-)
 from planner.plan import (
     SeededSource,
-    seed_of,
 )
-from planner.workflow import Workflow as PlanWorkflow
 from pydantic import ValidationError
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -239,7 +229,7 @@ _SEED_FACT_KEYS = (
     "stat_var_item_count",
     "stat_var_member_count_exact",
     "entity_roles",
-    "stat_var_truncated",
+    "stat_var_served_count",
     "open_entity_axes",
 )
 
@@ -283,7 +273,6 @@ def seeded_envelope(seeds: Sequence[dict[str, Any]]) -> dict[str, Any]:
     `warnings` are every seed's together, and `wide` is whether any seed is,
     which is how `choose_depth` reads them. What describes one identity
     (`_SEED_FACT_KEYS`, and a reading's coverage `window`) is on its seed alone.
-    `_drop_seeds_from_turn` builds the envelope again from the seeds left.
     """
     return {
         "status": "definite",
@@ -303,8 +292,7 @@ class TakenSeed:
 
     `index` is the seed's position in the seeds slot, which names its own
     step. `seed` holds what the turn keeps of it: the spec_id, the identity,
-    which hashes to the spec_id, the dcids of the StatVars Search listed, and
-    the operations (`harness.wire.SeedSpec`).
+    which hashes to the spec_id, and the operations (`harness.wire.SeedSpec`).
     """
 
     index: int
@@ -429,9 +417,9 @@ def seeds_slot(posted: Sequence[object]) -> list[dict[str, Any]]:
     """The seeds slot (`SEEDS_STATE_KEY`) for a turn that posted `posted`, one entry per seed.
 
     Each seed is read as `take_seeds` reads it (`_read_seed`). One it can
-    take is kept as its `harness.wire.Seed`: the spec_id, the definition,
-    the StatVar dcids and the operations, and nothing else of the Spec
-    block. One it cannot take is kept as the refusal its step fails with,
+    take is kept as its `harness.wire.Seed`: the spec_id, the definition
+    and the operations, and nothing else of the Spec block. One it cannot
+    take is kept as the refusal its step fails with,
     under `_SEED_REFUSED`. A seed's position is its index in the slot, so
     `seed` refuses each at the index it was posted at, and no posted block
     enters session state.
@@ -491,115 +479,19 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
     """The part Search resolves `taken`'s identity to now (`translator.discovery.resolve_definition`)."""
     spec = taken.seed.spec
     return await resolve_definition(
-        surface,
-        spec_id=spec.spec_id,
-        identity=spec.definition.identity,
-        stat_vars=spec.resubmitted_stat_vars,
+        surface, spec_id=spec.spec_id, identity=spec.definition.identity
     )
-
-
-def candidate_stat_vars(candidates: list[dict[str, Any]], spec_id: str | None) -> str:
-    """The StatVars `search` elected for the chosen candidate
-    (`harness.tool_contracts.graph_envelope`'s `candidates` branch lists them
-    per offered spec), carried forward the same way `_candidate_wide` carries
-    `wide`: the re-entry resolve searches nothing, so `fetch` has no block to
-    read them from. Returned as the JSON `GraphState.spec_id_stat_vars`
-    holds, `{"spec_id": ..., "stat_vars": [...]}`: the list names the
-    candidate it belongs to, so `_chosen_stat_vars` posts it for that
-    `spec_id` and no other."""
-    stat_vars = next(
-        (
-            [dcid for dcid in c.get("stat_vars") or [] if isinstance(dcid, str)]
-            for c in candidates
-            if c.get("spec_id") == spec_id
-        ),
-        [],
-    )
-    return json.dumps({"spec_id": spec_id, "stat_vars": stat_vars})
-
-
-# The `fix` key of `get_data`'s `spec_not_exportable` refusal that names each StatVar
-# the call posted in `resolved_stat_var_dcids` that is outside the identity's family
-# (dfo-apis `member_not_resolvable`, `data_mcp.tool_errors._member_not_resolvable_refusal`).
-_NOT_MEMBERS_FIX_KEY = "not_members"
-
-
-def dropped_seed_shape(*, step_id: str | None, seed: str, failure: ToolFailure) -> dict[str, Any]:
-    """A stop on a seed the turn drops, as the planner reads it on the replan.
-
-    `spec_id` names the seed as the planner was shown it, where a
-    `RediscoveryNeeded` names its source, so `harness.planner_seam` tells the
-    planner not to propose it again: the seed has left the turn's seeded
-    sources (`_drop_seeds_from_turn`), so nothing maps it back to a seed to
-    keep pinned. The message counts the StatVars that left the dataset and
-    names none. It says why and what to plan instead, and that the
-    part of the question the seed answered is left out, which the planner's
-    brief would otherwise have it plan as a part no seed covers.
-    `propose_plan` and `discover_source` refuse the dataset for the rest of
-    the turn (`planner.plan.dropped_seeds`).
-    """
-    named = failure.fix.get(_NOT_MEMBERS_FIX_KEY)
-    counted = f" ({len(named):,} of them)" if isinstance(named, list) and named else ""
-    return {
-        "kind": "seed_dropped",
-        "step_id": step_id,
-        "spec_id": seed,
-        "refusal": {
-            "code": failure.code,
-            "message": (
-                f"StatVars Search elected for the seeded dataset {seed!r} are no longer "
-                f"members of its dataset{counted}. The user is told that this plan "
-                "leaves it out and to search for it again, so it is dropped from this turn. "
-                "Do not plan that dataset again in this turn: do not pin it, and do not add "
-                "an unpinned requirement for the part of the question it answered, since a "
-                "search for that part finds the same dataset and is refused. Plan from the "
-                "other seeded datasets and leave that part out."
-            ),
-        },
-    }
-
-
-def stale_seeds(
-    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
-    *,
-    workflow: PlanWorkflow | None,
-    seeded: Sequence[SeededSource],
-) -> dict[str, str]:
-    """The seeds `outcome`'s wave found stale: each seed's spec_id, by the id of the step that found it.
-
-    A step finds its seed stale when `get_data` refused it naming
-    `_NOT_MEMBERS_FIX_KEY`: StatVars Search elected for the seed, which every
-    retrieval of the seed posts, have left its dataset. The step's evidence
-    binding names the spec_id it retrieved, the seed's own or its copy over a
-    plan's period (`SeededSource.windowed_from`), and either maps to the seed.
-    """
-    if workflow is None:
-        return {}
-    seeds = {item.source.spec_id: seed_of(item) for item in seeded}
-    retrieved = {binding.step_id: binding.spec_id for binding in workflow.evidence_bindings}
-    stale: dict[str, str] = {}
-    for stop in (outcome, *outcome.also_stopped):
-        if not isinstance(stop, Refused) or stop.payload is None or stop.step_id is None:
-            continue
-        if not stop.payload.fix.get(_NOT_MEMBERS_FIX_KEY):
-            continue
-        seed = seeds.get(retrieved.get(stop.step_id, ""))
-        if seed is not None:
-            stale[stop.step_id] = seed
-    return stale
 
 
 class DroppedSeed(TypedDict):
     """A seed the turn dropped, as the user is told of it.
 
     `name` is the seed as the user saw it named. `reason` is why it was
-    dropped as it was taken (`read_answer`, in Search's terms); `None` for
-    a seed whose StatVars left its dataset, which `_left_dataset_clause`
-    words for any number of seeds.
+    dropped as it was taken (`read_answer`, in Search's terms).
     """
 
     name: str
-    reason: str | None
+    reason: str
 
 
 def seed_name(seed: Mapping[str, Any]) -> str:
@@ -615,19 +507,9 @@ def _quoted_list(names: Sequence[str]) -> str:
     return ", ".join(quoted[:-1]) + ("," if len(quoted) > 2 else "") + f" and {quoted[-1]}"
 
 
-def _left_dataset_clause(count: int) -> str:
-    """Why `count` seeds whose StatVars left their datasets were dropped, with the pronoun their number takes."""
-    if count == 1:
-        return "the variables Search listed for it are no longer part of its dataset"
-    return "the variables Search listed for them are no longer part of their datasets"
-
-
 def _drop_reasons(drops: Sequence[DroppedSeed]) -> list[tuple[list[str], str]]:
-    """`drops` as (names, why) pairs: every seed whose StatVars left its dataset
-    under one clause, then each seed dropped as it was taken under its own."""
-    stale = [drop["name"] for drop in drops if drop["reason"] is None]
-    pairs = [(stale, _left_dataset_clause(len(stale)))] if stale else []
-    return pairs + [([drop["name"]], drop["reason"]) for drop in drops if drop["reason"]]
+    """`drops` as (names, why) pairs, each seed under its own reason."""
+    return [([drop["name"]], drop["reason"]) for drop in drops]
 
 
 def _again(drops: Sequence[DroppedSeed]) -> str:

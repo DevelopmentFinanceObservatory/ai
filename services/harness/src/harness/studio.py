@@ -111,7 +111,7 @@ from harness.wire import (
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_SECONDS = 15.0
+HEARTBEAT_SECONDS = 5.0
 SSE_MEDIA_TYPE = "text/event-stream"
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
@@ -1253,7 +1253,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         conversation.ensure_turn_span()
         if studio.surface_recorder is not None:
             studio.surface_recorder.set_step_order(
-                f"{principal}/{body.conversation_id}", pending.step_order
+                f"{principal}/{body.conversation_id}", pending.step_order, pending.step_labels
             )
 
         if body.decision is InterruptDecision.REJECT:

@@ -1815,9 +1815,8 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
     [
         (
             {
-                "stat_vars": tuple(f"Flow_{index}" for index in range(200)),
+                "served_count": None,
                 "stat_var_member_count": 1554,
-                "stat_var_truncated": True,
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
@@ -1825,7 +1824,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         ),
         (
             {
-                "stat_vars": ("Flow_0", "Flow_1", "Flow_2"),
+                "served_count": 3,
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
@@ -1833,7 +1832,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         ),
         (
             {
-                "stat_vars": ("Male", "Female"),
+                "served_count": 2,
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
@@ -1841,7 +1840,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         ),
         (
             {
-                "stat_vars": ("Flow_0",),
+                "served_count": None,
                 "stat_var_member_count": 1,
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
@@ -1850,7 +1849,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         ),
         (
             {
-                "stat_vars": ("Flow_0",),
+                "served_count": None,
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
@@ -1861,8 +1860,8 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         "summed-by-the-rule",
         "summed-by-the-plan",
         "separate-by-the-plan",
-        "one-listed-summed",
-        "one-listed-separate",
+        "one-confirmed-summed",
+        "uncounted-separate",
     ],
 )
 def test_the_dataset_sentence_states_how_a_family_is_read(
@@ -1935,7 +1934,7 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
         decision,
         definition=None,
         breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0),
-        stat_vars=tuple(f"Flow_{index}" for index in range(200)),
+        served_count=None,
         stat_var_member_count=705,
         stat_var_reading=StatVarReading.SEPARATE,
         stat_var_reading_set_by=ReadingSetBy.PLAN,

@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
+import pytest
 from data_mcp import client_holder
 from data_mcp.definition_store import (
     DefinitionStore,
     InMemoryDefinitionStore,
     set_store,
 )
+from data_mcp.resolve_definition_tool import RESUBMIT_READ_TIMEOUT_S
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp
 from fastmcp import Client
@@ -27,22 +29,27 @@ _RECORDED = json.loads(
     (Path(__file__).parent / "fixtures" / "resolve_population_guatemala.json").read_text()
 )
 _SPEC = _RECORDED["parts"][0]["spec"]
-_STAT_VARS = [item["ref"] for item in _SPEC["resolved"]["stat_vars"]["items"]]
 
 
 def _arguments(**overrides: Any) -> dict[str, Any]:
     return {
         "spec_id": _SPEC["spec_id"],
         "identity": _SPEC["definition"]["identity"],
-        "stat_vars": _STAT_VARS,
         **overrides,
     }
 
 
-def _recorded_answer(posted: list[dict[str, Any]], envelope: dict[str, Any] = _RECORDED) -> Handler:
+def _recorded_answer(
+    posted: list[dict[str, Any]],
+    envelope: dict[str, Any] = _RECORDED,
+    *,
+    read_timeouts: list[float] | None = None,
+) -> Handler:
     def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/search/resolve"
         posted.append(json.loads(request.content))
+        if read_timeouts is not None:
+            read_timeouts.append(request.extensions["timeout"]["read"])
         return httpx2.Response(200, json=envelope)
 
     return handler
@@ -59,13 +66,12 @@ async def _call(
             return await client.call_tool("resolve_definition", arguments, raise_on_error=False)
 
 
-async def test_an_identity_is_posted_as_its_own_base_and_search_s_answer_is_returned_and_stored() -> (
-    None
-):
+async def test_an_identity_is_posted_alone_and_search_s_answer_is_returned_and_stored() -> None:
     posted: list[dict[str, Any]] = []
+    read_timeouts: list[float] = []
     store = InMemoryDefinitionStore()
 
-    result = await _call(_recorded_answer(posted), _arguments(), store)
+    result = await _call(_recorded_answer(posted, read_timeouts=read_timeouts), _arguments(), store)
 
     assert result.is_error is False
     assert result.structured_content == {"spec_id": _SPEC["spec_id"], "status": "definite"}
@@ -81,26 +87,16 @@ async def test_an_identity_is_posted_as_its_own_base_and_search_s_answer_is_retu
                     "entry_kind": "identity",
                     "variable_text": _SPEC["spec_id"],
                     "identity": _SPEC["definition"]["identity"],
-                    "base_spec_id": _SPEC["spec_id"],
-                    "base_identity": _SPEC["definition"]["identity"],
-                    "resolved_stat_var_dcids": _STAT_VARS,
                 }
             ],
         },
-        "response_options": {"include_sentence": True},
     }
+    # A resubmit's member walk may read a family's whole subject set, which dfo-apis
+    # bounds at 90 s, past the read timeout a search waits.
+    assert read_timeouts == [pytest.approx(RESUBMIT_READ_TIMEOUT_S, abs=0.01)]
     held = await store.get(_SPEC["spec_id"], schema_version=1)
     assert held is not None
     assert json.loads(held.canonical_bytes) == _SPEC["definition"]["identity"]
-
-
-async def test_no_statvars_posts_none() -> None:
-    posted: list[dict[str, Any]] = []
-
-    await _call(_recorded_answer(posted), _arguments(stat_vars=None), InMemoryDefinitionStore())
-
-    (body,) = posted
-    assert "resolved_stat_var_dcids" not in body["input"]["entries"][0]
 
 
 async def test_an_identity_that_does_not_hash_to_its_spec_id_is_refused_before_search() -> None:

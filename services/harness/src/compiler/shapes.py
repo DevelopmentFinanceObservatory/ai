@@ -265,15 +265,14 @@ def _separate_measures(source: SelectedSource) -> MeasureCount:
     """How many measures a family read separately carries.
 
     A retrieval of a family holds every member of its binding that has data.
-    The StatVars `search` confirmed count them (`stat_var_count`): exactly
-    when the listing is complete (`stat_var_truncated` is false), so a
-    family `search` confirmed one member of carries one measure, and as a
-    lower bound otherwise. The count is `SEVERAL` where it bounds nothing
-    above one: no StatVar confirmed, and one of a listing that is capped or
-    does not say whether it is.
+    `stat_var_count` counts them: exactly once `search` states the members
+    it serves (`served_count`), so a family serving one member carries one
+    measure, and as a lower bound otherwise. The count is `SEVERAL` where it
+    bounds nothing above one: no member counted, or one of a membership not
+    settled.
     """
     count = stat_var_count(source)
-    if count > 1 or (count == 1 and source.stat_var_truncated is False):
+    if count > 1 or (count == 1 and source.served_count == 1):
         return count
     return SEVERAL
 

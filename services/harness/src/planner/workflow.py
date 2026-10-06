@@ -133,18 +133,14 @@ class SelectedSource(StrictModel):
     per series (`selection: per_series`), so each series states its own unit
     and the source names no one `unit_ref`; `None` otherwise.
 
-    `stat_vars` are the dcids `resolved.stat_vars.items` named: members of
-    the definition's binding that `search` confirmed at the resolve's place,
-    capped upstream at `SEARCH_RESOLVED_STAT_VARS_MAX`.
-    `stat_var_member_count` counts those confirmed members, which upstream
-    states even when `items` is capped, `stat_var_member_count_exact` says
-    whether that count is exact or a floor (`False`), and `stat_var_truncated` says
-    whether `items` still carries every member it counts. Both are `None`
-    when the envelope did not state them. `pinned` is whether a described
-    identity mints as one StatVar, the family's root that `search` elected
-    (`compiler.sources.pinned_stat_var`). It is `None` wherever that rule
-    was not evaluated: a source whose identity names its StatVars, one
-    carrying no identity, and a record that does not state the field.
+    `stat_var_member_count` is `resolved.stat_vars.member_count`, the members
+    of the definition's binding that `search` confirmed at the resolve's
+    place, and `stat_var_member_count_exact` says whether that count is exact
+    or a floor (`False`). `served_count` is `resolved.stat_vars.served_count`,
+    how many StatVars the mint serves for the definition, which `search`
+    states only once the membership settled; one makes the source a single
+    series (`compiler.sources.is_family`). Each is `None` when the envelope
+    did not state it.
 
     The binding itself is the population `resolved.shape.member_count`
     counts, kept as `shape_member_count`, which can exceed the confirmed
@@ -202,11 +198,9 @@ class SelectedSource(StrictModel):
     confidence: str | None = None
     has_data: bool | None
     measure_label: Annotated[str | None, HASHED_WHEN_SET] = None
-    stat_vars: tuple[str, ...] = ()
     stat_var_member_count: int | None = None
     stat_var_member_count_exact: Annotated[bool | None, HASHED_WHEN_SET] = None
-    stat_var_truncated: bool | None = None
-    pinned: Annotated[bool | None, HASHED_WHEN_SET] = None
+    served_count: Annotated[int | None, HASHED_WHEN_SET] = None
     shape_member_count: int | None = None
     shape_member_digest: str | None = None
     entities: tuple[ResolvedEntity, ...] = ()

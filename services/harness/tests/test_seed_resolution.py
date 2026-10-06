@@ -98,7 +98,7 @@ def _block(name: str) -> dict[str, Any]:
         "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
         "resolved": {
             "rendered_sentence": f"the reading {name}",
-            "stat_vars": {"items": [{"ref": f"Var_{name}", "slot_values": []}]},
+            "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
         },
     }
 
@@ -205,9 +205,13 @@ async def _run(
 def _kenya_evidence(approved: Any) -> RetrievalEvidence:
     """What a retrieval of the seed returns: Kenya's one series, as the manifest names it.
 
-    The members are the ones the seed's block lists: Search states a member
-    digest for the family, so the source read from its answer lists none."""
-    served = tuple(item["ref"] for item in _KENYA["resolved"]["stat_vars"]["items"])
+    The served members are three of the family's CRS purpose codes; the family's
+    digest is the one Search states."""
+    served = tuple(
+        f"Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_"
+        f"CRSPurposeCode{code}_Nominal"
+        for code in (11110, 11120, 11130)
+    )
     stats = series_statistics_table(
         [
             SeriesStatisticsModel.model_validate(
@@ -269,12 +273,12 @@ async def test_a_label_the_browser_changed_is_never_read_and_search_names_the_en
     )
     (posted,) = surface.search.posted
     (entry,) = posted["input"]["entries"]
-    assert entry["identity"] == entry["base_identity"] == _KENYA["definition"]["identity"]
-    assert entry["base_spec_id"] == _KENYA["spec_id"]
-    # A family with a member digest is elected again by Search, so the resubmit
-    # posts none of its StatVars.
-    assert _KENYA["resolved"]["shape"]["member_digest"]
-    assert "resolved_stat_var_dcids" not in entry
+    # The resubmit posts the identity alone; Search derives the population from it.
+    assert entry == {
+        "entry_kind": "identity",
+        "variable_text": _KENYA["spec_id"],
+        "identity": _KENYA["definition"]["identity"],
+    }
 
     uganda = DatasetRequirement(
         id="aid",

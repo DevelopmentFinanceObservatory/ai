@@ -14,17 +14,11 @@ definition slots, never reaches graph state.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from common.skills import ordered_skill_ids
-from compiler.sources import (
-    DESCRIBED_SHAPE_KIND,
-    block_posts_stat_vars,
-    elected_stat_vars,
-    open_entity_axes_of,
-    pinned_stat_var,
-)
+from compiler.sources import DESCRIBED_SHAPE_KIND, open_entity_axes_of
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +91,11 @@ def _search_warnings(envelope: dict[str, Any], part: dict[str, Any]) -> list[dic
 
 
 def _spec_candidates(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One entry per offered spec: its id, its sentence, its width facts
-    (`_wide_facts`) and `stat_vars`, the StatVars `search` elected for it
-    (`_elected_dcids`) that a `get_data` call for the chosen candidate posts
-    as `resolved_stat_var_dcids`, empty for a block whose retrieval posts
-    none (`compiler.sources.block_posts_stat_vars`)."""
+    """One entry per offered spec: its id, its sentence and its width facts (`_wide_facts`)."""
     return [
         {
             "spec_id": spec.get("spec_id"),
             "label": (spec.get("resolved") or {}).get("rendered_sentence") or spec.get("spec_id"),
-            "stat_vars": (
-                _elected_dcids(spec.get("resolved") or {}) if block_posts_stat_vars(spec) else []
-            ),
             **_wide_facts(spec),
         }
         for spec in specs
@@ -132,31 +119,6 @@ def _entity_roles(spec: dict[str, Any]) -> list[str]:
     return sorted((_identity(spec).get("entities") or {}).keys())
 
 
-def _elected_items(resolved: dict[str, Any]) -> Sequence[Mapping[str, Any]]:
-    return (resolved.get("stat_vars") or {}).get("items") or []
-
-
-def _elected_dcids(resolved: dict[str, Any]) -> list[str]:
-    """The dcid of each elected item, in order, as `get_data` takes them.
-
-    Read by the reader a source's are (`compiler.sources.elected_stat_vars`),
-    so a chosen candidate, a `definite` reading and a plan's retrieval post
-    the same list for the same block. A list that reader refuses offers none
-    of its entries: one cut to the readable ones would differ from the list a
-    plan's retrieval posts. The refusal is logged and the candidate stays on
-    offer, since this reads a candidate that may never be chosen and must
-    not fail the digest.
-    """
-    try:
-        return list(elected_stat_vars(resolved))
-    except ValueError:
-        logger.warning(
-            "a candidate elects StatVars get_data does not take; it offers none to post",
-            exc_info=True,
-        )
-        return []
-
-
 def _year(value: Any) -> int | None:
     try:
         return int(value)
@@ -168,12 +130,10 @@ def _coverage_window(resolved: dict[str, Any]) -> tuple[int, int] | None:
     """The first and last years the resolver found data across.
 
     `resolved.download.window`, the first and last years of the points a
-    mint of the definition writes, when it states both. Otherwise the
-    earliest `start` and latest `end` year across every elected item's own
-    `data_date_range`, the same per-item field a served `get_data` mint
-    reads to build a frame's window. `search` lists only some of a large
-    family's items, so this is the narrower read. `None` when neither
-    states a usable range."""
+    mint of the definition writes, when it states both. Otherwise
+    `resolved.stat_vars.data_date_range`, the first and last dates of the
+    points the answer serves across the family's served members. `None`
+    when neither states a usable range."""
     download = resolved.get("download")
     window = download.get("window") if isinstance(download, Mapping) else None
     if isinstance(window, Mapping):
@@ -181,20 +141,13 @@ def _coverage_window(resolved: dict[str, Any]) -> tuple[int, int] | None:
         end = _year(window.get("end_year"))
         if start is not None and end is not None:
             return start, end
-    starts: list[int] = []
-    ends: list[int] = []
-    for item in _elected_items(resolved):
-        date_range = item.get("data_date_range") if isinstance(item, Mapping) else None
-        if not isinstance(date_range, Mapping):
-            continue
-        start = _year(date_range.get("start"))
-        end = _year(date_range.get("end"))
-        if start is not None and end is not None:
-            starts.append(start)
-            ends.append(end)
-    if not starts:
+    stat_vars = resolved.get("stat_vars")
+    date_range = stat_vars.get("data_date_range") if isinstance(stat_vars, Mapping) else None
+    if not isinstance(date_range, Mapping):
         return None
-    return min(starts), max(ends)
+    start = _year(date_range.get("start"))
+    end = _year(date_range.get("end"))
+    return (start, end) if start is not None and end is not None else None
 
 
 def requested_range(identity: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -249,7 +202,7 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
 def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
     """The single-series facts and derived `wide` verdict for one resolved
     spec: shape kind, entity roles, member count and whether it is exact or a
-    floor, truncation, and
+    floor, how many StatVars the mint serves once the membership settled, and
     whether the identity mints as one series (`graph_envelope`'s docstring
     has the full predicate). Also
     `open_entity_axes`, each entity axis `search` left open with how many members
@@ -261,38 +214,29 @@ def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
     (`harness.mcp_client.McpResolver.__call__`'s `spec_id`-set shortcut
     reads it back off the graph's own state)."""
     resolved = spec.get("resolved") or {}
-    identity = _identity(spec)
-    items = _elected_items(resolved)
-    shape_kind = _identity_shape_kind(spec)
-    entity_roles = _entity_roles(spec)
     stat_vars = resolved.get("stat_vars") or {}
-    # `items` may list only part of the family. `member_count` counts it whole.
-    member_count = stat_vars.get("member_count")
-    counted = isinstance(member_count, int) and not isinstance(member_count, bool)
-    item_count = member_count if counted else len(items)
-    truncated = bool(stat_vars.get("truncated"))
-    # A count Search states is a floor when it says so. A count of the items
-    # alone is a floor when the list was cut.
-    count_exact = stat_vars.get("member_count_exact") is not False if counted else not truncated
-    described_arm = shape_kind == DESCRIBED_SHAPE_KIND
-    pinned_arm = shape_kind == "stat_var"
-    single_series = pinned_stat_var(identity, items, slots=resolved.get("slots")) is not None
-    # One series -- a pinned arm, or a described family whose elected item
-    # is its root -- always wins: see `graph_envelope`'s docstring for why
-    # `truncated` must not be allowed to override it.
-    wide = False if pinned_arm or single_series else (described_arm or truncated)
+    member_count = _whole(stat_vars.get("member_count"))
+    served_count = _whole(stat_vars.get("served_count"))
+    shape_kind = _identity_shape_kind(spec)
+    single_series = shape_kind == "stat_var" or served_count == 1
+    several = shape_kind == DESCRIBED_SHAPE_KIND or (served_count or 0) > 1
     return {
-        "wide": wide,
+        "wide": not single_series and several,
         "stat_var_shape_kind": shape_kind,
-        "stat_var_item_count": item_count,
-        "stat_var_member_count_exact": count_exact,
-        "entity_roles": entity_roles,
-        "stat_var_truncated": truncated,
+        "stat_var_item_count": member_count,
+        "stat_var_member_count_exact": stat_vars.get("member_count_exact") is not False,
+        "entity_roles": _entity_roles(spec),
+        "stat_var_served_count": served_count,
         "open_entity_axes": [
             {"column": axis.column, "members": axis.member_count}
             for axis in open_entity_axes_of(resolved)
         ],
     }
+
+
+def _whole(value: Any) -> int | None:
+    """`value` when it is a whole number, `None` otherwise; a JSON `true` is no count."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -333,57 +277,18 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     unbound, and a demographic slot is unbound whenever the query did not
     name it), so treating it as wide would route to the planner and the
     approval gate exactly the asks that mint as one series. A pinned-arm
-    identity (`shape.kind == "stat_var"`) is one series. A described-arm
-    identity is one series when `search` elected exactly one item and that
-    item is the family's root (`compiler.sources.pinned_stat_var`): entity
-    roles exactly `{"observationAbout"}`, no `set`-bound slot, the item's
-    `constraint_properties` equal the identity's `value`- and `exact`-bound
-    slot properties, its `slot_values` equal those slots' refs, and no
-    `value`-bound slot's entry in `resolved.slots` carries an `expansion`.
-    A root dominates every member with extra constraints, which is the test
-    dfo-apis runs to prove its member walk complete, so "population of
-    Guatemala" (nothing bound, `Count_Person` with
-    `constraint_properties: []`) and "female population in Mexico"
-    (`gender` bound, `Count_Person_Female` with `["gender"]`) both mint as
-    one series (`data_mcp.substitution.root_member` names the case the
-    block cannot show in which a root still mints as several series). Every
-    other described-arm identity is wide: nothing elected, two or more
-    elected items, an item constrained beyond the bound slots, an item
-    whose `constraint_properties` is missing or `null` (Search does not
-    know its constraints), an item constrained to another code than a
-    slot binds, a `value` binding that widens to descendant codes (a
-    hierarchical family such as `crsPurpose`, whose subtree the mint
-    serves), a `set`-bound slot, or a role-bearing identity
-    (`origin`/`destination`, the CRS `FinancialFlow` case) that
-    legitimately enumerates many members. Any other identity is wide when
-    `resolved.stat_vars.truncated` is `true`.
-
-    Neither `resolved.stat_vars.member_count` nor `truncated` may drive this
-    directly: `member_count` is capped at 1 for a non-set-bound standard
-    shape today by an early upstream `break`, and both fields change
-    meaning once dfo-apis #893 lands. `truncated` is computed against the
-    200-item display cap over that same pre-collapsed count, so it is
-    structurally `false` for every ordinary standard ask until #893 ships --
-    reading it as the primary signal would route every standard identity as
-    narrow, exactly the bug this field exists to fix.
-
-    One series -- a pinned arm, or a described identity whose elected item
-    is its root -- always wins over `truncated`, as it does in dfo-apis,
-    where a confirmed root proves a truncated member walk complete.
-    Post-#893, `member_count` stops being `len(items)` and becomes the
-    confirmed-at-place population, and `truncated` becomes `len(items) <
-    member_count`; `items` itself is unchanged, so an ordinary standard
-    identity elects exactly one winner while `member_count` grows past one
-    and `truncated` flips true. If `truncated` could override a root, every
-    one of those identities -- the case the root test exists to keep off
-    the slow path -- would flip wide the day #893 ships, with nothing in
-    this repo's fixtures able to catch it, since they all carry today's
-    values. So `truncated` sharpens a verdict only for an identity the root
-    test does not cover; it never inverts a single-series call.
+    identity (`shape.kind == "stat_var"`) is one series. Any other identity
+    is one series when `resolved.stat_vars.served_count` is one: `search`
+    states how many StatVars the mint serves once the membership settled,
+    so "population of Guatemala" (the family's root, `Count_Person`, serves
+    alone) is one series. Every other described-arm identity is wide, a
+    membership `search` did not settle (`served_count` null) included. Any
+    other identity is wide when `search` states it serves more than one.
 
     The raw facts a later change to this predicate would need --
-    `stat_var_shape_kind`, `stat_var_item_count`, `entity_roles`,
-    `stat_var_truncated` -- ride alongside `wide` in the digest, so reading
+    `stat_var_shape_kind`, `stat_var_item_count` (the members `search`
+    confirmed, `resolved.stat_vars.member_count`), `entity_roles`,
+    `stat_var_served_count` -- ride alongside `wide` in the digest, so reading
     them never needs another trip back into `mcp_client.py`'s raw envelope.
 
     A `no_data` part maps by its `category`: `unresolved` (or nearest-real

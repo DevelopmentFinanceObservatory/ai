@@ -96,8 +96,8 @@ def _facet_option(dcid: str, label: str, *, value_kind: str = "enum_value") -> d
     return {"value": {"ref": {"dcid": dcid, "label": label}, "value_kind": value_kind}}
 
 
-# `facet_options`, populated on every definite spec below since the tool always sets
-# `response_options.include_option_coverage` -- one entry per axis a resolved
+# `facet_options`, populated on every definite spec below since dfo-apis serves it on
+# every definite spec -- one entry per axis a resolved
 # candidate carried an observed value for. `provenance` exceeds the three-value
 # render cap on purpose, exercising the digest's "and N more" tail.
 _FACET_OPTIONS_FIXTURE: list[dict[str, Any]] = [

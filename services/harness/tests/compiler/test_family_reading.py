@@ -1,20 +1,16 @@
 """How a source binding a family of StatVars is read, summed or separately.
 
 The spec blocks come from `tests/fixtures/family_spec_blocks.json`: single-part
-`search` envelopes recorded from dfo-apis, cut to the fields a source reads.
-Each slot carries `summable` and each elected item its `constraint_properties`
-as dfo-apis serves them. A test that needs a slot the recordings lack edits a
+`search` envelopes recorded from dfo-apis, cut to the fields a source reads
+and converted to the wire that lists no members. Each slot carries `summable`
+as dfo-apis serves it. A test that needs a slot the recordings lack edits a
 copy of a recorded block and says what it changed.
 
-A role-bearing CRS identity never mints as one StatVar, so it is a family
-however many members `search` listed: the recordings list 68 and 200, and the
-one-member case is a recorded block cut to its first item. A source restored
-from a record that states no pin verdict is a family by the StatVars it lists.
-
-The three blocks that elect one StatVar keyed on a place each state it as
-the family's root: its `constraint_properties` are the identity's
-`value`-bound slot properties. `_as_root` writes the same two fields onto an
-edited block that elects a root.
+A source is one StatVar exactly when `search` states it serves one
+(`resolved.stat_vars.served_count`). The three blocks that elected their
+family's root, keyed on a place, state a served count of one; the CRS
+families state their served count, or none where the recorded walk was
+capped.
 
 The compile-level tests state the plans that whole questions call for and
 check the retrieval's `stat_vars` argument, the aggregate by period that
@@ -38,9 +34,7 @@ from compiler.compile import CompileIssueCode, CompileResult, compile_plan
 from compiler.sources import (
     default_reading,
     is_family,
-    member_digest,
     outcome_from_envelope,
-    posted_stat_vars,
     source_from_spec_block,
     stat_var_reading,
 )
@@ -92,40 +86,17 @@ _BLOCKS: dict[str, Any] = json.loads(
 )
 
 
-def _as_root(block: dict[str, Any]) -> dict[str, Any]:
-    """`block` with its elected items stating what Search states of a family's root.
-
-    A root's `constraint_properties` are the identity's `value`-bound slot
-    properties, and its `slot_values` those slots' refs
-    (`data_mcp.substitution.root_member`).
-    """
-    bound = {
-        slot["property"]: slot["binding"]["ref"]
-        for slot in block["definition"]["identity"]["slots"]
-        if slot["binding"]["state"] == "value"
-    }
-    for item in block["resolved"]["stat_vars"]["items"]:
-        item["constraint_properties"] = sorted(bound)
-        item["slot_values"] = [
-            {"key": {"property": {"dcid": prop}}, "value": {"ref": {"dcid": ref}}}
-            for prop, ref in bound.items()
-        ]
-    return block
-
-
 def _block(name: str) -> dict[str, Any]:
     """A deep copy of one recorded spec block, safe to edit."""
     return copy.deepcopy(_BLOCKS[name]["parts"][0]["spec"])
 
 
 def _retrieval(source: SelectedSource, stat_vars: str | None = None) -> dict[str, Any]:
-    """The `get_data` arguments a retrieval of `source` writes: its spec_id, the reading
-    when it states one, and the StatVars it posts (`posted_stat_vars`)."""
+    """The `get_data` arguments a retrieval of `source` writes: its spec_id, and the
+    reading when it states one."""
     args: dict[str, Any] = {"spec_id": source.spec_id}
     if stat_vars is not None:
         args["stat_vars"] = stat_vars
-    if posted := posted_stat_vars(source):
-        args["resolved_stat_var_dcids"] = list(posted)
     return args
 
 
@@ -133,12 +104,12 @@ def _source(name: str) -> SelectedSource:
     return source_from_spec_block(_block(name))
 
 
-def _one_elected(name: str) -> dict[str, Any]:
-    """A recorded block with `resolved.stat_vars` cut to its first item, as `search`
-    states it when one member of the binding has data for the roles asked."""
+def _one_confirmed(name: str) -> dict[str, Any]:
+    """A recorded block whose `resolved.stat_vars` confirms one member and settles no
+    membership, as `search` states it when one member of the binding has data for the
+    roles asked and its walk did not finish."""
     block = _block(name)
-    stat_vars = block["resolved"]["stat_vars"]
-    stat_vars.update(items=stat_vars["items"][:1], member_count=1, truncated=False)
+    block["resolved"]["stat_vars"].update(member_count=1, served_count=None)
     return block
 
 
@@ -175,11 +146,11 @@ def test_french_education_grants_sum_over_three_summable_open_axes() -> None:
     assert default_reading(source) is StatVarReading.SUM
 
 
-def test_a_family_capped_by_search_is_still_a_family() -> None:
-    # 200 of 1,554 members listed: `items` is capped well above one.
+def test_a_family_whose_membership_search_did_not_settle_is_still_a_family() -> None:
+    # 1,554 members confirmed, and the walk capped: no served count.
     source = _source("germany_bilateral_oda")
 
-    assert len(source.stat_vars) == 200
+    assert source.served_count is None
     assert source.stat_var_member_count == 1554
     assert is_family(source)
     assert default_reading(source) is StatVarReading.SUM
@@ -206,67 +177,54 @@ def test_male_and_female_population_stays_separate_over_its_set_bound_sex() -> N
 @pytest.mark.parametrize(
     "name", ["life_expectancy_ghana", "population_kenya", "unemployment_rate_by_sex_spain"]
 )
-def test_one_elected_stat_var_is_no_family_however_many_candidates_search_counted(
+def test_one_served_stat_var_is_no_family_however_many_candidates_search_counted(
     name: str,
 ) -> None:
-    """Each binds one StatVar. `member_count` counts the three candidates
-    confirmed at the place, so `truncated` reads true, and neither makes the
-    source a family. Every slot of these is inapplicable, so a rule reading
-    `truncated` as a family would sum each over no axis at all."""
+    """Each serves one StatVar, the family's root. `member_count` counts the three
+    candidates confirmed at the place, and does not make the source a family.
+    Every slot of these is inapplicable, so a rule reading the count as a family
+    would sum each over no axis at all."""
     for source in outcome_from_envelope(_BLOCKS[name]).sources:
-        assert len(source.stat_vars) == 1
-        assert source.stat_var_member_count == 3
-        assert source.stat_var_truncated is True
+        assert (source.served_count, source.stat_var_member_count) == (1, 3)
         assert not is_family(source)
         assert stat_var_reading(source, None).stat_var_reading is None
 
 
-# --- A family `search` lists one member of -------------------------------------------
-
-
-def test_every_recorded_role_bearing_identity_is_unpinned_and_every_pinned_one_is_no_family() -> (
-    None
-):
-    """A described identity keyed on `observationAbout` alone whose one
-    elected StatVar is its family's root mints as that StatVar, and no other
-    does. The pin and the family predicate read the same rule, so a source
-    is one or the other."""
-    pinned = {
-        name: [source.pinned for source in outcome_from_envelope(envelope).sources]
+def test_every_recorded_source_is_a_family_unless_search_serves_one_stat_var() -> None:
+    families = {
+        name: [is_family(source) for source in outcome_from_envelope(envelope).sources]
         for name, envelope in _BLOCKS.items()
     }
 
-    assert pinned == {
-        "france_education_grants": [False],
-        "germany_bilateral_oda": [False],
-        "germany_oda_to_kenya": [False],
-        "male_female_population_nigeria": [False],
-        "life_expectancy_ghana": [True],
-        "population_kenya": [True],
-        "unemployment_rate_by_sex_spain": [True, True],
+    assert families == {
+        "france_education_grants": [True],
+        "germany_bilateral_oda": [True],
+        "germany_oda_to_kenya": [True],
+        "male_female_population_nigeria": [True],
+        "life_expectancy_ghana": [False],
+        "population_kenya": [False],
+        "unemployment_rate_by_sex_spain": [False, False],
     }
-    for name, envelope in _BLOCKS.items():
-        for source in outcome_from_envelope(envelope).sources:
-            assert is_family(source) is (not source.pinned), name
 
 
-def test_a_role_bearing_family_listing_one_member_is_still_a_family_and_is_summed() -> None:
-    """France's education grants with one member listed. An identity keyed
-    on a provider states no root, so dfo-apis mints every member of the
-    binding, and the open axes, all summable, read it summed."""
-    source = source_from_spec_block(_one_elected("france_education_grants"))
+# --- A family `search` confirmed one member of -----------------------------------------
 
-    assert len(source.stat_vars) == 1
-    assert source.pinned is False
+
+def test_a_family_confirming_one_member_without_a_served_count_is_summed() -> None:
+    """France's education grants with one member confirmed and no membership
+    settled: the mint may serve more, and the open axes, all summable, read it
+    summed."""
+    source = source_from_spec_block(_one_confirmed("france_education_grants"))
+
     assert is_family(source)
     read = stat_var_reading(source, None)
     assert read.stat_var_reading is StatVarReading.SUM
     assert read.stat_var_reading_set_by is ReadingSetBy.RULE
 
 
-def test_a_role_bearing_family_listing_one_member_stays_separate_over_an_unsummable_axis() -> None:
+def test_a_family_confirming_one_member_stays_separate_over_an_unsummable_axis() -> None:
     # The recording binds nettingBasis to Gross; unbound, it pairs gross and net.
-    block = _one_elected("germany_oda_to_kenya")
+    block = _one_confirmed("germany_oda_to_kenya")
     _slot(block, "nettingBasis")["binding"] = {"kind": "unbound"}
 
     source = source_from_spec_block(block)
@@ -275,111 +233,17 @@ def test_a_role_bearing_family_listing_one_member_stays_separate_over_an_unsumma
     assert stat_var_reading(source, None).stat_var_reading is StatVarReading.SEPARATE
 
 
-def test_an_identity_electing_its_root_beside_another_member_is_a_family() -> None:
-    """Total population with the female population elected too. The mint
-    reduces the family to its root only when the root is the one StatVar
-    `search` elected, so two elected members are read as a family."""
-    block = _block("population_kenya")
-    block["resolved"]["stat_vars"]["items"].append(
-        {"ref": "Count_Person_Female", "slot_values": [], "constraint_properties": ["gender"]}
-    )
-
-    source = source_from_spec_block(block)
-
-    assert source.stat_vars == ("Count_Person", "Count_Person_Female")
-    assert source.pinned is False
-    assert is_family(source)
-
-
-@pytest.mark.parametrize(
-    "constraint_properties",
-    [None, ["gender"]],
-    ids=["constraints-unknown", "constrained-beyond-the-bound-slots"],
-)
-def test_one_elected_stat_var_that_is_not_the_root_is_a_family(
-    constraint_properties: list[str] | None,
-) -> None:
-    """Total population in Kenya binds no slot, so its root asserts no
-    constraint. An elected StatVar whose constraints Search does not state,
-    and one that asserts a constraint, are each one member of the family the
-    mint resolves."""
-    block = _block("population_kenya")
-    (item,) = block["resolved"]["stat_vars"]["items"]
-    item["constraint_properties"] = constraint_properties
-
-    source = source_from_spec_block(block)
-
-    assert source.pinned is False
-    assert is_family(source)
-
-
-def test_a_recorded_block_electing_its_root_states_the_roots_constraint_properties() -> None:
-    """Total population in Kenya binds no slot, and Search states that its one
-    elected StatVar asserts no constraint, so that StatVar is the family's root
-    and the source mints as it. An item stating no `constraint_properties` is
-    `test_one_elected_stat_var_that_is_not_the_root_is_a_family`."""
-    recorded = json.loads(
-        (Path(__file__).parent.parent / "fixtures" / "family_spec_blocks.json").read_text()
-    )["population_kenya"]["parts"][0]["spec"]
-    assert recorded["resolved"]["stat_vars"]["items"] == [
-        {"ref": "Count_Person", "constraint_properties": [], "slot_values": []}
-    ]
-
-    source = source_from_spec_block(recorded)
-
-    assert source.pinned is True
-    assert not is_family(source)
-
-
-def test_a_source_carrying_no_identity_is_a_family_by_the_stat_vars_it_lists() -> None:
+def test_a_source_carrying_no_identity_is_a_family_by_its_served_count() -> None:
     block = _block("france_education_grants")
     del block["definition"]
 
-    listed = source_from_spec_block(block)
-    one = source_from_spec_block(_one_elected("france_education_grants") | {"definition": {}})
+    source = source_from_spec_block(block)
 
-    assert listed.identity is None and listed.pinned is None and is_family(listed)
-    assert one.identity is None and one.pinned is None and not is_family(one)
-    # data-mcp lists none of a family Search states a member digest for; the
-    # binding's own count says whether it is a family.
-    unlisted = listed.model_copy(update={"stat_vars": ()})
-    assert unlisted.shape_member_digest is not None and unlisted.shape_member_count == 183
-    assert is_family(unlisted)
-    assert not is_family(unlisted.model_copy(update={"shape_member_count": 1}))
+    assert source.identity is None and is_family(source)
+    assert not is_family(source.model_copy(update={"served_count": 1}))
 
 
-@pytest.mark.parametrize("name", ["population_kenya", "life_expectancy_ghana"])
-def test_a_restored_source_stating_no_pin_verdict_is_a_family_only_by_the_stat_vars_it_lists(
-    name: str,
-) -> None:
-    """A stored `SelectedSource` whose record carries no `pinned` key: the pin
-    rule was not evaluated for it, so its one listed StatVar makes it no
-    family and the plan card states no reading."""
-    dumped = _source(name).model_dump(mode="json")
-    del dumped["pinned"]
-
-    restored = SelectedSource.model_validate(dumped)
-
-    assert restored.pinned is None
-    assert not is_family(restored)
-    read = stat_var_reading(restored, None)
-    assert read.stat_var_reading is None
-    assert _reading_clause(read) is None
-
-
-def test_a_restored_role_bearing_source_stating_no_pin_verdict_counts_the_stat_vars_it_lists() -> (
-    None
-):
-    dumped = _source("france_education_grants").model_dump(mode="json")
-    del dumped["pinned"]
-
-    restored = SelectedSource.model_validate(dumped)
-
-    assert len(restored.stat_vars) == 68
-    assert is_family(restored)
-
-
-# --- An unpinned binding `search` states holds one member ----------------------------
+# --- A binding `search` states one served member of -----------------------------------
 
 _PLACE_OPEN_BLOCK: dict[str, Any] = json.loads(
     (Path(__file__).parent.parent / "fixtures" / "search_spec_place_scope.json").read_text()
@@ -390,38 +254,16 @@ _DONOR_OPEN_BLOCK: dict[str, Any] = json.loads(
 
 
 def _place_open(**stat_vars: object) -> dict[str, Any]:
-    """The recorded place-open block, its `resolved.stat_vars` fields overridden."""
+    """The recorded place-open block, confirming one member as a floor, with no
+    membership settled unless `stat_vars` overrides it."""
     block = copy.deepcopy(_PLACE_OPEN_BLOCK)
-    block["resolved"]["stat_vars"].update(stat_vars)
+    block["resolved"]["stat_vars"].update({"served_count": None} | stat_vars)
     return block
 
 
-def _place_bound(**stat_vars: object) -> dict[str, Any]:
-    """The place-open block with Kenya bound on `observationAbout` and no scope left
-    open, its one elected StatVar stated as the family's root (`_as_root`)."""
-    block = _as_root(_place_open(**stat_vars))
-    block["definition"]["identity"]["entities"] = {"observationAbout": ["country/KEN"]}
-    block["resolved"]["entities"] = [
-        {"role": "observationAbout", "ref": "country/KEN", "label": "Kenya"}
-    ]
-    del block["resolved"]["scope"]
-    return block
-
-
-def _without(block: dict[str, Any], *path: str) -> dict[str, Any]:
-    """`block` with the key `path` names removed from `resolved`."""
-    *parents, key = path
-    node = block["resolved"]
-    for parent in parents:
-        node = node[parent]
-    del node[key]
-    return block
-
-
-def _donor_open(*, listed: int, truncated: bool) -> dict[str, Any]:
+def _donor_open(*, confirmed: int, served: int | None) -> dict[str, Any]:
     block = copy.deepcopy(_DONOR_OPEN_BLOCK)
-    stat_vars = block["resolved"]["stat_vars"]
-    stat_vars.update(items=stat_vars["items"][:listed], member_count=listed, truncated=truncated)
+    block["resolved"]["stat_vars"].update(member_count=confirmed, served_count=served)
     return block
 
 
@@ -432,157 +274,51 @@ def _stating_no_summable(block: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
-def _donor_bound() -> dict[str, Any]:
-    block = copy.deepcopy(_DONOR_OPEN_BLOCK)
-    block["definition"]["identity"]["entities"]["origin"] = ["country/FRA"]
-    block["resolved"]["entities"].append(
-        {"role": "origin", "ref": "country/FRA", "label": "France"}
-    )
-    block["resolved"]["role_axis_facts"] = []
-    return block
-
-
-def _shape_count(block: dict[str, Any], count: object) -> dict[str, Any]:
-    block["resolved"]["shape"]["member_count"] = count
-    return block
-
-
-def _other_digest(block: dict[str, Any], dcids: Sequence[str]) -> dict[str, Any]:
-    """`block` with the digest of `dcids`, a population other than its one listed StatVar."""
-    block["resolved"]["shape"]["member_digest"] = member_digest(dcids)
-    return block
-
-
-def _exact(block: dict[str, Any]) -> dict[str, Any]:
-    """`block` with the digest of its one listed StatVar, which states the binding is that member."""
-    (item,) = block["resolved"]["stat_vars"]["items"]
-    block["resolved"]["shape"]["member_digest"] = member_digest([item["ref"]])
-    return block
-
-
 @pytest.mark.parametrize(
-    ("block", "pinned", "family"),
+    ("block", "family"),
     [
-        pytest.param(_place_bound(), True, False, id="place-bound"),
-        pytest.param(_exact(_place_open()), False, False, id="place-open-exactly-one-member"),
-        pytest.param(
-            _without(_exact(_place_open()), "scope"),
-            False,
-            False,
-            id="place-less-exactly-one-member",
-        ),
-        # The recorded blocks state their binding count with no digest: a floor.
-        pytest.param(_place_open(), False, True, id="place-open-floor-of-one"),
-        pytest.param(_without(_place_open(), "scope"), False, True, id="place-less-floor-of-one"),
-        pytest.param(_donor_open(listed=2, truncated=False), False, True, id="aid-donor-open"),
-        pytest.param(_donor_bound(), False, True, id="aid-fully-bound"),
-        pytest.param(
-            _donor_open(listed=1, truncated=True), False, True, id="aid-one-listed-capped"
-        ),
-        pytest.param(
-            _donor_open(listed=1, truncated=False), False, True, id="aid-one-listed-of-many"
-        ),
-        pytest.param(
-            _place_bound(member_count=4, truncated=True), True, False, id="place-bound-capped"
-        ),
-        # An exact binding of one still needs the listing to agree, uncapped.
-        pytest.param(
-            _exact(_place_open(member_count=3, truncated=True)), False, True, id="exact-capped"
-        ),
-        pytest.param(_exact(_place_open(truncated=True)), False, True, id="exact-list-capped"),
-        pytest.param(
-            _without(_exact(_place_open()), "stat_vars", "truncated"),
-            False,
-            True,
-            id="exact-truncation-unstated",
-        ),
-        pytest.param(
-            _without(_exact(_place_open()), "stat_vars", "member_count"),
-            False,
-            True,
-            id="exact-confirmed-count-unstated",
-        ),
-        pytest.param(
-            _without(_exact(_place_open()), "shape", "member_count"),
-            False,
-            True,
-            id="digest-with-no-binding-count",
-        ),
-        pytest.param(
-            _shape_count(_exact(_place_open()), 2), False, True, id="exact-binding-of-two"
-        ),
-        # A digest of some other population says the binding is not the listed member.
-        pytest.param(
-            _other_digest(_place_open(), ["Count_Person"]),
-            False,
-            True,
-            id="digest-of-another-member",
-        ),
-        pytest.param(
-            _other_digest(_place_open(), ["Count_Person", "Count_Person_Female"]),
-            False,
-            True,
-            id="digest-of-a-larger-population",
-        ),
-        pytest.param(
-            _shape_count(_donor_open(listed=1, truncated=False), 1),
-            False,
-            True,
-            id="aid-count-of-one-under-the-digest-of-257",
-        ),
+        pytest.param(_place_open(served_count=1), False, id="place-open-one-served"),
+        pytest.param(_place_open(), True, id="place-open-floor-of-one"),
+        pytest.param(_donor_open(confirmed=1, served=1), False, id="aid-one-served"),
+        pytest.param(_donor_open(confirmed=2, served=2), True, id="aid-two-served"),
+        pytest.param(_donor_open(confirmed=1, served=None), True, id="aid-one-confirmed"),
         # JSON `true` is no count of one.
-        pytest.param(
-            _shape_count(_exact(_place_open()), True), False, True, id="binding-count-true"
-        ),
-        pytest.param(
-            _exact(_place_open(member_count=True)), False, True, id="confirmed-count-true"
-        ),
+        pytest.param(_place_open(served_count=True), True, id="served-count-true"),
     ],
 )
-def test_an_unpinned_described_identity_is_a_family_unless_search_states_exactly_one_member(
-    block: dict[str, Any], pinned: bool, family: bool
+def test_a_source_is_a_family_unless_search_states_it_serves_exactly_one_member(
+    block: dict[str, Any], family: bool
 ) -> None:
-    source = source_from_spec_block(block)
-
-    assert source.pinned is pinned
-    assert is_family(source) is family
+    assert is_family(source_from_spec_block(block)) is family
 
 
 def test_a_count_search_states_as_true_is_read_as_no_count() -> None:
-    source = source_from_spec_block(_shape_count(_place_open(member_count=True), True))
+    block = _place_open(member_count=True, served_count=True)
+    block["resolved"]["shape"]["member_count"] = True
+
+    source = source_from_spec_block(block)
 
     assert source.shape_member_count is None
     assert source.stat_var_member_count is None
+    assert source.served_count is None
 
 
 def test_a_floor_of_one_with_its_place_left_open_is_a_family_the_card_states_no_reading_for() -> (
     None
 ):
-    """Health spending per person with no country named. `search` counts its
-    binding as at least one, so the retrieval reads it as a family and
-    states `separate`, and the card, which names one indicator varying along
-    no axis, states no reading clause."""
-    source = source_from_spec_block(copy.deepcopy(_PLACE_OPEN_BLOCK))
+    """Health spending per person with no country named. `search` confirms
+    one member as a floor and settles no membership, so the retrieval reads
+    it as a family and states `separate`, and the card, which names one
+    indicator varying along no axis, states no reading clause."""
+    source = source_from_spec_block(_place_open())
 
     read = stat_var_reading(source, None)
 
-    assert source.pinned is False
-    assert source.shape_member_digest is None
+    assert source.served_count is None
     assert [axis.column for axis in source.open_entity_axes or ()] == ["observationAbout"]
     assert read.stat_var_reading is StatVarReading.SEPARATE
     assert read.stat_var_reading_set_by is ReadingSetBy.RULE
     assert _reading_clause(read) is None
-
-
-def test_the_digest_of_one_stat_var_is_read_with_or_without_its_dcid_prefix() -> None:
-    """A block listing a prefixed StatVar is refused as a source, so the
-    prefix reaches the rule only on a source restored from a record."""
-    source = source_from_spec_block(_exact(_place_open()))
-    (listed,) = source.stat_vars
-    restored = source.model_copy(update={"stat_vars": (f"dcid:{listed}",)})
-
-    assert not is_family(source)
-    assert not is_family(restored)
 
 
 def _summable_expenditure_type(block: dict[str, Any]) -> dict[str, Any]:
@@ -603,7 +339,7 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
     requested: StatVarReading | None,
     set_by: ReadingSetBy,
 ) -> None:
-    """One member listed over a binding `search` counts as at least one, with
+    """One member confirmed over a binding `search` counts as at least one, with
     an open axis the family sums over: the binding may hold more, so the
     retrieval asks for the sum, whether the plan states it or the rule does.
     The requirement names no place, so a filter keeps the countries before
@@ -652,30 +388,30 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
 @pytest.mark.parametrize(
     ("block", "clause"),
     [
-        pytest.param(_place_open(), None, id="one-listed-uncapped-no-open-axis"),
+        pytest.param(_place_open(), None, id="one-confirmed-no-open-axis"),
         pytest.param(
-            _place_open(member_count=3, truncated=True),
+            _place_open(member_count=3),
             "kept as 3 separate StatVars by default",
-            id="one-listed-capped",
+            id="three-confirmed",
         ),
         pytest.param(
-            _without(_place_open(), "stat_vars", "truncated"),
+            _place_open(member_count=None),
             "kept as separate StatVars by default",
-            id="one-listed-truncation-unstated",
+            id="nothing-counted",
         ),
         pytest.param(
-            _stating_no_summable(_donor_open(listed=2, truncated=False)),
+            _stating_no_summable(_donor_open(confirmed=2, served=2)),
             "kept as 2 separate StatVars by default",
-            id="two-listed",
+            id="two-served",
         ),
         pytest.param(
-            _stating_no_summable(_donor_open(listed=1, truncated=False)),
+            _stating_no_summable(_donor_open(confirmed=1, served=None)),
             "kept as separate StatVars by default",
-            id="one-listed-uncapped-over-open-axes",
+            id="one-confirmed-over-open-axes",
         ),
     ],
 )
-def test_a_family_read_separately_states_its_clause_unless_it_lists_one_indicator_with_no_axis(
+def test_a_family_read_separately_states_its_clause_unless_it_counts_one_indicator_with_no_axis(
     block: dict[str, Any], clause: str | None
 ) -> None:
     read = stat_var_reading(source_from_spec_block(block), None)
@@ -945,13 +681,13 @@ def test_total_education_grants_from_france_sum_the_family_then_total_each_year(
     }
 
 
-def test_a_family_listing_one_member_asks_for_its_sum_and_feeds_a_single_measure_verb(
+def test_a_family_confirming_one_member_asks_for_its_sum_and_feeds_a_single_measure_verb(
     compile_question: Callable[..., CompileResult],
 ) -> None:
-    """France's education grants with one member listed: the retrieval asks
-    dfo-apis for the family's sum, so the frame holds one StatVar whichever
-    members hold data, and the yearly total reads it."""
-    source = source_from_spec_block(_one_elected("france_education_grants"))
+    """France's education grants with one member confirmed and no membership
+    settled: the retrieval asks dfo-apis for the family's sum, so the frame
+    holds one StatVar whichever members hold data, and the yearly total reads it."""
+    source = source_from_spec_block(_one_confirmed("france_education_grants"))
     grants = _dataset(
         "grants",
         [Entity(name="France", role="donor")],
@@ -1027,7 +763,7 @@ def test_a_total_over_a_family_the_rule_leaves_separate_is_refused_at_compile_ti
     (issue,) = result.issues
     assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "yearly_total"
-    # Search lists 200 of the 474 StatVars it confirmed; the count is the 474.
+    # Search confirmed 474 StatVars and settled no membership; the count is the 474.
     assert source.stat_var_member_count == 474
     assert "aggregate reads a single measure; got 474" in issue.reason
     # Summing would refuse `rollup_not_summable`, so the reason omits that advice.
@@ -1035,17 +771,12 @@ def test_a_total_over_a_family_the_rule_leaves_separate_is_refused_at_compile_ti
     assert "stat_vars='sum'" not in issue.reason
 
 
-def _gross_and_net_kenya_listing(items: int, *, truncated: bool) -> SelectedSource:
-    """Germany's ODA to Kenya over an open netting basis, with `resolved.stat_vars`
-    cut to its first `items` and stating whether `search` capped the list."""
+def _gross_and_net_kenya_counting(*, confirmed: int | None, served: int | None) -> SelectedSource:
+    """Germany's ODA to Kenya over an open netting basis, its `resolved.stat_vars`
+    stating `confirmed` members and `served` StatVars."""
     block = _block("germany_oda_to_kenya")
     _slot(block, "nettingBasis")["binding"] = {"kind": "unbound"}
-    stat_vars = block["resolved"]["stat_vars"]
-    stat_vars.update(
-        items=stat_vars["items"][:items],
-        member_count=items + 2 if truncated else items,
-        truncated=truncated,
-    )
+    block["resolved"]["stat_vars"].update(member_count=confirmed, served_count=served)
     return source_from_spec_block(block)
 
 
@@ -1068,62 +799,32 @@ def _compile_yearly_oda_to_kenya(
     )
 
 
-def test_a_family_search_confirmed_one_member_of_read_separately_feeds_a_single_measure_verb(
+def test_a_flow_search_serves_one_member_of_feeds_a_single_measure_verb(
     compile_question: Callable[..., CompileResult],
 ) -> None:
-    """One member listed and the list complete: one member has data for the
-    roles asked, so the frame holds one StatVar and the yearly total reads it,
-    though the open netting basis keeps the reading separate."""
-    source = _gross_and_net_kenya_listing(1, truncated=False)
+    """One member served: the frame holds one StatVar and the yearly total
+    reads it, though the open netting basis would keep a family separate. The
+    source is no family and states no reading."""
+    source = _gross_and_net_kenya_counting(confirmed=1, served=1)
 
     result = _compile_yearly_oda_to_kenya(compile_question, source)
 
-    assert len(source.stat_vars) == 1
-    assert result.issues == ()
-    assert _step_args(result, "oda_op") == _retrieval(source, "separate")
-
-
-def test_a_fully_bound_flow_search_confirmed_one_member_of_feeds_a_single_measure_verb(
-    compile_question: Callable[..., CompileResult],
-) -> None:
-    """Every member-naming slot of the recorded block bound to one flat value,
-    one member listed and a binding whose digest is that member's: the
-    source is no family, states no reading, and is one measure."""
-    block = _one_elected("germany_oda_to_kenya")
-    for slot in block["resolved"]["slots"]:
-        if not slot["key"].get("property"):
-            continue
-        if slot["binding"]["kind"] != "value" or slot.get("expansion"):
-            slot["binding"] = {"kind": "value", "value": {"ref": {"dcid": "X"}}}
-            slot.pop("expansion", None)
-    block["resolved"]["shape"]["member_count"] = 1
-    (listed,) = block["resolved"]["stat_vars"]["items"]
-    block["resolved"]["shape"]["member_digest"] = member_digest([listed["ref"]])
-    source = source_from_spec_block(block)
-
-    result = _compile_yearly_oda_to_kenya(compile_question, source)
-
-    assert source.pinned is False
     assert not is_family(source)
-    assert source.open_axes == ()
     assert result.issues == ()
     assert _step_args(result, "oda_op") == _retrieval(source)
 
 
-def test_a_family_listing_one_member_of_a_capped_list_read_separately_is_refused_at_compile_time(
-    compile_question: Callable[..., CompileResult],
+@pytest.mark.parametrize("confirmed", [1, None], ids=["one-confirmed", "no-count"])
+def test_a_family_whose_membership_is_unsettled_read_separately_is_refused_at_compile_time(
+    compile_question: Callable[..., CompileResult], confirmed: int | None
 ) -> None:
-    """One member listed of a list `search` capped, with no count of the
-    members it confirmed: more members may hold data, so the aggregate is
-    refused as it is for a family counted whole, and the reason states no
-    count the listing cannot support."""
-    source = _gross_and_net_kenya_listing(1, truncated=True).model_copy(
-        update={"stat_var_member_count": None}
-    )
+    """One member confirmed, or none counted, and no membership settled: more
+    members may hold data, so the aggregate is refused as it is for a family
+    counted whole, and the reason states no count the source cannot support."""
+    source = _gross_and_net_kenya_counting(confirmed=confirmed, served=None)
 
     result = _compile_yearly_oda_to_kenya(compile_question, source)
 
-    assert len(source.stat_vars) == 1
     (issue,) = result.issues
     assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
     assert issue.operation_id == "yearly_total"
@@ -1132,47 +833,6 @@ def test_a_family_listing_one_member_of_a_capped_list_read_separately_is_refused
         "separately; it cannot be summed over nettingBasis, so the question has to name one "
         "value for it"
     )
-
-
-def test_a_family_listing_no_member_read_separately_is_refused_without_a_count_of_zero(
-    compile_question: Callable[..., CompileResult],
-) -> None:
-    source = _gross_and_net_kenya_listing(0, truncated=False)
-
-    result = _compile_yearly_oda_to_kenya(compile_question, source)
-
-    assert source.stat_vars == ()
-    (issue,) = result.issues
-    assert issue.code is CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
-    assert "aggregate reads a single measure; got several, one per StatVar" in issue.reason
-
-
-def test_a_summable_family_search_confirmed_one_member_of_feeds_a_verb_when_the_plan_reads_it_separately(
-    compile_question: Callable[..., CompileResult],
-) -> None:
-    """France's education grants with one member listed and the list
-    complete, read separately by the plan and totalled."""
-    source = source_from_spec_block(_one_elected("france_education_grants"))
-    grants = _dataset(
-        "grants",
-        [Entity(name="France", role="donor")],
-        Period(start=2020, end=2024),
-        measure="education grants",
-        stat_vars=StatVarReading.SEPARATE,
-    )
-
-    result = compile_question(
-        [grants, _yearly_total("grants")],
-        [
-            RetrieveOperation(id="grants_op", requirement_id="grants", spec_id=source.spec_id),
-            _yearly_total_op("grants_op"),
-        ],
-        terminal=["yearly_total"],
-        sources={"grants": source},
-    )
-
-    assert result.issues == ()
-    assert _step_args(result, "grants_op") == _retrieval(source, "separate")
 
 
 def test_a_summable_family_the_plan_reads_separately_is_refused_at_compile_time(

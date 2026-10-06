@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -171,3 +173,32 @@ def test_save_load_and_clear_round_trip_through_session_state() -> None:
     clear_referral(state)
 
     assert load_referral(state) is None
+
+
+def test_a_referral_stored_with_member_lists_is_no_referral(
+    source: SourceFactory,
+    stored_with_member_list: Callable[[SelectedSource], dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A session paused on the planner's question holds the referral that
+    # prompted it. Its candidates were stored with fields `SelectedSource`
+    # no longer has, so the referral is dropped and the plan is translated
+    # again.
+    two = (source(), source(spec_id="spec_" + "b" * 32))
+    referral = Referral(
+        kind=ReferralKind.SOURCE_AMBIGUOUS, reason="r", requirement_id="a", candidates=two
+    )
+    stored = referral.model_dump(mode="json")
+    stored["candidates"] = [stored_with_member_list(candidate) for candidate in two]
+    state: dict[str, Any] = {REFERRAL_STATE_KEY: json.dumps(stored)}
+
+    with caplog.at_level(logging.WARNING, logger="translator.referral"):
+        assert load_referral(state) is None
+
+    (logged,) = caplog.records
+    assert logged.levelno == logging.WARNING
+    assert logged.args == (
+        REFERRAL_STATE_KEY,
+        1,
+        "candidates.pinned, candidates.stat_var_truncated, candidates.stat_vars",
+    )

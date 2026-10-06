@@ -2257,6 +2257,7 @@
         "rendering": {
           "format": "parquet",
           "bundle": false,
+          "layout": "frame",
           "groupby": {
             "by": [
               "time_period"

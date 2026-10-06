@@ -109,7 +109,13 @@ def _log_with_known_source(revision: str, ref: str) -> DiscoveryLog:
         status=DiscoveryStatus.DEFINITE,
         spec_ids=(SPEC_KENYA,),
     )
-    source = SelectedSource(spec_id=SPEC_KENYA, sentence="s", has_data=True, stat_vars=(ref,))
+    source = SelectedSource(
+        spec_id=SPEC_KENYA,
+        sentence="s",
+        has_data=True,
+        served_count=1,
+        identity={"shape": {"kind": "stat_var", "id": ref}},
+    )
     return DiscoveryLog().with_record(record, (source,))
 
 

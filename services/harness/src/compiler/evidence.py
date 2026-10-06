@@ -20,20 +20,12 @@ describes a measure rather than enumerating one -- a schema-shaped identity
 names up to five schema properties and pins no dcid, which is how one
 definition legitimately covers hundreds of stat_vars -- so the definition's
 own binding under a stable identity is checked separately, by
-`STAT_VAR_MEMBERSHIP_DRIFT`: the binding `search` stated at approval (the
-digest of its whole population, or the members it listed when it states no
-digest) against the stat_vars the definition resolved to at execution. Both
-sides are bindings -- what the definition names, whether or not a name
-carries any observations -- and only a binding may be compared against
-another binding. The two sides are not the same population, though: `search`
-digests every member the bindings admit, and the mint serves that family
-reduced to the members no other member dominates. The mint's trace states
-the digest of the family before that reduction (`family_member_digest`),
-which is what the approved digest is compared with. A trace without it
-leaves only the served members, equal to the family only when it has no
-dominated member, so a served binding smaller than the approved one is drift
-that cannot be told from the reduction, and is reported as unverified
-(`_digest_issues`).
+`STAT_VAR_MEMBERSHIP_DRIFT`: the digest of the family `search` stated at
+approval (`resolved.shape.member_digest`) against the digest of the family
+the mint admitted at execution (the manifest trace's `family_member_digest`).
+Both digest every member the bindings admit, before the mint reduces the
+family to the members no other member dominates. A side that states no
+digest leaves membership unverified (`_digest_issues`).
 The stat_vars a retrieval's per-series statistics name are a different
 thing, coverage rather than binding: a series absent from them may
 simply hold no data for the entities and years asked, which is sparsity, not
@@ -103,7 +95,7 @@ from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource
 from pydantic import ConfigDict, JsonValue, ValidationError
 
 from compiler.frame_columns import columns_on_axes
-from compiler.sources import member_digest
+from compiler.sources import pinned_stat_var
 
 
 class SeriesEvidence(StrictModel):
@@ -196,7 +188,6 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         origin="discovery",
         spec_id=source.spec_id,
         has_data=source.has_data,
-        stat_vars=source.stat_vars,
         entities=source.entities,
         open_entity_axes=source.open_entity_axes,
         unit_ref=source.unit_ref,
@@ -232,15 +223,8 @@ def evidence_from_manifest(
     spec resolved to at mint time -- read separately from `series_stats`
     since a stat_var the spec resolved to but that carried no observations
     for the entities and years asked is still part of the binding, not
-    absent from it. Only a definition manifest is read: a collection has no
-    single source to check a requirement against.
-
-    Raises:
-        ValueError: If the manifest describes a collection rather than one
-            definition.
+    absent from it.
     """
-    if manifest.definition is None:
-        raise ValueError("the manifest describes a collection, not one definition")
     units = _series_units(series_stats) if series_stats is not None else set()
     unit = next(iter(units)) if len(units) == 1 else None
     sources = manifest.citation.sources
@@ -1486,37 +1470,15 @@ def _drift_issues(
 
 
 def _pinned_stat_var(approved: SelectedSource) -> set[str] | None:
-    """The single dcid `approved.identity`'s `shape` pins, or `None` when it does not pin one.
+    """The single dcid `approved.identity`'s `shape` pins (`compiler.sources.pinned_stat_var`), bare.
 
-    Reads `shape` defensively: the existing test fixtures carry a simplified
-    `identity={"stat_var": ...}` with no `shape` member at all, and an
-    identity whose `shape` is present but is the `statvar_schema` arm (or any
-    other shape this reads has never seen) must fall through to the binding
-    comparison rather than raise. A pinned identity names its one dcid
-    directly, with no envelope to consult and nothing that could be missing
-    from it, so the binding it supplies is always known and always complete,
-    where `approved.stat_vars` lists only the members `search` confirmed.
+    A pinned identity names its one dcid directly, with no envelope to
+    consult and nothing that could be missing from it, so the binding it
+    supplies is always known and always complete. An identity of any other
+    shape, and one with no `shape` at all, falls through to the digest.
     """
-    identity = approved.identity
-    shape = identity.get("shape") if isinstance(identity, dict) else None
-    if not isinstance(shape, dict) or shape.get("kind") != "stat_var":
-        return None
-    dcid = shape.get("id")
-    return {_bare_dcid(dcid)} if isinstance(dcid, str) else None
-
-
-def _root_stat_var(approved: SelectedSource) -> set[str] | None:
-    """The one StatVar a described `approved` source mints as, or `None`.
-
-    `approved.pinned` records that the one StatVar `search` elected is the
-    family's root (`compiler.sources.pinned_stat_var`), so that StatVar is
-    `approved.stat_vars`' only entry. A source recorded as pinned with any
-    other number of elected StatVars states no root, and falls through to
-    the digest or the listed members.
-    """
-    if approved.pinned is not True or len(approved.stat_vars) != 1:
-        return None
-    return {_bare_dcid(approved.stat_vars[0])}
+    dcid = pinned_stat_var(approved.identity)
+    return {_bare_dcid(dcid)} if dcid is not None else None
 
 
 def _membership_issues(
@@ -1525,125 +1487,63 @@ def _membership_issues(
     """`STAT_VAR_MEMBERSHIP_DRIFT` when the definition's binding has moved under a stable identity.
 
     `SOURCE_DRIFT` holds the definition's *description* stable; this holds
-    its *binding* under that description stable. The retrieved binding is
-    `evidence.resolved_stat_vars`, read off the manifest's `trace`, never
-    `evidence.stat_vars`, which is coverage and is silent about a stat_var
-    the definition binds but that carries no observations for the entities
-    and years asked. What it is compared against depends on what the
-    approval knows of its own binding:
+    its *binding* under that description stable. What the retrieval is held
+    to depends on what the approval knows of its own binding:
 
     - A pinned identity (`_pinned_stat_var`) names its one dcid, so the
-      retrieved binding has to be exactly that dcid; anything else is an
-      ERROR.
-    - A described identity whose one elected StatVar is its family's root
-      (`_root_stat_var`) is held to that StatVar the same way. dfo-apis
-      mints the family reduced to the members no other member dominates,
-      which for a rooted family is the root alone, while
-      `shape_member_digest` covers every member the bindings admit, so the
-      digest of such a retrieval never equals the approved one.
-    - `approved.shape_member_digest` is `search`'s digest of the whole
-      binding, the population `resolved.shape.member_count` counts. It is
-      compared with the digest the mint's trace states for the family it
-      admitted: equal passes, different is an ERROR. A trace that states
-      none falls back to the served members, where a difference the mint's
-      own reduction could account for is a WARNING (`_digest_issues`).
-    - Without a digest (`search` states none when that population is
-      inexact, and an older envelope carries no `shape` member fields), the
-      only approved members are `approved.stat_vars`, the items `search`
-      listed. Those are members confirmed at the resolve's place, a subset
-      of the binding whether or not `stat_var_truncated` is set, so they are
-      a lower bound: a retrieved member they do not list proves nothing, and
-      a listed item missing from the retrieved binding is drift, an ERROR,
-      or a WARNING when `stat_var_truncated` says the list was capped.
+      retrieved binding, `evidence.resolved_stat_vars` off the manifest's
+      `trace`, has to be exactly that dcid; anything else is an ERROR.
+    - Otherwise the family's digest decides (`_digest_issues`), and a source
+      approved as one series (`served_count` of one) has to be served as one
+      StatVar (`_single_series_issues`).
 
-    Either binding unknown (an unpinned approval with neither a digest nor
-    items, or a manifest whose trace carries no `resolved_stat_vars`) leaves
-    membership unverified, a WARNING; it is never compared against the
-    coverage set instead.
+    `evidence.stat_vars`, the coverage set, is never compared: it is silent
+    about a StatVar the definition binds that carries no observations for
+    the entities and years asked.
     """
-    pinned = _pinned_stat_var(approved) or _root_stat_var(approved)
+    pinned = _pinned_stat_var(approved)
     if pinned is not None:
-        return _binding_comparison_issues(requirement, evidence, pinned, exact=True)
-    if approved.shape_member_digest is not None:
-        return _digest_issues(requirement, evidence, approved)
-    approved_set = {_bare_dcid(v) for v in approved.stat_vars} or None
-    return _binding_comparison_issues(
-        requirement,
-        evidence,
-        approved_set,
-        exact=False,
-        truncated=bool(approved.stat_var_truncated),
-    )
+        return _binding_comparison_issues(requirement, evidence, pinned)
+    return [
+        *_digest_issues(requirement, evidence, approved),
+        *_single_series_issues(requirement, evidence, approved),
+    ]
 
 
 def _digest_issues(
     requirement: DatasetRequirement, evidence: RetrievalEvidence, approved: SelectedSource
 ) -> list[EvidenceIssue]:
-    """`_membership_issues`' comparison of the retrieved binding against the approved digest.
+    """The approved family's digest against the one the mint's trace states.
 
-    The digest is `search`'s, over every member the bindings admit. The mint
-    admits the same family and serves it reduced to the members no other
-    member dominates (dfo-apis `statvar_members.enumerate_members`): the
-    whole family when none of its members dominates another, and a strict
-    subset of it otherwise, down to the root alone for a family that has one.
-
-    A trace that states `family_member_digest` settles it exactly
-    (`_family_digest_issues`). The rest of this function is the fallback for
-    a trace without one, from a dfo-apis that predates the field or a mint
-    that could not state the whole family. It has only the served members,
-    and which members dominate which depends on constraint facts this record
-    does not hold, so:
-
-    - An equal digest passes: the mint returned the approved population.
-    - A retrieved binding the reduction cannot produce from the approved
-      population is drift, an ERROR: one at least as large as the approved
-      population, or one holding a member outside it when the approval lists
-      the population whole (`_listed_population`).
-    - Any other difference is a binding smaller than the approved
-      population. The reduction produces that from an unchanged family, and
-      so does a family that lost members, so it is a WARNING: membership is
-      unverified, never confirmed.
+    Both are computed the same way over the same population, every member the
+    bindings admit (`compiler.sources.member_digest`), so a different digest
+    is drift, an ERROR, and an equal one confirms the family. A side that
+    states none (`search` states none for a walk it could not finish, and the
+    mint none for a family it could not state whole) leaves membership
+    unverified, a WARNING.
     """
-    retrieved = evidence.resolved_stat_vars
     required: JsonValue = {
         "member_count": approved.shape_member_count,
         "member_digest": approved.shape_member_digest,
     }
-    if evidence.family_member_digest is not None:
-        return _family_digest_issues(requirement, evidence, approved, required=required)
-    if retrieved is None:
-        return [_membership_unverified(requirement, found=None, required=required)]
-    retrieved_set = {_bare_dcid(v) for v in retrieved}
-    digest = member_digest(_bare_dcid(v) for v in retrieved)
-    if digest == approved.shape_member_digest:
+    found: JsonValue = {
+        "member_count": evidence.family_member_count,
+        "member_digest": evidence.family_member_digest,
+    }
+    if approved.shape_member_digest is None or evidence.family_member_digest is None:
+        return [_membership_unverified(requirement, found=found, required=required)]
+    if evidence.family_member_digest == approved.shape_member_digest:
         return []
-    found: JsonValue = {"member_count": len(retrieved), "member_digest": digest}
-    if _reduction_could_account_for(approved, retrieved_set):
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
-                severity=Severity.WARNING,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the definition was approved bound to {approved.shape_member_count} "
-                    f"StatVars and the retrieval binds it to {len(retrieved_set)}; the mint "
-                    "serves a family reduced to the members no other member dominates, so "
-                    "whether the rest were reduced away or left the binding cannot be "
-                    "confirmed"
-                ),
-                found=found,
-                required=required,
-            )
-        ]
     return [
         EvidenceIssue(
             code=EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
             severity=Severity.ERROR,
             requirement_id=requirement.id,
             detail=(
-                f"the definition was approved bound to {approved.shape_member_count} StatVars "
-                f"with member digest {approved.shape_member_digest}; the retrieval binds it to "
-                f"{len(retrieved)} StatVars with member digest {digest}"
+                f"the definition was approved bound to {approved.shape_member_count} "
+                f"StatVars with member digest {approved.shape_member_digest}; the "
+                f"retrieval's family holds {evidence.family_member_count} StatVars with "
+                f"member digest {evidence.family_member_digest}"
             ),
             found=found,
             required=required,
@@ -1651,46 +1551,17 @@ def _digest_issues(
     ]
 
 
-def _family_digest_issues(
-    requirement: DatasetRequirement,
-    evidence: RetrievalEvidence,
-    approved: SelectedSource,
-    *,
-    required: JsonValue,
+def _single_series_issues(
+    requirement: DatasetRequirement, evidence: RetrievalEvidence, approved: SelectedSource
 ) -> list[EvidenceIssue]:
-    """`_digest_issues` for a trace that states the digest of the family the mint admitted.
+    """An ERROR when a source approved as one series is served as another number of StatVars.
 
-    That digest and the approved one are computed the same way over the same
-    population, so a different one is drift, an ERROR, and an equal one says
-    the family is the approved one. The served members are then held to that
-    family where the approval lists it whole (`_listed_population`): one
-    outside it is an ERROR. Served members the trace does not state leave
-    that last check undone, and the family itself confirmed.
+    `search` states `served_count` once the membership settled, and one
+    makes the plan read the source as a single series. A manifest whose
+    trace lists no served StatVars proves nothing.
     """
-    found: JsonValue = {
-        "member_count": evidence.family_member_count,
-        "member_digest": evidence.family_member_digest,
-    }
-    if evidence.family_member_digest != approved.shape_member_digest:
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
-                severity=Severity.ERROR,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the definition was approved bound to {approved.shape_member_count} "
-                    f"StatVars with member digest {approved.shape_member_digest}; the "
-                    f"retrieval's family holds {evidence.family_member_count} StatVars with "
-                    f"member digest {evidence.family_member_digest}"
-                ),
-                found=found,
-                required=required,
-            )
-        ]
-    population = _listed_population(approved)
-    served = {_bare_dcid(v) for v in evidence.resolved_stat_vars or ()}
-    outside = sorted(served - population) if population is not None else []
-    if not outside:
+    served = evidence.resolved_stat_vars
+    if approved.served_count != 1 or served is None or len(served) == 1:
         return []
     return [
         EvidenceIssue(
@@ -1698,91 +1569,25 @@ def _family_digest_issues(
             severity=Severity.ERROR,
             requirement_id=requirement.id,
             detail=(
-                f"the retrieval serves {outside!r}, which the approved family of "
-                f"{approved.shape_member_count} StatVars does not hold"
+                f"the definition was approved as one StatVar; the retrieval serves {len(served)}"
             ),
-            found=sorted(served),
-            required=sorted(population or ()),
+            found=len(served),
+            required=1,
         )
     ]
 
 
-def _listed_population(approved: SelectedSource) -> set[str] | None:
-    """The approved binding's members, when `approved.stat_vars` lists every one of them.
-
-    `stat_vars` lists the members `search` confirmed, a subset of the
-    binding. It is the whole binding exactly when it hashes to
-    `shape_member_digest`; otherwise the members are unknown, `None`.
-    """
-    listed = {_bare_dcid(v) for v in approved.stat_vars}
-    if member_digest(listed) != approved.shape_member_digest:
-        return None
-    return listed
-
-
-def _reduction_could_account_for(approved: SelectedSource, retrieved: set[str]) -> bool:
-    """Whether the mint's reduction of the approved family could yield `retrieved`.
-
-    The reduction keeps at least one member and only members of the family,
-    so it yields a non-empty subset smaller than the population whenever it
-    drops anything. `retrieved` has to be smaller than
-    `shape_member_count`, and inside the population when the approval lists
-    it whole. A count the approval does not state proves nothing, so the
-    difference stays drift.
-    """
-    count = approved.shape_member_count
-    if count is None or not 0 < len(retrieved) < count:
-        return False
-    population = _listed_population(approved)
-    return population is None or retrieved < population
-
-
 def _binding_comparison_issues(
-    requirement: DatasetRequirement,
-    evidence: RetrievalEvidence,
-    approved_set: set[str] | None,
-    *,
-    exact: bool,
-    truncated: bool = False,
+    requirement: DatasetRequirement, evidence: RetrievalEvidence, approved_set: set[str]
 ) -> list[EvidenceIssue]:
-    """The `STAT_VAR_MEMBERSHIP_DRIFT` comparison of the retrieved binding against approved dcids.
+    """The retrieved binding against the one dcid a pinned identity names: any difference is an ERROR.
 
-    `exact` says `approved_set` is the whole binding, as the one dcid a
-    pinned identity names and the root a described one mints as
-    (`_root_stat_var`) are: any difference is an ERROR. Otherwise `approved_set` is a
-    lower bound, and only a member of it missing from the retrieved binding
-    is drift: an ERROR, or a WARNING when `truncated` says the list was
-    capped and so promises only the members it shows.
+    A manifest whose trace states no binding leaves membership unverified.
     """
     retrieved = evidence.resolved_stat_vars
-    retrieved_set = {_bare_dcid(v) for v in retrieved} if retrieved is not None else None
-
-    if approved_set is None or retrieved_set is None:
-        return [
-            _membership_unverified(
-                requirement,
-                found=sorted(retrieved_set) if retrieved_set is not None else None,
-                required=sorted(approved_set) if approved_set is not None else None,
-            )
-        ]
-    if not exact:
-        missing = approved_set - retrieved_set
-        if not missing:
-            return []
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT,
-                severity=Severity.WARNING if truncated else Severity.ERROR,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the approval listed {sorted(missing)!r} among the definition's members; "
-                    f"the retrieval's binding of {len(retrieved_set)} StatVars no longer "
-                    "includes them"
-                ),
-                found=sorted(retrieved_set),
-                required=sorted(approved_set),
-            )
-        ]
+    if retrieved is None:
+        return [_membership_unverified(requirement, found=None, required=sorted(approved_set))]
+    retrieved_set = {_bare_dcid(v) for v in retrieved}
     if approved_set == retrieved_set:
         return []
     return [

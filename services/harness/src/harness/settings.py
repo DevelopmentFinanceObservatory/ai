@@ -32,6 +32,14 @@ COMBINED_MCP_MOUNT_PATH = "/mcp"
 # this suffix, e.g. "/mcp/data/mcp".
 _MCP_PROTOCOL_SUFFIX = "/mcp"
 
+# The Gemini thinking levels the orchestrator's reasoning effort can be set to.
+type ThinkingLevelName = Literal["LOW", "MEDIUM", "HIGH"]
+
+# The orchestrator runs at `LOW`: in an 18-turn eval per arm, `LOW` halved the
+# median turn time (79.9 s to 38.0 s) with answer quality inside the spread
+# between two default-level runs.
+DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
+
 
 class Settings(BaseServiceSettings):
     """Config for the harness agentic-loop service.
@@ -159,6 +167,9 @@ class Settings(BaseServiceSettings):
     # Which agent answers a live studio turn: the workflow graph, or the
     # orchestrator agent (`orchestrator.agent`) calling tools itself.
     studio_engine: Literal["graph", "orchestrator"] = "graph"
+    # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
+    # read case-insensitively. Unset or blank means the default.
+    orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL
     # Browser origins a LIVE server answers CORS preflights for, as a
     # comma-separated env value (a locally served page testing against the
     # real agent on another port). Empty sends no CORS headers: the deployed
@@ -200,6 +211,14 @@ class Settings(BaseServiceSettings):
         # A blank `STUDIO_API_TOKEN=` in an env file leaves the setting unset.
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("orchestrator_thinking_level", mode="before")
+    @classmethod
+    def _normalise_thinking_level(cls, value: object) -> object:
+        # `low`, ` Low ` and `LOW` all name one level; a blank value is the default.
+        if isinstance(value, str):
+            return value.strip().upper() or DEFAULT_ORCHESTRATOR_THINKING_LEVEL
         return value
 
     @field_validator(

@@ -100,7 +100,6 @@ from compiler.sources import (
     FamilyOverlap,
     entity_scopes_disjoint,
     family_overlap,
-    posted_stat_vars,
     stat_var_reading,
 )
 from compiler.surface import ToolSchema, schema_hash_error
@@ -675,11 +674,9 @@ class _Build:
         Nothing when the entities they bind keep their rows apart
         (`compiler.sources.entity_scopes_disjoint`), whatever StatVars they share.
 
-        `SUM_SIDES_OVERLAP` with what both read when they share a definition,
-        a member digest or a listed StatVar, or one family holds the other.
-        Two sources that both list StatVars are compared by those lists
-        alone. A side listing none is a family `search` states by digest,
-        decided from the two identities (`compiler.sources.family_overlap`):
+        `SUM_SIDES_OVERLAP` with what both read when they share a definition
+        or a member digest, or one family holds the other, decided from the
+        two identities (`compiler.sources.family_overlap`):
         `SUM_OVERLAP_UNDECIDED`, with the two definitions, when they cannot
         show the families apart.
         """
@@ -696,10 +693,6 @@ class _Build:
                 CompileIssueCode.SUM_SIDES_OVERLAP,
                 f"StatVar family with member digest {left.shape_member_digest}",
             )
-        if shared := set(left.stat_vars) & set(right.stat_vars):
-            return CompileIssueCode.SUM_SIDES_OVERLAP, f"StatVars both elected ({len(shared)})"
-        if left.stat_vars and right.stat_vars:
-            return None
         return _family_overlap_issue(left, right)
 
     def _check_rank(self, operation: RankOperation) -> None:
@@ -1320,19 +1313,12 @@ class _Build:
         return writers[type(operation)](operation)
 
     def _retrieve_arguments(self, operation: RetrieveOperation) -> Arguments | None:
-        """Write `spec_id`, `stat_vars` for a family, and the StatVars the source elected.
+        """Write `spec_id` and `stat_vars` for a family.
 
         `stat_vars` is the source's `stat_var_reading`: `sum` asks dfo-apis
         to sum the family's members into one series, `separate` keeps one
         per member. It sits outside the definition's identity, so it
         re-mints nothing.
-
-        The StatVars the source posts (`compiler.sources.posted_stat_vars`)
-        go as `resolved_stat_var_dcids`, left out when it posts none.
-        dfo-apis checks they are still members of the dataset, refusing a
-        stale list with a remedy to search again, and a family's root among
-        them proves a truncated member walk complete. They sit outside the
-        identity too.
 
         `breakdown` is the requirement's, as its code system and level: dfo-apis
         sums the family within each code rolled up to that level, so the frame
@@ -1358,8 +1344,6 @@ class _Build:
         args: dict[str, JsonValue] = {"spec_id": source.spec_id}
         if source.stat_var_reading is not None:
             args["stat_vars"] = source.stat_var_reading.value
-        if posted := posted_stat_vars(source):
-            args["resolved_stat_var_dcids"] = list(posted)
         requirement = self.requirements.get(operation.requirement_id)
         if isinstance(requirement, DatasetRequirement) and requirement.breakdown is not None:
             args["breakdown"] = {

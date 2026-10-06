@@ -840,18 +840,16 @@ def _write_refusal(frame_ref: object) -> dict[str, Any] | None:
     return {"outcome": "refusal", "refusal": dict(refusal)} if refusal else None
 
 
-def scripted_spec_block(
-    *, spec_id: str, identity: Mapping[str, Any], stat_vars: Sequence[str]
-) -> dict[str, Any]:
+def scripted_spec_block(*, spec_id: str, identity: Mapping[str, Any]) -> dict[str, Any]:
     """The Spec block scripted Search serves for `identity`: the definition as
-    posted, a sentence naming the spec_id, and the StatVars posted, since no
-    graph is there to re-read them."""
+    posted, a sentence naming the spec_id, and one settled member, since no
+    graph is there to read a family from."""
     return {
         "spec_id": spec_id,
         "definition": {"schema_version": 1, "spec_id": spec_id, "identity": dict(identity)},
         "resolved": {
             "rendered_sentence": f"The scripted reading of {spec_id}",
-            "stat_vars": {"items": [{"ref": ref, "slot_values": []} for ref in stat_vars]},
+            "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
         },
     }
 
@@ -918,7 +916,6 @@ class ScriptedSurface:
             block = scripted_spec_block(
                 spec_id=str(arguments.get("spec_id") or ""),
                 identity=dict(arguments.get("identity") or {}),
-                stat_vars=list(arguments.get("stat_vars") or []),
             )
             envelope = {
                 "schema_version": 1,

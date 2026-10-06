@@ -1,6 +1,6 @@
 {
   "aggregate": {
-    "revision": "a59d79256745e96f5a386b1cec3c923b0b6eedb7cd59008958115a72ddea3717",
+    "revision": "d4ac81b0d13c9bc1bd13bbe41b5557e2ba2b2e2b846ba30840a79a06d5335e1c",
     "requirement_revisions": {
       "life_expectancy": "4ff871a11edf6fac9963e2c6ad07b5c1d1ef309164062147685de6d857c9b81f"
     },
@@ -154,11 +154,7 @@
             "searched_as": null,
             "confidence": "high",
             "has_data": true,
-            "stat_vars": [
-              "LifeExpectancy_Person"
-            ],
             "stat_var_member_count": null,
-            "stat_var_truncated": null,
             "shape_member_count": null,
             "shape_member_digest": null,
             "entities": [
@@ -183,7 +179,8 @@
             "definition": null,
             "open_axes": [],
             "stat_var_reading": null,
-            "stat_var_reading_set_by": null
+            "stat_var_reading_set_by": null,
+            "served_count": 1
           }
         ],
         "evidence_bindings": [
@@ -205,7 +202,7 @@
     }
   },
   "rank": {
-    "revision": "60aefbd397e170c776c3a8b4e1626a8498e041e09dece961fa664a1e09e340c2",
+    "revision": "5addffa378876cbed04cc90393ed7d54cfc00105f63d48282658dc52b7546443",
     "requirement_revisions": {
       "debt_service": "0838a4f6e2f4b731b2c1a992aca2f0dfc25c00df1bc5aaa03e52da2c756f1c3f"
     },
@@ -372,11 +369,7 @@
             "searched_as": null,
             "confidence": "high",
             "has_data": true,
-            "stat_vars": [
-              "DebtServicePaid"
-            ],
             "stat_var_member_count": null,
-            "stat_var_truncated": null,
             "shape_member_count": null,
             "shape_member_digest": null,
             "entities": [
@@ -406,7 +399,8 @@
             "definition": null,
             "open_axes": [],
             "stat_var_reading": null,
-            "stat_var_reading_set_by": null
+            "stat_var_reading_set_by": null,
+            "served_count": 1
           }
         ],
         "evidence_bindings": [
@@ -428,7 +422,7 @@
     }
   },
   "declined": {
-    "revision": "0b5262aa911cb1bda85fa044e1ae73e1d52e1b3d5552676f64973765040251ef",
+    "revision": "450c4ba725dc4361dde50b57cba04d5bfb13f732e128f0476bc3069bd53ea076",
     "requirement_revisions": {
       "life_expectancy": "4ff871a11edf6fac9963e2c6ad07b5c1d1ef309164062147685de6d857c9b81f"
     },
@@ -591,12 +585,7 @@
             "searched_as": null,
             "confidence": "high",
             "has_data": true,
-            "stat_vars": [
-              "LifeExpectancy_Person"
-            ],
             "stat_var_member_count": null,
-            "stat_var_truncated": null,
-            "pinned": null,
             "shape_member_count": null,
             "shape_member_digest": null,
             "entities": [
@@ -622,7 +611,8 @@
             "definition": null,
             "open_axes": [],
             "stat_var_reading": null,
-            "stat_var_reading_set_by": null
+            "stat_var_reading_set_by": null,
+            "served_count": 1
           }
         ],
         "evidence_bindings": [

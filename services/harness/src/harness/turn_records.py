@@ -25,7 +25,7 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
-from compiler.sources import is_family
+from compiler.sources import stat_var_count
 from planner.parties import column_party_roles
 from planner.plan import (
     DatasetRequirement,
@@ -38,6 +38,7 @@ from planner.plan import (
     plan_revision,
 )
 from planner.records import StatVarReading, StrictModel
+from pydantic import ConfigDict
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
@@ -86,8 +87,8 @@ class PlanSource(StrictModel):
     """One source the compiled plan retrieves.
 
     `name` is the provenance label. `members` counts the StatVars a family
-    reads, the larger of the listed members and the members `search`
-    confirmed. `None` for a source that binds one StatVar.
+    reads (`compiler.sources.stat_var_count`). `None` for a source that binds
+    one StatVar.
 
     `coverage_source` says what bounds `coverage`: `requested` when the
     identity's own range (`harness.tool_contracts.requested_range`) holds
@@ -97,14 +98,18 @@ class PlanSource(StrictModel):
 
     `identity` is the identity document `spec_id` hashes from
     (`planner.workflow.SelectedSource.identity`), `None` when the source
-    carried none. `stat_vars` are the StatVars a source that is no family
-    (`compiler.sources.is_family`) elected, which Search needs to resolve
-    its identity again; empty for a family, whose shape Search resolves
-    without them. Both are kept so a later turn's pin of a source only the
+    carried none. It is kept so a later turn's pin of a source only the
     translator found has its definition on record
     (`harness.studio_state.ConversationState.recorded_identity`). No
-    rendering of the record reads either.
+    rendering of the record reads it.
+
+    A record ignores keys it does not declare, since the conversation ledger
+    holds records written before a field was removed: `stat_vars`, the
+    StatVars Search listed, which records stored before Search stopped
+    listing members still carry.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     spec_id: str
     name: str | None
@@ -115,19 +120,20 @@ class PlanSource(StrictModel):
     members: int | None
     origin: Origin
     identity: dict[str, Any] | None = None
-    stat_vars: tuple[str, ...] = ()
 
 
 class RecordedIdentity(StrictModel):
     """A source's definition as a later turn resubmits it to Search.
 
-    `identity` is the identity document its spec_id hashes from, and
-    `stat_vars` the StatVars data-mcp's `resolve_definition` passes with it:
-    the one a source that is no family elected, none for a family.
+    `identity` is the identity document its spec_id hashes from. Search
+    derives the population from it. Like `PlanSource`, it ignores the
+    `stat_vars` that ledger records stored before Search stopped listing
+    members carry.
     """
 
+    model_config = ConfigDict(extra="ignore")
+
     identity: dict[str, Any]
-    stat_vars: tuple[str, ...] = ()
 
 
 class PlanDecision(StrictModel):
@@ -792,12 +798,9 @@ def _sources(
                 if asked is not None and asked[0] <= window.start and window.end <= asked[1]
                 else "coverage"
             ),
-            members=(
-                max(len(source.stat_vars), source.stat_var_member_count or 0) if family else None
-            ),
+            members=stat_var_count(source) if family else None,
             origin=origin,
             identity=source.identity,
-            stat_vars=() if is_family(source) else source.stat_vars,
         )
     return tuple(seen.values())
 

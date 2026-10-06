@@ -259,14 +259,6 @@ def render_get_data_digest(
         is headed as the family's total.
     """
     definition = manifest.definition
-    if definition is None:
-        # get_data always mints via `kind: "spec_id"`, which the mint route
-        # answers with a definition manifest, never a collection one -- this
-        # would mean that contract changed underneath this module.
-        raise ValueError(
-            "get_data's manifest carries no 'definition'; a collection manifest "
-            "here would mean the mint route's contract changed"
-        )
     summed_warnings = [w for w in manifest.warnings if w.code == _STAT_VARS_SUMMED]
     summed = (
         _SummedFamily(
@@ -358,7 +350,10 @@ def _acknowledgement_line(
     StatVar axis and keeps every declared role column, a role the question
     left open included, so the roles come from `coverage.dimensions`, one per
     frame role column plus `years`. The identity's `entities` hold only the
-    bound roles, keyed by flow axis.
+    bound roles, keyed by flow axis, and its `open_roles` the axes it covers
+    every member of, each named "every <noun>" by the role column the response
+    declares on that axis (`creditor` on IDS, `financingProvider` on CRS), or by
+    `_GRAIN_NOUNS` when the response declares none.
     """
     identity = definition.identity
     shape = identity.get("shape")
@@ -376,6 +371,12 @@ def _acknowledgement_line(
         for role, dcids in entities.items():
             if isinstance(dcids, list) and dcids:
                 pieces.append(f"{role} {_render_dcids(dcids, entity_labels)}")
+    open_roles = identity.get("open_roles")
+    if isinstance(open_roles, list):
+        axis_labels = {dim.axis: dim.label for dim in coverage.dimensions if dim.axis}
+        pieces.extend(
+            f"every {axis_labels.get(role) or _GRAIN_NOUNS.get(role, role)}" for role in open_roles
+        )
     scope_text = " · ".join(pieces)
 
     line = f"Retrieved {subject} for {scope_text}" if scope_text else f"Retrieved {subject}"
