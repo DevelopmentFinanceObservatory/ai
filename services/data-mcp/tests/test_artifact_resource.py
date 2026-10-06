@@ -76,7 +76,7 @@ def _snapshot_response(
         "artifacts": [
             {
                 "artifact_digest": artifact_digest,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 100,
                 "media_type": "application/octet-stream",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -127,7 +127,7 @@ async def test_happy_path_reads_a_fresh_signed_url_and_metadata() -> None:
     assert doc["media_type"] == "application/octet-stream"
     assert doc["bytes"] == 100
     assert doc["tier"] == "working"
-    assert doc["rendering"] == {"bundle": False, "format": "parquet"}
+    assert doc["rendering"] == {"bundle": False, "format": "parquet", "layout": "frame"}
     assert 0 < doc["expires_in_s"] <= _MAX_ADVERTISED_TTL_S
 
 
@@ -343,19 +343,20 @@ async def test_malformed_artifact_entry_refuses_without_leaking_its_signed_url()
     assert "https://signed.example/should-not-leak" not in exc_info.value.error.message
 
 
-async def test_two_artifact_entries_sharing_a_digest_refuses_upstream_response_unusable() -> None:
+async def test_two_entries_sharing_a_digest_read_the_first_ones_bytes() -> None:
     payload = _snapshot_response()
-    duplicate = dict(payload["artifacts"][0])
-    duplicate["url"] = "https://signed.example/a-second-rendering"
-    payload["artifacts"].append(duplicate)
+    other_rendering = dict(payload["artifacts"][0])
+    other_rendering["rendering"] = {"bundle": False, "format": "parquet", "layout": "long"}
+    other_rendering["url"] = "https://signed.example/a-second-rendering"
+    payload["artifacts"].append(other_rendering)
 
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, json=payload)
 
-    with pytest.raises(MCPError) as exc_info:
-        await _call_read_artifact(handler, _uri())
+    doc = _doc(await _call_read_artifact(handler, _uri()))
 
-    assert exc_info.value.error.message.startswith("upstream_response_unusable: ")
+    assert doc["url"] == _SENTINEL_URL
+    assert doc["rendering"] == {"bundle": False, "format": "parquet", "layout": "frame"}
 
 
 @pytest.mark.parametrize(

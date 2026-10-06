@@ -124,7 +124,8 @@
       "artifact_digest": "sha256:1f6c487afbc200b95c21b731bc86c2616a714003fea9ff22bc554ad10cccc7d5",
       "rendering": {
         "format": "parquet",
-        "bundle": false
+        "bundle": false,
+        "layout": "frame"
       },
       "bytes": 2527,
       "media_type": "application/vnd.apache.parquet",

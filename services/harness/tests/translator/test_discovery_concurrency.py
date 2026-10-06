@@ -77,17 +77,15 @@ def _spec() -> dict[str, Any]:
                 "has_data": True,
                 "window": {"start_year": 2010, "end_year": 2024},
             },
-            "stat_vars": {
-                "items": [
-                    {"ref": "DebtServicePaid", "label": "Debt service paid", "slot_values": []}
-                ],
-                "member_count": 1,
-                "truncated": False,
-            },
+            "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
             "entities": [{"role": "recipient", "label": "Kenya", "ref": "country/KEN"}],
             "facets": {"unit": {"basis": "declared_default", "ref": "usd", "label": "US dollars"}},
         },
-        "definition": {"schema_version": 1, "spec_id": SPEC, "identity": {"stat_var": "x"}},
+        "definition": {
+            "schema_version": 1,
+            "spec_id": SPEC,
+            "identity": {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}},
+        },
     }
 
 
@@ -344,7 +342,11 @@ async def test_a_concurrent_search_and_fetch_definitions_both_land_in_the_log(
     assert isinstance(requirement, DatasetRequirement)
     key = requirement_revision(requirement)
     known_source = SelectedSource(
-        spec_id=SPEC, sentence="s", has_data=True, stat_vars=("DebtServicePaid",)
+        spec_id=SPEC,
+        sentence="s",
+        has_data=True,
+        served_count=1,
+        identity={"shape": {"kind": "stat_var", "id": "DebtServicePaid"}},
     )
     seed = DiscoveryRecord(
         revision=revision,

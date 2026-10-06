@@ -113,7 +113,13 @@ REVISIONS = pytest.mark.parametrize(
     ids=["2025-11-25", "2026-07-28"],
 )
 
-UNHELD_COLLECTION = "col_" + "0" * 32
+# A call `get_data` refuses in its own body, before it reads the store or reaches dfo-apis:
+# "sum" totals the whole family, which leaves no code to break it down by.
+CONTRADICTORY_GET_DATA = {
+    "spec_id": "spec_" + "0" * 32,
+    "stat_vars": "sum",
+    "breakdown": {"code_system": "crsPurpose", "level": 0},
+}
 UNHELD_FRAME = {"spec_id": "spec_" + "0" * 32, "content_version": "cv_" + "0" * 32}
 
 
@@ -292,7 +298,7 @@ async def test_the_combined_server_refuses_as_the_direct_mounts_do(
     """One refusal from each child, neither of which reaches an upstream."""
     app = create_app(settings=Settings(mcp_api_token=TOKEN))
     calls = (
-        (DIRECT[0], "get_data", {"spec_id": UNHELD_COLLECTION}),
+        (DIRECT[0], "get_data", CONTRADICTORY_GET_DATA),
         (DIRECT[1], "aggregate", {"frame_ref": UNHELD_FRAME, "aggregation": "sum"}),
     )
 
@@ -311,7 +317,7 @@ async def test_the_combined_server_refuses_as_the_direct_mounts_do(
         assert direct.is_error is True
         assert combined.is_error is True
         assert combined.content == direct.content
-    assert '"code":"definition_not_held"' in pairs[0][1].content[0].text
+    assert '"code":"request_invalid"' in pairs[0][1].content[0].text
 
 
 def _envelope(result: Any) -> dict[str, Any]:
@@ -903,9 +909,7 @@ async def test_get_data_through_the_combined_server_runs_under_the_external_budg
                 mounted_mcp_transport(app, path_now, token=TOKEN), mode=mode
             ) as client:
                 assert client.protocol_version == revision
-                await client.call_tool(
-                    "get_data", {"spec_id": UNHELD_COLLECTION}, raise_on_error=False
-                )
+                await client.call_tool("get_data", CONTRADICTORY_GET_DATA, raise_on_error=False)
 
     assert set(read) == {COMBINED, DIRECT[0]}
     assert set(read[COMBINED]) == {EXTERNAL_CALL_BUDGET}
@@ -1945,7 +1949,7 @@ def _snapshot(request: httpx2.Request) -> httpx2.Response:
             "artifacts": [
                 {
                     "artifact_digest": digest,
-                    "rendering": {"bundle": False, "format": "parquet"},
+                    "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                     "bytes": 100,
                     "media_type": "application/octet-stream",
                     "created_at": "2026-08-11T00:00:00+00:00",

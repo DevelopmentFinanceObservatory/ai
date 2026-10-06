@@ -54,6 +54,7 @@ from typing import Any, cast
 import httpx2
 import pytest
 from common import auth as mcp_auth
+from compiler.sources import member_digest
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
 from google.adk.models.base_llm import BaseLlm
@@ -258,6 +259,26 @@ GHANA = ResolvedEntity(role="destination", ref="country/GHA", label="Ghana")
 
 
 @pytest.fixture
+def stored_with_member_list() -> Callable[[SelectedSource], dict[str, Any]]:
+    """Return a function dumping a source as the release that listed members stored it.
+
+    That release's `SelectedSource` held `stat_vars`, `stat_var_truncated`
+    and `pinned`, which the current one rejects, and no `served_count`.
+    """
+
+    def _stored(source: SelectedSource) -> dict[str, Any]:
+        stored = source.model_dump(mode="json")
+        del stored["served_count"]
+        return stored | {
+            "stat_vars": ["DebtServicePaid"],
+            "stat_var_truncated": False,
+            "pinned": None,
+        }
+
+    return _stored
+
+
+@pytest.fixture
 def source() -> Callable[..., SelectedSource]:
     """Return a factory for a discovered source resolving Kenya alone, 2010-2024, in USD.
 
@@ -274,7 +295,9 @@ def source() -> Callable[..., SelectedSource]:
             "sentence": "external debt service paid by Kenya, 2010 to 2024",
             "confidence": "high",
             "has_data": True,
-            "stat_vars": ("DebtServicePaid",),
+            "served_count": 1,
+            "shape_member_count": 1,
+            "shape_member_digest": member_digest(["DebtServicePaid"]),
             "entities": (KENYA,),
             "unit_ref": "usd",
             "unit_label": "US dollars",

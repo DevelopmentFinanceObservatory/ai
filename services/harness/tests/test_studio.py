@@ -695,7 +695,10 @@ async def test_a_crash_mid_execute_reports_the_finished_steps_on_the_failing_tur
         )
         second = await _stream(client, "/api/studio/turn", _turn_body("kenya oda 2023"))
 
-    finished = [frame for frame in failed if frame["event"] == "activity.step"]
+    # The plan's own step; "Starting the plan" is a status line with no tool.
+    finished = [
+        frame for frame in failed if frame["event"] == "activity.step" and frame.get("tool")
+    ]
     assert [frame["status"] for frame in finished] == ["running", "complete"]
     assert finished[0]["step_id"] == finished[1]["step_id"]
     assert _events(failed)[-1] == "error"
@@ -5688,6 +5691,12 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
         assert app_b.state.studio.surface_recorder.step_order(f"{principal}/{CONVERSATION}") == [
             step["id"] for step in plan["steps"]
         ]
+        # B names the plan steps' Activity lines with the plan card's labels.
+        assert app_b.state.studio.surface_recorder.step_labels(f"{principal}/{CONVERSATION}") == {
+            step["id"]: step["label"] for step in plan["steps"]
+        }
+        lines = [frame["label"] for frame in resumed if frame["event"] == "activity.step"]
+        assert plan["steps"][0]["label"] in lines
 
         second = await _stream(client_b, "/api/studio/turn", _turn_body("a follow-up question"))
 
@@ -6678,17 +6687,12 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         "spec.definition.schema_version",
         "spec.definition.spec_id",
         "spec.definition.identity",
-        "spec.resolved.stat_vars.items[].ref",
-        "spec.resolved.shape.member_digest",
         "operations[].verb",
         "operations[].phrase",
         "operations[].over",
         "operations[].target_year",
     }
     assert kept["spec"]["definition"] == _KENYA_SPEC["definition"]
-    assert [item["ref"] for item in kept["spec"]["resolved"]["stat_vars"]["items"]] == [
-        item["ref"] for item in _KENYA_SPEC["resolved"]["stat_vars"]["items"]
-    ]
     assert set(refused) == {"refused"}
     assert refused["refused"]["code"] == "seed_invalid"
     assert refused["refused"]["detail"].startswith("seed 1 cannot be used")
@@ -6702,19 +6706,19 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
 
 
 def _malformed_seed(
-    *, identity: Mapping[str, Any] | None = None, spec_id: str | None = None, **resolved: Any
+    *, identity: Mapping[str, Any] | None = None, spec_id: str | None = None
 ) -> dict[str, Any]:
     """A seed that parses as `harness.wire.Seed`, whose `identity` (by default
-    `_SEED_IDENTITY` for another reading) or `resolved` holds a member of a
-    type the seed's readers cannot take. Its identity hashes to its spec_id
-    unless `spec_id` is given."""
+    `_SEED_IDENTITY` for another reading) holds a member of a type the seed's
+    readers cannot take. Its identity hashes to its spec_id unless `spec_id`
+    is given."""
     identity = dict(identity or {**_SEED_IDENTITY, "seed": "malformed"})
     spec_id = spec_id or spec_id_for(canonicalize(identity))
     return {
         "spec": {
             "spec_id": spec_id,
             "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
-            "resolved": {"rendered_sentence": "A malformed seed", **resolved},
+            "resolved": {"rendered_sentence": "A malformed seed"},
         },
         "operations": [],
     }
@@ -6741,24 +6745,12 @@ def _malformed_seed(
             _malformed_seed(identity={**_SEED_IDENTITY, "shape": "statvar_schema"}),
             "seed_dropped: seed 0 is left out: Search no longer resolves it (request_invalid)",
         ),
-        (_malformed_seed(stat_vars=["Count_Person"]), "seed_invalid: seed 0 cannot be used"),
-        (
-            _malformed_seed(stat_vars={"items": ["Count_Person"]}),
-            "seed_invalid: seed 0 cannot be used",
-        ),
-        (
-            _malformed_seed(stat_vars={"items": [{"ref": 7, "slot_values": []}]}),
-            "seed_invalid: seed 0 cannot be used",
-        ),
     ],
     ids=[
         "requested-window-a-string",
         "identity-integer-past-2-53",
         "identity-entities-a-list",
         "identity-shape-a-string",
-        "resolved-stat-vars-a-list",
-        "resolved-stat-var-items-strings",
-        "resolved-stat-var-ref-a-number",
     ],
 )
 async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_other_seed_plans(

@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 # artifact. The constant `artifact` host segment is deliberate: `AnyUrl`
 # normalisation lowercases the host position but preserves path segments, so
 # every variable -- `subject_id`, `content_version`, `artifact_digest` --
-# lives in the path, where a mixed-case `spec_`/`col_` id or a `sha256:`
+# lives in the path, where a mixed-case `spec_` id or a `sha256:`
 # digest survives verbatim.
 ARTIFACT_URI_TEMPLATE = "dfo://artifact/{subject_id}/{content_version}/{artifact_digest}"
 
@@ -167,30 +167,12 @@ class DefinitionModel(BaseModel):
     identity: Mapping[str, object]
 
 
-class CollectionMemberModel(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    definition: DefinitionModel
-    content_version: str
-    coverage: CoverageModel
-    series_count: int | None = None
-
-
-class CollectionModel(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    collection_id: str
-    members: list[CollectionMemberModel]
-
-
 class Manifest(BaseModel):
     """The mint route's manifest, re-validated with every artifact URL gone.
 
     Mirrors `datasets_api.manifest_models.Manifest` field for field, except
     `artifacts` holds `ArtifactEntry` rather than upstream's
-    `ArtifactEntryModel`. Exactly one of `definition`/`collection` is
-    present, matching upstream's own rule. `series_count` is the number of
-    distinct series and lives at this top level only for a definition
-    manifest; a collection manifest carries its own per-member count on each
-    `CollectionMemberModel` instead (see `_series_count_only_at_the_right_level`).
+    `ArtifactEntryModel`. `series_count` is the number of distinct series.
     Per-series figures live in a `series-statistics/1` Parquet entry:
     whenever `series_count` is not `None`, `artifacts` carries one
     (`data_mcp.series_statistics.find_statistics_artifact`) for a caller
@@ -206,8 +188,7 @@ class Manifest(BaseModel):
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
     schema_version: int = 1
-    definition: DefinitionModel | None = None
-    collection: CollectionModel | None = None
+    definition: DefinitionModel
     content_version: str
     coverage: CoverageModel
     citation: CitationModel
@@ -217,43 +198,16 @@ class Manifest(BaseModel):
     series_count: int | None = None
 
     @model_validator(mode="after")
-    def _definition_xor_collection(self) -> Manifest:
-        if (self.definition is None) == (self.collection is None):
-            raise ValueError("exactly one of 'definition' or 'collection' must be present")
-        return self
-
-    @model_validator(mode="after")
-    def _series_count_only_at_the_right_level(self) -> Manifest:
-        if self.collection is not None and self.series_count is not None:
-            raise ValueError(
-                "top-level 'series_count' is only for a definition manifest; "
-                "a collection manifest carries series_count per member"
-            )
-        return self
-
-    @model_validator(mode="after")
     def _attach_artifact_resource_uris(self) -> Manifest:
         """Derive every artifact's `resource_uri`, overwriting whatever the input carried.
 
-        Runs after `_definition_xor_collection`, whose guarantee that exactly
-        one of `definition`/`collection` is present is what makes a single
-        subject id always available here. A collection manifest's members
-        each carry their own `content_version`, but the artifact list itself
-        is only ever at this top level, so every artifact shares this
-        manifest's own `content_version` -- one resource_uri per artifact,
-        keyed on the collection as a whole.
+        The artifact list is only ever at this top level, so every artifact
+        shares this manifest's own `content_version` and is keyed on the
+        definition's `spec_id`.
         """
-        if self.definition is not None:
-            subject_id = self.definition.spec_id
-        elif self.collection is not None:
-            subject_id = self.collection.collection_id
-        else:
-            # Unreachable: `_definition_xor_collection` already refused a
-            # manifest with neither present, before this validator runs.
-            raise AssertionError("neither 'definition' nor 'collection' is present")
         for artifact in self.artifacts:
             artifact.resource_uri = artifact_resource_uri(
-                subject_id=subject_id,
+                subject_id=self.definition.spec_id,
                 content_version=self.content_version,
                 artifact_digest=artifact.artifact_digest,
             )
@@ -299,8 +253,7 @@ def strip_manifest(payload: Mapping[str, Any]) -> Manifest:
 
     Raises:
         pydantic.ValidationError: `payload` doesn't match the manifest
-            shape this service knows how to serve -- missing a required
-            field, failing the definition/collection exclusivity rule, or
-            carrying top-level `statistics` on a collection manifest.
+            shape this service knows how to serve -- for example missing a
+            required field such as `definition`.
     """
     return Manifest.model_validate(payload)

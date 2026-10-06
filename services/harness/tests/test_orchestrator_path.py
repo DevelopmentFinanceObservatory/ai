@@ -4,7 +4,9 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -21,7 +23,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness import plan_display
+from harness import graph, plan_display
 from harness.graph import (
     APPROVE_INTERRUPT,
     CLARIFY_INTERRUPT,
@@ -33,6 +35,7 @@ from harness.graph import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
+    UNREADABLE_PLAN_NOTE,
     GenerativeNodes,
     _ask_status,
     _partial_result,
@@ -677,6 +680,197 @@ class _CountingSurface(ScriptedSurface):
     async def call_tool(self, **kwargs: Any) -> ToolCallResult:
         self.calls.append(kwargs["tool"].name)
         return await super().call_tool(**kwargs)
+
+
+# Three plans awaiting approval as the release that listed members stored
+# them, each beside the revision its card named. Their workflow's sources
+# hold `stat_vars`, `stat_var_truncated` and `pinned`, which
+# `planner.workflow.SelectedSource` no longer has.
+_PLANS_WITH_MEMBER_LISTS: dict[str, Any] = json.loads(
+    (Path(__file__).parent / "fixtures" / "plans_with_member_lists.json").read_text()
+)
+_UNREADABLE_PLAN = json.dumps(_PLANS_WITH_MEMBER_LISTS["aggregate"]["plan"])
+
+
+def _stored_state(runner: Runner) -> dict[str, Any]:
+    """The live state of the session `_session` opened."""
+    service = cast(InMemorySessionService, runner.session_service)
+    return service.sessions["t"]["u"]["s"].state
+
+
+def _plan_warnings(caplog: pytest.LogCaptureFixture) -> list[tuple[object, ...]]:
+    """The arguments of each warning `planner.plan` logged."""
+    return [
+        cast("tuple[object, ...]", record.args)
+        for record in caplog.records
+        if record.name == "planner.plan" and record.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stored", "answer"),
+    [
+        ("aggregate", "approves"),
+        ("rank", "approves"),
+        ("declined", "approves"),
+        ("aggregate", "amends"),
+    ],
+)
+async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
+    stored: str, answer: str, caplog: pytest.LogCaptureFixture
+):
+    """A plan awaiting approval across the release cannot be read. Approving
+    it or amending it retrieves nothing: the question is planned from the
+    start, the new card says why, and approving that one runs it."""
+    surface = _CountingSurface()
+    runner, model = _runner(
+        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        types.Part.from_text(text="Handed to the planner."),
+        types.Part.from_text(text="Charted."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=surface,
+        executor=_describes,
+    )
+    await _session(runner)
+    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    held = _PLANS_WITH_MEMBER_LISTS[stored]
+    _stored_state(runner)["plan"] = json.dumps(held["plan"])
+    result = (
+        {"approved": held["revision"]}
+        if answer == "approves"
+        else {"approved": None, "amendment": "only 2020"}
+    )
+
+    with caplog.at_level(logging.WARNING, logger="planner.plan"):
+        second = _pause(
+            await _run(
+                runner,
+                types.Content(
+                    role="user",
+                    parts=[create_request_input_response(first.id, {"result": result})],
+                ),
+            )
+        )
+
+    assert second.id == APPROVE_INTERRUPT
+    assert second.args["payload"]["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert second.args["payload"]["version"] == 1
+    assert surface.calls == []
+    ((state_key, entries, fields),) = _plan_warnings(caplog)
+    assert (state_key, entries) == ("plan", 1)
+    assert "workflow.sources.stat_vars" in str(fields)
+    assert held["plan"]["question"] not in caplog.text
+
+    approve = create_request_input_response(
+        second.id, {"result": {"approved": second.args["payload"]["revision"]}}
+    )
+    await _run(runner, types.Content(role="user", parts=[approve]))
+
+    assert "get_data" in surface.calls
+    assert "The approved plan ran." in _texts(model.requests[-1])
+
+
+async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists():
+    """A session's earlier plan call left a plan the release cannot read.
+    The next plan call drafts its own plan as it would with none on record,
+    and its card says nothing of the earlier one, which no card of this
+    call showed."""
+    runner, _ = _runner(
+        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        types.Part.from_text(text="Handed to the planner."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+    )
+    await _session(runner, plan=_UNREADABLE_PLAN)
+
+    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+
+    assert approval.id == APPROVE_INTERRUPT
+    assert "refusal_note" not in approval.args["payload"]
+    assert Plan.model_validate_json(_stored_state(runner)["plan"]).version == 1
+
+
+class _StoredWithMemberLists(Plan):
+    """A plan that is stored as `_UNREADABLE_PLAN`, whatever it holds.
+
+    Each node writes the plan it just built before the next reads it, so no
+    answer and no tool call lands a stored shape between `approve` and
+    `execute`, or between `execute` and `plan_done`. This puts one there.
+    """
+
+    def model_dump_json(self, **kwargs: Any) -> str:
+        del kwargs
+        return _UNREADABLE_PLAN
+
+
+async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member_lists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`execute` runs nothing of a plan it cannot read and spends no replan
+    on it: the question is planned from the start and the card says why."""
+    approve_plan = Plan.approve
+    monkeypatch.setattr(
+        Plan,
+        "approve",
+        lambda self: _StoredWithMemberLists.model_validate(approve_plan(self).model_dump()),
+    )
+    surface = _CountingSurface()
+    runner, _ = _runner(
+        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        types.Part.from_text(text="Handed to the planner."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=surface,
+        executor=_describes,
+    )
+    await _session(runner)
+    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approve = create_request_input_response(
+        first.id, {"result": {"approved": first.args["payload"]["revision"]}}
+    )
+
+    second = _pause(await _run(runner, types.Content(role="user", parts=[approve])))
+
+    assert second.id == APPROVE_INTERRUPT
+    assert second.args["payload"]["refusal_note"] == UNREADABLE_PLAN_NOTE
+    assert surface.calls == []
+    assert not _stored_state(runner).get("replans")
+
+
+async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_lists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`plan_done` hands back the frames the run produced as it does when no
+    plan is on record: without the plan record, and with the slot cleared."""
+    run_plan = graph.execute_approved_plan
+
+    async def stored_unreadable(plan: Plan, **kwargs: Any) -> tuple[Plan, Any]:
+        finished, outcome = await run_plan(plan, **kwargs)
+        return _StoredWithMemberLists.model_validate(finished.model_dump()), outcome
+
+    monkeypatch.setattr(graph, "execute_approved_plan", stored_unreadable)
+    runner, model = _runner(
+        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        types.Part.from_text(text="Handed to the planner."),
+        types.Part.from_text(text="Charted."),
+        planner=ScriptedPlannerModel(),
+        tool_surface=ScriptedSurface(),
+        executor=_describes,
+    )
+    await _session(runner)
+    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    revision = approval.args["payload"]["revision"]
+    approve = create_request_input_response(approval.id, {"result": {"approved": revision}})
+
+    events = await _run(runner, types.Content(role="user", parts=[approve]))
+
+    handed_back = _texts(model.requests[-1])
+    assert "The approved plan ran. Chart its frames and answer." in handed_back
+    assert f"Plan {revision[:12]}" not in handed_back
+    assert not [e for e in events if e.error_code]
+    state = _stored_state(runner)
+    assert state["plan"] is None
+    assert not state.get(ORCHESTRATOR_PLAN_RECORDS_KEY)
 
 
 async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again():

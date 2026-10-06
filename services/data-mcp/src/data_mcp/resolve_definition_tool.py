@@ -4,15 +4,13 @@ The harness calls it for each Search result a Studio turn starts from. A
 browser hands the harness a Spec block; the harness keeps the block's
 spec_id and identity and asks Search what that identity resolves to now, so
 every label, sentence and population fact the turn reads is Search's own
-answer. The tool posts one `identity` entry whose base is the identity
-itself, a no-op edit, registers every definition the answer carries as
-`search` does, and returns the envelope in `_meta` under
-`SEARCH_ENVELOPE_META_KEY`.
+answer. The tool posts one `identity` entry, from which Search derives the
+population, registers every definition the answer carries as `search` does,
+and returns the envelope in `_meta` under `SEARCH_ENVELOPE_META_KEY`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Annotated, Any
 
 from fastmcp.tools import ToolResult
@@ -25,36 +23,29 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import resolve_and_register
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
 
-# The StatVars one `dataset_resubmit` identity entry takes
-# (dfo-apis `search.models.request._RESUBMIT_MAX_RESOLVED_STAT_VARS`).
-MAX_RESUBMIT_STAT_VARS = 2_000
+# The wall-clock budget for one resubmit, and its read timeout. dfo-apis gives a
+# resubmit whose member walk reads a family's whole subject set 90 s, against
+# 45 s for a search, so the read waits 95 s and the budget leaves room for the
+# connect. The harness's `resolve_definition` call timeout
+# (`compiler.capabilities`) sits above the budget.
+RESUBMIT_READ_TIMEOUT_S = 95.0
+RESUBMIT_CALL_BUDGET_S = 100.0
 
 
-def resubmit_request(
-    *, spec_id: str, identity: dict[str, Any], stat_vars: Sequence[str] | None
-) -> dict[str, Any]:
+def resubmit_request(*, spec_id: str, identity: dict[str, Any]) -> dict[str, Any]:
     """The resolve request that re-resolves `identity` unchanged.
 
-    The identity is posted as its own base, which Search verifies by hashing
-    it to `spec_id`. Search names a part by the shape it verifies, whatever
-    `variable_text` says, so the spec_id stands in as that echo. `stat_vars`
-    is the seed Search needs for a shape no measure family covers: Search
-    re-reads each one in the graph and ignores them for a shape a family
-    covers.
+    Search names a part by the shape it verifies, whatever `variable_text`
+    says, so the spec_id stands in as that echo.
     """
     entry: dict[str, Any] = {
         "entry_kind": "identity",
         "variable_text": spec_id,
         "identity": identity,
-        "base_spec_id": spec_id,
-        "base_identity": identity,
     }
-    if stat_vars:
-        entry["resolved_stat_var_dcids"] = list(stat_vars)
     return {
         "schema_version": 1,
         "input": {"kind": "dataset_resubmit", "entries": [entry]},
-        "response_options": {"include_sentence": True},
     }
 
 
@@ -69,16 +60,6 @@ async def resolve_definition(
     identity: Annotated[
         dict[str, Any], Field(description="The definition's `identity`, as Search serves it.")
     ],
-    stat_vars: Annotated[
-        list[str] | None,
-        Field(
-            max_length=MAX_RESUBMIT_STAT_VARS,
-            description=(
-                "The StatVars Search listed for the spec (`resolved.stat_vars.items[].ref`), "
-                "which Search checks in the graph before it uses them."
-            ),
-        ),
-    ] = None,
 ) -> ToolResult:
     """Resolve a Spec block's identity again through Search, so the caller reads Search's own answer.
 
@@ -98,7 +79,9 @@ async def resolve_definition(
     except (IdentityMismatch, IdentityUnusable) as exc:
         return to_tool_result(ToolRefusal.request_invalid(pointer="/identity", detail=str(exc)))
     envelope = await resolve_and_register(
-        resubmit_request(spec_id=spec_id, identity=identity, stat_vars=stat_vars)
+        resubmit_request(spec_id=spec_id, identity=identity),
+        budget_s=RESUBMIT_CALL_BUDGET_S,
+        read_timeout_s=RESUBMIT_READ_TIMEOUT_S,
     )
     if isinstance(envelope, ToolResult):
         return envelope

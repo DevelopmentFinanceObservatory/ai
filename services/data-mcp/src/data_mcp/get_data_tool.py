@@ -8,15 +8,8 @@ names in the caller's `scope` are resolved to dcids through
 `data_mcp.resolution` before the mint call; the mint call itself and the
 resulting manifest never carry a name, only dcids and, later, a spec_id.
 
-Code that reads a `search` result passes the StatVars its spec block lists
-(`resolved.stat_vars.items`) as `resolved_stat_var_dcids`, and the mint posts
-them unchanged. The search digest names none, so a model leaves them out.
-dfo-apis refuses the mint `member_not_resolvable` when any of them is not a member of the family
-the identity resolves to, and otherwise serves the family under the requested
-spec_id; the posted StatVars also join the candidates its member walk confirms,
-so a family whose reverse-arc page never reaches a posted member still
-resolves, and a posted member that is the family's root proves a truncated
-walk complete.
+The mint posts the spec_id and its identity only. dfo-apis resolves the
+family's members from the graph on every mint, so no caller supplies them.
 
 Rendering the manifest into a digest lives in `data_mcp.get_data_digest`; the
 shared upstream client lives in `data_mcp.client_holder`.
@@ -94,7 +87,6 @@ from data_mcp.series_statistics import (
 )
 from data_mcp.settings import Settings
 from data_mcp.stat_var_list import without_long_stat_var_list
-from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS
 from data_mcp.tool_errors import (
     EntityCandidate,
     ToolErrorCode,
@@ -128,12 +120,8 @@ _MAX_ENTITY_NAMES = 50
 _MAX_ENTITY_NAME_CHARS = 200
 
 # `data_mcp.definition_store.identity.spec_id_for` mints "spec_" + 32
-# lowercase hex chars; `col_` shares that shape and is accepted here too, so
-# a collection id reaches the natural store-miss refusal below with an
-# honest message rather than failing local validation with none. Collection
-# fan-out (minting every member of a `col_` id) is not implemented by this
-# tool.
-_SPEC_ID_PATTERN = r"^(?:spec|col)_[0-9a-f]{32}$"
+# lowercase hex chars.
+_SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 
 # A dcid the resolve door itself just handed back in an `entity_ambiguous`
 # refusal's candidate list -- never a name the model invents. Namespaced
@@ -483,26 +471,6 @@ async def _resolve_scope_entities(
     return wire_entities, entity_labels, unheld_regions
 
 
-def _prefixed_stat_var_refusal(resolved_stat_var_dcids: Sequence[str]) -> ToolResult | None:
-    """Refuse the first `resolved_stat_var_dcids` entry dfo-apis' mint would reject, if any.
-
-    Mirrors `SpecIdInput._dcids_are_not_dcid_prefixed` (`datasets_api/mint_models.py`):
-    each entry is a bare dcid, as a search result lists it, never `dcid:`-prefixed.
-    Checked here so the caller reads this tool's own pointer and message, not the mint
-    route's validation error.
-    """
-    for index, dcid in enumerate(resolved_stat_var_dcids):
-        if dcid.startswith("dcid:"):
-            return to_tool_result(
-                ToolRefusal.request_invalid(
-                    pointer=f"/resolved_stat_var_dcids/{index}",
-                    detail=f"{dcid!r} must be a bare dcid, without the dcid: prefix, "
-                    "as a search result lists it",
-                )
-            )
-    return None
-
-
 def _pre_mint_deadline_refusal(*, service: str, step: str) -> ToolResult:
     """The retryable refusal for pre-mint work that ran past its share of the deadline."""
     return to_tool_result(
@@ -596,16 +564,7 @@ async def _load_identity_or_refuse(
     call sends as `definition.identity`; `None` when the store missed but the id should
     still attempt the registry-fallback mint path in `get_data` (a `None` identity drives
     that call to omit the `definition` sidecar); or a refusal `ToolResult` when the
-    store itself is unreachable, its held bytes fail their own hash check, or a `col_` id
-    misses.
-
-    A missed `col_` id refuses here rather than falling back, because the mint route's
-    `kind: "spec_id"` input constrains its own `spec_id` field to `^spec_`
-    (`datasets_api/mint_models.py`) and collections travel as a separate `collection_id`
-    kind. A `col_` id on the fallback path is therefore refused at the wire as a schema
-    violation, which would surface to the caller as `request_invalid` -- a malformed-argument
-    refusal for an id that satisfies this tool's own `_SPEC_ID_PATTERN`. Refusing locally
-    keeps `definition_not_held` as the answer, which is what an unheld collection id is.
+    store itself is unreachable or its held bytes fail their own hash check.
 
     The read must finish while the current `CallBudget.pre_mint_reserve_s` of `deadline`
     remains; past that it refuses retryably.
@@ -630,8 +589,6 @@ async def _load_identity_or_refuse(
 
     if stored is not None:
         return json.loads(stored.canonical_bytes)
-    if spec_id.startswith("col_"):
-        return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
     # No local hit, but dfo-apis' own registry may still hold this id: the local store is
     # per-process by default and even its GCS-backed form expires at 30 days, while the
     # upstream registry's rows are never deleted. Only a registry miss too (`spec_not_found`,
@@ -743,7 +700,6 @@ async def _fetch_statistics_for_digest(
     """
     if not statistics_needs_fetch(manifest.series_count):
         return None, False
-    assert manifest.definition is not None  # guaranteed by `_finish_mint_response`'s own check
     assert manifest.series_count is not None  # guaranteed by `statistics_needs_fetch` above
     artifact = find_statistics_artifact(manifest)
     if artifact is None:
@@ -867,9 +823,8 @@ async def _finish_mint_response(
 ) -> ToolResult:
     """Turn a mint route's manifest payload into the tool's result, or a refusal.
 
-    A manifest that no longer matches this service's own model (schema drift), or a
-    collection-shaped response (this tool only ever mints via `kind: "spec_id"`, which
-    the mint route never answers with one) would otherwise raise straight out of
+    A manifest that no longer matches this service's own model (schema drift) would
+    otherwise raise straight out of
     `get_data`. fastmcp's own dispatch loop re-raises a bare `pydantic.ValidationError`
     unwrapped rather than folding it into a `ToolError`, so an unguarded failure here
     escapes as a raw exception carrying none of this module's refusal fields, after a
@@ -932,7 +887,7 @@ async def _finish_mint_response(
     manifest = _narrowed_to_rendering(manifest, options=options)
 
     remint_persist_failed = False
-    if manifest.definition is not None and manifest.definition.spec_id != requested_spec_id:
+    if manifest.definition.spec_id != requested_spec_id:
         try:
             persisted = await _persist_reminted_definition(manifest.definition, deadline=deadline)
         except IdentityMismatch as exc:
@@ -1117,7 +1072,6 @@ async def _attempt_mint(
     client: UpstreamClient,
     spec_id: str,
     identity: Mapping[str, Any] | None,
-    resolved_stat_var_dcids: Sequence[str] | None,
     wire_scope: Mapping[str, Any],
     stat_vars: StatVarsReading,
     breakdown: Breakdown | None,
@@ -1140,7 +1094,6 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `resolved_stat_var_dcids` is posted unchanged, and left out when empty.
     `place_types` sets `options.columns` to `_PLACE_TYPE_COLUMNS`, which adds
     `observationAbout_type` to the default columns, and gives the frame a
     `content_version` of its own (`frame_materialisation.frame_ref_for`).
@@ -1159,13 +1112,12 @@ async def _attempt_mint(
             "spec_id": spec_id,
             "identity": identity,
         }
-    if resolved_stat_var_dcids:
-        # dfo-apis refuses `member_not_resolvable` when one of these is not a member of
-        # the family the identity resolves to, and adds them to the candidates its member
-        # walk confirms.
-        mint_input["resolved_stat_var_dcids"] = list(resolved_stat_var_dcids)
 
-    options: dict[str, Any] = {"format": "parquet", "bundle": False}
+    # `layout: "frame"` asks for the bare columns `_frame_from_parquet_bytes` reads, and
+    # dfo-apis stores it in the artifact's `rendering`, so the selection by equal
+    # rendering (`_narrowed_to_rendering`) keeps the frame file apart from long-layout
+    # files minted under the same pair.
+    options: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "frame"}
     if breakdown is not None:
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
@@ -1281,17 +1233,6 @@ async def get_data(
             )
         ),
     ] = "separate",
-    resolved_stat_var_dcids: Annotated[
-        list[str] | None,
-        Field(
-            default=None,
-            max_length=MAX_RESOLVED_STAT_VAR_DCIDS,
-            description=(
-                "StatVar dcids for this spec_id that code read from a search result, passed "
-                "back unchanged. The search digest names none: omit this when calling from it."
-            ),
-        ),
-    ] = None,
     place_types: Annotated[
         bool,
         Field(
@@ -1360,11 +1301,6 @@ async def get_data(
     deployment's graph and can take longer than usual when that graph is
     degraded.
 
-    `resolved_stat_var_dcids` is for code that reads a search result's own
-    StatVar listing, passed back unchanged. The search digest names no
-    StatVar, so leave it out when calling from the digest: the dataset served
-    is the same either way. Never compose these dcids.
-
     A spec that names no place covers every place with data, at every
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds each place's types as
@@ -1385,8 +1321,6 @@ async def get_data(
             Omit entirely to retrieve the stored definition unchanged.
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
-        resolved_stat_var_dcids: StatVar dcids code read from a search
-            result, as described above.
         place_types: Whether to add each place's types as
             `observationAbout_type`, for a spec that names no place.
         breakdown: The code system and hierarchy level to sum the family
@@ -1404,9 +1338,6 @@ async def get_data(
     budget_deadline_s = current_call_budget().deadline_s
     deadline_s = settings.get_data_deadline_s if budget_deadline_s is None else budget_deadline_s
     deadline = CallDeadline.after(deadline_s, clock=_deadline_clock)
-    prefixed = _prefixed_stat_var_refusal(resolved_stat_var_dcids or ())
-    if prefixed is not None:
-        return prefixed
     if breakdown is not None and stat_vars == "sum":
         return to_tool_result(
             ToolRefusal.request_invalid(
@@ -1441,7 +1372,9 @@ async def get_data(
             # no base identity to diff against -- the response the model
             # eventually sees carries the post-scope-surgery identity the
             # registry served, never the base -- so `dropped_roles` stays
-            # empty there rather than guessed at.
+            # empty there rather than guessed at. An open role binds no
+            # entity and is not reported dropped. dfo-apis closes one the scope
+            # binds and keeps every other open.
             base_roles = set((identity.get("entities") or {}).keys())
             dropped_roles = sorted(base_roles - set(scope.entities.keys()))
 
@@ -1457,7 +1390,6 @@ async def get_data(
         client=client,
         spec_id=spec_id,
         identity=identity,
-        resolved_stat_var_dcids=resolved_stat_var_dcids,
         wire_scope=wire_scope,
         stat_vars=stat_vars,
         breakdown=breakdown,

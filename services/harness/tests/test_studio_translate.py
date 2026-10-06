@@ -36,6 +36,7 @@ from harness.studio_state import ConversationState, StudioStore, _next_manifest
 from harness.studio_translate import (
     _PLANNER_FAILED_DETAIL,
     _STEP_DETAIL_CAP,
+    _checking_label,
     _ExecutorRecord,
     _RecordingExecutor,
     _RecordingSurface,
@@ -44,7 +45,7 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.wire import CompositionActor, CompositionBlock, PlanAsk, StepProduced, StepStatus
-from planner.plan import UnsupportedOperation, plan_revision
+from planner.plan import PLAN_STATE_KEY, DatasetRequirement, UnsupportedOperation, plan_revision
 from planner.workflow import ToolId
 
 from .resolved_revision import resolved_revision
@@ -273,6 +274,52 @@ def test_a_regressed_version_is_logged_and_does_not_move_latest_backwards(
     assert regressed.plan_version_id != first.plan_version_id
 
 
+@pytest.mark.parametrize("unreadable_version", [1, 2])
+def test_a_restarted_plan_opens_a_new_line_of_plan_versions(
+    unreadable_version: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The planner drafts from the start over a plan it could not read, and
+    flags the draft: its version 1 is no regression and no re-offer of the
+    version 1 already shown. It supersedes the last card shown under an id of
+    its own, and an amendment of it supersedes it in turn."""
+    conversation = ConversationState(conversation_id="c1")
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService())),
+    )
+    shown = [
+        translator._interrupt_frames(
+            APPROVE_INTERRUPT, {"payload": _plan_payload(version=version)}
+        )[-1]
+        for version in range(1, unreadable_version + 1)
+    ]
+    shown_ids = {card.plan_version_id for card in shown}
+
+    with caplog.at_level(logging.ERROR, logger="harness.studio_translate"):
+        versioned, redraft = translator._interrupt_frames(
+            APPROVE_INTERRUPT, {"payload": _plan_payload(version=1, restarted=True)}
+        )
+        amended_versioned, amended = translator._interrupt_frames(
+            APPROVE_INTERRUPT, {"payload": _plan_payload(version=2)}
+        )
+
+    assert caplog.records == []
+    assert (redraft.event, redraft.version) == ("plan.proposed", 1)
+    assert redraft.plan_version_id not in shown_ids
+    assert (versioned.event, versioned.version) == ("plan.versioned", 1)
+    assert versioned.plan_version_id == redraft.plan_version_id
+    assert versioned.supersedes == shown[-1].plan_version_id
+    assert (amended.event, amended.version) == ("plan.proposed", 2)
+    assert amended.plan_version_id not in shown_ids | {redraft.plan_version_id}
+    assert amended_versioned.event == "plan.versioned"
+    assert amended_versioned.plan_version_id == amended.plan_version_id
+    assert amended_versioned.supersedes == redraft.plan_version_id
+    assert conversation.plan_version_ids == {
+        1: redraft.plan_version_id,
+        2: amended.plan_version_id,
+    }
+
+
 class _UnreachableSurface:
     """A `ToolSurface` `_RecordingSurface` never actually calls here: this
     test appends `_ExecutorRecord`s to it directly, the way a wave's own
@@ -397,7 +444,7 @@ def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame() -> 
         (StepStatus.RUNNING, "Retrying in 7s (attempt 2 of 3)"),
     ]
     assert first.step_id == later.step_id != other.step_id
-    assert first.label == final[0].label == "Fetch the data"
+    assert first.label == final[0].label == "Fetching data"
     assert [(f.step_id, f.status) for f in final] == [
         (first.step_id, StepStatus.FAILED),
         (first.step_id, StepStatus.COMPLETE),
@@ -1225,3 +1272,141 @@ def test_a_planner_seam_error_reaches_the_user_without_its_model_facing_text() -
     assert frame.error.retry.value == "do_not_retry"
     assert "`translate`" not in frame.error.detail
     assert frame.error.detail == _PLANNER_FAILED_DETAIL.format(trace_id=conversation.trace_id)
+
+
+def _planner_answer(name: str, response: dict[str, Any], **state: Any) -> Event:
+    """A planner tool's response event, with the state delta the tool wrote."""
+    return Event(
+        author="dfo_planner",
+        content=types.Content(
+            role="user",
+            parts=[
+                types.Part(function_response=types.FunctionResponse(name=name, response=response))
+            ],
+        ),
+        actions=EventActions(state_delta=state),
+    )
+
+
+_REFUSED_DRAFT = {
+    "outcome": "invalid_input",
+    "code": "invalid_plan",
+    "message": "Invalid plan data: evidence_requirements.2.filter.predicates.0: Input tag",
+}
+
+
+def test_a_draft_after_a_refused_one_reads_reworking_the_draft() -> None:
+    """A refused `propose_plan` makes the planner's next draft a separate
+    line, so a long retry is not one "Drafting a plan"; the refusal's code
+    shows in plain words and its message, which names plan fields, never
+    reaches the wire."""
+    translator = _translator()
+    translator.translate(_planner_call("propose_plan", question="q"))
+
+    refused = translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
+    retry = translator.translate(_planner_call("propose_plan", question="q"))
+    accepted = translator.translate(_planner_answer("propose_plan", {"outcome": "ok"}))
+    another = translator.translate(_planner_call("propose_plan", question="q"))
+
+    assert refused == []
+    assert _status_lines(retry) == [
+        ("s0", "Drafting a plan", StepStatus.COMPLETE),
+        ("s2", "Reworking the draft", StepStatus.RUNNING),
+    ]
+    assert retry[1].detail == "a step didn't fit the plan's rules"
+    assert accepted == []
+    assert _status_lines(another) == [
+        ("s2", "Reworking the draft", StepStatus.COMPLETE),
+        ("s4", "Drafting a plan", StepStatus.RUNNING),
+    ]
+    assert not any("evidence_requirements" in (f.detail or "") for f in retry + another)
+
+
+def test_a_refusal_with_an_unlisted_code_reworks_the_draft_without_a_reason() -> None:
+    translator = _translator()
+    translator.translate(_planner_answer("propose_plan", {"outcome": "refused", "code": "x"}))
+
+    frames = translator.translate(_planner_call("propose_plan", question="q"))
+
+    assert _status_lines(frames) == [("s0", "Reworking the draft", StepStatus.RUNNING)]
+    assert frames[0].detail is None
+
+
+def test_the_check_line_names_the_data_of_the_plan_the_planner_recorded() -> None:
+    """The recorded plan rides on the accepted tool's state delta, a refused
+    draft carries none, so the check line names what is actually held."""
+    translator = _translator()
+    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    translator.translate(
+        _planner_answer(
+            "propose_plan", {"outcome": "ok"}, **{PLAN_STATE_KEY: plan.model_dump_json()}
+        )
+    )
+    translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
+
+    frames = translator.translate(_planner_call("translate"))
+
+    assert _status_lines(frames) == [
+        ("s0", "Checking life expectancy at birth for Kenya", StepStatus.RUNNING)
+    ]
+
+
+def test_the_check_line_counts_the_plans_other_datasets() -> None:
+    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    second = dataset.model_copy(update={"id": "second", "measure": "health spending"})
+    both = plan.model_copy(update={"evidence_requirements": (dataset, second)})
+    none = plan.model_copy(update={"evidence_requirements": ()})
+
+    assert _checking_label(both) == "Checking life expectancy at birth for Kenya and 1 more"
+    assert _checking_label(none) is None
+
+
+def test_an_approved_plan_shows_starting_the_plan_until_its_first_step() -> None:
+    """The executor takes seconds to start after an approval; the line
+    covers that, and completes before the first step's frame takes its seq."""
+    translator = _translator()
+
+    approved = translator.translate(_node_event("approve", route="approved", output={"v": 1}))
+    first_step = translator.translate(_progress_event("fetch_1", "Reading the data"))
+
+    assert _status_lines(approved) == [("s0", "Starting the plan", StepStatus.RUNNING)]
+    assert [(f.step_id, f.label, f.status) for f in first_step] == [
+        ("s0", "Starting the plan", StepStatus.COMPLETE),
+        ("s2", "Fetching data", StepStatus.RUNNING),
+    ]
+    assert first_step[0].seq < first_step[1].seq
+
+
+def test_starting_the_plan_completes_before_a_step_that_reported_no_progress() -> None:
+    translator, surface_recorder = _progress_translator()
+    translator.translate(_node_event("approve", route="approved", output={"v": 1}))
+    surface_recorder._records.append(_surface_record("fetch_1", {"outcome": "ok"}))
+
+    frames = translator.translate(_node_event("execute"))
+
+    assert [(f.label, f.status) for f in frames][:2] == [
+        ("Starting the plan", StepStatus.COMPLETE),
+        ("Fetching data", StepStatus.COMPLETE),
+    ]
+
+
+def test_an_amendment_does_not_start_the_plan() -> None:
+    frames = _translator().translate(_node_event("approve", route="amend", output={"plan": {}}))
+
+    assert frames == []
+
+
+def test_a_new_planner_run_after_a_refused_one_drafts_afresh() -> None:
+    """A planner run that ended on a refusal leaves nothing to rework in the
+    next run of the same segment: its first draft is the replan's own."""
+    translator = _translator()
+    translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
+    translator.translate(_node_event("planner", planner_started={"revising": False}))
+
+    frames = translator.translate(_planner_call("propose_plan", question="q"))
+
+    assert [(f.label, f.status) for f in frames] == [
+        ("Working on a plan", StepStatus.COMPLETE),
+        ("Drafting a plan", StepStatus.RUNNING),
+    ]

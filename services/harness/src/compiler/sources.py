@@ -21,10 +21,9 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
-from typing import Any, cast
+from typing import cast
 
 import rfc8785
-from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS, root_member
 from planner.records import Period, StatVarReading, StrictModel
 from planner.workflow import (
     OpenAxis,
@@ -41,10 +40,6 @@ EXACT_COVERAGE = "exact"
 # The `shape.kind` of an identity that describes its StatVars by schema and
 # slot bindings, where a pinned one names them.
 DESCRIBED_SHAPE_KIND = "statvar_schema"
-
-# The prefix dfo-apis's mint refuses on a posted StatVar (`SpecIdInput.
-# _dcids_are_not_dcid_prefixed`): each is a bare dcid.
-_DCID_PREFIX = "dcid:"
 
 
 class DiscoveryStatus(StrEnum):
@@ -148,20 +143,20 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     """Read one spec block of a `search` envelope into a `SelectedSource`.
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
-    coverage, measures, the label, size and digest of the binding its
-    `shape` states, entities, the entity axes it leaves open, unit (or that it
-    varies per series), provenance, the axes its family varies along -- and
-    the identity document of its
-    `definition` sidecar when the envelope carries one, with whether a
-    described identity mints as one StatVar (`pinned_stat_var`).
-    A `shape` without `member_count` or `member_digest` leaves them `None`.
+    coverage, the counts of its members and how many it serves, the label,
+    size and digest of the binding its `shape` states, entities, the entity
+    axes it leaves open, unit (or that it varies per series), provenance, the
+    axes its family varies along -- and the identity document of its
+    `definition` sidecar when the envelope carries one. A `shape` without
+    `member_count` or `member_digest` leaves them `None`, and a
+    `served_count` Search states as null (membership not settled) leaves it
+    `None`.
     `coverage.window` is a series window only when `coverage.kind` is
     `exact`; a `breadth` or `bare` coverage carries none.
 
     Raises:
-        ValueError: If the block lacks a usable `spec_id`, an entity it
-            resolves lacks its role, value or label, or the StatVars it
-            elected are not a list `get_data` takes (`_stat_vars`).
+        ValueError: If the block lacks a usable `spec_id`, or an entity it
+            resolves lacks its role, value or label.
     """
     resolved = _mapping(block.get("resolved"))
     coverage = _mapping(resolved.get("coverage"))
@@ -170,23 +165,17 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     unit = _mapping(facets.get("unit"))
     provenance = _mapping(facets.get("provenance"))
     shape = _mapping(resolved.get("shape"))
-    identity = _identity(_mapping(block.get("definition")).get("identity"))
-    items = _sequence(_mapping(resolved.get("stat_vars")).get("items"))
+    stat_vars = _mapping(resolved.get("stat_vars"))
     try:
-        stat_vars, stat_var_member_count, stat_var_truncated = _stat_vars(resolved.get("stat_vars"))
         return SelectedSource(
             spec_id=str(block.get("spec_id")),
             sentence=_text(resolved.get("rendered_sentence")) or "",
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
-            stat_vars=stat_vars,
-            stat_var_member_count=stat_var_member_count,
-            stat_var_member_count_exact=_flag(
-                _mapping(resolved.get("stat_vars")).get("member_count_exact")
-            ),
-            stat_var_truncated=stat_var_truncated,
-            pinned=_pinned(identity, items, slots=resolved.get("slots")),
+            stat_var_member_count=_count(stat_vars.get("member_count")),
+            stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
+            served_count=_count(stat_vars.get("served_count")),
             shape_member_count=_count(shape.get("member_count")),
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
@@ -202,7 +191,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
                 if coverage_kind == EXACT_COVERAGE
                 else None
             ),
-            identity=identity,
+            identity=_identity(_mapping(block.get("definition")).get("identity")),
             open_axes=_open_axes(resolved),
             slot_codes=_slot_codes(resolved),
         )
@@ -210,68 +199,6 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
         # pydantic's ValidationError is a ValueError too, so one clause covers
         # a malformed field and a missing one alike.
         raise ValueError(f"the spec block is not usable as a source: {exc}") from exc
-
-
-def _stat_vars(value: object) -> tuple[tuple[str, ...], int | None, bool | None]:
-    """The dcids `resolved.stat_vars` names, how many members it confirmed, and whether `items` was capped.
-
-    `search` serialises `resolved.stat_vars` as an object -- `items`,
-    `member_count`, `truncated` -- never a bare list, so a value that is not
-    a mapping (an absent field, or the old wrong list shape) states none of
-    the three: `member_count` and `truncated` come back `None`, unknown
-    rather than complete, and `items` comes back empty.
-
-    Every item the Search API serves is an object whose `ref` is a dcid, and
-    a retrieval posts these dcids to `get_data` as `resolved_stat_var_dcids`
-    (`posted_stat_vars`), so an item of any other form raises, and so does a
-    list `get_data` would refuse: one past `MAX_RESOLVED_STAT_VAR_DCIDS`, or a `ref` with the `dcid:` prefix.
-
-    Raises:
-        ValueError: If `items` is not a list, holds more than `MAX_RESOLVED_STAT_VAR_DCIDS`
-            entries, or one of its items is not an object with a non-empty
-            string `ref` that is a bare dcid.
-    """
-    obj = _mapping(value)
-    raw_items = obj.get("items") if obj.get("items") is not None else []
-    if not isinstance(raw_items, list):
-        raise ValueError(f"resolved.stat_vars.items is not a list: {raw_items!r}")
-    if len(raw_items) > MAX_RESOLVED_STAT_VAR_DCIDS:
-        raise ValueError(
-            f"resolved.stat_vars.items holds {len(raw_items)} StatVars, past the "
-            f"{MAX_RESOLVED_STAT_VAR_DCIDS} get_data takes"
-        )
-    items: list[str] = []
-    for index, item in enumerate(raw_items):
-        ref = item.get("ref") if isinstance(item, Mapping) else None
-        if not isinstance(ref, str) or not ref:
-            raise ValueError(
-                f"resolved.stat_vars.items[{index}] is not an object with a string ref: {item!r}"
-            )
-        if ref.startswith(_DCID_PREFIX):
-            raise ValueError(
-                f"resolved.stat_vars.items[{index}].ref {ref!r} is not a bare dcid: "
-                f"it carries the {_DCID_PREFIX} prefix"
-            )
-        items.append(ref)
-    truncated = obj.get("truncated")
-    return (
-        tuple(items),
-        _count(obj.get("member_count")),
-        truncated if isinstance(truncated, bool) else None,
-    )
-
-
-def elected_stat_vars(resolved: Mapping[str, object]) -> tuple[str, ...]:
-    """The StatVars a spec block's `resolved` elects, as `get_data` takes them.
-
-    The list `source_from_spec_block` records as `SelectedSource.stat_vars`,
-    for a reader that offers a block without building a source from it
-    (`harness.tool_contracts`, for each clarify candidate).
-
-    Raises:
-        ValueError: If the list is not one `get_data` takes (`_stat_vars`).
-    """
-    return _stat_vars(resolved.get("stat_vars"))[0]
 
 
 def _count(value: object) -> int | None:
@@ -320,15 +247,14 @@ def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | N
     """The codes each slot of `resolved.slots` admits, by constraint property.
 
     A `value` binding admits its ref and every code its `expansion` added;
-    Search states an expansion only when the walk added a code
-    (`data_mcp.substitution._widens`), so a value without one admits its ref
-    alone. A `set` binding admits each of its values' refs and the codes its
-    expansion added, and maps to `None` when it states no expansion, since
-    nothing says its values admit no descendants and its codes are unknown. An
-    unbound slot, and one with no constraint property (the place, time
-    window or source), is left out. `None` when `resolved` lists no slots, or
-    a slot carries a binding kind this reader does not know or a value
-    without a ref.
+    Search states an expansion only when the walk added a code, so a value
+    without one admits its ref alone. A `set` binding admits each of its
+    values' refs and the codes its expansion added, and maps to `None` when
+    it states no expansion, since nothing says its values admit no
+    descendants and its codes are unknown. An unbound slot, and one with no
+    constraint property (the place, time window or source), is left out.
+    `None` when `resolved` lists no slots, or a slot carries a binding kind
+    this reader does not know or a value without a ref.
     """
     slots = _sequence(resolved.get("slots"))
     if not slots:
@@ -401,21 +327,47 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     measurement qualifier and denominator, which a described identity's
     `shape` pins, and one code on each constraint property, which a member
     carries from the codes its family's slot admits (`slot_codes`). So two
-    families are `DISJOINT` when their shapes differ, or when a property
-    both bind to stated codes admits no code in common. Health and education
-    aid bind `crsPurpose` to two subtrees of the code index that share no
-    code. They are `NESTED` when one binds every property the other binds, each to
-    codes the other admits: a family holds every member of a family
-    narrower than it, as all sectors holds health. Anything else is
-    `UNDECIDED`: a side with no described shape or no `slot_codes`, a
-    property bound to codes not stated (a `None` entry) where the verdict
-    would rest on it, and two families that each bind a property the other
-    leaves open.
+    families are `DISJOINT` when a shape field differs as both state it, or
+    when a property both bind to stated codes admits no code in common.
+    Health and education aid bind `crsPurpose` to two subtrees of the code
+    index that share no code.
+
+    A shape field differs only when both sides state it as a dcid string, or
+    both as `{"ref": dcid}`, and the dcids differ. A field one side leaves out
+    proves nothing, since a sparse shape omits what a draft never filled. A
+    denominator stated as `{"unresolved": true}` proves nothing either. One
+    family is written that way while its denominator node is provisional, and
+    as `{"ref": dcid}` once the graph confirms it.
+
+    Two families are `NESTED` when their shapes state every field concretely
+    (a dcid string or `{"ref": dcid}`) and identically, and one binds every
+    property the other binds, each to codes the other admits. A family holds
+    every member of a family narrower than it, as all sectors holds health.
+    Two identities that each pin one StatVar (`pinned_stat_var`) are `NESTED`
+    when they pin the same one and `DISJOINT` otherwise.
+
+    Everything else is `UNDECIDED`. That covers a side with no described shape
+    or no `slot_codes`, a property bound to codes not stated (a `None` entry)
+    where the verdict would rest on it, two families that each bind a property
+    the other leaves open, and two that would nest but whose shapes differ in
+    a field one side leaves out, leaves unresolved, or spells another way,
+    since the open fields may name different nodes.
     """
-    shapes = [_described_shape(source) for source in (left, right)]
-    if shapes[0] is None or shapes[1] is None:
+    pinned = [pinned_stat_var(source.identity) for source in (left, right)]
+    if pinned[0] is not None and pinned[1] is not None:
+        return FamilyOverlap.NESTED if pinned[0] == pinned[1] else FamilyOverlap.DISJOINT
+    return _described_overlap(left, right)
+
+
+def _described_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap:
+    """`family_overlap` for two sources that do not both pin a StatVar."""
+    left_shape, right_shape = _described_shape(left), _described_shape(right)
+    if left_shape is None or right_shape is None:
         return FamilyOverlap.UNDECIDED
-    if shapes[0] != shapes[1]:
+    if any(
+        _states_apart(left_shape.get(field), right_shape.get(field))
+        for field in left_shape.keys() & right_shape.keys()
+    ):
         return FamilyOverlap.DISJOINT
     if left.slot_codes is None or right.slot_codes is None:
         return FamilyOverlap.UNDECIDED
@@ -426,9 +378,38 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
         for prop, codes in left.slot_codes.items()
     ):
         return FamilyOverlap.DISJOINT
-    if _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes):
+    nested = _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes)
+    if nested and _same_shape(left_shape, right_shape):
         return FamilyOverlap.NESTED
     return FamilyOverlap.UNDECIDED
+
+
+def _same_shape(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    """Whether two shapes state every field, and state it identically.
+
+    A field is stated as a dcid string or `{"ref": dcid}`. An absent field or
+    an `{"unresolved": true}` denominator leaves the StatVars it admits open.
+    """
+    return left.keys() == right.keys() and all(
+        _stated(value) and value == right[field] for field, value in left.items()
+    )
+
+
+def _stated(value: object) -> bool:
+    """Whether a shape field's value names one dcid: a string or `{"ref": dcid}`."""
+    return isinstance(value, str) or isinstance(_mapping(value).get("ref"), str)
+
+
+def _states_apart(left: object, right: object) -> bool:
+    """Whether two values of one shape field are both stated and differ.
+
+    Both must be dcid strings, or both `{"ref": dcid}`. An `{"unresolved":
+    true}` denominator, an absent field, or a value spelled differently on
+    each side gives nothing to compare.
+    """
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        left, right = _mapping(left).get("ref"), _mapping(right).get("ref")
+    return isinstance(left, str) and isinstance(right, str) and left != right
 
 
 def _described_shape(source: SelectedSource) -> Mapping[str, object] | None:
@@ -450,99 +431,36 @@ def _holds(
     )
 
 
-def pinned_stat_var(
-    identity: Mapping[str, Any], items: Sequence[Mapping[str, Any]], *, slots: object
-) -> str | None:
-    """The one StatVar a described `identity` mints as, or `None`.
+def pinned_stat_var(identity: Mapping[str, object] | None) -> str | None:
+    """The one StatVar dcid `identity` pins (`shape.kind` `stat_var`), or `None` for any other identity.
 
-    `items` are the block's `resolved.stat_vars.items` and `slots` its
-    `resolved.slots`. The rule is data-mcp's
-    (`data_mcp.substitution.root_member`): a described identity whose only
-    entity role is `observationAbout`, for which `search` elected exactly one
-    StatVar that is the family's root. dfo-apis reduces a family to the
-    members no other member dominates, and a root dominates every member
-    with further constraints, so the mint returns that one StatVar under the
-    identity's own spec_id. An identity naming any other role, one electing
-    several StatVars or one constrained beyond its bound slots, one whose
-    elected StatVar states no `constraint_properties`, and one whose shape
-    names its StatVar are minted as they stand.
+    A described identity (`statvar_schema`) names its members by schema and
+    slots, so no dcid can be read from it.
     """
-    return root_member(identity, items, slots=slots)
-
-
-def _pinned(
-    identity: Mapping[str, Any] | None, items: Sequence[Mapping[str, Any]], *, slots: object
-) -> bool | None:
-    """Whether a described `identity` mints as one StatVar; `None` for any other."""
     shape = (identity or {}).get("shape")
-    if not isinstance(shape, Mapping) or shape.get("kind") != DESCRIBED_SHAPE_KIND:
+    if not isinstance(shape, Mapping) or shape.get("kind") != "stat_var":
         return None
-    return pinned_stat_var(identity or {}, items, slots=slots) is not None
+    dcid = shape.get("id")
+    return dcid if isinstance(dcid, str) and dcid else None
 
 
 def is_family(source: SelectedSource) -> bool:
     """Whether a retrieval of `source` holds a family of StatVars.
 
-    A described identity is minted with every member of its binding unless
-    the one StatVar `search` elected is the family's root
-    (`SelectedSource.pinned`), so an unpinned one is a family however many
-    members `search` elected: an aid flow keyed on provider and recipient is
-    never pinned, and one member elected for it still mints them all. The
-    exception is a binding `search` states holds exactly one member
-    (`_states_one_member`): minted unpinned, it still holds that one StatVar.
-    A source that states no pin verdict (one whose identity names its
-    StatVars, one carrying no identity, and a record that does not state the
-    field) binds the StatVars `stat_vars` lists, so two or more is a family.
-    One that lists none of a binding `search` states a member digest for is
-    a family when the binding counts two or more members.
+    A source is one StatVar exactly when `search` states it serves one
+    (`served_count`), which it states only once the membership settled. Any
+    other count, and a membership `search` did not settle, read as a family:
+    the mint elects the members, and a family reading of one series serves
+    the same frame.
     """
-    if source.pinned is None:
-        if source.stat_vars or source.shape_member_digest is None:
-            return len(source.stat_vars) > 1
-        return (source.shape_member_count or 0) > 1
-    return not source.pinned and not _states_one_member(source)
+    return source.served_count != 1
 
 
 def stat_var_count(source: SelectedSource) -> int:
-    """How many StatVars `search` confirmed for `source`.
-
-    `stat_var_member_count` where the envelope states it, and at least as
-    many as `stat_vars` lists. A family `search` states a member digest for
-    lists none of its members.
-    """
-    return max(len(source.stat_vars), source.stat_var_member_count or 0)
-
-
-def posted_stat_vars(source: SelectedSource) -> tuple[str, ...]:
-    """The StatVars a retrieval of `source` posts as `get_data`'s `resolved_stat_var_dcids`.
-
-    A source without `shape_member_digest` lists a recall sample of the
-    binding's confirmed members, and that list is the membership a
-    retrieval asserts, so it posts whole. A pinned source posts its root,
-    which proves a truncated member walk complete. Any other source with a
-    digest is a family the packaged code index elects, which the mint
-    elects again from the same index, so its list is exemplars and it posts
-    none. The membership check compares the family's digest instead
-    (`compiler.evidence._membership_issues`).
-    """
-    if source.shape_member_digest is None or source.pinned:
-        return source.stat_vars
-    return ()
-
-
-def block_posts_stat_vars(block: Mapping[str, object]) -> bool:
-    """Whether a retrieval of a spec block posts the StatVars it lists.
-
-    It applies `posted_stat_vars`'s rule to a raw block, for a caller that
-    builds no source from it (`harness.tool_contracts`, for each clarify
-    candidate): a block without a member digest posts, and a digest block
-    posts only its pinned root."""
-    resolved = _mapping(block.get("resolved"))
-    if _text(_mapping(resolved.get("shape")).get("member_digest")) is None:
-        return True
-    identity = _identity(_mapping(block.get("definition")).get("identity"))
-    items = _sequence(_mapping(resolved.get("stat_vars")).get("items"))
-    return bool(_pinned(identity, items, slots=resolved.get("slots")))
+    """How many StatVars `source` holds: `served_count` once settled, else the members `search` confirmed."""
+    if source.served_count is not None:
+        return source.served_count
+    return source.stat_var_member_count or 0
 
 
 def member_digest(dcids: Iterable[str]) -> str:
@@ -553,31 +471,6 @@ def member_digest(dcids: Iterable[str]) -> str:
     the `dcid:` prefix.
     """
     return hashlib.sha256(rfc8785.dumps(sorted(dcids))).hexdigest()
-
-
-def _states_one_member(source: SelectedSource) -> bool:
-    """Whether `search` states that the binding of `source` holds exactly the one StatVar it lists.
-
-    `shape_member_digest` is `search`'s digest of the whole binding, stated
-    only where `shape_member_count` is a true total; without it the count is
-    a floor over a capped recall sample, which says the binding holds at
-    least that many. The binding is the one listed StatVar exactly when the
-    digest equals `member_digest` of that StatVar alone, so a digest of any
-    other population, and an absent one, leave the source a family. The
-    counts have to agree with it: a binding count of one, and a listing
-    whose `stat_var_member_count` is one and `stat_var_truncated` false. A
-    count the envelope left out and a `stat_var_truncated` it did not state
-    say nothing, so the source stays a family.
-    """
-    if len(source.stat_vars) != 1:
-        return False
-    (listed,) = source.stat_vars
-    return (
-        source.shape_member_count == 1
-        and source.shape_member_digest == member_digest([listed.removeprefix("dcid:")])
-        and source.stat_var_member_count == 1
-        and source.stat_var_truncated is False
-    )
 
 
 def default_reading(source: SelectedSource) -> StatVarReading:

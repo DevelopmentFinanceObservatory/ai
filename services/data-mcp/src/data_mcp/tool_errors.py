@@ -2,7 +2,7 @@
 
 `ToolRefusal` is the stable code/retry-mode/fix/message contract a tool
 returns via `to_tool_result` instead of letting a raw `UpstreamError`
-propagate. Nineteen codes span four retry modes (`RetryMode`), most with a
+propagate. Twenty codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
@@ -60,7 +60,7 @@ class RetryMode(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
-    """The nineteen refusal codes, each mapped to exactly one `RetryMode`."""
+    """The twenty refusal codes, each mapped to exactly one `RetryMode`."""
 
     FACET_NOT_AVAILABLE = "facet_not_available"
     DEFAULT_FACET_UNDEFINED = "default_facet_undefined"
@@ -81,6 +81,7 @@ class ToolErrorCode(StrEnum):
     SKILL_NOT_FOUND = "skill_not_found"
     SKILL_RESOURCE_NOT_FOUND = "skill_resource_not_found"
     ROLLUP_NOT_SUMMABLE = "rollup_not_summable"
+    OPEN_ROLE_UNAVAILABLE = "open_role_unavailable"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -107,6 +108,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.SKILL_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.SKILL_RESOURCE_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLUP_NOT_SUMMABLE: RetryMode.DO_NOT_RETRY,
+    ToolErrorCode.OPEN_ROLE_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
@@ -621,6 +623,34 @@ class ToolRefusal:
                 "just isn't registered. Search again with a different id."
             ),
             fix={"definition_id": definition_id, "next_step": "search"},
+            trace_id=trace_id,
+            capability_version=capability_version,
+        )
+
+    @classmethod
+    def open_role_unavailable(
+        cls,
+        *,
+        pointer: str | None,
+        detail: str | None,
+        trace_id: str | None = None,
+        capability_version: str | None = None,
+    ) -> Self:
+        # Search refuses a `dataset_resubmit` with this 422 when the posted
+        # identity holds a role open and the StatVars the definition elects
+        # declare no role on that axis. `pointer` is
+        # the identity's `open_roles` and `detail` names the axis. The same
+        # identity refuses the same way every time. A fresh `search` asking for
+        # the role elects whichever source breaks the measure down by it.
+        stated = f": {detail}" if detail else ""
+        return cls(
+            code=ToolErrorCode.OPEN_ROLE_UNAVAILABLE,
+            message=(
+                f"This definition can no longer give one series per member of the role "
+                f"its identity holds open{stated}. Search again for the breakdown and "
+                "use the spec_id it returns."
+            ),
+            fix={"pointer": pointer, "detail": detail, "next_step": "search"},
             trace_id=trace_id,
             capability_version=capability_version,
         )
@@ -1144,15 +1174,16 @@ _UPSTREAM_CODE_MAP: dict[str, ToolErrorCode] = {
     # against the graph.
     "spec_not_exportable": ToolErrorCode.SPEC_NOT_EXPORTABLE,
     # `member_not_resolvable` (422, not retryable) fires when the definition's StatVars
-    # cannot be resolved as it stands: a StatVar `get_data` posted in
-    # `resolved_stat_var_dcids` is not a member of the family the identity resolves to,
-    # or the graph's arcs for a member are inconsistent. Either way this spec cannot be
-    # minted, which is `spec_not_exportable`'s meaning; `_member_not_resolvable_refusal`
-    # names the StatVars.
+    # cannot be resolved as it stands: the graph's arcs for a member are inconsistent.
+    # This spec cannot be minted, which is `spec_not_exportable`'s meaning;
+    # `_member_not_resolvable_refusal` names the StatVars.
     "member_not_resolvable": ToolErrorCode.SPEC_NOT_EXPORTABLE,
     # `RollupNotSummableError` (`datasets_api/doors/mint_errors.py`, 422): a
     # `get_data(stat_vars="sum")` mint over StatVars that do not add into one total.
     "rollup_not_summable": ToolErrorCode.ROLLUP_NOT_SUMMABLE,
+    # Search's `dataset_resubmit` (422, `resolve_definition`): the posted identity
+    # holds open a role the elected StatVars do not declare.
+    "open_role_unavailable": ToolErrorCode.OPEN_ROLE_UNAVAILABLE,
 }
 
 
@@ -1341,13 +1372,6 @@ def _int_member(extensions: Mapping[str, Any], key: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-# The wire pointer of a `member_not_resolvable` issue naming a StatVar `get_data` posted
-# in `resolved_stat_var_dcids`; dfo-apis appends the entry's index. `get_data` posts the
-# list its caller passed unchanged, so the index is the same in this tool's own argument,
-# `_SELECTION_ARGUMENT_POINTER_PREFIX`.
-_SELECTION_POINTER_PREFIX = "/input/resolved_stat_var_dcids/"
-_SELECTION_ARGUMENT_POINTER_PREFIX = "/resolved_stat_var_dcids/"
-
 # How every spec_id starts (dfo-apis `SpecIdInput.spec_id`). A `member_not_resolvable`
 # issue names the spec_id as its `member` when the identity as a whole did not resolve.
 _SPEC_ID_PREFIX = "spec_"
@@ -1360,59 +1384,27 @@ def _stat_var_count(count: int) -> str:
 def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
     """`member_not_resolvable` as a `spec_not_exportable` refusal listing its StatVars in `fix`.
 
-    Each issue names one StatVar in `member`. An issue whose pointer is into
-    `resolved_stat_var_dcids` is a StatVar the caller passed to `get_data` that the
-    identity no longer resolves to; its pointer is rebased onto `get_data`'s own
-    `resolved_stat_var_dcids` argument. Any other issue names a StatVar or spec_id whose
-    graph arcs could not be resolved: `fix.members` lists them all, and the message
-    counts the StatVars alone, since a spec_id is the dataset and no StatVar of it. The
-    message names no StatVar, since a model reads it. A failed operation with no stored
-    refusal carries no issues, so its refusal counts no StatVar.
+    Each issue names one StatVar or spec_id whose graph arcs could not be resolved in
+    `member`: `fix.members` lists them all, and the message counts the StatVars alone,
+    since a spec_id is the dataset and no StatVar of it. The message names no StatVar,
+    since a model reads it. A failed operation with no stored refusal carries no issues,
+    so its refusal counts no StatVar.
     """
-    issues = [
-        issue
+    members = [
+        issue["member"]
         for issue in _objects(exc.extensions.get("issues"))
         if isinstance(issue.get("member"), str) and issue["member"]
     ]
-    selection_issues = [
-        issue
-        for issue in issues
-        if str(issue.get("pointer", "")).startswith(_SELECTION_POINTER_PREFIX)
-    ]
-    fix: dict[str, Any] = {}
-    if selection_issues:
-        not_members = [issue["member"] for issue in selection_issues]
-        # `remedy` is for the end user, as on `over_ceiling`: `harness.graph` appends it to
-        # the turn's closing text when this refusal stops a plan.
-        remedy = (
-            "A variable search listed for this dataset is no longer one of its members. "
-            "Search for the question again, then fetch the dataset it returns."
-        )
-        fix["not_members"] = not_members
-        fix["pointers"] = [
-            _SELECTION_ARGUMENT_POINTER_PREFIX
-            + str(issue["pointer"])[len(_SELECTION_POINTER_PREFIX) :]
-            for issue in selection_issues
-        ]
-        fix["remedy"] = remedy
-        message = (
-            f"resolved_stat_var_dcids names {_stat_var_count(len(not_members))} that are no "
-            "longer members of this dataset (fix.not_members). Run search for this question "
-            f"again, then call get_data with the spec_id it returns. {remedy}"
-        )
-    else:
-        members = [issue["member"] for issue in issues]
-        fix["members"] = members
-        stat_vars = [member for member in members if not member.startswith(_SPEC_ID_PREFIX)]
-        counted = f" ({_stat_var_count(len(stat_vars))})" if stat_vars else ""
-        message = (
-            f"This spec can't be minted: the graph could not resolve its StatVars{counted}. "
-            "Retrying it refuses the same way -- search again for a different ask."
-        )
+    stat_vars = [member for member in members if not member.startswith(_SPEC_ID_PREFIX)]
+    counted = f" ({_stat_var_count(len(stat_vars))})" if stat_vars else ""
+    message = (
+        f"This spec can't be minted: the graph could not resolve its StatVars{counted}. "
+        "Retrying it refuses the same way -- search again for a different ask."
+    )
     return ToolRefusal(
         code=ToolErrorCode.SPEC_NOT_EXPORTABLE,
         message=message,
-        fix=fix,
+        fix={"members": members},
         trace_id=exc.trace_id,
         capability_version=exc.capability_version,
     )
@@ -1496,6 +1488,12 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
             )
         ),
         ToolErrorCode.ROLLUP_NOT_SUMMABLE: lambda: _rollup_not_summable_refusal(exc),
+        ToolErrorCode.OPEN_ROLE_UNAVAILABLE: lambda: ToolRefusal.open_role_unavailable(
+            pointer=exc.extensions.get("pointer"),
+            detail=exc.detail,
+            trace_id=exc.trace_id,
+            capability_version=exc.capability_version,
+        ),
     }
     factory = factories.get(tool_code) if tool_code is not None else None
     return factory() if factory is not None else None

@@ -28,18 +28,9 @@ def test_captured_envelope_renders_to_the_pinned_digest() -> None:
     that produced `spec_ed5b608a610cdc5a4bc703cf7d1bc2d0`, the spec_id the issue
     reports an unpinned mint refusing on `over_ceiling`.
 
-    dfo-apis#893 will change what `resolved.stat_vars.member_count` and
-    `resolved.stat_vars.truncated` mean for this query: today a non-set-bound
-    standard shape caps `member_count` at 1 via an early `break` and `truncated`
-    can never fire on that path, so this fixture carries `member_count: 1` and
-    `truncated: false`. After #893 lands, the same query returns the number of
-    candidate members confirmed to have data at the place, and `truncated`
-    reflects a real cap. `resolved.stat_vars.items`, the field names, and the
-    nesting are unaffected -- only what the two numbers mean changes. This
-    fixture needs re-recording once #893 deploys; until then this test's
-    `member_count`/`truncated` assertions pin the pre-#893 shape deliberately.
-    The item's `constraint_properties` postdates the capture and is written in by
-    hand: `Count_Person` asserts no constraint, so Search serves an empty list.
+    The fixture is converted to the wire without a member list: `resolved.stat_vars`
+    carries the counts, `served_count` and the spec-level `data_date_range` the
+    recorded item stated.
 
     `render_digest` states the measure and its StatVar count beside the
     spec_id, naming no member. The rendered-digest assertion below
@@ -56,18 +47,12 @@ def test_captured_envelope_renders_to_the_pinned_digest() -> None:
 
     resolved = spec["resolved"]
     stat_vars = resolved["stat_vars"]
-    assert stat_vars["items"] == [
-        {
-            "ref": "Count_Person",
-            "label": "Total population",
-            "slot_values": [],
-            "constraint_properties": [],
-            "data_date_range": {"start": "1960", "end": "2024"},
-        }
-    ]
-    # Pre-#893 shape -- see the docstring above for what changes and what doesn't.
-    assert stat_vars["member_count"] == 1
-    assert stat_vars["truncated"] is False
+    assert stat_vars == {
+        "member_count": 1,
+        "member_count_exact": True,
+        "served_count": 1,
+        "data_date_range": {"start": "1960", "end": "2024"},
+    }
 
     rendered = render_digest(envelope)
     assert rendered == (

@@ -148,20 +148,20 @@ Frames are SSE `data:` lines, one JSON object per frame, discriminated on
 each in `wire_fixtures/studio/` (elicitation has two: the plain and the
 skippable/free-text shapes).
 
-| `event`               | What it is                                                                                                                           |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                               |
-| `message.complete`    | final text for the turn's message                                                                                                    |
-| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                 |
-| `plan.versioned`      | a new plan version after an amendment; a fresh `plan.proposed` follows                                                               |
-| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`) |
-| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                  |
-| `component.revised`   | new revision under the same `component_id`                                                                                           |
-| `composition.updated` | the authoritative canvas manifest                                                                                                    |
-| `elicitation.request` | a clarifying question; **pauses and ends the stream** (delta 1)                                                                      |
-| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                        |
-| `error`               | stream-fatal tool error (delta 4)                                                                                                    |
-| `done`                | turn complete: `trace_id` + final composition or null                                                                                |
+| `event`               | What it is                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `message.delta`       | append to the streaming assistant message; text is GitHub-flavored Markdown (delta 15)                                                      |
+| `message.complete`    | final text for the turn's message                                                                                                           |
+| `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
+| `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
+| `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
+| `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
+| `component.revised`   | new revision under the same `component_id`                                                                                                  |
+| `composition.updated` | the authoritative canvas manifest                                                                                                           |
+| `elicitation.request` | a clarifying question; **pauses and ends the stream** (delta 1)                                                                             |
+| `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                               |
+| `error`               | stream-fatal tool error (delta 4)                                                                                                           |
+| `done`                | turn complete: `trace_id` + final composition or null                                                                                       |
 
 `component.created.payload` / `component.revised.payload` are the platform's resolved revision, passed through verbatim as the envelope `{schema_version, catalog_version, component_id, revision, provenance, component}` that dfo-spec-kit's `envelope.schema.json` defines. `payload.component` is the resolved component for its type, points included, and `payload.provenance` is the platform's provenance for that revision, authoritative for the card's back. The member is opaque to this contract, which does not restate its shape.
 
@@ -177,6 +177,16 @@ through the website proxy and Cloud Run are fragile.
 
 Amendment flow: `decision: "amend"` yields `plan.versioned` followed by a
 fresh `plan.proposed` (a new pause, new `interrupt_id`) on the new stream.
+The new `version` is higher than the one it supersedes.
+
+A plan the harness cannot read when the client approves or amends it is
+planned again from the question. The new stream sends a `message.delta`
+and `message.complete` saying so, then `plan.versioned` with
+`version: 1`, a new `plan_version_id` and `supersedes` naming the card
+it replaces, then a fresh `plan.proposed`. That `version` can be lower
+than the one it supersedes, so a client replaces its card from the
+`plan.proposed` that follows. When no plan can be drafted, the turn
+closes with `message.complete` and `done`.
 
 An `/interrupt` answer stays retryable after a crash: the answer is
 recorded durably before the resumed stream starts, so a client that gets
@@ -201,7 +211,7 @@ are legal; order is not. Use it to order frames, never as an index.
 ### Heartbeats (delta 3)
 
 During long tool calls (data mints run up to ~125 s) the stream carries SSE
-comment lines (`: ka`) roughly every 15 seconds. Standard SSE clients
+comment lines (`: ka`) roughly every 5 seconds. Standard SSE clients
 ignore comments; proxies see traffic. Heartbeats carry no `seq`.
 
 ### Error fatality (delta 4)
@@ -319,10 +329,9 @@ question, and the `seed` node reports the reference in a failed step,
 `schema_version` stays 1.
 
 - `spec` is a definite part's Search API Spec block (`SeedSpec`), capped
-  at `MAX_SEED_SPEC_BYTES` as posted. The harness keeps its `spec_id`,
-  its `definition` and the dcids in `resolved.stat_vars.items[].ref`,
-  and drops every other member as it reads the seed. A client may send
-  `resolved` holding `stat_vars.items[].ref` alone.
+  at `MAX_SEED_SPEC_BYTES` as posted. The harness keeps its `spec_id`
+  and its `definition`, and drops every other member as it reads the
+  seed. A client may leave `resolved` out.
 - `operations` are the question's operations on it (`SeedOperation`):
   `{verb, phrase, over, target_year}`, with no other member, at most
   `MAX_SEED_OPERATIONS` (8) of them. `target_year` is the year a forecast
@@ -348,21 +357,24 @@ usable seed names) and the others go on.
 
 The node then resolves every usable seed's identity again, all at once:
 one `resolve_definition` call per seed to the data-mcp at
-`DATA_MCP_URL`, which posts the identity as its own base, with the
-StatVar dcids, to the Search API's `dataset_resubmit` door and stores
-the definition Search answers with, so the `get_data` that retrieves
-the seed reads it wherever data-mcp runs. The turn waits for the
+`DATA_MCP_URL`, which posts the identity alone to the Search API's
+`dataset_resubmit` door and stores the definition Search answers with,
+so the `get_data` that retrieves the seed reads it wherever data-mcp
+runs. The turn waits for the
 slowest answer. A seed data-mcp or Search could not be reached for
 fails its step (`service_unavailable`); when that leaves no seed, the
 receive step fails too. A seed whose identity Search refuses, no longer
-resolves to a definite part, or resolves to another `spec_id` is
-dropped: its step fails as `seed_dropped`, with the reason and a request
-to search for it again, and the turn plans from the others. It leaves
-the turn as a stale seed does (below): no retrieval in the turn takes
-that dataset again, and the turn's next words name it, as
-`dataset <n> from Search` with Search's reason, in a `message.delta`
+resolves to a definite part, or resolves to another `spec_id`, or whose
+answer the harness cannot read, is dropped: its step fails as
+`seed_dropped`, with the reason and a request to search for it again,
+and the turn plans from the others. No plan in the turn retrieves that
+dataset, pinned or through a search
+(`planner.plan.names_dropped_seed`), and the turn's next words name it,
+as `dataset <n> from Search` with Search's reason, in a `message.delta`
 before the plan card, in the `question` of an `elicitation.request`, or
-in the closing text when no plan is drafted. The node retrieves nothing.
+in the closing text when no plan is drafted. A planner that drafts no
+plan from the kept seeds closes the turn with text naming the dropped
+seed and the seeds left unplanned. The node retrieves nothing.
 It plans from the kept seeds in place of `probe`, and a turn with no
 kept seed falls back to the question alone, whose search `probe` reads
 without any reading of a dropped dataset: a `definite` reading of one,
@@ -371,32 +383,14 @@ naming the drop. The receive step is recorded on every turn that posts a
 list of seeds, counting the seeds kept, none included.
 
 A plan pins each seed over the years it retrieves. A fetch with no plan
-retrieves the year Search showed when the question named none. Every
-`get_data` of a seed posts the StatVars Search's answer lists in
-`resolved.stat_vars.items` as `resolved_stat_var_dcids` when that list is
-the dataset's membership, which holds when `resolved.shape` states no
-`member_digest` or the seed mints as its family's root. A family with a
-member digest posts none, since the mint elects its members again.
+retrieves the year Search showed when the question named none. A
+`get_data` of a seed posts its spec_id and identity alone; the mint
+resolves the family's members from the graph.
 
 On the `download` surface the first kept seed is retrieved, every
 other kept seed fails its step as `one_dataset_per_download`, and the
 retrieved seed's operations are reported by a failed
 `seed-<n>-operations` step, `no_operations_on_download`.
-
-A seed whose StatVars have left its dataset fails its retrieval. A turn
-with another usable seed drops it and offers a new plan from the
-others: the dropped seed's name arrives in a `message.delta` frame
-before the new `plan.proposed`, and the plan cannot retrieve that
-dataset again in the turn, pinned or through a search
-(`planner.plan.names_dropped_seed`). The turn stops, closing with a
-remedy asking for a fresh search, when it has one usable seed, when
-every usable seed is stale in the same run, when another step of that
-run stopped on a failure a new plan cannot fix, when the turn already
-replanned once, and on the `download` surface. A replan that drafts no
-plan, or that fails, closes with text naming the dropped seed and the
-seeds left unplanned. The drop builds the resolve envelope and the depth
-verdict again from the seeds left, so the replanned card's `depth` and
-`depth_notice` describe those.
 
 Fixture: `request-11-turn-seeded.json`.
 
@@ -510,7 +504,7 @@ Fixture values that are samples, corrected here:
 1. Interrupts close the stream; `/api/studio/interrupt` answers with a new
    stream continuing the turn.
 1. `seq` is monotonic per turn across segments; gaps legal.
-1. SSE comment heartbeats (`: ka`) ~every 15 s during long calls.
+1. SSE comment heartbeats (`: ka`) ~every 5 s during long calls.
 1. `activity.step status=failed` is recoverable; a top-level `error` frame
    is stream-fatal and `done` does not follow.
 1. `Authorization: Bearer <token>` + client-minted `conversation_id` on
@@ -551,7 +545,7 @@ Fixture values that are samples, corrected here:
 1. `turn.request.seed_spec` is a list of 1 to 6 `Seed`s
    (`{spec, operations}`) handed over from Search; the reserved
    single-reference shape still parses and seeds nothing. The harness
-   keeps each seed's `spec_id`, `definition`, StatVar dcids and
+   keeps each seed's `spec_id`, `definition` and
    operations, and reads every other fact from Search's answer for the
    identity.
 1. A plan that ranks, totals or shares a dataset naming no place keeps

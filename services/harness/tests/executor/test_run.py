@@ -117,7 +117,7 @@ async def test_a_run_binds_the_retrieved_frame_into_the_verb_and_is_accepted(
     (get_data_call, aggregate_call) = surface.calls
     assert get_data_call == (
         "get_data",
-        {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["DebtServicePaid"]},
+        {"spec_id": SPEC_KENYA},
     )
     # The binding resolved to the frame get_data's manifest named.
     assert aggregate_call[1]["frame_ref"] == {
@@ -1035,11 +1035,19 @@ async def test_a_retrieval_whose_identity_drifted_since_approval_is_not_evidence
 @pytest.mark.parametrize(
     ("snapshot", "refused_as"),
     [
-        # The list read back binds another StatVar: membership drift.
+        # The list read back serves two StatVars for a source approved as one:
+        # membership drift.
         (
             httpx2.Response(
                 200,
-                json={"trace": {"resolved_stat_vars": [{"ref": "dcid:Other", "roles": []}]}},
+                json={
+                    "trace": {
+                        "resolved_stat_vars": [
+                            {"ref": "dcid:DebtServicePaid", "roles": []},
+                            {"ref": "dcid:Other", "roles": []},
+                        ]
+                    }
+                },
             ),
             RefusalKind.REQUIREMENT_UNMET,
         ),
@@ -1056,7 +1064,9 @@ async def test_a_stat_var_list_the_result_left_out_is_read_back_for_the_membersh
     refused_as: RefusalKind,
 ) -> None:
     left_out = manifest()
-    left_out[STAT_VARS_OMITTED_KEY] = len(left_out["trace"].pop("resolved_stat_vars"))
+    del left_out["trace"]["resolved_stat_vars"]
+    # The count the result recorded: the read-back list holds as many.
+    left_out[STAT_VARS_OMITTED_KEY] = 2
     upstream = UpstreamClient(
         settings=DataMcpSettings(upstream_max_attempts=1),
         transport=httpx2.MockTransport(lambda request: snapshot),

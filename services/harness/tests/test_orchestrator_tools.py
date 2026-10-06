@@ -62,7 +62,7 @@ FAMILY_BLOCK = {
     "spec_id": SPEC_AID,
     "resolved": {
         "rendered_sentence": "Health aid to Kenya",
-        "stat_vars": {"items": [{"ref": "A"}, {"ref": "B"}], "member_count": 2},
+        "stat_vars": {"member_count": 2, "served_count": 2},
         "slots": [
             {
                 "key": {"property": {"dcid": "crsPurposeCode"}},
@@ -76,7 +76,7 @@ SINGLE_BLOCK = {
     "spec_id": SPEC_LIFE,
     "resolved": {
         "rendered_sentence": "Life expectancy in Nigeria",
-        "stat_vars": {"items": [{"ref": "LE"}], "member_count": 1},
+        "stat_vars": {"member_count": 1, "served_count": 1},
     },
 }
 
@@ -415,22 +415,6 @@ async def test_fetch_of_a_chosen_candidate_adds_a_reading_for_it():
     assert readings[0].fetch is not None
 
 
-async def test_fetch_posts_no_statvars_for_a_family_search_states_a_member_digest_for():
-    """The mint elects such a family again from the code index Search elected
-    it from, so its listed StatVars are exemplars, not a membership to assert."""
-    block = copy.deepcopy(FAMILY_BLOCK)
-    block["resolved"]["shape"] = {"member_count": 1_454, "member_digest": "d"}
-    executor = FakeExecutor()
-    tools, ctx = _tools(executor=executor)
-    ctx.state["orchestrator:specs"] = {SPEC_AID: block}
-
-    await tools["fetch"](SPEC_AID, ctx)
-
-    assert [args for tool, args in executor.calls if tool == "get_data"] == [
-        {"spec_id": SPEC_AID, "stat_vars": "sum"}
-    ]
-
-
 @pytest.mark.parametrize(
     ("stored", "earlier"),
     [
@@ -460,8 +444,8 @@ async def test_fetch_reads_a_family_as_its_total_and_a_single_indicator_as_is(
     )
 
     assert [args for tool, args in executor.calls if tool == "get_data"] == [
-        {"spec_id": SPEC_AID, "stat_vars": "sum", "resolved_stat_var_dcids": ["A", "B"]},
-        {"spec_id": SPEC_LIFE, "resolved_stat_var_dcids": ["LE"]},
+        {"spec_id": SPEC_AID, "stat_vars": "sum"},
+        {"spec_id": SPEC_LIFE},
         {
             "spec_id": "spec_other",
             "scope": {"window": {"kind": "range", "start_year": 2015, "end_year": 2020}},
@@ -596,6 +580,11 @@ WINDOW_2023 = {"kind": "range", "start_year": 2023, "end_year": 2023}
         (GHANA, {"window": WINDOW_2023}, 2),
         # The scope replaces the entities the identities differ in.
         (GHANA, {"entities": {"destination": ["Kenya"]}}, 1),
+        # A scope on the other side leaves the second's open origin open.
+        ({"open_roles": ["origin"]}, {"entities": {"destination": ["Kenya"]}}, 2),
+        # A scope on the open side, in a caller's word for it, is not read as
+        # closing the second's open origin, so the two requests key apart.
+        ({"open_roles": ["origin"]}, {"entities": {"donor": ["France"]}}, 2),
     ],
 )
 async def test_fetch_of_the_same_data_twice_in_a_turn_retrieves_it_once(
@@ -666,7 +655,7 @@ async def test_fetch_forwards_a_stated_reading_and_a_breakdown(
     await tools["fetch"](SPEC_AID, ctx, **stated)
 
     assert [args for tool, args in executor.calls if tool == "get_data"] == [
-        {"spec_id": SPEC_AID, **sent, "resolved_stat_var_dcids": ["A", "B"]}
+        {"spec_id": SPEC_AID, **sent}
     ]
 
 

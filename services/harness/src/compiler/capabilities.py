@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="ff63dcbf60ffd5e16fd55d91ad17520ebca36aa95600b6306572dc7e612408f3",
+        input_schema_hash="2cd3732534408dfb3472f10ddadeaa748132e10445cdd3e1280785b64c801cb2",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -164,10 +164,12 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         tool=_data("resolve_definition"),
         phase=Phase.DISCOVERY,
         implementation_version="1",
-        input_schema_hash="3051ccd467a906bdb6bd16e744d756ac5e0aaafa2ddf8c45a60ddff6d1739c91",
-        # The same dfo-apis resolve route as `search`, under the same data-mcp
-        # budget (`data_mcp.search_tool.SEARCH_CALL_BUDGET_S`), so the same timeout.
-        call_timeout_s=60.0,
+        input_schema_hash="338afb65d348ea9b31b733facd635fa605e07b36699d1074ffe0b215d4a0ab5a",
+        # Above data-mcp's resubmit budget
+        # (`data_mcp.resolve_definition_tool.RESUBMIT_CALL_BUDGET_S`, 100 s), itself
+        # above dfo-apis's 90 s deadline for a resubmit whose member walk reads a
+        # family's whole subject set.
+        call_timeout_s=110.0,
     ),
     ToolCapability(
         tool=_data("get_data"),
@@ -179,7 +181,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         ),
         implementation_version="1",
         # Pins the `place_types` and `breakdown` parameters.
-        input_schema_hash="455b3888b3e8c2c123a3cbc287a2a610ed8f9d6a3d68aa94c49159276798446a",
+        input_schema_hash="732cfc887a323e7566cbf4917e8d7038ec40dbf45ab47a183a4f6a205e36b8aa",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.

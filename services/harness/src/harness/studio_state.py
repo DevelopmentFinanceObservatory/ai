@@ -48,7 +48,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
-from compiler.sources import is_family, source_from_spec_block
+from compiler.sources import source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from fastapi.responses import JSONResponse
@@ -299,6 +299,10 @@ class _PendingInterrupt:
     # Restored before a resumed segment starts so activity steps stay
     # numbered by plan order, whichever instance answers the interrupt.
     step_order: tuple[str, ...] = ()
+    # The same plan's label for each step, by step id, restored beside
+    # `step_order` so a resumed segment's Activity lines carry the plan's
+    # own step names. Empty for an interrupt saved before labels were kept.
+    step_labels: dict[str, str] = field(default_factory=dict)
     # Set by `/interrupt` to the id of the segment resuming this interrupt,
     # instead of deleting the entry outright: a crash between the answer
     # being appended and the resumed segment's own checkpoint leaves a
@@ -702,9 +706,8 @@ class ConversationState:
         self.turns.append(record)
 
     def recorded_identity(self, spec_id: str) -> RecordedIdentity | None:
-        """The identity `spec_id` hashes from and the StatVars Search
-        resolves it with, as this turn or an earlier one recorded them. None
-        when none did.
+        """The identity `spec_id` hashes from, as this turn or an earlier one
+        recorded it. None when none did.
 
         This turn's are those of the spec blocks its searches have returned
         so far and of the sources its plans have used. An earlier turn's
@@ -976,6 +979,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "plan_revision": p.plan_revision,
             "option_ids": sorted(p.option_ids),
             "step_order": list(p.step_order),
+            "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
         }
@@ -992,6 +996,7 @@ def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
             plan_revision=entry.get("plan_revision"),
             option_ids=frozenset(entry.get("option_ids") or ()),
             step_order=tuple(entry.get("step_order") or ()),
+            step_labels=dict(entry.get("step_labels") or {}),
             resuming_segment=entry.get("resuming_segment"),
             answer=entry.get("answer"),
         )
@@ -1943,17 +1948,16 @@ def _history_turn(
 def _turn_identities(
     specs: dict[str, Any], plans: Iterable[PlanRecord]
 ) -> dict[str, RecordedIdentity]:
-    """The identity and StatVars of each spec block in `specs` and of each
-    source of `plans`, by spec_id.
+    """The identity of each spec block in `specs` and of each source of
+    `plans`, by spec_id.
 
     A block is read as a source (`source_from_spec_block`) for its
-    `definition.identity` and, when it is no family (`is_family`), the one
-    StatVar it elected. A plan source states both (`PlanSource`). An
+    `definition.identity`. A plan source states it (`PlanSource`). An
     identity data-mcp's `resolve_definition` would refuse
     (`caller_definition`: one that does not hash to its spec_id, or one past
     `MAX_IDENTITY_BYTES` as compact JSON) is left out, so each entry is one
-    a later pin can resolve, and none takes more than that cap plus one
-    StatVar. A family's StatVars and the rest of a block are dropped."""
+    a later pin can resolve, and none takes more than that cap. The rest of
+    a block is dropped."""
     found: dict[str, RecordedIdentity] = {}
     for spec_id, block in specs.items():
         if not isinstance(block, dict):
@@ -1963,11 +1967,9 @@ def _turn_identities(
         except ValueError:
             continue
         if source.identity is not None:
-            found[spec_id] = RecordedIdentity(
-                identity=source.identity, stat_vars=() if is_family(source) else source.stat_vars
-            )
+            found[spec_id] = RecordedIdentity(identity=source.identity)
     found.update(
-        (source.spec_id, RecordedIdentity(identity=source.identity, stat_vars=source.stat_vars))
+        (source.spec_id, RecordedIdentity(identity=source.identity))
         for plan in plans
         for source in plan.sources
         if source.identity is not None

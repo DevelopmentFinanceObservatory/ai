@@ -53,7 +53,7 @@ _FRAME_REF = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
 _ARTIFACT_DIGEST = "sha256:" + "3" * 64
 _SIGNED_URL = "https://storage.example/fresh-signed-url"
 # The options `get_data` posts for the default rendering.
-_OPTIONS: dict[str, object] = {"bundle": False, "format": "parquet"}
+_OPTIONS: dict[str, object] = {"bundle": False, "format": "parquet", "layout": "frame"}
 
 
 def _digest_for(data: bytes) -> str:
@@ -76,13 +76,12 @@ def _manifest(
     content_version: str = _CONTENT_VERSION,
     artifact_digest: str = _ARTIFACT_DIGEST,
     trace: dict[str, Any] | None = None,
-    as_collection: bool = False,
     renderings: dict[str, dict[str, object]] | None = None,
 ) -> Manifest:
     """A manifest listing one default-rendering artifact under `artifact_digest`, or one
     artifact per `renderings` entry (digest to rendering), in its order."""
     if renderings is None:
-        renderings = {artifact_digest: {"bundle": False, "format": "parquet"}}
+        renderings = {artifact_digest: {"bundle": False, "format": "parquet", "layout": "frame"}}
     payload: dict[str, Any] = {
         "schema_version": 1,
         "content_version": content_version,
@@ -102,9 +101,6 @@ def _manifest(
             for digest, rendering in renderings.items()
         ],
     }
-    if as_collection:
-        payload["collection"] = {"collection_id": "col_" + "0" * 32, "members": []}
-        return strip_manifest(payload)
     payload["definition"] = {"schema_version": 1, "spec_id": spec_id, "identity": {}}
     return strip_manifest(payload)
 
@@ -158,7 +154,7 @@ def _snapshot_payload(
         "artifacts": [
             {
                 "artifact_digest": artifact_digest,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 100,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -801,18 +797,6 @@ async def test_a_cache_hit_by_a_second_caller_is_still_a_no_op_fetch() -> None:
     assert store.put_calls == [FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)]
 
 
-async def test_manifest_with_no_definition_refuses_upstream_response_unusable() -> None:
-    manifest = _manifest(as_collection=True)
-
-    outcome = await materialise_and_register(
-        options=_OPTIONS, manifest=manifest, settings=_settings(), writer="tester"
-    )
-
-    assert outcome.status == "refused"
-    assert outcome.refusal is not None
-    assert outcome.refusal.code.value == "upstream_error"
-
-
 async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> None:
     manifest = _manifest(content_version="not-a-valid-content-version")
 
@@ -830,6 +814,7 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
 _SUM_SIBLING_RENDERING: dict[str, object] = {
     "bundle": False,
     "format": "parquet",
+    "layout": "frame",
     "groupby": {"by": ["time_period", "crsPurpose"], "op": "sum"},
 }
 _TYPED_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["observationAbout_type"]}

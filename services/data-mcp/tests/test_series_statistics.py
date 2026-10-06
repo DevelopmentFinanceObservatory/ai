@@ -231,7 +231,7 @@ def test_find_statistics_artifact_ignores_a_member_scoped_rendering() -> None:
 
 
 def test_find_statistics_artifact_none_when_absent() -> None:
-    manifest = _manifest(rendering={"bundle": False, "format": "parquet"})
+    manifest = _manifest(rendering={"bundle": False, "format": "parquet", "layout": "frame"})
 
     assert find_statistics_artifact(manifest) is None
 

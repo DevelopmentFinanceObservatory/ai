@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from compiler.shapes import ResolvedShape, shapes_for
-from compiler.sources import source_from_spec_block
+from compiler.sources import member_digest, source_from_spec_block
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -345,7 +345,8 @@ def _two_role_requirement_and_source() -> tuple[DatasetRequirement, SelectedSour
         sentence="external debt service paid by Kenya to China, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("DebtServicePaid",),
+        served_count=1,
+        shape_member_digest=member_digest(["DebtServicePaid"]),
         entities=(
             ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),
             ResolvedEntity(role="creditor", ref="country/CHN", label="China"),
@@ -520,7 +521,8 @@ def test_share_of_keeps_only_the_numerators_own_columns(
         sentence="Kenya's GDP, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("Gdp",),
+        served_count=1,
+        shape_member_digest=member_digest(["Gdp"]),
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -567,7 +569,8 @@ def test_an_unkeyed_share_of_carries_no_columns(
         sentence="Kenya's GDP, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("Gdp",),
+        served_count=1,
+        shape_member_digest=member_digest(["Gdp"]),
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -865,7 +868,8 @@ def test_join_keeps_the_left_sides_column_for_a_shared_role() -> None:
         sentence="Kenya's debt service, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("DebtServicePaid",),
+        served_count=1,
+        shape_member_digest=member_digest(["DebtServicePaid"]),
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -884,7 +888,8 @@ def test_join_keeps_the_left_sides_column_for_a_shared_role() -> None:
         sentence="Uganda's debt service, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("DebtServicePaid",),
+        served_count=1,
+        shape_member_digest=member_digest(["DebtServicePaid"]),
         entities=(ResolvedEntity(role="debtor_col", ref="country/UGA", label="Uganda"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -930,7 +935,8 @@ def _gdp() -> tuple[DatasetRequirement, SelectedSource, RetrieveOperation]:
         sentence="Kenya's GDP, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("Gdp",),
+        served_count=1,
+        shape_member_digest=member_digest(["Gdp"]),
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -1120,7 +1126,8 @@ def test_an_operation_reading_a_join_is_declined_with_no_shape_and_no_issue() ->
         sentence="Uganda's debt service, 2015 to 2024",
         confidence="high",
         has_data=True,
-        stat_vars=("DebtServicePaid",),
+        served_count=1,
+        shape_member_digest=member_digest(["DebtServicePaid"]),
         entities=(ResolvedEntity(role="debtor_col", ref="country/UGA", label="Uganda"),),
         unit_ref="usd",
         unit_label="US dollars",

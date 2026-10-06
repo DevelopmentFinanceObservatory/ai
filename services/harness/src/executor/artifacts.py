@@ -41,9 +41,7 @@ def extract_frame_ref(
         raise ArtifactError("the tool returned no structured content")
     try:
         if extract is Extract.FRAME_REF_FROM_MANIFEST:
-            manifest = parse_manifest(structured_content)
-            if manifest.definition is None:
-                raise ArtifactError("the manifest describes a collection, not one definition")
+            parse_manifest(structured_content)
             return FrameRef.model_validate(structured_content.get("frame_ref"))
         if extract is Extract.FRAME_REF_PAIR:
             return FrameRef.model_validate(

@@ -185,7 +185,7 @@ async def test_snapshot_route_carries_a_url_and_expiry_within_the_advertised_ttl
                     "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
                     "scope": {},
                 },
-                "options": {"format": "parquet", "bundle": False},
+                "options": {"format": "parquet", "bundle": False, "layout": "frame"},
             },
         )
         mint_response.raise_for_status()

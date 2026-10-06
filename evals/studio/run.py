@@ -79,6 +79,10 @@ class CaseError(Exception):
     """A mechanical expectation failed; the message is the finding."""
 
 
+class JudgeError(Exception):
+    """The judge model stayed unavailable through its retries; the case is unscored."""
+
+
 def _request(kind: str, conversation_id: str, **members: Any) -> dict[str, Any]:
     body = {"kind": kind, "schema_version": 1, "conversation_id": conversation_id}
     body.update({key: value for key, value in members.items() if value is not None})
@@ -604,9 +608,15 @@ async def judge_case(
 ) -> list[dict[str, Any]]:
     # Lazy on purpose: judge-less runs (the whole contract layer) must not
     # pay the model SDK's import.
-    from google.genai import Client, types  # noqa: PLC0415
+    from google.genai import Client, errors, types  # noqa: PLC0415
 
-    client = Client()
+    # The judge model answers 503 or 429 under load; the SDK retries its
+    # transient codes with backoff.
+    client = Client(
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=4, initial_delay=2.0, max_delay=30.0)
+        )
+    )
     message_turns = [turn for turn in case["turns"] if "message" in turn]
     evidence = {
         "turns": [
@@ -636,16 +646,21 @@ async def judge_case(
     )
     samples = []
     for _ in range(config.get("num_samples", 1)):
-        response = await client.aio.models.generate_content(
-            model=config["judge_model"],
-            contents=content,
-            config=types.GenerateContentConfig(
-                system_instruction=_JUDGE_INSTRUCTION,
-                response_schema=schema,
-                response_mime_type="application/json",
-                temperature=0.0,
-            ),
-        )
+        try:
+            response = await client.aio.models.generate_content(
+                model=config["judge_model"],
+                contents=content,
+                config=types.GenerateContentConfig(
+                    system_instruction=_JUDGE_INSTRUCTION,
+                    response_schema=schema,
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
+            )
+        except errors.APIError as error:
+            if not isinstance(error, errors.ServerError) and error.code != 429:
+                raise
+            raise JudgeError(str(error)) from error
         samples.append(json.loads(response.text or "[]"))
     # Per rubric: fraction of samples answering yes, plus one rationale.
     scored = []
@@ -817,14 +832,20 @@ async def run_suite(
                     record["contract_violations"] = outcome["contract"]
                     record["expectation_violations"] = outcome["expectation"]
                 if judge and case.get("rubrics"):
-                    record["rubric_scores"] = await judge_case(case, outcome["turn_frames"], config)
-                    threshold = config.get("threshold", 1.0)
-                    record["expectation_violations"] += [
-                        f"rubric {entry['rubric_id']}: score {entry['score']:.2f} "
-                        f"< {threshold} — {entry['rationales'][:1]}"
-                        for entry in record["rubric_scores"]
-                        if entry["score"] < threshold
-                    ]
+                    try:
+                        record["rubric_scores"] = await judge_case(
+                            case, outcome["turn_frames"], config
+                        )
+                    except JudgeError as error:
+                        record["judge_error"] = str(error)
+                    else:
+                        threshold = config.get("threshold", 1.0)
+                        record["expectation_violations"] += [
+                            f"rubric {entry['rubric_id']}: score {entry['score']:.2f} "
+                            f"< {threshold} — {entry['rationales'][:1]}"
+                            for entry in record["rubric_scores"]
+                            if entry["score"] < threshold
+                        ]
             except CaseError as error:
                 # A non-200 on a stream route is a surface failure; xfail never
                 # excuses it.
@@ -840,6 +861,10 @@ async def run_suite(
             missed = bool(record["expectation_violations"])
             if contract_broken:
                 record["status"] = "FAIL"
+                suite_passed = False
+            elif "judge_error" in record:
+                # Unscored is not passed: the suite cannot claim the rubrics held.
+                record["status"] = "JUDGE_ERROR"
                 suite_passed = False
             elif case.get("xfail"):
                 record["status"] = "XFAIL" if missed else "XPASS"
@@ -874,14 +899,22 @@ def _compare_streams(first: list[dict], second: list[dict], case_id: str) -> lis
 
 
 def _print_record(record: dict[str, Any]) -> None:
-    marker = {"PASS": "ok ", "FAIL": "FAIL", "XFAIL": "xf ", "XPASS": "XPASS?!"}[record["status"]]
+    marker = {
+        "PASS": "ok ",
+        "FAIL": "FAIL",
+        "XFAIL": "xf ",
+        "XPASS": "XPASS?!",
+        "JUDGE_ERROR": "JERR",
+    }[record["status"]]
     line = f"[{marker}] {record['id']} ({record['duration_s']}s)"
     if record["status"] == "XFAIL":
         line += f"  (expected: {record['xfail']})"
     if record["status"] == "XPASS":
         line += f"  (marked xfail '{record['xfail']}' but PASSED — gap closed? retire the marker)"
     print(line)
-    if record["status"] == "FAIL":
+    if record["status"] == "JUDGE_ERROR":
+        print(f"       - [judge] {record['judge_error']}")
+    if record["status"] in ("FAIL", "JUDGE_ERROR"):
         for violation in record["contract_violations"]:
             print(f"       - [contract] {violation}")
         for violation in record["expectation_violations"]:

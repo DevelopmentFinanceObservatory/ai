@@ -92,29 +92,33 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import logging
 import uuid
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple, cast
 from weakref import WeakValueDictionary
 
 import rfc8785
 from common.hashed_fields import revision_content
+from compiler.evidence import open_axis_for
 from compiler.sources import (
     EXACT_COVERAGE,
     DiscoveryStatus,
     PartWarning,
-    is_family,
     outcome_from_envelope,
+    pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.tool_errors import ToolErrorCode
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
-from planner.parties import party_role
+from planner.parties import across_party, party_role
 from planner.plan import (
     DatasetRequirement,
     Plan,
@@ -133,12 +137,14 @@ from planner.plan import (
     seeded_sources,
     windowed_pins,
 )
-from planner.records import Identifier, SpecId, StrictModel
+from planner.records import Identifier, SpecId, StrictModel, warn_left_out
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import SelectedSource, ToolId
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from translator.referral import ReferralKind
+
+logger = logging.getLogger(__name__)
 
 # How many `search` calls one plan revision may make in total; a `describe`
 # record never spends this budget, only `search` does (`DiscoveryLog.calls`).
@@ -385,8 +391,9 @@ class DiscoveryLog(StrictModel):
         requirement reads its source's open entity axes, so a source
         recorded without them (`SelectedSource.open_entity_axes` of `None`)
         is left out for it and the requirement is discovered again.
-        `requirement_revision` is the same with and without `across`, so the
-        record's key cannot tell the two apart.
+        `requirement_revision` is the same with and without an `across` that
+        opens no role (the place), so the record's key cannot tell the two
+        apart.
         """
         by_requirement: dict[str, list[DiscoveryRecord]] = {}
         for record in self.records:
@@ -622,29 +629,66 @@ def load_log(state: SessionState) -> DiscoveryLog:
     the form an earlier release wrote here; every record inside it defaults
     `sequence` to 0, so it is re-stamped by position, the same append order
     the string form's own `records` tuple already carries.
+
+    A source or a record stored in a shape its model rejects, one a release
+    with other fields wrote, invalidates its requirement: every source and
+    every record stored for that requirement id is left out, and the
+    omission is logged. A record names its sources by spec_id and the scans
+    read the latest record that matches, so leaving out the one entry would
+    leave a record naming a source the log does not hold, or an earlier
+    answer standing in for the latest. The requirement then holds nothing
+    and is discovered again. A rejected record that names no requirement is
+    left out alone.
     """
     raw = state.get(DISCOVERY_STATE_KEY)
     if not raw:
         return DiscoveryLog()
     if isinstance(raw, str):
-        log = DiscoveryLog.model_validate_json(raw)
-        records = tuple(
-            record.model_copy(update={"sequence": i}) for i, record in enumerate(log.records)
+        stored = json.loads(raw)
+        stored_records = [
+            {**value, "sequence": i} for i, value in enumerate(stored.get("records", ()))
+        ]
+        stored_sources = stored.get("sources", {})
+    else:
+        stored_records = list(raw["records"].values())
+        stored_sources = raw["sources"]
+
+    errors: list[ValidationError] = []
+    invalidated: set[str] = set()
+    sources: dict[str, dict[str, SelectedSource]] = {}
+    for requirement_id, by_spec in stored_sources.items():
+        try:
+            sources[requirement_id] = {
+                spec_id: SelectedSource.model_validate(value) for spec_id, value in by_spec.items()
+            }
+        except ValidationError as exc:
+            errors.append(exc)
+            invalidated.add(requirement_id)
+    records: list[DiscoveryRecord] = []
+    for value in stored_records:
+        try:
+            records.append(DiscoveryRecord.model_validate(value))
+        except ValidationError as exc:
+            errors.append(exc)
+            requirement_id = value.get("requirement_id")
+            if isinstance(requirement_id, str):
+                invalidated.add(requirement_id)
+    kept = [record for record in records if record.requirement_id not in invalidated]
+    if errors:
+        dropped_sources = sum(len(stored_sources[key]) for key in invalidated & set(stored_sources))
+        dropped_records = len(stored_records) - len(kept)
+        warn_left_out(
+            logger,
+            DISCOVERY_STATE_KEY,
+            errors,
+            entries=dropped_records + dropped_sources,
+            detail="%d records, %d sources, for %d requirements",
+            counts=(dropped_records, dropped_sources, len(invalidated)),
         )
-        return DiscoveryLog(records=records, sources=log.sources)
-    records = tuple(
-        sorted(
-            (DiscoveryRecord.model_validate(value) for value in raw["records"].values()),
-            key=lambda record: record.sequence,
-        )
+    return DiscoveryLog(
+        records=tuple(sorted(kept, key=lambda record: record.sequence)),
+        sources={key: found for key, found in sources.items() if key not in invalidated},
     )
-    sources = {
-        requirement_id: {
-            spec_id: SelectedSource.model_validate(value) for spec_id, value in by_spec.items()
-        }
-        for requirement_id, by_spec in raw["sources"].items()
-    }
-    return DiscoveryLog(records=records, sources=sources)
 
 
 def save_log(state: SessionState, log: DiscoveryLog) -> None:
@@ -761,11 +805,10 @@ def compact_source(source: SelectedSource, *, selectable: bool = True) -> dict[s
     always shown, so a reader sees the phrase that found the source without
     comparing it against the requirement. `measure` is what the source
     measures, by `search`'s label; `measure_count` says how many StatVars
-    `search` confirmed for it (`compiler.sources.stat_var_count`), "at
-    least" that many when the count is a floor; and `varies_by`, present
-    only when the source has open axes, names the slots its StatVars vary
-    along. The description names no StatVar, since a partial list reads to a
-    model as the whole family or as a pattern to guess other names from.
+    it holds (`compiler.sources.stat_var_count`), "at least" that many when
+    the count is a floor; and `varies_by`, present only when the source has
+    open axes, names the slots its StatVars vary along. The description
+    names no StatVar.
     `open_entity_axes`, present only when
     the source leaves an entity axis open, names each one and how many members
     it holds, the population a requirement's `across` covers. `definition` carries
@@ -796,15 +839,15 @@ def compact_source(source: SelectedSource, *, selectable: bool = True) -> dict[s
 
 
 def _measure_count(source: SelectedSource) -> str | None:
-    """How many StatVars `source` holds, in words: "at least" that many when `search` states the count as a floor."""
+    """How many StatVars `source` holds, in words: "at least" that many when `search` states the count as a floor.
+
+    A served count is exact. Without one, the confirmed members are a floor
+    when `search` says so (`stat_var_member_count_exact`).
+    """
     count = stat_var_count(source)
     if count == 0:
         return None
-    floor = (
-        source.stat_var_member_count_exact is False
-        if source.stat_var_member_count is not None
-        else source.stat_var_truncated is not False
-    )
+    floor = source.served_count is None and source.stat_var_member_count_exact is False
     return stat_var_count_text(count, floor=floor)
 
 
@@ -840,9 +883,8 @@ def described_sources(sources: Sequence[SelectedSource]) -> list[dict[str, objec
     years (`planner.plan.dataset_of`), whatever sentence and coverage Search
     states for each period. Two sources that carry no identity are one
     dataset when `compact_source` describes them alike apart from
-    `_RETRIEVAL_KEYS` and `definition`, and bind the same members: the same
-    `shape_member_digest` where `search` states one, else the same listed
-    StatVars. Each dataset is listed once, as
+    `_RETRIEVAL_KEYS` and `definition`, and bind the same `shape_member_digest`
+    (both `None` when `search` states none). Each dataset is listed once, as
     its first retrieval, in the order given, with the first definition any of
     its retrievals fetched. Every further retrieval adds its own
     `_RETRIEVAL_KEYS` and `coverage_window`, and its `has_data` when that
@@ -863,7 +905,7 @@ def described_sources(sources: Sequence[SelectedSource]) -> list[dict[str, objec
                     for key, value in compact.items()
                     if key not in (*_RETRIEVAL_KEYS, "definition")
                 },
-                "members": source.shape_member_digest or source.stat_vars,
+                "members": source.shape_member_digest,
             }
         )
         first = first_of.get(dataset)
@@ -906,8 +948,9 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
     """Return the content hash identifying this dataset requirement's own searched content.
 
     Covers exactly what `_search_part` sends to `search` -- `measure`,
-    `entities`, `period`, `unit` -- plus `source_spec_id`, the pin
-    `selectable` honours. Never `decision_ids`, `coverage` or `id`, none of
+    `entities`, `period`, `unit`, and the open role `across` asks for
+    (`_open_roles`), stated only when there is one -- plus `source_spec_id`,
+    the pin `selectable` honours. Never `decision_ids`, `coverage` or `id`, none of
     which affects what is searched or what a pin resolves to. Canonical JSON
     (RFC 8785) under SHA-256, the same discipline `plan_revision` uses for the
     whole plan: stable across an edit to a different requirement or a
@@ -919,6 +962,8 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
     content = revision_content(
         requirement, include={"measure", "entities", "period", "unit", "source_spec_id"}
     )
+    if open_roles := _open_roles(requirement):
+        content["open_roles"] = open_roles
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
@@ -1018,11 +1063,10 @@ def _unit_phrase(unit: Unit) -> str:
 def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, object]:
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
-    Sends only the named entities. `across` names a party with no member, so
-    the part leaves that axis open and `search` defaults its scope, as it
-    does for a question that names nobody on it. Never carries `source`:
-    data-mcp refuses a search naming one without a unit, and ignores it when
-    a unit is also given, so there is nothing for stating it to buy.
+    Sends the named entities, and the side of a flow `across` covers as an
+    open role (`_open_roles`). Never carries `source`: data-mcp refuses a
+    search naming one without a unit, and ignores it when a unit is also
+    given, so there is nothing for stating it to buy.
 
     An entity's role goes as the `PARTY_ROLES` word it stands for
     (`party_role`), each a word of `search`'s role lexicon. A role standing
@@ -1039,7 +1083,29 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     part["time"] = f"{requirement.period.start} to {requirement.period.end}"
     if requirement.unit is not None:
         part["unit"] = _unit_phrase(requirement.unit)
+    if open_roles := _open_roles(requirement):
+        part["open_roles"] = open_roles
     return part
+
+
+def _open_roles(requirement: DatasetRequirement) -> list[str]:
+    """The role `search` is asked to hold open for `requirement`, its `across` when that names a side of a flow.
+
+    The role goes as the `PARTY_ROLES` word `across` stands for, so "lenders"
+    asks for every creditor. Search then elects a source that breaks the
+    measure down by that role over one that only totals it, and counts the
+    role's members. An `across` naming the place, a population narrower than
+    a party ("bilateral donor"), or two words of one side names no role
+    `search` holds open, and nothing is sent. No entity binds the side sent,
+    because `DatasetRequirement` refuses an entity in the party its `across` covers.
+    """
+    if requirement.across is None or across_party(requirement.across) not in (
+        "giving",
+        "receiving",
+    ):
+        return []
+    role = party_role(requirement.across)
+    return [role] if role is not None else []
 
 
 def _dropped_phrases(
@@ -1205,8 +1271,10 @@ async def fetch_definitions(
     same discipline `discover_source`'s own closing phase follows. Held apart
     this way, the `describe` round trip below runs with the lock released.
 
-    Only a source that is one StatVar is described, since a family's
-    definition would be one member's and a model would read it as the family's. Every
+    Only a source whose identity pins one StatVar
+    (`compiler.sources.pinned_stat_var`) is described: a family's definition
+    would be one member's and a model would read it as the family's, and a
+    described identity names no dcid to describe. Every
     source still needing a fetch is batched into as few `describe` calls as
     `DESCRIBE_ID_BATCH_MAX` allows, one call per chunk of the sources' own
     stat var each, so a plan's single-digit definite-source count costs one
@@ -1218,22 +1286,21 @@ async def fetch_definitions(
     it enriches, so it is returned as tried and left at that.
     """
     pending = [
-        (requirement_id, requirement_keys[requirement_id], source)
+        (requirement_id, requirement_keys[requirement_id], source, dcid)
         for requirement_id, source in sources.items()
         if requirement_id in requirement_keys
-        and source.stat_vars
-        and not is_family(source)
+        and (dcid := pinned_stat_var(source.identity)) is not None
         and source.spec_id
         not in _described_source_ids(log, requirement_keys[requirement_id], requirement_id)
     ]
     pairs: list[DescribedPair] = []
     for start in range(0, len(pending), DESCRIBE_ID_BATCH_MAX):
         chunk = pending[start : start + DESCRIBE_ID_BATCH_MAX]
-        ids = [source.stat_vars[0] for _, _, source in chunk]
+        ids = [dcid for _, _, _, dcid in chunk]
         try:
             nodes, refused = await _describe_ids(surface, ids)
         except ToolSurfaceUnavailableError:
-            for requirement_id, key, source in chunk:
+            for requirement_id, key, source, _ in chunk:
                 pairs.append(
                     (
                         DiscoveryRecord(
@@ -1248,7 +1315,7 @@ async def fetch_definitions(
                     )
                 )
             continue
-        for requirement_id, key, source in chunk:
+        for requirement_id, key, source, dcid in chunk:
             record = DiscoveryRecord(
                 revision=revision,
                 tool="describe",
@@ -1257,7 +1324,7 @@ async def fetch_definitions(
                 spec_ids=(source.spec_id,),
                 detail="describe refused" if refused else None,
             )
-            definition = _definition_of(nodes, source.stat_vars[0])
+            definition = _definition_of(nodes, dcid)
             if definition is None:
                 pairs.append((record, ()))
             else:
@@ -1397,7 +1464,6 @@ async def resolve_definition(
     *,
     spec_id: str,
     identity: Mapping[str, Any],
-    stat_vars: Sequence[str],
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
 
@@ -1411,8 +1477,6 @@ async def resolve_definition(
             refused it, or the envelope holds no part.
     """
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
-    if stat_vars:
-        arguments["stat_vars"] = list(stat_vars)
     try:
         answer = await _call_within_entry(surface, tool=RESOLVE_DEFINITION, arguments=arguments)
     except ToolSurfaceUnavailableError as exc:
@@ -1517,27 +1581,37 @@ def _no_data_reason(part: Mapping[str, Any]) -> str | None:
     return reason if isinstance(reason, str) else None
 
 
+class _FreshSearch(Enum):
+    """A pin reader's answer that only a fresh `search` can source the requirement.
+
+    The readers after it would post an identity Search has refused, so
+    `_source_from_resolve_pin` skips them.
+    """
+
+    NEEDED = "needed"
+
+
 async def _seeded_source(
     tool_context: ToolContext,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
     surface: ToolSurface,
-) -> SelectedSource | dict[str, object] | None:
+) -> SelectedSource | dict[str, object] | _FreshSearch | None:
     """The source of the dataset the user handed over from Search that `requirement` pins.
 
     `None` when its pin names none (`planner.plan.seeded_sources`). A seed
     is returned as the `seed` node read it from Search.
 
     A copy of a seed over another window (`SeededSource.windowed_from`, which
-    `planner.agent.propose_plan` pins) is recorded with its identity, the
-    seed's elected StatVars and the seed's sentence as a name, and no fact
-    about its own period. Search states those: the identity is resolved here
-    through data-mcp (`resolve_definition`), which stores its definition for
-    the plan's `get_data`, and the whole source is read from Search's part
+    `planner.agent.propose_plan` pins) is recorded with its identity and the
+    seed's sentence as a name, and no fact about its own period. Search
+    states those: the identity is resolved here through data-mcp
+    (`resolve_definition`), which stores its definition for the plan's
+    `get_data`, and the whole source is read from Search's part
     (`resolved_spec`, `compiler.sources.source_from_spec_block`), so its
-    sentence, coverage, StatVars and member counts are the ones Search states
-    for that period. Nothing is written back to session state, so every call
+    sentence, coverage and member counts are the ones Search states for that
+    period. Nothing is written back to session state, so every call
     asks Search again.
 
     A copy that cannot be read that way is the problem returned, naming the
@@ -1552,14 +1626,19 @@ async def _seeded_source(
     a block that is not usable as a source, since the dataset the
     requirement is pinned to cannot serve its period and what to change is
     the user's to choose.
+
+    Search refusing the copy `open_role_unavailable` is the exception. The
+    identity holds open a role the StatVars it elects do not declare, so
+    every resolve of it refuses the same way, the copy on record
+    (`_recorded_source`) included. That answer is `_FreshSearch.NEEDED`,
+    and the fresh `search` asks for the role again when the requirement's
+    `across` names a side of a flow (`_open_roles`).
     """
-    spec_id = requirement.source_spec_id
-    if spec_id is None:
-        return None
-    seeded = seeded_source(seeded_sources(tool_context.state), spec_id)
+    seeded = seeded_source(seeded_sources(tool_context.state), requirement.source_spec_id)
     if seeded is None:
         return None
     source = seeded.source
+    spec_id = source.spec_id
     if seeded.windowed_from is None or source.identity is None:
         return source
     window = source.identity.get("requested_window")
@@ -1568,9 +1647,7 @@ async def _seeded_source(
     kind = ReferralKind.REQUIREMENT_UNMEETABLE
     no_data_reason: str | None = None
     try:
-        part = await resolve_definition(
-            surface, spec_id=spec_id, identity=source.identity, stat_vars=source.stat_vars
-        )
+        part = await resolve_definition(surface, spec_id=spec_id, identity=source.identity)
         return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
@@ -1579,6 +1656,8 @@ async def _seeded_source(
                 f"Search could not be asked for {asked}: {exc}",
                 outcome=Outcome.REFUSED,
             )
+        if exc.code == ToolErrorCode.OPEN_ROLE_UNAVAILABLE:
+            return _FreshSearch.NEEDED
         if not exc.refused:
             fault = "it returns nothing"
         else:
@@ -1625,11 +1704,10 @@ async def _recorded_source(
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one a search in the conversation recorded for the pin itself
     (`planner.plan.recorded_identity`) when its window is that period. It
-    is resolved with its recorded StatVars through data-mcp
-    (`resolve_definition`), which stores the
+    is resolved through data-mcp (`resolve_definition`), which stores the
     definition for the plan's `get_data`, and the source is read from
-    Search's part (`resolved_spec`), so its sentence, coverage and StatVars
-    are the ones Search states for that period.
+    Search's part (`resolved_spec`), so its sentence, coverage and member
+    counts are the ones Search states for that period.
 
     `None` when no such identity is on record, when it names a dataset the
     turn dropped (`planner.plan.names_dropped_seed`), or when Search does
@@ -1649,9 +1727,7 @@ async def _recorded_source(
     ):
         return None
     try:
-        part = await resolve_definition(
-            surface, spec_id=spec_id, identity=identity, stat_vars=recorded.stat_vars
-        )
+        part = await resolve_definition(surface, spec_id=spec_id, identity=identity)
         return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
     except DefinitionNotResolvedError as exc:
         if not exc.retryable:
@@ -1730,7 +1806,8 @@ async def _source_from_resolve_pin(
     instead, is honoured from that dataset's source (`_seeded_source`), on a
     plan of any size; a seed's identity already carries the requirement's
     period, or every year with data when its window is the user's own. A
-    problem `_seeded_source` met is returned as it is.
+    problem `_seeded_source` met is returned as it is. Its
+    `_FreshSearch.NEEDED` returns `None` before the readers below run.
 
     Otherwise the source is the pinned dataset's block as the planner was
     shown it (`_block_source`), when it parses as a source whose
@@ -1747,8 +1824,16 @@ async def _source_from_resolve_pin(
     `None`, not a raised problem, when none of these holds a source. The
     caller falls through to a fresh `search`, the path for a pin with
     nothing on record, which `search` itself must confirm.
+
+    A requirement whose `across` asks for every member of a side of a flow
+    (`_open_roles`) takes the source only when it leaves that side open
+    (`compiler.evidence.open_axis_for`). Otherwise this returns `None` too,
+    and the fresh `search` asks for the side as an open role, which elects
+    a source broken down by it where one exists.
     """
     source = await _seeded_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    if source is _FreshSearch.NEEDED:
+        return None
     if source is None:
         source = _block_source(tool_context, plan=plan, requirement=requirement)
     if source is None:
@@ -1757,6 +1842,13 @@ async def _source_from_resolve_pin(
         return None
     if isinstance(source, dict):
         return source
+    across = requirement.across
+    if (
+        across is not None
+        and _open_roles(requirement)
+        and isinstance(open_axis_for(across, source.open_entity_axes), str)
+    ):
+        return None
     variable = requirement.measure
     source = source.model_copy(update={"searched_as": variable})
     revision = plan_revision(plan)

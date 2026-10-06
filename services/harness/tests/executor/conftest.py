@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.compile import compile_plan
+from compiler.sources import member_digest
 from compiler.surface import (
     McpSurface,
     ProgressCallback,
@@ -80,9 +81,19 @@ RESULT_FRAME: dict[str, Any] = {
 }
 
 
-def _resolved_stat_vars_trace(stat_vars: tuple[str, ...]) -> dict[str, Any]:
-    """A manifest `trace` binding the spec to `stat_vars`, matching the approved source by default."""
-    return {"resolved_stat_vars": [{"ref": f"dcid:{one}", "roles": []} for one in stat_vars]}
+def _fixture_stat_var(source: SelectedSource) -> str:
+    """The one StatVar a fixture source's identity names (`{"stat_var": ...}`)."""
+    return str((source.identity or {}).get("stat_var") or "Stat")
+
+
+def _resolved_stat_vars_trace(source: SelectedSource) -> dict[str, Any]:
+    """A manifest `trace` serving the fixture source's one StatVar, and stating the family
+    digest the source was approved with, so membership is confirmed by default."""
+    return {
+        "resolved_stat_vars": [{"ref": f"dcid:{_fixture_stat_var(source)}", "roles": []}],
+        "family_member_digest": source.shape_member_digest,
+        "family_member_count": source.shape_member_count,
+    }
 
 
 _STATISTICS_ARTIFACT_DIGEST = "sha256:" + "9" * 64
@@ -272,7 +283,7 @@ def manifest(
             "content_version": CONTENT_VERSION,
             "coverage": {"rows": 10, "dimensions": []},
             "citation": {"text": "World Bank, International Debt Statistics", "sources": []},
-            "trace": _resolved_stat_vars_trace(base.stat_vars),
+            "trace": _resolved_stat_vars_trace(base),
             "warnings": [],
             "artifacts": [_statistics_artifact()],
             "series_count": len(statistics),
@@ -299,7 +310,7 @@ def manifest_for(_stats_by_manifest: _StatsRegistry) -> Callable[..., dict[str, 
             if source.entities
             else ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya")
         )
-        stat_var = source.stat_vars[0] if source.stat_vars else "Stat"
+        stat_var = _fixture_stat_var(source)
         statistics: list[dict[str, Any]] = [
             {
                 "stat_var": f"dcid:{stat_var}",
@@ -325,7 +336,7 @@ def manifest_for(_stats_by_manifest: _StatsRegistry) -> Callable[..., dict[str, 
             "content_version": CONTENT_VERSION,
             "coverage": {"rows": 10, "dimensions": []},
             "citation": {"text": "World Bank, International Debt Statistics", "sources": []},
-            "trace": _resolved_stat_vars_trace(source.stat_vars),
+            "trace": _resolved_stat_vars_trace(source),
             "warnings": [],
             "artifacts": [_statistics_artifact()],
             "series_count": len(statistics),
@@ -346,7 +357,9 @@ def population_source() -> Callable[..., SelectedSource]:
             "sentence": "total population of Kenya, 2015 to 2024",
             "confidence": "high",
             "has_data": True,
-            "stat_vars": ("Population",),
+            "served_count": 1,
+            "shape_member_count": 1,
+            "shape_member_digest": member_digest(["Population"]),
             "entities": (ResolvedEntity(role="country", ref="country/KEN", label="Kenya"),),
             "unit_ref": None,
             "unit_label": None,
@@ -498,7 +511,8 @@ def gdp_source(source: Callable[..., SelectedSource]) -> Callable[..., SelectedS
         fields: dict[str, Any] = {
             "spec_id": SPEC_GDP,
             "sentence": "gross domestic product of Kenya, 2010 to 2024",
-            "stat_vars": ("Gdp",),
+            "served_count": 1,
+            "shape_member_digest": member_digest(["Gdp"]),
             "identity": {"stat_var": "Gdp"},
         }
         return source(**(fields | overrides))

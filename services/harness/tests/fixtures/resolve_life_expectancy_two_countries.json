@@ -57,20 +57,13 @@
             "stat_type": "measuredValue"
           },
           "stat_vars": {
-            "items": [
-              {
-                "ref": "LifeExpectancy_Person",
-                "label": "Life expectancy at birth",
-                "slot_values": [],
-                "constraint_properties": [],
-                "data_date_range": {
-                  "start": "1960",
-                  "end": "2023"
-                }
-              }
-            ],
             "member_count": 1,
-            "truncated": false
+            "member_count_exact": true,
+            "served_count": 1,
+            "data_date_range": {
+              "start": "1960",
+              "end": "2023"
+            }
           },
           "entities": {
             "observationAbout": [

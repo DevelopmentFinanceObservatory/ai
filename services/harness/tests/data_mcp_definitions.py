@@ -23,6 +23,7 @@ from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp import client_holder
 from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import DefinitionStore, get_store, set_store
+from data_mcp.definition_store.identity import canonicalize, spec_id_for
 from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
 from fastmcp.exceptions import ToolError
@@ -43,7 +44,8 @@ class SearchStub:
     definition carries. A posted identity whose spec_id one of them names is
     answered with a one-part `definite` envelope carrying it; any other with
     a 422 `request_invalid`, as Search refuses an identity it cannot
-    resolve. `answer` replaces the envelope for a spec_id. `delay_s` holds
+    resolve. `answer` replaces the envelope for a spec_id, and `refuse`
+    answers a spec_id with that 422 problem body instead. `delay_s` holds
     each answer for that long, by spec_id. `posted` records each request
     body, `spans` when each was received and answered (`time.monotonic`),
     and `peak` the most requests held at once.
@@ -54,10 +56,12 @@ class SearchStub:
         blocks: Iterable[Mapping[str, Any]] = (),
         *,
         answer: Mapping[str, Mapping[str, Any]] | None = None,
+        refuse: Mapping[str, Mapping[str, Any]] | None = None,
         delay_s: Mapping[str, float] | None = None,
     ) -> None:
         self._blocks = {block["spec_id"]: block for block in map(served_block, blocks)}
         self._answer = dict(answer or {})
+        self._refuse = dict(refuse or {})
         self._delay_s = dict(delay_s or {})
         self._held = 0
         self.peak = 0
@@ -69,7 +73,7 @@ class SearchStub:
         body = json.loads(request.content)
         self.posted.append(body)
         (entry,) = body["input"]["entries"]
-        spec_id = entry["base_spec_id"]
+        spec_id = spec_id_for(canonicalize(entry["identity"]))
         received = time.monotonic()
         self._held += 1
         self.peak = max(self.peak, self._held)
@@ -78,6 +82,8 @@ class SearchStub:
         finally:
             self._held -= 1
             self.spans.append((received, time.monotonic()))
+        if spec_id in self._refuse:
+            return httpx2.Response(422, json=self._refuse[spec_id])
         if spec_id in self._answer:
             return httpx2.Response(200, json=self._answer[spec_id])
         block = self._blocks.get(spec_id)
