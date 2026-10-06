@@ -28,6 +28,7 @@ actually race.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import sqlite3
@@ -778,8 +779,8 @@ _GDP_ALL_YEARS, _GDP_1960_2024 = json.loads(
     (Path(__file__).parent / "fixtures" / "gdp_guatemala_definitions.json").read_text()
 )
 _GDP_STAT_VAR = "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
-# Recorded `search` spec blocks: Kenya's population elects one StatVar,
-# German ODA to Kenya is a family of 200 listed StatVars in a 55 KB block.
+# Recorded `search` spec blocks: Kenya's population serves one StatVar,
+# German ODA to Kenya is a family.
 _SPEC_BLOCKS = json.loads(
     (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
 )
@@ -787,14 +788,8 @@ _ONE_STAT_VAR_BLOCK = _SPEC_BLOCKS["population_kenya"]["parts"][0]["spec"]
 _FAMILY_BLOCK = _SPEC_BLOCKS["germany_oda_to_kenya"]["parts"][0]["spec"]
 
 
-@pytest.mark.parametrize(
-    ("block", "stat_vars"),
-    [(_ONE_STAT_VAR_BLOCK, ["Count_Person"]), (_FAMILY_BLOCK, [])],
-    ids=["one_stat_var", "family"],
-)
-def test_a_source_a_turn_only_fetched_keeps_its_identity_and_nothing_else_of_its_block(
-    block, stat_vars
-):
+@pytest.mark.parametrize("block", [_ONE_STAT_VAR_BLOCK, _FAMILY_BLOCK], ids=["one", "family"])
+def test_a_source_a_turn_only_fetched_keeps_its_identity_and_nothing_else_of_its_block(block):
     spec_id = block["spec_id"]
     identity = block["definition"]["identity"]
     state = ConversationState(conversation_id=CONVERSATION)
@@ -805,19 +800,15 @@ def test_a_source_a_turn_only_fetched_keeps_its_identity_and_nothing_else_of_its
     ]
     state.turn_specs = {spec_id: block}
 
-    assert state.recorded_identity(spec_id) == RecordedIdentity(
-        identity=identity, stat_vars=tuple(stat_vars)
-    )
+    assert state.recorded_identity(spec_id) == RecordedIdentity(identity=identity)
     state.close_turn(final_text="Done.")
     state.begin_turn()
 
     (record,) = state.turns
     assert "specs" not in record
-    # The bound: the identity and at most one StatVar, without the block around them.
-    assert record["identities"] == {spec_id: {"identity": identity, "stat_vars": stat_vars}}
-    assert state.recorded_identity(spec_id) == RecordedIdentity(
-        identity=identity, stat_vars=tuple(stat_vars)
-    )
+    # The bound: the identity, without the block around it.
+    assert record["identities"] == {spec_id: {"identity": identity}}
+    assert state.recorded_identity(spec_id) == RecordedIdentity(identity=identity)
     assert state.earlier_block(spec_id) is None
 
 
@@ -838,15 +829,14 @@ def _plan_json_retrieving(source: SelectedSource) -> dict[str, Any]:
 
 def _gdp_plan_json() -> dict[str, Any]:
     """`_PLAN`'s plan retrieving instead the 1960 to 2024 GDP definition its
-    translator found, which elects one StatVar, the family's root."""
+    translator found, which serves one StatVar, the family's root."""
     (source,) = _top_donors()[0].workflow.sources
     return _plan_json_retrieving(
         source.model_copy(
             update={
                 "spec_id": _GDP_1960_2024["spec_id"],
                 "identity": _GDP_1960_2024["identity"],
-                "stat_vars": (_GDP_STAT_VAR,),
-                "pinned": True,
+                "served_count": 1,
                 "stat_var_reading": None,
             }
         )
@@ -854,7 +844,7 @@ def _gdp_plan_json() -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("block", [_ONE_STAT_VAR_BLOCK, _FAMILY_BLOCK], ids=["one", "family"])
-def test_a_search_block_and_a_plan_source_record_the_same_stat_vars(block):
+def test_a_search_block_and_a_plan_source_record_the_same_identity(block):
     spec_id = block["spec_id"]
     searched = ConversationState(conversation_id=CONVERSATION)
     searched.turn_specs = {spec_id: block}
@@ -864,14 +854,8 @@ def test_a_search_block_and_a_plan_source_record_the_same_stat_vars(block):
     assert searched.recorded_identity(spec_id) == planned.recorded_identity(spec_id) is not None
 
 
-@pytest.mark.parametrize(
-    ("plan_json", "stat_vars"),
-    [(_PLAN_JSON, ()), (_gdp_plan_json(), (_GDP_STAT_VAR,))],
-    ids=["family", "gdp"],
-)
-def test_a_source_only_the_translator_found_keeps_its_identity_into_the_next_turn(
-    plan_json, stat_vars
-):
+@pytest.mark.parametrize("plan_json", [_PLAN_JSON, _gdp_plan_json()], ids=["family", "gdp"])
+def test_a_source_only_the_translator_found_keeps_its_identity_into_the_next_turn(plan_json):
     (source,) = plan_json["sources"]
     assert source["origin"] == "translator" and source["identity"] is not None
     state = ConversationState(conversation_id=CONVERSATION)
@@ -881,7 +865,7 @@ def test_a_source_only_the_translator_found_keeps_its_identity_into_the_next_tur
     state.begin_turn()
 
     assert state.recorded_identity(source["spec_id"]) == RecordedIdentity(
-        identity=source["identity"], stat_vars=stat_vars
+        identity=source["identity"]
     )
     assert state.earlier_block(source["spec_id"]) is None
 
@@ -1050,6 +1034,36 @@ def test_the_prior_ledger_keeps_each_spec_ids_newest_reading_and_its_turns_block
     assert state.earlier_block(_READING_JSON["spec_id"]) == {"turn": 3}
     assert state.earlier_block(latest["spec_id"]) is None
     assert ConversationState(conversation_id=CONVERSATION).prior_ledger_state() is None
+
+
+def test_a_ledger_turn_stored_before_search_stopped_listing_members_still_loads():
+    """A conversation's ledger holds turns stored when Search listed each source's
+    members: every plan source and recorded identity carries `stat_vars`. The
+    turn still reads as its plan and its identities, the list left behind."""
+    plan = copy.deepcopy(_PLAN_JSON)
+    for source in plan["sources"]:
+        source["stat_vars"] = [] if source["members"] else [_GDP_STAT_VAR]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turns = [
+        {
+            "user": "q",
+            "assistant": "a",
+            "plans": [plan],
+            "identities": {
+                _GDP_ALL_YEARS["spec_id"]: {
+                    "identity": _GDP_ALL_YEARS["identity"],
+                    "stat_vars": [_GDP_STAT_VAR],
+                }
+            },
+        }
+    ]
+
+    assert state.recall_part(part="plan", turn=1)["text"] == [
+        _PLAN.render(budget=studio_state._RECALL_TEXT_BUDGET)
+    ]
+    assert state.recorded_identity(_GDP_ALL_YEARS["spec_id"]) == RecordedIdentity(
+        identity=_GDP_ALL_YEARS["identity"]
+    )
 
 
 def test_recall_leaves_out_a_turns_plans_readings_blocks_and_identities():
@@ -1493,6 +1507,7 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
         plan_revision="rev_1",
         option_ids=frozenset({"spec_b", "spec_a"}),
         step_order=("step_b", "step_a"),
+        step_labels={"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"},
         resuming_segment="seg_1",
         answer={"decision": "approve", "option_id": "spec_a"},
     )
@@ -1534,6 +1549,7 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     assert pending.plan_revision == "rev_1"
     assert pending.option_ids == frozenset({"spec_a", "spec_b"})
     assert pending.step_order == ("step_b", "step_a")
+    assert pending.step_labels == {"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"}
     assert pending.resuming_segment == "seg_1"
     assert pending.answer == {"decision": "approve", "option_id": "spec_a"}
     assert loaded.awaiting_answer is False  # its only entry is resuming
@@ -2317,3 +2333,12 @@ async def test_a_release_past_its_timeout_cancels_the_checkpoint_once() -> None:
 
     assert cleanup_cancels == 0
     assert cleaned_up
+
+
+def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> None:
+    entry = {"adk_id": "adk_1", "kind": "plan", "step_order": ["step_a"]}
+
+    pending = studio_state._deserialize_pending({"int_1": entry})["int_1"]
+
+    assert pending.step_order == ("step_a",)
+    assert pending.step_labels == {}

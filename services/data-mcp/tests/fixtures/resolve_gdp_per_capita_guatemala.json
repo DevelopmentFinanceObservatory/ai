@@ -194,41 +194,13 @@
           "inapplicable_slots": [],
           "unresolved_slots": [],
           "stat_vars": {
-            "items": [
-              {
-                "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal_PerCapita",
-                "label": "Nominal gross domestic product per capita",
-                "slot_values": [
-                  {
-                    "key": {
-                      "axis": "how",
-                      "property": {
-                        "dcid": "activitySource",
-                        "label": "activitySource"
-                      },
-                      "label": "activity source"
-                    },
-                    "value": {
-                      "ref": {
-                        "dcid": "GrossDomesticProduction",
-                        "label": "GrossDomesticProduction"
-                      },
-                      "value_kind": "enum_value"
-                    }
-                  }
-                ],
-                "constraint_properties": [
-                  "activitySource"
-                ],
-                "data_date_range": {
-                  "start": "1960",
-                  "end": "2024"
-                }
-              }
-            ],
             "member_count": 1,
             "member_count_exact": false,
-            "truncated": false
+            "served_count": null,
+            "data_date_range": {
+              "start": "1960",
+              "end": "2024"
+            }
           },
           "entities": [
             {
@@ -393,12 +365,6 @@
             }
           ],
           "trace": {
-            "resolved_stat_vars": [
-              {
-                "dcid": "Amount_EconomicActivity_GrossDomesticProduction_Nominal_PerCapita",
-                "label": "Nominal gross domestic product per capita"
-              }
-            ],
             "resolved_entities": [
               {
                 "dcid": "country/GTM",
@@ -464,38 +430,6 @@
               }
             ],
             "query_qualifiers": [],
-            "pipeline_trace": [
-              {
-                "step": "extract",
-                "ran": false
-              },
-              {
-                "step": "recall",
-                "ran": true,
-                "ms": 614
-              },
-              {
-                "step": "shape",
-                "ran": true,
-                "ms": 1108
-              },
-              {
-                "step": "bind",
-                "ran": true,
-                "ms": 874
-              },
-              {
-                "step": "materialise",
-                "ran": true,
-                "ms": 1
-              },
-              {
-                "step": "answer",
-                "ran": true,
-                "ms": 79
-              }
-            ],
-            "n_recalled": 63,
             "capability_version": "cap_a71dd3a39765e8e5"
           },
           "confidence": "high",

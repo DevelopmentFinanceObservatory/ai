@@ -112,30 +112,23 @@ def test_an_unsupported_part_offers_no_spec_and_keeps_only_caller_input_warnings
 @pytest.mark.parametrize(
     ("stat_vars", "facts"),
     [
-        # A family Search states a member digest for, listed without items.
+        # A family whose membership settled.
         (
-            {"items": [], "member_count": 1_454, "member_count_exact": True, "truncated": True},
+            {"member_count": 1_454, "member_count_exact": True, "served_count": 1_454},
             {"member_count": 1_454, "member_count_exact": True},
         ),
         # A recall sample: the members Search confirmed, a floor on the family.
         (
-            {
-                "items": [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)],
-                "member_count": 5,
-                "member_count_exact": False,
-                "truncated": False,
-            },
+            {"member_count": 5, "member_count_exact": False, "served_count": None},
             {"member_count": 5, "member_count_exact": False},
         ),
     ],
-    ids=["digest-family", "recall-sample"],
+    ids=["settled-family", "recall-sample"],
 )
 def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     stat_vars: dict[str, Any], facts: dict[str, Any]
 ) -> None:
-    """A partial list reads to a model as the whole family, so neither the answer nor
-    the digest names a member StatVar."""
-    spec = _spec(stat_vars=stat_vars["items"])
+    spec = _spec()
     spec["resolved"]["stat_vars"] = stat_vars
     spec["resolved"]["shape"] = {"label": "population"}
     spec["resolved"]["slots"] = [
@@ -152,7 +145,6 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     envelope = _envelope("definite", spec=spec)
 
     answer = render_answer(envelope)["parts"][0]["specs"][0]
-    digest = render_digest(envelope)
 
     assert answer == {
         "spec_id": "spec_1",
@@ -161,9 +153,6 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
         **facts,
         "varies_by": ["sex"],
     }
-    assert "Count_Person" not in json.dumps(answer)
-    assert "Count_Person" not in digest
-    assert "group" not in digest
 
 
 def test_a_spec_with_no_elected_stat_vars_states_no_count() -> None:

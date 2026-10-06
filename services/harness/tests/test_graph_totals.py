@@ -119,7 +119,7 @@ def _family(spec_char: str, label: str) -> SelectedSource:
         spec_id="spec_" + spec_char * 32,
         sentence=f"{label} of Kenya, 2015 to 2024",
         has_data=True,
-        stat_vars=(f"{label}_0", f"{label}_1", f"{label}_2"),
+        served_count=3,
         entities=(ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya"),),
         unit_ref="usd",
         unit_label="US dollars",
@@ -132,7 +132,7 @@ def _family(spec_char: str, label: str) -> SelectedSource:
 def _single(spec_char: str, stat_var: str) -> SelectedSource:
     """A Kenya source binding one StatVar, which no reading applies to."""
     return _family(spec_char, stat_var).model_copy(
-        update={"stat_vars": (stat_var,), "open_axes": (), "identity": {"stat_var": stat_var}}
+        update={"served_count": 1, "open_axes": (), "identity": {"stat_var": stat_var}}
     )
 
 
@@ -737,7 +737,7 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
             spec_id="spec_" + spec_char * 32,
             sentence="Aid to Kenya",
             has_data=True,
-            stat_vars=stat_vars,
+            served_count=len(stat_vars),
         )
         for step_id, spec_char, (stat_vars, _) in (("left", "a", left), ("right", "b", right))
     }

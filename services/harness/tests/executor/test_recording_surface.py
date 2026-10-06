@@ -26,6 +26,7 @@ from typing import Any
 import httpx2
 import pytest
 from compiler.compile import compile_plan
+from compiler.sources import member_digest
 from compiler.surface import (
     ProgressCallback,
     ProgressReport,
@@ -191,7 +192,9 @@ async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_w
     whole = manifest()
     left_out = {
         **whole,
-        "trace": {},
+        "trace": {
+            key: value for key, value in whole["trace"].items() if key != "resolved_stat_vars"
+        },
         STAT_VARS_OMITTED_KEY: len(whole["trace"]["resolved_stat_vars"]),
     }
     reads: list[str] = []
@@ -262,7 +265,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
         artifacts=[
             {
                 "artifact_digest": "sha256:" + "1" * 64,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 1024,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2019-05-01T00:00:00+00:00",
@@ -280,7 +283,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
         artifacts=[
             {
                 "artifact_digest": "sha256:" + "2" * 64,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 2048,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2021-11-20T00:00:00+00:00",
@@ -472,7 +475,9 @@ async def test_a_card_counts_the_stat_vars_of_the_frame_it_draws_from(
     either frame counts the three the sum added, which the summed retrieval's
     manifest states and the lineage link carries to the aggregate's frame."""
     family = source(
-        stat_vars=("Debt_0", "Debt_1", "Debt_2"),
+        served_count=3,
+        shape_member_count=3,
+        shape_member_digest=member_digest(["Debt_0", "Debt_1", "Debt_2"]),
         open_axes=(OpenAxis(property="crsPurpose", summable=True),),
     )
     summed = manifest_for(family) | {"stat_var_count": 1, "summed_stat_var_count": 3}
@@ -565,7 +570,7 @@ def _artifacts(created_at: str | None) -> list[dict[str, Any]]:
         else [
             {
                 "artifact_digest": "sha256:" + "0" * 64,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 1024,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": created_at,
@@ -1167,7 +1172,8 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
     gdp_source = source(
         spec_id=SPEC_GDP,
         sentence="gross domestic product, 2010 to 2024",
-        stat_vars=("Gdp",),
+        served_count=1,
+        shape_member_digest=member_digest(["Gdp"]),
         identity={"stat_var": "Gdp"},
         entities=(),
         open_entity_axes=every_country,

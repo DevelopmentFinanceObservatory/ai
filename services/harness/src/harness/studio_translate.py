@@ -60,7 +60,10 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
+from planner.phrasing import entities_phrase
+from planner.plan import PLAN_STATE_KEY, DatasetRequirement
 from planner.plan import Plan as PlannerPlan
+from planner.tool_results import ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
 from translator.tool import TRANSLATE_TOOL_NAME
@@ -69,6 +72,8 @@ from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph import (
     APPROVE_INTERRUPT,
+    ORCHESTRATOR_PLAN_FAILED_STATUS,
+    ORCHESTRATOR_PLAN_RAN_STATUS,
     ORCHESTRATOR_STATUS_KEY,
     PLANNER_STARTED_KEY,
     SEED_STEP_TOOL,
@@ -136,24 +141,46 @@ _PLANNER_CALL_LABELS = {
     "submit_plan": "Getting the plan ready for you",
 }
 
-# Human labels for plan steps and activity entries. The planner agent writes
-# its own `label` / `description` per step (`step_display` on the planner
-# node's output) and those win; this is the
-# fallback for a scripted draft, which carries none. Also the Activity feed's
-# labels, which are per-tool by nature.
+# The line for a `propose_plan` call that follows a refused one, and the
+# Activity detail for the refusal's code. The refusal's own message names
+# plan fields, so only the code reaches the wire, and a code not listed
+# here leaves the line without a detail.
+_REWORKING = "Reworking the draft"
+_REWORK_REASONS = {
+    ProblemCode.INVALID_PLAN: "a step didn't fit the plan's rules",
+    ProblemCode.INVALID_ARGUMENTS: "a step didn't fit the plan's rules",
+    ProblemCode.OPERATION_UNSUPPORTED: "a step asked for something the tools can't do",
+    ProblemCode.VERSION_STALE: "the draft was out of date",
+    ProblemCode.PLAN_NOT_DRAFT: "the draft was out of date",
+}
+
+# The line from the planner's start, or the agent's hand-off to it, until
+# its first call.
+_WORKING_ON_PLAN = "Working on a plan"
+
+# The line from an approved plan's `approve` event until its first step
+# reports, which covers the executor's start.
+_STARTING_PLAN = "Starting the plan"
+
+# The Activity feed's labels for a tool's calls. A plan step's line takes
+# the plan's own label for that step instead (`_RecordingSurface.
+# step_labels`); this is the fallback when the plan named none, such as a
+# plan proposed before step labels were kept.
 _TOOL_LABELS = {
-    "get_data": "Fetch the data",
-    "aggregate": "Aggregate the series",
-    "compare": "Compare the series",
-    "growth": "Compute growth",
-    "rank": "Rank the entities",
-    "share_of": "Compute shares",
-    "filter": "Filter the frame",
-    "join": "Join the frames",
-    "describe_frame": "Describe the frame",
-    "write_component": "Create a canvas component",
+    "get_data": "Fetching data",
+    "aggregate": "Combining values",
+    "compare": "Comparing",
+    "growth": "Calculating growth",
+    "rank": "Ranking",
+    "share_of": "Calculating shares",
+    "filter": "Filtering data",
+    "join": "Joining data",
+    "describe_frame": "Checking data",
+    "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
 }
+# A tool with no label above is never shown by its machine name.
+_UNNAMED_TOOL_LABEL = "Working on your request"
 
 
 def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) -> dict[str, Any]:
@@ -572,6 +599,9 @@ class _RecordingSurface:
         # `_Translator._drain_recorder` to sort a wave's records back into
         # plan order before numbering them.
         self._step_order: dict[str, list[str]] = {}
+        # The same plan's label for each step, by conversation: the Activity
+        # feed names a plan step's line with it.
+        self._step_labels: dict[str, dict[str, str]] = {}
         # When each plan step's call in flight started, by (conversation,
         # step id). A call that returns or fails takes its entry with it
         # (`_record`); a cancelled one leaves it for `mark_step_failed`.
@@ -818,20 +848,31 @@ class _RecordingSurface:
         }
         return mine
 
-    def set_step_order(self, conversation: str, order: Sequence[str]) -> None:
+    def set_step_order(
+        self,
+        conversation: str,
+        order: Sequence[str],
+        labels: Mapping[str, str] | None = None,
+    ) -> None:
         """Remember `conversation`'s latest approved plan's workflow step order.
 
         Called from `_Translator._interrupt_frames` when it builds the
         `plan.proposed` frame. A workflow's own steps run as concurrent
         waves (`executor.run._Run.execute`), so two independent steps can
         finish, and get recorded, in the opposite order the plan lists
-        them; `step_order` lets `_drain_recorder` put them back.
+        them; `step_order` lets `_drain_recorder` put them back. `labels`
+        are the plan's own label for each step, by step id.
         """
         self._step_order[conversation] = list(order)
+        self._step_labels[conversation] = dict(labels or {})
 
     def step_order(self, conversation: str) -> list[str]:
         """`conversation`'s latest plan step order, or `[]` if none was set."""
         return self._step_order.get(conversation, [])
+
+    def step_labels(self, conversation: str) -> dict[str, str]:
+        """`conversation`'s latest plan step labels by step id, or `{}`."""
+        return self._step_labels.get(conversation, {})
 
 
 def _first_line(text: str, *, limit: int = 160) -> str | None:
@@ -872,8 +913,27 @@ def _request_input_call(event: Event) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def _step_label(tool: str) -> str:
-    return _TOOL_LABELS.get(tool, tool)
+def _record_detail(record: _ExecutorRecord) -> str | None:
+    """A successful recorded call's one-line result. A card's line names
+    its kind and title already (`_record_label`), so it carries none."""
+    if record.tool == "write_component":
+        return None
+    return record.result.get("summary")
+
+
+def _step_label(tool: str, plan_label: str | None = None) -> str:
+    return plan_label or _TOOL_LABELS.get(tool, _UNNAMED_TOOL_LABEL)
+
+
+def _record_label(record: _ExecutorRecord, plan_labels: Mapping[str, str]) -> str:
+    """A recorded call's Activity line: a card's kind and title for a write
+    (its summary reads `line_chart: <title>`), else the plan's label for
+    its step, else the tool's own."""
+    if record.tool == "write_component":
+        kind, _, title = str(record.result.get("summary") or "").partition(": ")
+        if title:
+            return f"{kind.replace('_', ' ').capitalize()}: {title}"
+    return _step_label(record.tool, plan_labels.get(record.step_id or ""))
 
 
 def _planner_call_label(name: str, args: dict[str, Any]) -> str | None:
@@ -884,6 +944,18 @@ def _planner_call_label(name: str, args: dict[str, Any]) -> str | None:
     return _PLANNER_CALL_LABELS.get(name)
 
 
+def _checking_label(plan: PlannerPlan) -> str | None:
+    """The translate call's line, naming the plan's first dataset: "Checking
+    health spending per person for Kenya and Uganda", with "and N more" for
+    the rest. None for a plan with no dataset."""
+    datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
+    if not datasets:
+        return None
+    first = datasets[0]
+    label = f"Checking {first.measure} for {entities_phrase(first.entities, across=first.across)}"
+    return f"{label} and {len(datasets) - 1} more" if len(datasets) > 1 else label
+
+
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`graph.py`'s `planner` node
@@ -891,18 +963,23 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     a plan already known good.
 
     `refusal_note` is the one field a `"pending_refusal"`-routed payload,
-    or a replan after a dropped seed, carries beside a normal `"ok"` one's
-    own `summary`/`revision` (`graph.py`'s `planner` node): the payload
+    an `"ok"` draft that leaves out a seed `seed` dropped, or an `"ok"`
+    draft made over a plan the node could not read, carries beside a
+    normal `"ok"` one's own `summary`/`revision` (`graph.py`'s `planner`
+    node): the payload
     still needs to say why the user is seeing a plan again, and `Plan`'s
     schema has no field for that. `depth` and `depth_notice` are
     the depth verdict `graph.py`'s `choose_depth` node reached earlier in
     the same turn, carried on both routes for `_interrupt_frames` to read;
-    `Plan`'s own schema has no field for either.
+    `Plan`'s own schema has no field for either. `restarted` marks an
+    `"ok"` draft made over a plan the node could not read, whose version
+    counts from 1 again; `_interrupt_frames` reads it to start a new line of
+    plan version ids.
     """
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "depth", "depth_notice")
+        if key not in ("summary", "revision", "refusal_note", "restarted", "depth", "depth_notice")
     }
     return PlannerPlan.model_validate(fields)
 
@@ -910,10 +987,9 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
 def _plan_depth(payload: dict[str, Any]) -> PlanDepth | None:
     """The planner node's `depth` value, as the wire enum -- `None` for a
     value the enum doesn't carry, `depth="none"` included. That verdict
-    routes a turn to `fetch` when it resolves, so a first plan card never
-    carries it; a card proposed after a dropped seed can, when the seeds
-    left would have been fetched, and it renders with no depth. A payload
-    without a recognised depth still renders a card rather than raising."""
+    routes a turn to `fetch` when it resolves, so no plan card carries it.
+    A payload without a recognised depth still renders a card rather than
+    raising."""
     try:
         return PlanDepth(payload.get("depth"))
     except ValueError:
@@ -968,6 +1044,13 @@ class _Translator:
         # The dropped seeds the running draft's `PLANNER_STARTED_KEY` names,
         # which a question the planner asks opens with.
         self._untold_drops: str | None = None
+        # Set by a refused `propose_plan`, as the refusal's code (None when it
+        # carried none), so the next call reads "Reworking the draft"; an
+        # accepted one clears it.
+        self._rework_code: str | None = None
+        self._reworking = False
+        # The translate call's line for the plan the planner last recorded.
+        self._checking: str | None = None
 
     def translate(self, event: Event) -> list[Any]:
         step_progress = (
@@ -980,7 +1063,7 @@ class _Translator:
             # before this frame reopens it; and `harness.graph`'s `execute`
             # may still amend a finished step's record
             # (`_RecordingSurface.mark_step_failed`) once the whole run is over.
-            return [self._running_step(step_progress)]
+            return [*self._close_starting(), self._running_step(step_progress)]
         frames: list[Any] = list(self._drain_recorder())
         interrupt = _request_input_call(event)
         if interrupt is not None:
@@ -990,21 +1073,32 @@ class _Translator:
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
             for call in event.get_function_calls():
-                label = _planner_call_label(call.name or "", call.args or {})
-                if label is not None:
-                    frames.extend(self._open_status(label))
+                frames.extend(self._planner_call_status(call.name or "", call.args or {}))
+            for response in event.get_function_responses():
+                if response.name == "propose_plan":
+                    answer = response.response or {}
+                    self._reworking = answer.get("outcome") != "ok"
+                    self._rework_code = answer.get("code") if self._reworking else None
+            # A recorded or checked plan rides on its tool response's state
+            # delta, a refused one on none, so this is always the plan held.
+            recorded = event.actions.state_delta.get(PLAN_STATE_KEY) if event.actions else None
+            if isinstance(recorded, str):
+                self._checking = _checking_label(PlannerPlan.model_validate_json(recorded))
             return frames
         node = _node_name(event)
         # The planner node's other `custom_metadata` events, the seam's
         # late `progress` reports, carry no output and add no frame.
         started = event.custom_metadata.get(PLANNER_STARTED_KEY) if event.custom_metadata else None
         if node == "planner" and isinstance(started, dict):
-            label = "Revising the plan" if started.get("revising") else "Working on a plan"
+            label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
             self._untold_drops = started.get("untold_drops")
+            self._reworking = False
         output = event.output if isinstance(event.output, dict) else None
         if output is None:
             return frames
+        if node == "approve" and event.actions.route == "approved":
+            frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
             self._untold_drops = None
             frames.extend(self._close_status())
@@ -1077,7 +1171,20 @@ class _Translator:
             detail=detail,
         )
 
-    def _open_status(self, label: str) -> list[ActivityStep]:
+    def _planner_call_status(self, name: str, args: dict[str, Any]) -> list[ActivityStep]:
+        """The status line for one of the planner's own calls: a draft after
+        a refused one is "Reworking the draft", and the translate call names
+        the plan's data once one is recorded."""
+        if name == "propose_plan" and self._reworking:
+            return self._open_status(
+                _REWORKING, detail=_REWORK_REASONS.get(self._rework_code or "")
+            )
+        if name == TRANSLATE_TOOL_NAME and self._checking is not None:
+            return self._open_status(self._checking)
+        label = _planner_call_label(name, args)
+        return self._open_status(label) if label is not None else []
+
+    def _open_status(self, label: str, *, detail: str | None = None) -> list[ActivityStep]:
         """Start a `running` status line for `label`, completing the one
         before it. The same label again keeps its line running."""
         if self._status is not None and self._status[1] == label:
@@ -1093,9 +1200,16 @@ class _Translator:
                 step_id=step_id,
                 label=label,
                 status=StepStatus.RUNNING,
+                detail=detail,
             )
         )
         return frames
+
+    def _close_starting(self) -> list[ActivityStep]:
+        """Complete "Starting the plan" ahead of the plan's first step frame."""
+        if self._status is not None and self._status[1] == _STARTING_PLAN:
+            return self._close_status()
+        return []
 
     def _close_status(self) -> list[ActivityStep]:
         """Complete the running status line, if there is one. The
@@ -1140,19 +1254,27 @@ class _Translator:
         tool = str(progress.get("tool") or "")
         message = progress.get("message")
         seq = self._conversation.next_seq()
+        plan_labels = (
+            self._surface_recorder.step_labels(current_conversation_id.get())
+            if self._surface_recorder is not None
+            else {}
+        )
         return ActivityStep(
             event="activity.step",
             seq=seq,
             step_id=self._wire_step_id(str(progress.get("step_id")), seq=seq),
-            label=_step_label(tool),
+            label=_step_label(tool, plan_labels.get(str(progress.get("step_id")))),
             status=StepStatus.RUNNING,
             tool=tool or None,
             detail=message if isinstance(message, str) else None,
         )
 
     def _drain_recorder(self) -> list[Any]:
-        """Frames for every call recorded since the last drain. Every record
-        of one step, retries included, shares that step's wire id."""
+        """Frames for every call recorded since the last drain."""
+        return self._record_frames(self._take_records())
+
+    def _take_records(self) -> list[_ExecutorRecord]:
+        """Every call recorded since the last drain, plan steps first."""
         conversation = current_conversation_id.get()
         records = list(self._recorder.drain(conversation))
         if self._surface_recorder is not None:
@@ -1173,8 +1295,20 @@ class _Translator:
                 surface_records, key=lambda record: position.get(record.step_id, len(order))
             )
             records = [*surface_records, *records]
-        frames: list[Any] = []
+        return records
+
+    def _record_frames(self, records: list[_ExecutorRecord]) -> list[Any]:
+        """Frames for `records`. Every record of one step, retries included,
+        shares that step's wire id."""
+        plan_labels = (
+            self._surface_recorder.step_labels(current_conversation_id.get())
+            if self._surface_recorder is not None
+            else {}
+        )
+        frames: list[Any] = self._close_starting() if records else []
         for record in records:
+            if self._unshown(record):
+                continue
             seq = self._conversation.next_seq()
             step_id = self._wire_step_id(record.step_id, seq=seq)
             refused = record.result.get("outcome") == "refusal"
@@ -1185,11 +1319,11 @@ class _Translator:
                     event="activity.step",
                     seq=seq,
                     step_id=step_id,
-                    label=_step_label(record.tool),
+                    label=_record_label(record, plan_labels),
                     status=StepStatus.FAILED if refused else StepStatus.COMPLETE,
                     tool=record.tool,
                     duration_ms=record.duration_ms,
-                    detail=_refusal_detail(refusal) if refused else record.result.get("summary"),
+                    detail=_refusal_detail(refusal) if refused else _record_detail(record),
                     produced=(
                         StepProduced(
                             component_id=component["component_id"],
@@ -1207,6 +1341,12 @@ class _Translator:
                     )
                 )
         return frames
+
+    def _unshown(self, record: _ExecutorRecord) -> bool:
+        """Whether `record` stays out of the Activity feed. Every record
+        shows here; an engine whose own steps already stand for some calls
+        hides those."""
+        return False
 
     def _component_frames(
         self, component: dict[str, Any], *, step_id: str, land: bool, revises: str | None
@@ -1285,16 +1425,20 @@ class _Translator:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
-                # `graph.py`'s `planner` node sets this on its
+                # `graph.py`'s `planner` node sets this in three cases. Its
                 # `"pending_refusal"` route (BUDGET_EXHAUSTED or
                 # QUESTION_FIXED), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
-                # and on a replan after a dropped seed, which names the
-                # seed left out. The plan card below says what is still
-                # approvable; this says why the user is seeing it again
-                # rather than the change they just asked for -- any other
-                # `"ok"` draft carries no `refusal_note` and gets no
-                # message here.
+                # carries the refusal's sentence: the plan card below says
+                # what is still approvable, and this says why the user is
+                # seeing it again rather than the change they just asked
+                # for. An `"ok"` draft made when `seed` dropped seeds the
+                # user has not been told of names each seed left out and
+                # why (`dropped_seeds_note`). An `"ok"` draft made over a
+                # plan the node could not read says so
+                # (`UNREADABLE_PLAN_NOTE`), ahead of any dropped-seed note.
+                # Any other `"ok"` draft carries no `refusal_note` and
+                # gets no message here.
                 frames.append(
                     MessageDelta(event="message.delta", seq=conversation.next_seq(), text=note)
                 )
@@ -1305,9 +1449,21 @@ class _Translator:
                 )
             version = int(payload.get("version", 1))
             latest = conversation.latest_plan_version
+            restarted_from: str | None = None
+            if payload.get("restarted"):
+                # `graph.py`'s `planner` node drafted this plan from the
+                # start, over a plan it could not read, so its version
+                # counts from 1 on a line of its own. The ids given out so
+                # far name versions of the plan it replaces: they are
+                # forgotten, and the last card shown is superseded below.
+                if latest is not None:
+                    restarted_from = conversation.plan_version_ids[latest]
+                conversation.plan_version_ids.clear()
+                conversation.latest_plan_version = latest = None
             if latest is not None and version < latest:
-                # Versions only rise within a turn once the amend/replan
-                # guard lands (see plan.py's `Plan.amend`); a lower version
+                # An amendment or a replan raises the version (see plan.py's
+                # `Plan.amend`), and a plan drafted over an unreadable one
+                # arrives `restarted` and is handled above. A lower version
                 # arriving here is a bug elsewhere, not a real re-offer, so
                 # this plan gets a fresh wire id rather than `setdefault`
                 # handing back the stale one already given out for that
@@ -1324,14 +1480,19 @@ class _Translator:
                 plan_version_id = conversation.plan_version_ids.setdefault(
                     version, _wire_id("plan")
                 )
-                if latest is not None and version > latest:
+                supersedes = (
+                    conversation.plan_version_ids[latest]
+                    if latest is not None and version > latest
+                    else restarted_from
+                )
+                if supersedes is not None:
                     frames.append(
                         PlanVersioned(
                             event="plan.versioned",
                             seq=conversation.next_seq(),
                             plan_version_id=plan_version_id,
                             version=version,
-                            supersedes=conversation.plan_version_ids[latest],
+                            supersedes=supersedes,
                         )
                     )
                 conversation.latest_plan_version = version
@@ -1361,8 +1522,11 @@ class _Translator:
                 if plan.workflow is not None
                 else [step.id for step in steps]
             )
+            step_labels = {step.id: step.label for step in steps}
             if self._surface_recorder is not None:
-                self._surface_recorder.set_step_order(current_conversation_id.get(), step_order)
+                self._surface_recorder.set_step_order(
+                    current_conversation_id.get(), step_order, step_labels
+                )
             requirements = [
                 PlanRequirement(**cast("dict[str, Any]", row))
                 for row in plan_display.requirement_rows(plan)
@@ -1424,6 +1588,7 @@ class _Translator:
                 plan_version=version,
                 plan_revision=revision,
                 step_order=tuple(step_order),
+                step_labels=step_labels,
             )
             return frames
         # The graph's own `clarify` node (`APPROVE_INTERRUPT`'s sibling
@@ -1493,26 +1658,43 @@ class _OrchestratorTranslator(_Translator):
     and go to `_Translator.translate`. On top of those, the agent's own
     events stream as they happen:
 
-    - a thought summary, as one running `activity.step` per model call
-      labelled with the summary's latest heading (Gemini opens each
-      thought with one; a short call thinks too little to send any);
+    - one running status line (an `activity.step` with no `tool`) whenever
+      the agent works and no tool step runs. After a batch of tool results
+      it names what the model reads ("Reading what the search found",
+      "Looking at <measure>, <years>", "Going over the charts", "Reading
+      the earlier turn", "Going over the notes on DFO"), with the limits those
+      results state as `detail`, and "Working out the next step" after a
+      refused hand-off; a batch that mixes tools is named by its latest
+      stage. A successful plan hand-off opens "Working on a plan", a
+      successful ask hands over to the question, and neither opens a
+      reading line. The line completes, with `duration_ms`, when anything else
+      happens: a tool call, answer text, a hand-off, the segment's end. A skill
+      read keeps it running. Thought text never shows;
     - each tool call, as an `activity.step` labelled from its arguments the
-      moment the model makes it, completed when the tool returns;
+      moment the model makes it, completed when the tool returns. A
+      hand-off to the planner and a skill read show only when they fail:
+      the planner's own lines follow a hand-off, and a skill read is
+      background, not progress;
     - answer text, as `message.delta` chunks, the last model call's text
       being the turn's `message.complete`: text before a tool call is
       interim, and text after a hand-off to the user or the planner would
       sit above the question or the plan card, so neither is the answer;
     - an orchestrator node's own status line ("Reading your question") as a
-      running step until the next thing happens.
+      running step until the next thing happens; a plan hand-back shows a
+      failed step and then "Reading the planner's answer" when the planner
+      made no plan, and "Reading the plan's results" when the plan ran,
+      opened at the execute node's result so it covers `plan_done` too.
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._thought = ""
-        self._thought_step: str | None = None
         self._streamed_text = False
-        self._open_calls: dict[str, tuple[str, str]] = {}
-        self._handed_off = False
+        # Each open call's wire step id, label and arguments, by call id.
+        self._open_calls: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        # Calls that show only if they fail, by call id: the tool's name.
+        self._quiet_calls: dict[str, str] = {}
+        # The kind of hand-off ("plan", "ask") the agent's tools recorded.
+        self._handed_off: str | None = None
 
     def _step(
         self, step_id: str | None, label: str, status: StepStatus, **extra: Any
@@ -1529,6 +1711,16 @@ class _OrchestratorTranslator(_Translator):
             **extra,
         )
 
+    def _unshown(self, record: _ExecutorRecord) -> bool:
+        """A successful call no plan step made, to a tool whose work an
+        agent tool call's own line already stands for: the data a fetch
+        retrieved and checked, or a skill it read. Failures always show."""
+        return (
+            record.step_id is None
+            and record.tool in _UNSHOWN_RECORDED_TOOLS
+            and record.result.get("outcome") != "refusal"
+        )
+
     def translate(self, event: Event) -> list[Any]:
         # A paused segment ends on its pause frame; the planner relays its
         # queued progress after pausing.
@@ -1540,21 +1732,34 @@ class _OrchestratorTranslator(_Translator):
         if isinstance(status, str):
             # An agent run starts: whatever it wrote before was interim.
             self._final_text = ""
-            self._handed_off = False
-            return [*self._drain_recorder(), *self._open_status(status)]
+            self._handed_off = None
+            frames = list(self._drain_recorder())
+            if status == ORCHESTRATOR_PLAN_FAILED_STATUS:
+                frames.extend(self._close_status())
+                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED))
+                # The agent reads the planner's answer under its own line.
+                frames.extend(self._open_status(status))
+            else:
+                # A plan hand-back's status is the line the execute node's
+                # result opened, which keeps running.
+                frames.extend(self._open_status(status))
+            return frames
         if event.author != ORCHESTRATOR_AGENT_NAME:
-            return super().translate(event)
-        frames: list[Any] = list(self._drain_recorder())
+            frames = super().translate(event)
+            if (
+                _node_name(event) == "execute"
+                and event.output is not None
+                and event.actions.route == "ok"
+            ):
+                # The plan ran: `plan_done` describes its frames, then the
+                # agent reads them.
+                frames.extend(self._open_status(ORCHESTRATOR_PLAN_RAN_STATUS))
+            return frames
+        records = self._take_records()
+        frames: list[Any] = self._record_frames(records)
         parts = event.content.parts if event.content and event.content.parts else []
-        thought = "".join(part.text or "" for part in parts if part.thought)
         text = "".join(part.text or "" for part in parts if part.text and not part.thought)
         if event.partial:
-            if thought:
-                self._thought += thought
-                if _thought_heading(self._thought) is not None:
-                    # Close the status line before the step takes its seq.
-                    frames.extend(self._close_status())
-                    frames.extend(self._thinking())
             if text and not self._handed_off:
                 frames.extend(self._close_status())
                 self._streamed_text = True
@@ -1565,9 +1770,8 @@ class _OrchestratorTranslator(_Translator):
                     )
                 )
             return frames
-        # A finished model call: its thinking is over, and its text arrived
-        # already as partials unless the model sent it in one piece.
-        frames.extend(self._close_thinking())
+        # A finished model call: its text arrived already as partials unless
+        # the model sent it in one piece.
         if text and not self._streamed_text and not self._handed_off:
             frames.extend(self._close_status())
             self._final_text += text
@@ -1575,54 +1779,182 @@ class _OrchestratorTranslator(_Translator):
                 MessageDelta(event="message.delta", seq=self._conversation.next_seq(), text=text)
             )
         self._streamed_text = False
-        if event.get_function_calls():
+        calls = event.get_function_calls()
+        if calls and not self._handed_off:
             self._final_text = ""
-            frames.extend(self._close_status())
+            # A skill read shows no step, so the line it ran under keeps running.
+            if any(call.name not in _SKILL_READS for call in calls):
+                frames.extend(self._close_status())
         for call in event.get_function_calls():
-            label = _tool_call_label(call.name or "", call.args or {})
-            frame = self._step(None, label, StepStatus.RUNNING, tool=call.name)
-            self._open_calls[call.id or frame.step_id] = (frame.step_id, label)
+            name = call.name or ""
+            args = call.args or {}
+            if name in _QUIET_CALLS:
+                self._quiet_calls[call.id or ""] = name
+                continue
+            measure = self._measure(args.get("spec_id")) if name == "fetch" else None
+            label = _tool_call_label(name, args, measure)
+            query = args.get("query") if name == "search" else None
+            frame = self._step(
+                None, label, StepStatus.RUNNING, tool=name, detail=str(query) if query else None
+            )
+            self._open_calls[call.id or frame.step_id] = (frame.step_id, label, args)
             frames.append(frame)
+        # What the agent's next model call reads: (tool, arguments, result,
+        # failed) for each response a status line can name.
+        read: list[tuple[str, dict[str, Any], dict[str, Any], bool]] = []
         for response in event.get_function_responses():
             # A hand-off counts once the tool recorded it; a refused or
             # failed one leaves the model to answer, and that text shows.
             answer = response.response or {}
             if answer.get(HANDED_OFF):
-                self._handed_off = True
-            opened = self._open_calls.get(response.id or "")
-            if opened is not None:
-                failed = "error" in answer or "refusal" in answer
-                reason = answer.get("error") or answer.get("refusal")
-                frames.append(
-                    self._step(
-                        *opened,
-                        StepStatus.FAILED if failed else StepStatus.COMPLETE,
-                        tool=response.name,
-                        detail=str(reason)[:_STEP_DETAIL_CAP] if failed and reason else None,
+                self._handed_off = str(answer[HANDED_OFF])
+            failed = "error" in answer or "refusal" in answer
+            reason = answer.get("error") or answer.get("refusal")
+            failure = str(reason)[:_STEP_DETAIL_CAP] if failed and reason else None
+            quiet = self._quiet_calls.pop(response.id or "", None)
+            if quiet is not None:
+                if failed:
+                    frames.append(
+                        self._step(
+                            None,
+                            _tool_call_label(quiet, {}),
+                            StepStatus.FAILED,
+                            tool=quiet,
+                            detail=failure,
+                        )
                     )
-                )
-        if event.get_function_responses():
-            frames.extend(self._open_status("Reading the results"))
+                continue
+            opened = self._open_calls.get(response.id or "")
+            if opened is None:
+                continue
+            step_id, label, args = opened
+            if failed:
+                status, detail = StepStatus.FAILED, failure
+            else:
+                status, detail = self._outcome(response.name or "", args, answer)
+            frames.append(self._step(step_id, label, status, tool=response.name, detail=detail))
+            if response.name in _READING_STAGES:
+                read.append((response.name or "", args, answer, failed))
+        if not event.get_function_responses():
+            return frames
+        if self._handed_off == "plan":
+            # The planner node opens this same line as it starts, which
+            # keeps this one running through the hand-off.
+            frames.extend(self._open_status(_WORKING_ON_PLAN))
+        elif self._handed_off is None:
+            responded = {response.name or "" for response in event.get_function_responses()}
+            frames.extend(self._reading_status(read, records, responded))
         return frames
 
-    def _thinking(self) -> list[Any]:
-        heading = _thought_heading(self._thought)
-        if heading is None:
+    def _reading_status(
+        self,
+        read: list[tuple[str, dict[str, Any], dict[str, Any], bool]],
+        records: list[_ExecutorRecord],
+        responded: set[str],
+    ) -> list[ActivityStep]:
+        """The status line the agent's next model call runs under, naming
+        what it reads: the batch's latest stage (`_READING_STAGES`), with the
+        limits its results state as `detail`. A batch with no reading stage
+        reads about DFO after `explain_dfo`, and otherwise, after a refused
+        hand-off, works out the next step; a batch of skill reads alone opens
+        none, so the line it ran under keeps running. `records` are the calls
+        the batch's tools made, drained with its responses; `responded` names
+        every tool the batch answered."""
+        names = {name for name, *_ in read}
+        stage = next((stage for stage in _READING_STAGES if stage in names), None)
+        if stage is None:
+            if "explain_dfo" in responded:
+                return self._open_status(_READING_ABOUT_DFO)
+            if responded - _SKILL_READS:
+                return self._open_status(_WORKING_OUT_NEXT_STEP)
             return []
-        frame = self._step(self._thought_step, heading, StepStatus.RUNNING, detail=self._thought)
-        self._thought_step = frame.step_id
-        return [frame]
+        results = [(args, answer, failed) for name, args, answer, failed in read if name == stage]
+        if stage == "fetch":
+            label, detail = self._looking_at(results, records)
+        elif stage == "search":
+            label = _READING_LABELS[stage]
+            limits = (_search_limits(answer) for _, answer, failed in results if not failed)
+            detail = "; ".join(limit for limit in limits if limit)
+        else:
+            label, detail = _READING_LABELS[stage], None
+        return self._open_status(label, detail=detail[:_STEP_DETAIL_CAP] if detail else None)
 
-    def _close_thinking(self) -> list[Any]:
-        frames: list[Any] = []
-        heading = _thought_heading(self._thought)
-        if self._thought_step is not None and heading is not None:
-            frames.append(
-                self._step(self._thought_step, heading, StepStatus.COMPLETE, detail=self._thought)
-            )
-        self._thought = ""
-        self._thought_step = None
-        return frames
+    def _looking_at(
+        self,
+        fetched: list[tuple[dict[str, Any], dict[str, Any], bool]],
+        records: list[_ExecutorRecord],
+    ) -> tuple[str, str | None]:
+        """The line and detail for a batch of fetches. One fetch names its
+        measure, and the years its data covers when its retrieval states
+        them, with its summary as detail; several list each measure and
+        summary in the detail."""
+        if len(fetched) == 1:
+            args, answer, failed = fetched[0]
+            measure = None if failed else self._measure(args.get("spec_id"))
+            if measure is None:
+                return _LOOKING_AT_DATA, None
+            years = self._fetched_years(records).get(str(args.get("spec_id")))
+            label = f"Looking at {measure}, {years}" if years else f"Looking at {measure}"
+            summary = answer.get("summary")
+            return label, str(summary) if summary else None
+        lines = []
+        for args, answer, failed in fetched:
+            if failed:
+                continue
+            pieces = (self._measure(args.get("spec_id")), answer.get("summary"))
+            lines.append(": ".join(str(piece) for piece in pieces if piece))
+        return _LOOKING_AT_DATA, "; ".join(line for line in lines if line) or None
+
+    def _fetched_years(self, records: list[_ExecutorRecord]) -> dict[str, str]:
+        """The years each fetch's retrieval in `records` covers, such as 2000-2023,
+        by spec_id, read off the manifest the retrieval recorded. Empty with
+        no surface recorder to read manifests through."""
+        if self._surface_recorder is None:
+            return {}
+        years: dict[str, str] = {}
+        for record in records:
+            if (
+                record.tool != "get_data"
+                or record.step_id is not None
+                or record.result.get("outcome") != "ok"
+            ):
+                continue
+            for ref in record.result.get("frame_refs") or []:
+                manifest = self._surface_recorder.retrieval_manifest(frame_ref=ref) or {}
+                window = (manifest.get("coverage") or {}).get("window") or {}
+                start, end = window.get("start_year"), window.get("end_year")
+                if isinstance(start, int) and isinstance(end, int):
+                    years[str(record.args.get("spec_id"))] = _year_span(start, end)
+        return years
+
+    def _outcome(
+        self, name: str, args: dict[str, Any], answer: dict[str, Any]
+    ) -> tuple[StepStatus, str | None]:
+        """A call that returned no error or refusal: its status and detail."""
+        if name == "search":
+            return StepStatus.COMPLETE, _search_detail(args.get("query"), answer)
+        if name == "fetch":
+            summary = answer.get("summary")
+            return StepStatus.COMPLETE, str(summary) if summary else None
+        if name == "make_charts":
+            return _charts_outcome(args, answer)
+        return StepStatus.COMPLETE, None
+
+    def _measure(self, spec_id: Any) -> str | None:
+        """The measure a search in this conversation returned `spec_id` for,
+        in the question's words: from this turn's readings, which a resumed
+        segment keeps, then earlier turns', newest first."""
+        turns = [self._conversation.turn_readings] + [
+            turn.get("readings") or [] for turn in reversed(self._conversation.turns)
+        ]
+        for readings in turns:
+            for reading in reversed(readings):
+                offered = [reading.get("spec_id")] + [
+                    candidate.get("spec_id") for candidate in reading.get("candidates") or []
+                ]
+                if spec_id in offered and reading.get("text"):
+                    return str(reading["text"])
+        return None
 
     def finish(self) -> list[Any]:
         frames: list[Any] = list(self._drain_recorder())
@@ -1639,40 +1971,119 @@ class _OrchestratorTranslator(_Translator):
         return frames + super().finish()
 
 
-# A thought summary's heading is a paragraph's first line, which Gemini
-# writes in bold (or as a markdown heading); longer than this, it is prose.
-_THOUGHT_HEADING_CHARS = 80
-
-
-def _thought_heading(thought: str) -> str | None:
-    """The latest heading in a thought summary, or None when it has none yet."""
-    for paragraph in reversed(thought.split("\n\n")):
-        first = paragraph.strip().split("\n", 1)[0].strip()
-        if first.startswith(("**", "#")):
-            heading = first.strip("*# ").strip()
-            if heading and len(heading) <= _THOUGHT_HEADING_CHARS:
-                return heading
-    return None
-
+# The step a plan hand-back with no plan shows: the closing message says
+# what could not be calculated.
+_PLAN_FAILED = "The planner could not make a plan"
+# Agent tools whose calls show only when they fail.
+_QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
+_SKILL_READS = frozenset({"get_skill", "get_skill_file"})
+# The tools whose results the agent's next model call reads under a status
+# line, latest stage first: a batch that mixes them is named by the first.
+_READING_STAGES = ("make_charts", "fetch", "search", "recall")
+_READING_LABELS = {
+    "make_charts": "Going over the charts",
+    "search": "Reading what the search found",
+    "recall": "Reading the earlier turn",
+}
+_LOOKING_AT_DATA = "Looking at the data"
+_READING_ABOUT_DFO = "Going over the notes on DFO"
+_WORKING_OUT_NEXT_STEP = "Working out the next step"
+# Recorded calls an agent tool makes on its own behalf (`fetch` retrieves
+# and checks its data, a skill read goes through the surface), shown only
+# when they fail.
+_UNSHOWN_RECORDED_TOOLS = frozenset({"get_data", "describe_frame", "get_skill", "get_skill_file"})
 
 _ORCHESTRATOR_TOOL_LABELS = {
+    "search": "Searching for data",
     "fetch": "Fetching data",
     "ask_user": "Asking you a question",
     "plan": "Handing the question to the planner",
     "explain_dfo": "Reading about DFO",
     "recall": "Looking back at an earlier turn",
+    "get_skill": "Reading background notes",
+    "get_skill_file": "Reading background notes",
 }
 
 
-def _tool_call_label(name: str, args: dict[str, Any]) -> str:
-    """A status line for one of the orchestrator's tool calls, from its arguments."""
-    if name == "search":
-        return f"Searching: {args['query']}" if args.get("query") else "Searching"
+def _tool_call_label(name: str, args: dict[str, Any], measure: str | None = None) -> str:
+    """A status line for one of the orchestrator's tool calls, from its
+    arguments; a fetch names `measure`, what a search said its spec_id reads
+    as."""
+    if name == "fetch" and measure:
+        return f"Fetching {measure}"
     if name == "make_charts":
         count = len(args.get("charts") or [])
-        return f"Drawing {count} chart{'s' if count != 1 else ''}"
-    if name in ("get_skill", "get_skill_file"):
-        return (
-            f"Reading the {args['skill_id']} skill" if args.get("skill_id") else "Reading a skill"
-        )
+        return f"Making {count} chart{'s' if count != 1 else ''}"
     return _ORCHESTRATOR_TOOL_LABELS.get(name) or _step_label(name)
+
+
+def _search_detail(query: Any, answer: dict[str, Any]) -> str | None:
+    """A search's result in words: the query, what it found, and what it did
+    not find with the reason Search gave."""
+    found: list[str] = []
+    missed: list[str] = []
+    for part in answer.get("parts") or []:
+        variable = str(part.get("variable") or "a measure")
+        status = part.get("status")
+        if status == "definite":
+            found.append(variable)
+        elif status == "candidates":
+            found.append(f"{variable} (more than one reading)")
+        elif status == "no_data":
+            missed.append(f"no data for {variable}")
+        elif status == "unsupported":
+            missed.append(f"no supported dataset for {variable}")
+        else:
+            missed.append(f"no match for {variable}")
+    outcome = []
+    if found:
+        outcome.append("Found " + ", ".join(found))
+    outcome.extend(missed)
+    if not answer.get("parts") and answer.get("kind") not in (None, "resolution"):
+        outcome.append(str(answer["kind"]))
+    words = "; ".join(outcome)
+    text = " · ".join(str(piece) for piece in (query, words) if piece)
+    return text[:_STEP_DETAIL_CAP] or None
+
+
+def _search_limits(answer: dict[str, Any]) -> str | None:
+    """What a search result says limits the answer, in the words it already
+    holds: each found measure's years, the parts with more than one reading,
+    and the parts with no data. Codes, ids and the resolver's warnings,
+    which can name dcids, stay out."""
+    limits: list[str] = []
+    for part in answer.get("parts") or []:
+        variable = str(part.get("variable") or "a measure")
+        status = part.get("status")
+        if status == "definite":
+            window = part.get("window") or {}
+            start, end = window.get("start"), window.get("end")
+            if isinstance(start, int) and isinstance(end, int):
+                limits.append(f"{part.get('resolved') or variable}, {_year_span(start, end)}")
+        elif status == "candidates":
+            count = len(part.get("candidates") or [])
+            limits.append(f"{variable}: {count} possible readings")
+        elif status == "no_data":
+            limits.append(f"no data for {variable}")
+        elif status == "unsupported":
+            limits.append(f"no supported dataset for {variable}")
+    return "; ".join(limits) or None
+
+
+def _year_span(start: int, end: int) -> str:
+    return str(start) if start == end else f"{start}\u2013{end}"
+
+
+def _charts_outcome(args: dict[str, Any], answer: dict[str, Any]) -> tuple[StepStatus, str | None]:
+    """A make_charts result's status: failed when any chart asked for was not
+    drawn, either refused or past the per-call limit, with which and why."""
+    asked = len(args.get("charts") or [])
+    charts = answer.get("charts") or []
+    problems = [f"{chart.get('title')}: {chart['error']}" for chart in charts if "error" in chart]
+    if answer.get("not_drawn"):
+        problems.append(str(answer["not_drawn"]))
+    if not problems:
+        return StepStatus.COMPLETE, None
+    drawn = sum(1 for chart in charts if "error" not in chart)
+    detail = f"{asked - drawn} of {asked} could not be drawn: " + "; ".join(problems)
+    return StepStatus.FAILED, detail[:_STEP_DETAIL_CAP]

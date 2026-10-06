@@ -52,6 +52,7 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from orchestrator.agent import _retrying
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
 from translator.referral import ReferralKind, clear_referral, load_referral
@@ -2231,17 +2232,17 @@ def create_planner_agent(
             a fresh plan.
         prefix_cache: The process's shared cache of static prompt prefixes.
             Given, and `model_name` naming a Gemini model, every call reads
-            the instruction and tool declarations from it. The model keeps
-            ADK's single attempt either way, so a transient error ends the
-            generation inside the entry's deadline rather than spending it
-            on retries.
+            the instruction and tool declarations from it. Either way a
+            Gemini model retries a transient error (408, 429, 5xx) up to
+            three attempts, as the orchestrator's does
+            (`orchestrator.agent._retrying`).
 
     Returns:
         The configured `LlmAgent`.
     """
     return LlmAgent(
         name=AGENT_NAME,
-        model=model_name if prefix_cache is None else prefix_cache.model_for(model_name),
+        model=_retrying(model_name, prefix_cache=prefix_cache),
         instruction=planner_instruction(
             has_translator=translate is not None,
             has_skills=surface is not None,

@@ -140,10 +140,13 @@ failed on a moved source revision arrives as one (`upstream_error` naming
 Neither a bare retry fixes: a synchronous `upstream_version_changed` says
 `refresh_then_retry` on the wire, and `definition_not_held` says
 `correct_and_retry`, but the approved `spec_id` has already left the store, so
-retrying reaches the same absence. Both come straight back as
-`RediscoveryNeeded`, naming the requirement and source that need discovering
-again -- a new discovery under a new plan revision, which only the translator
-can do. A rediscovery for a step carrying no evidence binding names nothing to
+retrying reaches the same absence. `open_role_unavailable` is
+`correct_and_retry` too, yet Search refuses a re-resolved identity that keeps
+an open role the StatVars it elects declare no role on, so the same
+identity refuses again and the source must be searched for afresh. All three
+come straight back as `RediscoveryNeeded`, naming the requirement and source
+that need discovering again -- a new discovery under a new plan revision,
+which only the translator can do. A rediscovery for a step carrying no evidence binding names nothing to
 rediscover, so it is `step_refused` instead.
 
 **A retrieval step runs under one absolute budget.** A step whose tool

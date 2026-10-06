@@ -18,7 +18,7 @@ def _spec(
     sentence: str = "malaria grants from France to Togo, 2015 to 2024",
     confidence: str | None = "high",
     coverage: dict[str, Any] | None = None,
-    stat_vars: list[dict[str, Any]] | None = None,
+    member_count: int = 0,
     entities: list[dict[str, Any]] | None = None,
     facets: dict[str, Any] | None = None,
     facet_options: list[dict[str, Any]] | None = None,
@@ -29,9 +29,9 @@ def _spec(
         "confidence": confidence,
         "coverage": coverage if coverage is not None else {"kind": "bare", "has_data": True},
         "stat_vars": {
-            "items": stat_vars if stat_vars is not None else [],
-            "member_count": len(stat_vars or []),
-            "truncated": False,
+            "member_count": member_count,
+            "member_count_exact": True,
+            "served_count": member_count,
         },
         "entities": entities if entities is not None else [],
         "facets": facets if facets is not None else {},
@@ -100,7 +100,7 @@ def test_definite_digest_carries_sentence_spec_id_confidence_coverage() -> None:
                 "observation_count": 10,
                 "window": {"start_year": 2015, "end_year": 2024},
             },
-            stat_vars=[{"ref": "MalariaGrantDisbursements", "label": "Malaria grants"}],
+            member_count=1,
             entities=[
                 {"role": "provider", "label": "France", "ref": "country/FRA"},
                 {"role": "recipient", "label": "Togo", "ref": "country/TGO"},
@@ -422,32 +422,24 @@ def test_unknown_part_status_renders_a_minimal_block() -> None:
 @pytest.mark.parametrize(
     ("stat_vars", "counted"),
     [
-        # A family Search states a member digest for, listed without items.
+        # A family whose membership settled.
         (
-            {"items": [], "member_count": 1_454, "member_count_exact": True, "truncated": True},
+            {"member_count": 1_454, "member_count_exact": True, "served_count": 1_454},
             "1,454 StatVars",
         ),
         # A recall sample: the members Search confirmed, a floor on the family.
         (
-            {
-                "items": [{"ref": f"Count_Person_{n}", "label": f"group {n}"} for n in range(5)],
-                "member_count": 5,
-                "member_count_exact": False,
-                "truncated": False,
-            },
+            {"member_count": 5, "member_count_exact": False, "served_count": None},
             "at least 5 StatVars",
         ),
-        # A list with no count is counted, exact unless it is truncated.
-        ({"items": [{"ref": "Count_Person_0"}] * 2, "truncated": True}, "at least 2 StatVars"),
-        ({"items": [{"ref": "Count_Person_0"}], "truncated": False}, "1 StatVar"),
+        ({"member_count": 1, "member_count_exact": True, "served_count": 1}, "1 StatVar"),
     ],
-    ids=["digest-family", "recall-sample", "listed-truncated", "listed-one"],
+    ids=["settled-family", "recall-sample", "one"],
 )
 def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     stat_vars: dict[str, Any], counted: str
 ) -> None:
-    """A partial list reads to a model as the whole family, or as a pattern to
-    guess other names from, so the digest counts the members and names none."""
+    """The digest counts the members and names none."""
     spec = _spec()
     spec["resolved"]["stat_vars"] = stat_vars
     spec["resolved"]["shape"] = {"label": "population"}
@@ -510,7 +502,7 @@ def test_each_candidate_counts_its_own_stat_vars_naming_none() -> None:
             "ordering": "intent_rank",
             "max_candidates": 5,
             "specs": [
-                _spec(spec_id="spec_a", stat_vars=[{"ref": "Count_Person", "label": "People"}]),
+                _spec(spec_id="spec_a", member_count=1),
                 _spec(spec_id="spec_b"),
             ],
             "truncated": False,
@@ -679,7 +671,7 @@ def test_a_nearest_real_spec_counts_its_stat_vars_naming_none() -> None:
             "category": "absent",
             "nearest_real": [
                 {
-                    **_spec(spec_id="spec_near", stat_vars=[{"ref": "Count_Person"}]),
+                    **_spec(spec_id="spec_near", member_count=1),
                     "relaxation": {"axis": "where", "dropped_value_dcids": []},
                 }
             ],
@@ -709,20 +701,14 @@ def test_no_data_counts_the_stat_vars_it_checked_naming_none(checked: int, line:
         no_data={
             "reason": "no_observations",
             "category": "absent",
-            "elected_stat_vars": [
-                {"dcid": f"StatVar{i}", "label": f"indicator {i}"} for i in range(checked)
-            ],
+            "elected_count": checked,
         },
     )
 
-    digest = render_digest(envelope)
-
-    assert line in digest
-    assert "indicator" not in digest
-    assert "StatVar0" not in digest
+    assert line in render_digest(envelope)
 
 
-def test_no_data_without_elected_stat_vars_omits_the_line() -> None:
+def test_no_data_without_elected_count_omits_the_line() -> None:
     envelope = _envelope("no_data", no_data={"reason": "no_observations", "category": "absent"})
 
     digest = render_digest(envelope)

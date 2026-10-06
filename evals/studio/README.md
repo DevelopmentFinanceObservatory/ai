@@ -138,6 +138,9 @@ server started with `STUDIO_ENGINE=orchestrator`.
   regardless, because the contract layer has no known gaps.
 - `XPASS` — an xfail case passed. The gap closed; retire the marker so the
   behavior is held from now on.
+- `JUDGE_ERROR` — the judge model still answered 503 or 429 after its retries, so
+  the rubrics went unscored. The suite goes on to the next case but does not
+  pass; rerun the case with `--case <id>`.
 
 Two live cases (`live-identity-bug-fails-safe`,
 `live-rank-three-countries-fails-safe`) assert the harness fails SAFE on

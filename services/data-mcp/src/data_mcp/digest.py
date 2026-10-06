@@ -365,13 +365,10 @@ def _measure(spec: Mapping[str, Any]) -> dict[str, Any]:
     """What `spec` measures, as data: Search's `measure` label, the family's `member_count`, whether that count is exact, and the axes its members vary along.
 
     The count is `resolved.stat_vars.member_count`, exact unless
-    `member_count_exact` is false. Without one it is the number of StatVars
-    listed, exact unless the list is `truncated`. A count of zero is left
-    out. An axis is a slot with a constraint property that
-    `inapplicable_slots` does not list, unbound or bound to a set or an
-    expanded value, named by its label. No member StatVar is named, since a
-    partial list reads to a model as the whole family, or as a pattern to
-    guess other names from. A fact Search does not state is left out.
+    `member_count_exact` is false. A count of zero is left out. An axis is a
+    slot with a constraint property that `inapplicable_slots` does not list,
+    unbound or bound to a set or an expanded value, named by its label. No
+    member StatVar is named. A fact Search does not state is left out.
     """
     resolved = spec.get("resolved") or {}
     stat_vars = resolved.get("stat_vars") or {}
@@ -383,9 +380,6 @@ def _measure(spec: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         facts["member_count"] = count
         facts["member_count_exact"] = stat_vars.get("member_count_exact") is not False
-    elif stat_vars.get("items"):
-        facts["member_count"] = len(stat_vars["items"])
-        facts["member_count_exact"] = stat_vars.get("truncated") is not True
     axes = _varying_axes(resolved)
     if axes:
         facts["varies_by"] = axes
@@ -548,16 +542,9 @@ def _window_text(window: Mapping[str, Any] | None) -> str:
 
 
 def _checked_count(no_data: Mapping[str, Any]) -> int:
-    """How many StatVars a no_data check confirmed and found empty, naming none.
-
-    `elected_stat_var_count` where search replaced the list of a family with
-    a member digest by its count, and the StatVars `elected_stat_vars` lists
-    otherwise.
-    """
-    count = no_data.get("elected_stat_var_count")
-    if isinstance(count, int) and not isinstance(count, bool):
-        return count
-    return len(no_data.get("elected_stat_vars") or [])
+    """How many StatVars a no_data check confirmed and found empty (`elected_count`), naming none."""
+    count = no_data.get("elected_count")
+    return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
 
 def _nearest_real_line(spec: Mapping[str, Any]) -> str:

@@ -321,3 +321,90 @@ def test_every_orchestrator_case_can_fail() -> None:
             assert not set(case.get("checks", [])) & checks.REQUEST_CHECKS, (
                 f"{label}: a live run records no model requests to check"
             )
+
+
+def _judged_cases(count: int) -> list[str]:
+    return [c["id"] for c in _suite()["cases"] if c.get("rubrics")][:count]
+
+
+async def test_a_judge_that_stays_unavailable_marks_the_case_and_the_run_goes_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _load("run")
+    first, second = _judged_cases(2)
+
+    async def outcome(client: Any, case: dict[str, Any]) -> dict[str, Any]:
+        return {"contract": [], "expectation": [], "turn_frames": []}
+
+    async def judge(case: dict[str, Any], turn_frames: Any, config: Any) -> list[dict[str, Any]]:
+        if case["id"] == first:
+            raise run.JudgeError("503 UNAVAILABLE")
+        return [{"rubric_id": r["id"], "score": 1.0, "rationales": []} for r in case["rubrics"]]
+
+    monkeypatch.setattr(run, "run_case", outcome)
+    monkeypatch.setattr(run, "_frame_checks", lambda case, outcome: [])
+    monkeypatch.setattr(run, "judge_case", judge)
+
+    results, passed = await run.run_suite(
+        mode="orchestrator-live", url="http://unused", judge=True, only=[first, second]
+    )
+
+    by_id = {r["id"]: r for r in results}
+    assert by_id[first]["status"] == "JUDGE_ERROR"
+    assert by_id[first]["judge_error"] == "503 UNAVAILABLE"
+    assert "rubric_scores" in by_id[second]
+    assert not passed
+
+
+def _failing_judge(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> tuple[ModuleType, list[Any], dict[str, Any], list[list[Any]]]:
+    """`run` with a judge client whose every call raises `error`, the
+    `http_options` each client was built with, and a judged case to score."""
+    from google import genai  # noqa: PLC0415
+
+    run = _load("run")
+    built: list[Any] = []
+
+    class Models:
+        async def generate_content(self, **kwargs: Any) -> Any:
+            raise error
+
+    class FakeClient:
+        def __init__(self, *, http_options: Any) -> None:
+            built.append(http_options)
+            self.aio = type("Aio", (), {"models": Models()})()
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+    case = next(c for c in _suite()["cases"] if c.get("rubrics"))
+    turns = [[] for turn in case["turns"] if "message" in turn]
+    return run, built, case, turns
+
+
+@pytest.mark.parametrize("code", [503, 429])
+async def test_the_judge_retries_a_transient_error_and_raises_judge_error_when_it_persists(
+    code: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from google.genai import _api_client, errors  # noqa: PLC0415
+
+    kind = errors.ServerError if code >= 500 else errors.ClientError
+    run, built, case, turns = _failing_judge(monkeypatch, kind(code, {"error": {"code": code}}))
+
+    with pytest.raises(run.JudgeError, match=str(code)):
+        await run.judge_case(case, turns, {"judge_model": "m", "num_samples": 1})
+
+    retry = built[0].retry_options
+    assert code in (retry.http_status_codes or _api_client._RETRY_HTTP_STATUS_CODES)
+    assert retry.attempts > 1
+
+
+async def test_a_judge_error_that_is_not_transient_still_stops_the_suite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from google.genai import errors  # noqa: PLC0415
+
+    bad_request = errors.ClientError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT"}})
+    run, _, case, turns = _failing_judge(monkeypatch, bad_request)
+
+    with pytest.raises(errors.ClientError):
+        await run.judge_case(case, turns, {"judge_model": "m", "num_samples": 1})

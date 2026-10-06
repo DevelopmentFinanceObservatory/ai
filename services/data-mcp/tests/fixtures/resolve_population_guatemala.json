@@ -486,20 +486,13 @@
           ],
           "unresolved_slots": [],
           "stat_vars": {
-            "items": [
-              {
-                "ref": "Count_Person",
-                "label": "Total population",
-                "slot_values": [],
-                "constraint_properties": [],
-                "data_date_range": {
-                  "start": "1960",
-                  "end": "2024"
-                }
-              }
-            ],
             "member_count": 1,
-            "truncated": false
+            "member_count_exact": true,
+            "served_count": 1,
+            "data_date_range": {
+              "start": "1960",
+              "end": "2024"
+            }
           },
           "entities": [
             {
@@ -782,12 +775,6 @@
             }
           ],
           "trace": {
-            "resolved_stat_vars": [
-              {
-                "dcid": "Count_Person",
-                "label": "Total population"
-              }
-            ],
             "resolved_entities": [
               {
                 "dcid": "country/GTM",
@@ -999,42 +986,6 @@
               }
             ],
             "query_qualifiers": [],
-            "applied_window": {
-              "start_year": 2010
-            },
-            "date_source": "query",
-            "pipeline_trace": [
-              {
-                "step": "extract",
-                "ran": false
-              },
-              {
-                "step": "recall",
-                "ran": true,
-                "ms": 0
-              },
-              {
-                "step": "shape",
-                "ran": true,
-                "ms": 265
-              },
-              {
-                "step": "bind",
-                "ran": true,
-                "ms": 1799
-              },
-              {
-                "step": "materialise",
-                "ran": true,
-                "ms": 2
-              },
-              {
-                "step": "answer",
-                "ran": true,
-                "ms": 1
-              }
-            ],
-            "n_recalled": 47,
             "requested_window": {
               "start_year": 2010
             },

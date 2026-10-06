@@ -142,7 +142,7 @@ def _mint_response() -> dict[str, Any]:
         "artifacts": [
             {
                 "artifact_digest": _artifact_digest(),
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 100,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",

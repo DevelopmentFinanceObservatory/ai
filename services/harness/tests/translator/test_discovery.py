@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from compiler.sources import DiscoveryStatus, source_from_spec_block
+from compiler.sources import DiscoveryStatus, pinned_stat_var, source_from_spec_block
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -270,34 +271,50 @@ async def test_the_unit_sent_carries_the_price_basis_and_base_year(
     assert call["parts"][0]["unit"] == "constant 2015 USD"
 
 
+_KENYA_DEBTOR = Entity(name="Kenya", role="debtor")
+
+
 @pytest.mark.parametrize(
-    ("entities", "sent"),
+    ("entities", "across", "open_roles"),
     [
-        ([Entity(name="Kenya", role="debtor")], [{"text": "Kenya", "role": "debtor"}]),
-        ([], None),
+        ([_KENYA_DEBTOR], "creditor", ["creditor"]),
+        ([], "creditor", ["creditor"]),
+        ([_KENYA_DEBTOR], "lenders", ["creditor"]),
+        ([Entity(name="Kenya")], "donor", ["donor"]),
+        ([_KENYA_DEBTOR], "countries", None),
+        ([_KENYA_DEBTOR], "bilateral creditor", None),
     ],
+    ids=["beside-entity", "alone", "plural-synonym", "unroled-entity", "place", "narrower"],
 )
-async def test_a_party_stated_in_across_reaches_search_as_no_entity(
+async def test_a_flow_party_stated_in_across_reaches_search_as_an_open_role(
     surface: McpSurface,
     draft: DraftFactory,
     requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
     search_calls: list[dict[str, Any]],
     context_holding: ContextHolding,
     entities: list[Entity],
-    sent: list[dict[str, str]] | None,
+    across: str,
+    open_roles: list[str] | None,
 ) -> None:
-    # Search defaults the scope of a side the part names nobody on, as it
-    # does for the raw question, so `across` sends nothing of its own.
-    across = requirement(entities=entities, across="creditor")
-    context = context_holding(draft(evidence_requirements=[across, derived_requirement()]))
+    # Search elects a source broken down by the open role over its total, so
+    # `across` asks for every member of the side it names. The place, or a
+    # population narrower than a party, is no role, and the entities go as named.
+    # The plan answers with the series, which a total across places would refuse.
+    stated = requirement(entities=entities, across=across)
+    context = context_holding(draft(evidence_requirements=[stated]))
 
     await _discover(surface, context)
 
     (call,) = search_calls
     (part,) = call["parts"]
-    assert part.get("entities") == sent
-    assert "creditor" not in str(part)
+    assert part.get("open_roles") == open_roles
+    assert part.get("entities") == (
+        [
+            {"text": entity.name, **({"role": entity.role} if entity.role else {})}
+            for entity in entities
+        ]
+        or None
+    )
 
 
 async def test_a_source_dumped_without_its_open_axes_is_not_selectable_for_across(
@@ -318,7 +335,7 @@ async def test_a_source_dumped_without_its_open_axes_is_not_selectable_for_acros
     stored = context.state[DISCOVERY_STATE_KEY]["sources"]["annual_debt_service"][SPEC_KENYA]
     del stored["open_entity_axes"]
     keys = _requirement_keys(context, "annual_debt_service")
-    across = requirement(across="creditor")
+    across = requirement(across="bilateral creditor")
     assert requirement_revision(across) == keys["annual_debt_service"]
 
     restored = load_log(context.state)
@@ -352,28 +369,24 @@ def test_a_source_shows_each_open_axis_with_its_member_count() -> None:
 @pytest.mark.parametrize(
     ("stat_vars", "measure_count"),
     [
-        # A family Search states a member digest for, listed without items.
-        (
-            {"items": [], "member_count": 96, "member_count_exact": True, "truncated": True},
-            "96 StatVars",
-        ),
+        # A settled family: the members the mint serves.
+        ({"member_count": 96, "member_count_exact": True, "served_count": 96}, "96 StatVars"),
         # A recall sample: the members Search confirmed, a floor on the family.
         (
-            {"member_count": 3, "member_count_exact": False, "truncated": False},
+            {"member_count": 3, "member_count_exact": False, "served_count": None},
             "at least 3 StatVars",
         ),
-        ({"member_count": None, "truncated": False}, "3 StatVars"),
-        ({"member_count": None, "truncated": True}, "at least 3 StatVars"),
+        # A served count is exact, whatever the confirmed count.
+        ({"member_count": 3, "member_count_exact": False, "served_count": 5}, "5 StatVars"),
     ],
-    ids=["digest-family", "recall-sample", "listed-whole", "listed-capped"],
+    ids=["settled-family", "recall-sample", "served-over-a-floor"],
 )
 def test_a_source_names_its_measure_counts_its_stat_vars_and_names_none(
     stat_vars: dict[str, Any], measure_count: str
 ) -> None:
-    """A partial list reads to a model as the whole family, so the description
-    counts the StatVars and names the axes they vary along, and no StatVar."""
+    """The description counts the StatVars and names the axes they vary along,
+    and no StatVar."""
     block = copy.deepcopy(_KENYA_OVER["2010-2023"])
-    listed = [item["ref"] for item in block["resolved"]["stat_vars"]["items"]]
     block["resolved"]["stat_vars"].update(stat_vars)
     source = source_from_spec_block(block)
 
@@ -383,7 +396,6 @@ def test_a_source_names_its_measure_counts_its_stat_vars_and_names_none(
     assert described["measure_count"] == measure_count
     assert described["varies_by"] == [axis.property for axis in source.open_axes]
     assert described["varies_by"]
-    assert not any(stat_var in json.dumps(described) for stat_var in listed)
 
 
 @pytest.mark.parametrize("open_entity_axes", [(), None])
@@ -877,7 +889,7 @@ def _described(spec_id: str, sentence: str, searched_as: str | None) -> Selected
         spec_id=spec_id,
         sentence=sentence,
         has_data=True,
-        stat_vars=("Var_a", "Var_b"),
+        served_count=2,
         searched_as=searched_as,
     )
 
@@ -966,20 +978,16 @@ def test_described_sources_keeps_the_definition_any_retrieval_of_a_dataset_fetch
 @pytest.mark.parametrize(
     "members",
     [
-        ({}, {"stat_vars": ("Var_c", "Var_d")}),
-        # Families with a member digest list no StatVar; the digests tell them apart.
-        (
-            {"stat_vars": (), "shape_member_digest": "d1"},
-            {"stat_vars": (), "shape_member_digest": "d2"},
-        ),
+        ({"shape_member_digest": "d1"}, {"shape_member_digest": "d2"}),
+        ({"shape_member_digest": "d1"}, {"shape_member_digest": None}),
     ],
-    ids=["listed", "digested"],
+    ids=["two-digests", "one-digest"],
 )
 def test_described_sources_keeps_apart_sources_that_bind_other_members(
     members: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     """Two sources with no identity that describe alike are one dataset only
-    when they bind the same members, which the description counts and never names."""
+    when they state the same member digest."""
     debt = _described(SPEC_KENYA, "debt service paid by Kenya", "debt service").model_copy(
         update=members[0]
     )
@@ -1052,7 +1060,6 @@ def _copy_over(seed: SelectedSource, block: dict[str, Any]) -> SeededSource:
             spec_id=block["spec_id"],
             sentence=seed.sentence,
             has_data=None,
-            stat_vars=seed.stat_vars,
             identity=block["definition"]["identity"],
         ),
         windowed_from=seed.spec_id,
@@ -1110,10 +1117,8 @@ async def test_a_pin_naming_a_windowed_seed_is_read_from_searchs_answer_for_its_
 
     assert result["status"] == "definite"
     recorded = load_log(context.state).sources["req_b"][windowed]
-    # data-mcp lists none of the StatVars of a family Search states a member
-    # digest for, and marks the listing truncated.
     assert recorded == source_from_spec_block(answered).model_copy(
-        update={"searched_as": recorded.searched_as, "stat_vars": (), "stat_var_truncated": True}
+        update={"searched_as": recorded.searched_as}
     )
     assert result["sources"] == [compact_source(recorded)]
     # Search's facts for 2010-2023, where the seed's are for 2015-2023.
@@ -1123,14 +1128,8 @@ async def test_a_pin_naming_a_windowed_seed_is_read_from_searchs_answer_for_its_
     assert "2010 to 2023" in recorded.sentence
     assert recorded.sentence != seed.sentence
     assert (seed.stat_var_member_count, recorded.stat_var_member_count) == (89, 96)
-    # Search is asked with the copy's identity and the seed's elected StatVars.
-    assert data_mcp.calls == [
-        {
-            "spec_id": windowed,
-            "identity": copy.source.identity,
-            "stat_vars": list(seed.stat_vars),
-        }
-    ]
+    # Search is asked with the copy's identity alone.
+    assert data_mcp.calls == [{"spec_id": windowed, "identity": copy.source.identity}]
     assert await service.get(windowed, schema_version=1) == identity_definition(
         answered["definition"]
     )
@@ -1190,16 +1189,13 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
             ],
         )
     )
-    stat_vars = ("Var_elected",)
-    recorded = RecordedIdentity(identity=identity, stat_vars=stat_vars)
+    recorded = RecordedIdentity(identity=identity)
     token = current_recorded_identity.set(
         {spec_id: recorded}.get if on_record == "identity" else None
     )
     if on_record == "copy":
         earlier = _KENYA_OVER["2015-2023"]["spec_id"]
-        copied = WindowedPin(
-            spec_id=spec_id, identity=identity, stat_vars=stat_vars, windowed_from=earlier
-        )
+        copied = WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)
         save_windowed_pins(context.state, [copied])
     resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
 
@@ -1214,9 +1210,7 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
         assert result["action"]["arguments"]["kind"] == "pinned_source_not_found"
         return
     assert search_calls == []
-    assert resolving.calls == [
-        {"spec_id": spec_id, "identity": identity, "stat_vars": list(stat_vars)}
-    ]
+    assert resolving.calls == [{"spec_id": spec_id, "identity": identity}]
     assert result["status"] == "definite"
     assert "action" not in result
     log = load_log(context.state)
@@ -1224,6 +1218,74 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
     assert log.sources["annual_debt_service"][spec_id].coverage_window == Period(
         start=2010, end=2023
     )
+
+
+@pytest.mark.parametrize("axis_open", [True, False], ids=["axis-open", "axis-closed"])
+@pytest.mark.parametrize("path", ["shown-block", "recorded-identity"])
+async def test_a_pin_leaving_the_across_side_closed_is_searched_for_as_an_open_role(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    path: str,
+    axis_open: bool,
+) -> None:
+    # The requirement ranks across creditors and pins a dataset the turn
+    # already holds. One that leaves the creditor side open is honoured with
+    # no `search`. One that totals it, as a search that named no open role
+    # finds it, cannot hold every creditor, so `search` is asked for the side
+    # as an open role instead of the pin being recorded.
+    creditor_axis = [{"role": "origin", "member_count": 55, "members_available": True}]
+    if path == "shown-block":
+        spec_id, period = SPEC_KENYA, Period(start=2015, end=2024)
+        block = _spec(
+            spec_id,
+            "debt service paid by Kenya",
+            coverage=_matching_window(),
+            **({"role_axis_facts": creditor_axis} if axis_open else {}),
+        )
+        surface_used: ToolSurface = surface
+    else:
+        answered = copy.deepcopy(_KENYA_OVER["2010-2023"])
+        answered["resolved"]["role_axis_facts"] = creditor_axis if axis_open else []
+        spec_id, period = answered["spec_id"], Period(start=2010, end=2023)
+        recorded = RecordedIdentity(identity=answered["definition"]["identity"])
+        surface_used = _SearchAndResolve(
+            surface, DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+        )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=period, across="creditors"),
+                derived_requirement(),
+            ],
+        )
+    )
+    if path == "shown-block":
+        _shown(context, spec_id, block)
+    token = current_recorded_identity.set(
+        {spec_id: recorded}.get if path == "recorded-identity" else None
+    )
+
+    try:
+        result = await _discover(surface_used, context)
+    finally:
+        current_recorded_identity.reset(token)
+
+    tools = [record.tool for record in load_log(context.state).records]
+    if axis_open:
+        assert search_calls == []
+        assert tools == ["pin"]
+        assert result["sources"][0]["open_entity_axes"] == [{"column": "origin", "members": 55}]
+        return
+    assert "pin" not in tools
+    (call,) = search_calls
+    (part,) = call["parts"]
+    assert part["open_roles"] == ["creditor"]
 
 
 class _UnreachableStore:
@@ -1377,6 +1439,65 @@ async def test_a_windowed_seed_search_does_not_resolve_to_that_dataset_is_refuse
     assert log.calls(plan_revision(plan)) == 0
 
 
+async def test_a_windowed_seed_refused_for_its_open_role_is_searched_for_afresh(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # Search refuses the copy `open_role_unavailable` because the StatVars its
+    # identity elects over 2010-2023 declare no creditor role. The copy on
+    # record is the same identity, so the requirement goes straight to a
+    # fresh `search` asking for every creditor, with no second resolve.
+    seed = source_from_spec_block(_KENYA_OVER["2015-2023"])
+    copy = _copy_over(seed, _KENYA_OVER["2010-2023"])
+    windowed = copy.source.spec_id
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(windowed)],
+            evidence_requirements=[
+                requirement(
+                    source_spec_id=windowed,
+                    period=Period(start=2010, end=2023),
+                    across="creditors",
+                ),
+                derived_requirement(),
+            ],
+        )
+    )
+    save_seeded_sources(context.state, [SeededSource(source=seed), copy])
+    save_windowed_pins(
+        context.state,
+        [
+            WindowedPin(
+                spec_id=windowed,
+                identity=copy.source.identity,
+                windowed_from=seed.spec_id,
+            )
+        ],
+    )
+    refusal = {
+        "code": "open_role_unavailable",
+        "title": "refused",
+        "detail": "the elected StatVars declare no creditor role",
+        "retryable": False,
+        "pointer": "/input/identity/open_roles",
+    }
+    resolving = DataMcpDefinitions(
+        InMemoryDefinitionStore(), search=SearchStub(refuse={windowed: refusal})
+    )
+
+    await _discover(_SearchAndResolve(surface, resolving), context)
+
+    assert [call["spec_id"] for call in resolving.calls] == [windowed]
+    (call,) = search_calls
+    (part,) = call["parts"]
+    assert part["open_roles"] == ["creditor"]
+
+
 class _Refusing:
     """A surface whose data-mcp refuses every call with `refusal`."""
 
@@ -1418,9 +1539,7 @@ async def test_a_refused_resolve_names_the_refusals_code_when_it_states_one(
     refusal: dict[str, object], code: str | None, said: str
 ) -> None:
     with pytest.raises(DefinitionNotResolvedError) as raised:
-        await resolve_definition(
-            _Refusing(refusal), spec_id=SPEC_KENYA, identity={"seed": "x"}, stat_vars=()
-        )
+        await resolve_definition(_Refusing(refusal), spec_id=SPEC_KENYA, identity={"seed": "x"})
 
     assert str(raised.value) == said
     assert raised.value.code == code
@@ -1499,6 +1618,10 @@ def test_resolved_spec_names_how_a_part_is_not_the_dataset(
     assert raised.value.part == part
 
 
+# The identity the stub `search` serves for every spec block.
+_PINNED_IDENTITY = {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}}
+
+
 def _dropped(spec_id: str, identity: dict[str, Any]) -> SeededSource:
     return SeededSource(
         source=SelectedSource(
@@ -1510,8 +1633,8 @@ def _dropped(spec_id: str, identity: dict[str, Any]) -> SeededSource:
 @pytest.mark.parametrize(
     "dropped",
     [
-        _dropped(SPEC_KENYA, {"stat_var": "x"}),
-        _dropped(SPEC_THIRD, {"stat_var": "x", "requested_window": {"kind": "all"}}),
+        _dropped(SPEC_KENYA, _PINNED_IDENTITY),
+        _dropped(SPEC_THIRD, {**_PINNED_IDENTITY, "requested_window": {"kind": "all"}}),
     ],
     ids=["same-spec-id", "same-dataset-over-other-years"],
 )
@@ -1548,8 +1671,8 @@ async def test_a_search_that_finds_a_dataset_the_turn_dropped_names_no_source(
 @pytest.mark.parametrize(
     "dropped",
     [
-        _dropped(SPEC_KENYA, {"stat_var": "x"}),
-        _dropped(SPEC_THIRD, {"stat_var": "x", "requested_window": {"kind": "all"}}),
+        _dropped(SPEC_KENYA, _PINNED_IDENTITY),
+        _dropped(SPEC_THIRD, {**_PINNED_IDENTITY, "requested_window": {"kind": "all"}}),
     ],
     ids=["same-spec-id", "same-dataset-over-other-years"],
 )
@@ -2350,6 +2473,60 @@ async def test_the_log_survives_a_round_trip_through_session_state(
     assert log.sources["annual_debt_service"][SPEC_KENYA].entities[0].ref == "country/KEN"
 
 
+@pytest.mark.parametrize("as_string", [False, True], ids=["dict form", "string form"])
+def test_load_log_leaves_out_a_requirement_stored_with_member_lists(
+    source: Callable[..., SelectedSource],
+    stored_with_member_list: Callable[[SelectedSource], dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+    as_string: bool,
+) -> None:
+    # A session that crosses the release holds sources with fields
+    # `SelectedSource` no longer has. Their requirement loads as never
+    # discovered, its source-less `no_data` record included, since that
+    # answer would otherwise stand in for the later `definite` one. The
+    # requirement beside it, stored in the current shape, is untouched.
+    log = DiscoveryLog()
+    for requirement_id, status, found in (
+        ("annual_debt_service", DiscoveryStatus.NO_DATA, ()),
+        ("annual_debt_service", DiscoveryStatus.DEFINITE, (source(),)),
+        ("exports", DiscoveryStatus.DEFINITE, (source(spec_id=SPEC_OTHER),)),
+    ):
+        record = DiscoveryRecord(
+            revision="r1",
+            tool="search",
+            requirement_id=requirement_id,
+            requirement_key="k",
+            status=status,
+            spec_ids=tuple(item.spec_id for item in found),
+        )
+        log = log.with_record(record, found)
+    state: dict[str, Any] = {}
+    save_log(state, log)
+    stored = state[DISCOVERY_STATE_KEY]
+    stored["sources"]["annual_debt_service"][SPEC_KENYA] = stored_with_member_list(source())
+    if as_string:
+        stored = {**stored, "records": [r.model_dump(mode="json") for r in log.records]}
+        state[DISCOVERY_STATE_KEY] = json.dumps(stored)
+
+    with caplog.at_level(logging.WARNING, logger="translator.discovery"):
+        loaded = load_log(state)
+
+    assert [record.requirement_id for record in loaded.records] == ["exports"]
+    assert loaded.sources == {"exports": {SPEC_OTHER: source(spec_id=SPEC_OTHER)}}
+    assert loaded.nearest_for("k", "annual_debt_service") == ()
+    assert list(loaded.selectable(requirement_keys={"exports": "k"}, pinned={})) == ["exports"]
+    (logged,) = caplog.records
+    assert logged.levelno == logging.WARNING
+    assert logged.args == (
+        DISCOVERY_STATE_KEY,
+        3,
+        2,
+        1,
+        1,
+        "pinned, stat_var_truncated, stat_vars",
+    )
+
+
 def test_load_log_reads_the_string_form_an_earlier_release_wrote(
     source: Callable[..., SelectedSource],
 ) -> None:
@@ -2395,6 +2572,17 @@ def test_load_log_reads_the_string_form_an_earlier_release_wrote(
     assert reloaded.sources["annual_debt_service"][SPEC_KENYA].spec_id == SPEC_KENYA
 
 
+def _pinning(spec_id: str, stat_var: str) -> SelectedSource:
+    """A source whose identity pins `stat_var`, the one StatVar `describe` can name for it."""
+    return SelectedSource(
+        spec_id=spec_id,
+        sentence="s",
+        has_data=True,
+        served_count=1,
+        identity={"shape": {"kind": "stat_var", "id": stat_var}},
+    )
+
+
 def _log_with_known_source(revision: str, requirement_id: str, ref: str) -> DiscoveryLog:
     """A log recording one `definite` source for `requirement_id` naming `ref`.
 
@@ -2409,7 +2597,7 @@ def _log_with_known_source(revision: str, requirement_id: str, ref: str) -> Disc
         status=DiscoveryStatus.DEFINITE,
         spec_ids=(SPEC_KENYA,),
     )
-    source = SelectedSource(spec_id=SPEC_KENYA, sentence="s", has_data=True, stat_vars=(ref,))
+    source = _pinning(SPEC_KENYA, ref)
     return DiscoveryLog().with_record(record, (source,))
 
 
@@ -2442,25 +2630,26 @@ async def test_fetch_definitions_enriches_a_definite_sources_own_definition(
 @pytest.mark.parametrize(
     "family",
     [
-        {"stat_vars": ("DebtServicePaid", "DebtServiceDue")},
-        # A described identity that mints a family, though Search lists one member.
-        {"pinned": False},
+        {"served_count": 2, "identity": {"shape": {"kind": "statvar_schema"}}},
+        # A described identity serving one StatVar names no dcid to describe.
+        {"identity": {"shape": {"kind": "statvar_schema"}}},
     ],
-    ids=["two-listed", "one-listed-unpinned"],
+    ids=["a-described-family", "one-served-by-a-described-identity"],
 )
-async def test_fetch_definitions_describes_no_member_of_a_family(
+async def test_fetch_definitions_describes_only_a_pinned_identity(
     surface: McpSurface,
     draft: DraftFactory,
     context_holding: ContextHolding,
     family: dict[str, Any],
 ) -> None:
     """A family's definition would be one member's, which a model would read
-    as the whole family's, so a family source is not described."""
+    as the whole family's, and a described identity names no dcid, so only a
+    source whose identity pins its StatVar is described."""
     context = context_holding(draft())
     await _discover(surface, context)
     log = load_log(context.state)
     source = log.sources["annual_debt_service"][SPEC_KENYA]
-    assert source.stat_vars == ("DebtServicePaid",)
+    assert pinned_stat_var(source.identity) == "DebtServicePaid"
     family = source.model_copy(update=family)
 
     pairs = await fetch_definitions(
@@ -2584,12 +2773,7 @@ async def test_fetch_definitions_retries_a_batch_that_refuses_over_one_unheld_dc
     requirement_ids = [f"req_{i}" for i in range(8)]
     keys = {requirement_id: f"key_{requirement_id}" for requirement_id in requirement_ids}
     sources = {
-        requirement_id: SelectedSource(
-            spec_id=_valid_spec_id(i),
-            sentence="s",
-            has_data=True,
-            stat_vars=("refuse" if i == 3 else f"ok_{i}",),
-        )
+        requirement_id: _pinning(_valid_spec_id(i), "refuse" if i == 3 else f"ok_{i}")
         for i, requirement_id in enumerate(requirement_ids)
     }
     counting = _CountingSurface(surface)

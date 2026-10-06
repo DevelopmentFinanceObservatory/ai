@@ -274,7 +274,7 @@ _ENVELOPE_KEYS = frozenset(
         "stat_var_item_count",
         "stat_var_member_count_exact",
         "entity_roles",
-        "stat_var_truncated",
+        "stat_var_served_count",
         "open_entity_axes",
         "candidates",
         "warnings",
@@ -1998,7 +1998,7 @@ _SEED_FACT_LINES = (
     "stat_var_shape_kind",
     "stat_var_item_count",
     "entity_roles",
-    "stat_var_truncated",
+    "stat_var_served_count",
 )
 
 
@@ -2095,7 +2095,7 @@ def _render_envelope(envelope: dict[str, Any]) -> str:
       routed on.
     - `parts`: how many variables the question decomposed into.
     - The pin-predicate facts (`stat_var_shape_kind`, `stat_var_item_count`,
-      `entity_roles`, `stat_var_truncated`) ride alongside `wide` for the same
+      `entity_roles`, `stat_var_served_count`) ride alongside `wide` for the same
       reason `graph_envelope` carries them, sparing a later reader of `wide`
       another trip into the raw envelope.
     - `open_entity_axes`, each entity axis `search` left open with its member count, so the
@@ -2134,7 +2134,7 @@ def _render_envelope(envelope: dict[str, Any]) -> str:
             "stat_var_shape_kind",
             "stat_var_item_count",
             "entity_roles",
-            "stat_var_truncated",
+            "stat_var_served_count",
         )
         if envelope.get(key) is not None
     )
@@ -2468,12 +2468,12 @@ def _refused_specs(refusal: dict[str, Any] | None) -> list[tuple[str, str]]:
 
     Reads `refusal` and each `also_stopped` entry as the opaque per-kind dict
     `_message`'s `elif refusal:` branch already treats them as: only
-    `RediscoveryNeeded`'s shape and the `seed_dropped` shape
-    (`harness.seeds`'s `dropped_seed_shape`) carry a `spec_id` today, at the top
+    `RediscoveryNeeded`'s shape carries a `spec_id` today, at the top
     level, with why in its nested `refusal.message`. `MethodChoiceNeeded` and
     `Refused` name neither. `RediscoveryNeeded` fires for
     `executor.classify.REDISCOVERY_CODES` (`upstream_version_changed`,
-    `definition_not_held`) alone; `over_ceiling`/`member_cardinality` is a
+    `definition_not_held`, `open_role_unavailable`) alone;
+    `over_ceiling`/`member_cardinality` is a
     `Refused` `STOP` (`classify.py`'s own `STOP_CODES` default) and so
     carries no `spec_id` here. This does not assume that shape survives
     unchanged.

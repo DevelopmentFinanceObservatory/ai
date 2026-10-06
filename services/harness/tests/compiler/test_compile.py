@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from itertools import permutations
 from pathlib import Path
 from typing import Any
@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
-from compiler.sources import source_from_spec_block
+from compiler.sources import member_digest, source_from_spec_block
 from compiler.surface import ToolSchema
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
@@ -108,6 +108,20 @@ DerivedRequirementFactory = Callable[..., EvidenceRequirement]
 SourceFactory = Callable[..., SelectedSource]
 
 Code = CompileIssueCode
+
+
+def _pinned(stat_var: str, fields: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """`fields` as a source whose identity pins `stat_var`, the one StatVar `search`
+    serves for it: two such sources overlap only when they pin one StatVar. The
+    identity members `fields` states win over the pin."""
+    fields = dict(fields or {})
+    identity = {"shape": {"kind": "stat_var", "id": stat_var}} | fields.pop("identity", {})
+    return {
+        "served_count": 1,
+        "shape_member_digest": member_digest([stat_var]),
+        **fields,
+        "identity": identity,
+    }
 
 
 def _draft(
@@ -197,10 +211,7 @@ def test_a_retrieval_then_an_aggregate_compiles_to_two_bound_steps(
     assert workflow is not None
     retrieve, totals = workflow.steps
     assert (retrieve.tool.server, retrieve.tool.name) == ("data-mcp", "get_data")
-    assert retrieve.args == {
-        "spec_id": SPEC_KENYA,
-        "resolved_stat_var_dcids": ["DebtServicePaid"],
-    }
+    assert retrieve.args == {"spec_id": SPEC_KENYA}
     assert retrieve.bindings == {}
     assert (totals.tool.server, totals.tool.name) == ("analysis-mcp", "aggregate")
     # The compiler wrote the frame grammar's period column; the proposal said "period".
@@ -1731,37 +1742,19 @@ def test_a_translation_that_stops_at_the_retrieval_compiles(
     assert result.workflow.terminal_steps == ("debt",)
     (step,) = result.workflow.steps
     assert step.tool.name == "get_data"
-    assert step.args == {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["DebtServicePaid"]}
+    assert step.args == {"spec_id": SPEC_KENYA}
 
 
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        (
-            {"stat_vars": ("Count_Person", "Count_Person_Female")},
-            {
-                "spec_id": SPEC_KENYA,
-                "stat_vars": "separate",
-                "resolved_stat_var_dcids": ["Count_Person", "Count_Person_Female"],
-            },
-        ),
-        (
-            {"stat_vars": ("Count_Person",)},
-            {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["Count_Person"]},
-        ),
-        ({"stat_vars": ()}, {"spec_id": SPEC_KENYA}),
-        (
-            {"stat_vars": ("Count_Person", "Count_Person_Female"), "shape_member_digest": "d"},
-            {"spec_id": SPEC_KENYA, "stat_vars": "separate"},
-        ),
-        (
-            {"stat_vars": ("Count_Person",), "shape_member_digest": "d", "pinned": True},
-            {"spec_id": SPEC_KENYA, "resolved_stat_var_dcids": ["Count_Person"]},
-        ),
+        ({"served_count": 2}, {"spec_id": SPEC_KENYA, "stat_vars": "separate"}),
+        ({"served_count": None}, {"spec_id": SPEC_KENYA, "stat_vars": "separate"}),
+        ({"served_count": 1}, {"spec_id": SPEC_KENYA}),
     ],
-    ids=["a-family-elected", "one-elected", "none-elected", "a-digest-family", "a-pinned-root"],
+    ids=["a-family", "unsettled", "one-served"],
 )
-def test_a_retrieval_posts_the_statvars_its_source_elected(
+def test_a_retrieval_writes_the_spec_id_and_a_family_s_reading_alone(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
@@ -1769,12 +1762,9 @@ def test_a_retrieval_posts_the_statvars_its_source_elected(
     overrides: dict[str, object],
     expected: dict[str, object],
 ) -> None:
-    # A source without a member digest lists its membership, which rides on
-    # the retrieval in the source's order as `get_data`'s
-    # `resolved_stat_var_dcids`, beside the reading a family states. A
-    # source that elected none leaves the key out, so `get_data` resolves the
-    # family alone, and so does a family with a member digest, which the mint
-    # elects again; a pinned source posts its root.
+    # The mint resolves the family's members itself, so a retrieval posts no
+    # StatVar: a family states its reading, and a source serving one StatVar
+    # states nothing beside its spec_id.
     plan = _draft([decision()], [requirement()], answer_mode=AnswerMode.SERIES)
 
     result = build(
@@ -2213,8 +2203,13 @@ def test_a_whole_side_reading_a_filter_counts_the_entities_it_kept(
         plan,
         _translation(_retrieve(), retrieve_gdp, filter_op, operation, terminal=["gap"]),
         discovered={
-            "annual_debt_service": wide_source(entities=_THREE_DESTINATIONS),
-            "annual_gdp": source(spec_id=SPEC_OTHER, stat_vars=("GrossDomesticProduct",)),
+            "annual_debt_service": wide_source(
+                entities=_THREE_DESTINATIONS, **_pinned("DebtServicePaid")
+            ),
+            "annual_gdp": source(
+                spec_id=SPEC_OTHER,
+                **_pinned("GrossDomesticProduct"),
+            ),
         },
     )
 
@@ -2840,9 +2835,10 @@ def test_a_sum_binds_both_frames_pins_each_sides_unit_and_feeds_a_growth(
         _draft([decision()], requirements),
         translation,
         discovered={
-            "annual_debt_service": source(**left_source),
+            "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
             "multilateral": source(
-                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), **right_source
+                spec_id=SPEC_OTHER,
+                **_pinned("MultilateralDebtService", right_source),
             ),
         },
     )
@@ -2918,9 +2914,11 @@ def test_a_whole_sum_side_needs_an_entity_only_where_its_requirement_pools_sever
         _draft([decision()], [bilateral, multilateral, total]),
         translation,
         discovered={
-            "annual_debt_service": source(entities=resolved),
+            "annual_debt_service": source(entities=resolved, **_pinned("DebtServicePaid")),
             "multilateral": source(
-                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), entities=resolved
+                spec_id=SPEC_OTHER,
+                **_pinned("MultilateralDebtService"),
+                entities=resolved,
             ),
         },
     )
@@ -2933,31 +2931,38 @@ def test_a_whole_sum_side_needs_an_entity_only_where_its_requirement_pools_sever
     ("right_source", "right_unit", "code"),
     [
         pytest.param(
-            {"spec_id": SPEC_KENYA, "stat_vars": ("MultilateralDebtService",)},
+            {
+                "spec_id": SPEC_KENYA,
+                "served_count": 1,
+                "shape_member_digest": member_digest(["MultilateralDebtService"]),
+            },
             _USD,
             Code.SUM_SIDES_OVERLAP,
             id="the-same-definition",
         ),
         pytest.param(
-            {"spec_id": SPEC_OTHER, "stat_vars": ("DebtServicePaid", "Other")},
-            _USD,
-            Code.SUM_SIDES_OVERLAP,
-            id="a-statvar-in-common",
-        ),
-        pytest.param(
-            {"spec_id": SPEC_OTHER, "stat_vars": (), "shape_member_digest": "d"},
+            {"spec_id": SPEC_OTHER, "served_count": None, "shape_member_digest": "d"},
             _USD,
             Code.SUM_SIDES_OVERLAP,
             id="one-family-under-two-definitions",
         ),
         pytest.param(
-            {"spec_id": SPEC_OTHER, "stat_vars": ("Other",), "unit_ref": "eur"},
+            {
+                "spec_id": SPEC_OTHER,
+                "served_count": 1,
+                "shape_member_digest": member_digest(["Other"]),
+                "unit_ref": "eur",
+            },
             Unit(currency="EUR", prices="current"),
             Code.SUM_UNITS_DIFFER,
             id="another-currency",
         ),
         pytest.param(
-            {"spec_id": SPEC_OTHER, "stat_vars": ("Other",)},
+            {
+                "spec_id": SPEC_OTHER,
+                "served_count": 1,
+                "shape_member_digest": member_digest(["Other"]),
+            },
             None,
             Code.SUM_UNITS_DIFFER,
             id="one-side-states-no-unit",
@@ -2989,12 +2994,11 @@ def test_a_sum_that_could_count_a_flow_twice_or_mix_units_is_refused(
         _draft([decision()], requirements),
         translation,
         discovered={
-            # Search lists no member of a family it states a member digest
-            # for, so two such sides overlap when the digests are equal.
+            # Two families overlap when their digests are equal.
             "annual_debt_service": source(
                 **(
-                    {"stat_vars": (), "shape_member_digest": "d"}
-                    if "shape_member_digest" in right_source
+                    {"served_count": None, "shape_member_digest": "d"}
+                    if right_source.get("shape_member_digest") == "d"
                     else {}
                 )
             ),
@@ -3047,9 +3051,10 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
         _draft([decision()], requirements),
         translation,
         discovered={
-            "annual_debt_service": source(**left_source),
+            "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
             "multilateral": source(
-                spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",), **_BOUND_BY_REQUEST
+                spec_id=SPEC_OTHER,
+                **_pinned("MultilateralDebtService", _BOUND_BY_REQUEST),
             ),
         },
     )
@@ -3148,8 +3153,11 @@ def test_a_side_declaring_no_unit_against_one_in_a_unit_is_refused_before_runnin
         _draft([decision()], requirements),
         translation,
         discovered={
-            "annual_debt_service": source(**left_source),
-            "annual_gdp": source(spec_id=SPEC_OTHER, stat_vars=("Gdp",), **right_source),
+            "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
+            "annual_gdp": source(
+                spec_id=SPEC_OTHER,
+                **_pinned("Gdp", right_source),
+            ),
         },
     )
 
@@ -3201,8 +3209,11 @@ def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_then_the_year
         _draft([decision()], [requirement(), multilateral, total, span]),
         translation,
         discovered={
-            "annual_debt_service": source(),
-            "multilateral": source(spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",)),
+            "annual_debt_service": source(**_pinned("DebtServicePaid")),
+            "multilateral": source(
+                spec_id=SPEC_OTHER,
+                **_pinned("MultilateralDebtService"),
+            ),
         },
     )
 
@@ -3228,11 +3239,11 @@ _HEALTH = ("CRSPurposeCode120", "CRSPurposeCode121", "CRSPurposeCode12220")
 
 
 def _family(
-    digest: str, *, slot_codes: dict[str, tuple[str, ...] | None] | None, **shape: str
+    digest: str, *, slot_codes: dict[str, tuple[str, ...] | None] | None, **shape: object
 ) -> dict:
-    """A source `search` states by member digest alone, listing none of its members."""
+    """A family `search` states by member digest, its membership not served as one StatVar."""
     return {
-        "stat_vars": (),
+        "served_count": None,
         "shape_member_digest": digest,
         "shape_member_count": 40,
         "identity": {"shape": _ODA_SHAPE | shape},
@@ -3241,33 +3252,92 @@ def _family(
 
 
 @pytest.mark.parametrize(
-    ("right_family", "code"),
+    ("left_shape", "right_family", "code"),
     [
         pytest.param(
+            {},
             {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)}},
             Code.SUM_SIDES_OVERLAP,
             id="all-sectors-holds-education",
         ),
         pytest.param(
+            {},
             {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": _HEALTH}},
             None,
             id="education-and-health-share-no-code",
         ),
         pytest.param(
+            {},
             {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)}, "measured_property": "count"},
             None,
             id="another-measure",
         ),
         pytest.param(
+            {},
             {"slot_codes": {"crsCooperationModality": ("CRSModalityC01",)}},
             Code.SUM_OVERLAP_UNDECIDED,
             id="each-binds-a-property-the-other-leaves-open",
         ),
-        pytest.param({"slot_codes": None}, Code.SUM_OVERLAP_UNDECIDED, id="slots-unread"),
+        pytest.param({}, {"slot_codes": None}, Code.SUM_OVERLAP_UNDECIDED, id="slots-unread"),
         pytest.param(
+            {},
             {"slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": None}},
             Code.SUM_OVERLAP_UNDECIDED,
             id="a-set-whose-codes-are-not-stated",
+        ),
+        pytest.param(
+            {"measurement_denominator": {"ref": "Count_Person"}},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)},
+                "measurement_denominator": {"ref": "Count_Household"},
+            },
+            None,
+            id="another-denominator",
+        ),
+        pytest.param(
+            {"measurement_denominator": {"unresolved": True}},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)},
+                "measurement_denominator": {"ref": "Count_Person"},
+            },
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="an-unresolved-denominator-against-a-ref",
+        ),
+        pytest.param(
+            {"measurement_denominator": {"unresolved": True}},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)},
+                "measurement_denominator": {"unresolved": True},
+            },
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="two-unresolved-denominators-may-differ",
+        ),
+        pytest.param(
+            {"measurement_denominator": {"ref": "Count_Person"}},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)},
+                "measurement_denominator": {"ref": "Count_Person"},
+            },
+            Code.SUM_SIDES_OVERLAP,
+            id="one-denominator-on-both-sides",
+        ),
+        pytest.param(
+            {},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",)},
+                "measurement_denominator": {"ref": "Count_Person"},
+            },
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="a-field-one-side-leaves-out",
+        ),
+        pytest.param(
+            {"measurement_denominator": {"unresolved": True}},
+            {
+                "slot_codes": {"crsTypeOfFlow": ("CRSTypeOfFlow10",), "crsPurpose": _HEALTH},
+                "measurement_denominator": {"unresolved": True},
+            },
+            None,
+            id="unresolved-denominators-and-codes-shared-by-none",
         ),
     ],
 )
@@ -3276,6 +3346,7 @@ def test_two_families_listed_by_digest_alone_are_summed_as_their_identities_allo
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
+    left_shape: dict[str, Any],
     right_family: dict[str, Any],
     code: CompileIssueCode | None,
 ) -> None:
@@ -3286,7 +3357,9 @@ def test_two_families_listed_by_digest_alone_are_summed_as_their_identities_allo
         _draft([decision()], requirements),
         translation,
         discovered={
-            "annual_debt_service": source(**_family("d-education", slot_codes=education)),
+            "annual_debt_service": source(
+                **_family("d-education", slot_codes=education, **left_shape)
+            ),
             "multilateral": source(spec_id=SPEC_OTHER, **_family("d-other", **right_family)),
         },
     )
@@ -3304,7 +3377,10 @@ _EAST_AFRICA = ResolvedEntity(role="destination", ref="EastAfrica", label="East 
     [
         pytest.param((_UGANDA,), {"shape_member_digest": "d"}, None, id="other-recipient"),
         pytest.param(
-            (_UGANDA,), {"stat_vars": ("DebtServicePaid",)}, None, id="other-recipient-listed"
+            (_UGANDA,),
+            {"served_count": 1, "shape_member_digest": member_digest(["DebtServicePaid"])},
+            None,
+            id="other-recipient-one-served",
         ),
         pytest.param(
             None, {"shape_member_digest": "d"}, Code.SUM_SIDES_OVERLAP, id="same-recipient"
@@ -3327,7 +3403,7 @@ def test_one_family_summed_over_entities_it_binds_apart_counts_nothing_twice(
     # ODA to Kenya plus ODA to another recipient: one family, its rows kept
     # apart only by the recipient each side binds.
     requirements, translation = _summed(requirement)
-    family = {"stat_vars": ()} | shared
+    family = {"served_count": None} | shared
     entities = {} if right_entities is None else {"entities": right_entities}
 
     result = build(
@@ -3370,8 +3446,11 @@ def test_a_sum_of_a_sum_is_checked_through_to_every_source(
     requirements = [r for r in requirements if r.id != "growth"]
     operations = [op for op in translation.operations if op.id != "growth"]
     discovered = {
-        "annual_debt_service": source(),
-        "multilateral": source(spec_id=SPEC_OTHER, stat_vars=("MultilateralDebtService",)),
+        "annual_debt_service": source(**_pinned("DebtServicePaid")),
+        "multilateral": source(
+            spec_id=SPEC_OTHER,
+            **_pinned("MultilateralDebtService"),
+        ),
     }
     right = RequirementSide(input_id="annual_debt_service")
     right_op = Side(input="debt")
@@ -3382,7 +3461,7 @@ def test_a_sum_of_a_sum_is_checked_through_to_every_source(
         operations.append(_retrieve(id="private", requirement_id="private", spec_id=_SPEC_THIRD))
         discovered["private"] = source(
             spec_id=_SPEC_THIRD,
-            stat_vars=("PrivateDebtService",),
+            **_pinned("PrivateDebtService"),
             unit_ref="usd" if third_unit == _USD else "eur",
         )
         right = RequirementSide(input_id="private")
@@ -4005,12 +4084,10 @@ def test_top_countries_by_health_spending_ranks_by_the_open_place_axis(
 ) -> None:
     # "Top 10 countries by health spending per person": no country named,
     # and dev `search`'s own block leaves its 193 countries open on
-    # `observationAbout`. An identity that names no place states no root,
-    # and `search` counts the binding as at least one StatVar, so the
-    # retrieval reads it as a family: separately, since it varies along no
-    # axis to sum over. The place axis holds every level of place, so a
-    # filter keeps the countries first: its retrieval asks for place types,
-    # and the filter reads them.
+    # `observationAbout`. `search` states the mint serves one StatVar, so
+    # the retrieval states no reading. The place axis holds every level of
+    # place, so a filter keeps the countries first: its retrieval asks for
+    # place types, and the filter reads them.
     open_place = source_from_spec_block(place_scope_block)
     countries_req, countries = _countries_of("health")
     rank_req, ranked = _rank_over("countries", axis="country", reads="countries")
@@ -4029,14 +4106,8 @@ def test_top_countries_by_health_spending_ranks_by_the_open_place_axis(
     assert result.ok, result.issues
     assert result.workflow is not None
     retrieve, keep, rank = result.workflow.steps
-    assert open_place.pinned is False
-    assert retrieve.args == {
-        "spec_id": open_place.spec_id,
-        "stat_vars": "separate",
-        "resolved_stat_var_dcids": list(open_place.stat_vars),
-        "place_types": True,
-    }
-    assert len(open_place.stat_vars) == 1
+    assert open_place.served_count == 1
+    assert retrieve.args == {"spec_id": open_place.spec_id, "place_types": True}
     assert retrieve.expected_role_keys == _frame_role_columns(["observationAbout"])
     assert keep.args == {
         "predicates": [
@@ -4147,12 +4218,96 @@ def test_top_donors_to_kenya_ranks_by_the_open_origin_axis(
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
     }
-    assert kenya_from_every_donor.stat_vars
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.RULE
     assert retrieve.expected_role_keys == _frame_role_columns(["destination", "origin"])
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}
     assert rank.expected_role_keys == _frame_role_columns(["origin"])
     assert "entity_role_unverified" not in [w.code.value for w in result.warnings]
+
+
+def _nigeria_ppg_service_to_every_creditor(role_open_block: dict[str, Any]) -> dict[str, Any]:
+    """The block `search` answers Nigeria's PPG debt service in 2024 with, every creditor open.
+
+    Asked for an open creditor, it elects the by-creditor twin of the IDS
+    total, binds Nigeria on `destination`, and counts 17 creditors on
+    `origin`. Built on the recorded education-aid block, its family replaced
+    by the one StatVar.
+    """
+    block = copy.deepcopy(role_open_block)
+    identity = block["definition"]["identity"]
+    identity["shape"]["population_type"] = "ServicingPayment"
+    identity["slots"] = []
+    identity["entities"] = {"destination": ["country/NGA"]}
+    identity["open_roles"] = ["origin"]
+    identity["requested_window"] = {"kind": "range", "start_year": 2024, "end_year": 2024}
+    resolved = block["resolved"]
+    resolved["shape"].pop("member_digest")
+    resolved["shape"]["member_count"] = 1
+    resolved["shape"]["slot_keys"] = []
+    resolved["slots"] = []
+    resolved["inapplicable_slots"] = []
+    resolved["stat_vars"] = {
+        "member_count": 1,
+        "member_count_exact": True,
+        "served_count": 1,
+        "data_date_range": {"start": "1970", "end": "2024"},
+    }
+    resolved["entities"] = [
+        {"ref": "country/NGA", "label": "Nigeria", "entity_type": "Country", "role": "destination"}
+    ]
+    resolved["open_axis_facts"] = []
+    resolved["role_axis_facts"] = [
+        {"role": "origin", "member_count": 17, "members_available": True}
+    ]
+    return block
+
+
+def test_top_creditors_nigeria_pays_rank_over_the_open_creditor_axis(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    role_open_block: dict[str, Any],
+) -> None:
+    # "Who does Nigeria pay the most in debt service for PPG debt in 2024
+    # (top 5)" is answered by the by-creditor source search elects for an open
+    # creditor, which ranks Nigeria's 17 creditors and keeps five.
+    source = source_from_spec_block(_nigeria_ppg_service_to_every_creditor(role_open_block))
+    debt = DatasetRequirement(
+        id="debt",
+        decision_ids=["measure"],
+        measure="debt service on PPG external debt",
+        entities=[Entity(name="Nigeria", role="debtor")],
+        across="creditor",
+        period=Period(start=2024, end=2024),
+    )
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "creditor",
+        "reduction": Reduction.SUM,
+        "limit": 5,
+    }
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [debt, RankRequirement(decision_ids=["measure", "population"], input_id="debt", **fields)],
+    )
+    fetch = RetrieveOperation(id="fetch", requirement_id="debt", spec_id=source.spec_id)
+    ranked = RankOperation(requirement_id="ranked", input="fetch", **fields)
+
+    result = build(
+        plan, _translation(fetch, ranked, terminal=["ranked"]), discovered={"debt": source}
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    retrieve, rank = result.workflow.steps
+    assert retrieve.expected_role_keys == _frame_role_columns(["destination", "origin"])
+    assert rank.args == {
+        "rank_by": ["origin"],
+        "ascending": False,
+        "aggregation": "sum",
+        "limit": 5,
+    }
 
 
 @pytest.mark.parametrize("party", ["bilateral donor", "DAC donor", "multilateral donor"])
@@ -4744,13 +4899,15 @@ def _drc_sources(source: SourceFactory) -> dict[str, SelectedSource]:
     """The sources the plans pin: the US flow bound both sides, every donor's open on `origin`."""
     return {
         "us_disbursements": source(
-            spec_id=SPEC_US_TO_DRC, entities=(DRC, UNITED_STATES), stat_vars=("UsOdaToDrc",)
+            spec_id=SPEC_US_TO_DRC,
+            entities=(DRC, UNITED_STATES),
+            **_pinned("UsOdaToDrc"),
         ),
         "all_donors_disbursements": source(
             spec_id=SPEC_EVERY_DONOR_TO_DRC,
             entities=(DRC,),
             open_entity_axes=(OpenEntityAxis(column="origin", member_count=77),),
-            stat_vars=("OdaToDrc",),
+            **_pinned("OdaToDrc"),
         ),
     }
 

@@ -9,6 +9,8 @@ finding a workflow carries about a requirement it was approved against.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, override
 
@@ -18,6 +20,7 @@ from pydantic import (
     Field,
     GetJsonSchemaHandler,
     JsonValue,
+    ValidationError,
     model_validator,
 )
 from pydantic.json_schema import JsonSchemaValue
@@ -86,6 +89,49 @@ class StrictModel(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, json_schema_extra=_strip_titles)
+
+
+def rejected_fields(errors: Iterable[ValidationError]) -> list[str]:
+    """The fields `errors` reject, each as its dotted path, sorted and named once.
+
+    A list index is left out of a path, so one field rejected in several
+    entries is one name. A path names a field and never its value, so a
+    caller may log it for stored state whose content it must not log.
+    """
+    return sorted(
+        {
+            ".".join(part for part in error["loc"] if isinstance(part, str))
+            for exc in errors
+            for error in exc.errors(include_input=False, include_url=False)
+        }
+    )
+
+
+def warn_left_out(
+    logger: logging.Logger,
+    state_key: str,
+    errors: Sequence[ValidationError],
+    *,
+    entries: int = 1,
+    detail: str = "",
+    counts: Sequence[int] = (),
+) -> None:
+    """Log on `logger` that a reader left `entries` stored entries out of `state_key`.
+
+    The warning names the state key and the fields `errors` reject
+    (`rejected_fields`), and no stored value. `detail` is a `%d` format that
+    breaks `entries` down, filled from `counts`.
+    """
+    noun = "entry" if entries == 1 else "entries"
+    breakdown = f" ({detail})" if detail else ""
+    logger.warning(
+        f"%s: left out %d stored {noun}{breakdown} whose shape is not the current one; "
+        "rejected fields: %s",
+        state_key,
+        entries,
+        *counts,
+        ", ".join(rejected_fields(errors)),
+    )
 
 
 class TaggedModel(StrictModel):

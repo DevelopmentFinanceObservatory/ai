@@ -243,7 +243,9 @@ class FactSeries(_WireModel):
     point_count: int = Field(ge=0)
     coordinates: dict[str, str] | None = None
     first: float | None = None
+    first_period: str | None = None
     last: float | None = None
+    last_period: str | None = None
     change: SeriesChange | None = None
 
 
@@ -415,9 +417,6 @@ MAX_OPERATION_PHRASE_CHARS = 200
 # the most a whole query may hold (dfo-apis `search.engine.config`'s
 # `max_query_chars`).
 MAX_SEED_SENTENCE_CHARS = 2_000
-# The StatVars a block lists: dfo-apis `search.engine.config`'s
-# `resolved_stat_vars_max`.
-MAX_SEED_STAT_VARS = 200
 # The entities a block resolves: an identity binds at most 1,024 refs under
 # one role (dfo-apis `search.models.identity`), which a region's members can
 # reach. The most recorded is 2.
@@ -524,7 +523,7 @@ def check_resolved_bounds(resolved: dict[str, Any]) -> None:
     The members are the ones `compiler.sources.source_from_spec_block`,
     `harness.tool_contracts.graph_envelope` and `harness.graph`'s seed
     readers take: the sentence, the entities, the unit and provenance, the
-    coverage, the listed StatVars, the slots, the open entity axes and the
+    coverage, the member counts, the slots, the open entity axes and the
     headline. A member of another type than Search serves is left to its
     reader, which refuses or ignores it.
 
@@ -558,15 +557,8 @@ def check_resolved_bounds(resolved: dict[str, Any]) -> None:
             f"resolved.coverage.dimensions[{index}].count", _seed_mapping(dimension).get("count")
         )
     stat_vars = _seed_mapping(resolved.get("stat_vars"))
-    _seed_count("resolved.stat_vars.member_count", stat_vars.get("member_count"))
-    for index, item in enumerate(
-        _seed_items("resolved.stat_vars.items", stat_vars.get("items"), MAX_SEED_STAT_VARS)
-    ):
-        where = f"resolved.stat_vars.items[{index}]"
-        _seed_text(f"{where}.ref", _seed_mapping(item).get("ref"))
-        for key in ("slot_values", "constraint_properties"):
-            for value in _seed_items(f"{where}.{key}", _seed_mapping(item).get(key)):
-                _seed_text(f"{where}.{key}", value)
+    for key in ("member_count", "served_count"):
+        _seed_count(f"resolved.stat_vars.{key}", stat_vars.get(key))
     shape = _seed_mapping(resolved.get("shape"))
     _seed_text("resolved.shape.member_digest", shape.get("member_digest"))
     _seed_count("resolved.shape.member_count", shape.get("member_count"))
@@ -599,10 +591,9 @@ class SpecBlock(BaseModel):
     the Spec's other members.
 
     `harness.graph`'s `seed` node reads Search's own answer for each seed's
-    identity as one: the source a plan pins, whose StatVars
-    (`resolved.stat_vars.items`) every `get_data` of the seed posts, and the
-    planner's envelope. Each member of `resolved` the harness reads is held to
-    its own bound (`check_resolved_bounds`).
+    identity as one: the source a plan pins, and the planner's envelope.
+    Each member of `resolved` the harness reads is held to its own bound
+    (`check_resolved_bounds`).
     """
 
     model_config = ConfigDict(extra="allow")
@@ -622,54 +613,25 @@ class SpecBlock(BaseModel):
         return self
 
 
-class _SeedMember(BaseModel):
-    """A member of a seed's Spec block the harness keeps. The block's other
-    members are dropped as it is read."""
+class SeedSpec(BaseModel):
+    """What a seed hands over of one definite part's Spec block: the spec_id
+    and the definition.
+
+    The website posts the block as Search served it. Every other member,
+    `resolved` whole among them, is dropped as the block is read, so nothing
+    in the harness reads it from the browser: `harness.graph`'s `seed` node
+    takes it from Search's own answer for the identity (`SpecBlock`), and
+    Search derives the population from the identity. A seed posted before
+    Search stopped listing members, whose `resolved.stat_vars.items` names
+    them, reads the same. The block is bounded at `MAX_SEED_SPEC_BYTES` as
+    posted; the identity's own bound is data-mcp's
+    (`data_mcp.definition_writes.MAX_IDENTITY_BYTES`).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
-
-class SeedStatVar(_SeedMember):
-    """One StatVar Search listed for the Spec, by its dcid alone."""
-
-    ref: str = Field(max_length=MAX_SEED_TEXT_CHARS)
-
-
-class SeedStatVars(_SeedMember):
-    items: list[SeedStatVar] = Field(default_factory=list, max_length=MAX_SEED_STAT_VARS)
-
-
-class SeedShape(_SeedMember):
-    """Whether Search states a member digest for the Spec's binding."""
-
-    member_digest: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
-
-
-class SeedResolved(_SeedMember):
-    stat_vars: SeedStatVars = Field(default_factory=SeedStatVars)
-    shape: SeedShape | None = None
-
-
-class SeedSpec(_SeedMember):
-    """What a seed hands over of one definite part's Spec block: the spec_id,
-    the definition, the dcids of the StatVars Search listed
-    (`resolved.stat_vars.items[].ref`), and whether Search stated a member
-    digest (`resolved.shape.member_digest`).
-
-    The website posts the block as Search served it. Every other member,
-    labels, sentence, coverage, headline and slots among them, is dropped as
-    the block is read, so nothing in the harness reads them from the browser:
-    `harness.graph`'s `seed` node takes them from Search's own answer for the
-    identity (`SpecBlock`). The StatVars are what Search re-reads in the
-    graph when the identity's shape names no measure family. A family with a
-    member digest is one Search elects again, so its StatVars are not
-    re-posted (`resubmitted_stat_vars`). The block is bounded at `MAX_SEED_SPEC_BYTES` as posted; the identity's own bound is
-    data-mcp's (`data_mcp.definition_writes.MAX_IDENTITY_BYTES`).
-    """
-
     spec_id: str = Field(max_length=MAX_SEED_TEXT_CHARS)
     definition: SeedDefinition
-    resolved: SeedResolved = Field(default_factory=SeedResolved)
 
     @model_validator(mode="before")
     @classmethod
@@ -686,19 +648,6 @@ class SeedSpec(_SeedMember):
     def _the_definition_names_this_spec(self) -> SeedSpec:
         _check_names_its_spec(self.definition, self.spec_id)
         return self
-
-    @property
-    def stat_vars(self) -> tuple[str, ...]:
-        """The dcids of the StatVars Search listed for the Spec, in its order."""
-        return tuple(item.ref for item in self.resolved.stat_vars.items)
-
-    @property
-    def resubmitted_stat_vars(self) -> tuple[str, ...]:
-        """The StatVars a resubmit of the identity posts: none for a family with a
-        member digest, which Search elects again from its code index, and
-        `stat_vars` otherwise."""
-        shape = self.resolved.shape
-        return () if shape is not None and shape.member_digest else self.stat_vars
 
 
 class OperationVerb(StrEnum):
@@ -1065,8 +1014,13 @@ class PlanProposed(_WireModel):
 
 
 class PlanVersioned(_WireModel):
-    """A new plan version after an amendment. Re-render the plan card from
-    the fresh plan.proposed that follows."""
+    """A new plan version replaces the card `supersedes` names. Re-render the
+    plan card from the fresh plan.proposed that follows.
+
+    An amendment raises `version`. A plan drafted again because the one
+    awaiting approval could not be read carries `version` 1, which can be
+    lower than the version it supersedes.
+    """
 
     event: Literal["plan.versioned"]
     seq: int = Field(ge=0)

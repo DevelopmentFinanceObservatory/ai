@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 from collections.abc import Callable, Coroutine
-from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -57,9 +56,10 @@ Handler = (
 def mint_pair(manifest: Manifest) -> FrameRef:
     """The manifest's own pair, which a frame minted with the default columns is
     held under. Built unvalidated, since most manifests here carry a short
-    `content_version` like `"cv_1"`, and a collection manifest names no `spec_id`."""
-    spec_id = manifest.definition.spec_id if manifest.definition is not None else ""
-    return FrameRef.model_construct(spec_id=spec_id, content_version=manifest.content_version)
+    `content_version` like `"cv_1"`."""
+    return FrameRef.model_construct(
+        spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -192,6 +192,7 @@ def _identity_doc(
     *,
     entities: dict[str, list[str]] | None = None,
     shape_id: str = "MalariaGrantDisbursements",
+    open_roles: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "identity_version": "spec1",
@@ -200,6 +201,7 @@ def _identity_doc(
         "facets": {"provenance": {"ref": "OECD_DAC2A", "state": "value"}},
         "requested_window": {"kind": "all"},
         "slots": [],
+        **({"open_roles": open_roles} if open_roles is not None else {}),
     }
 
 
@@ -241,7 +243,7 @@ def _manifest_response(
         "artifacts": [
             {
                 "artifact_digest": artifact_digest,
-                "rendering": {"bundle": False, "format": "parquet"},
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
                 "bytes": 100,
                 "media_type": "application/octet-stream",
                 "created_at": "2026-08-11T00:00:00+00:00",
@@ -357,7 +359,7 @@ async def test_mint_request_body_matches_exactly() -> None:
                 },
                 "scope": {},
             },
-            "options": {"format": "parquet", "bundle": False},
+            "options": {"format": "parquet", "bundle": False, "layout": "frame"},
         }
     ]
 
@@ -419,7 +421,7 @@ async def test_mint_request_body_matches_exactly_with_a_scope_override() -> None
                 },
                 "scope": {"entities": {"recipient": ["country/UGA"]}},
             },
-            "options": {"format": "parquet", "bundle": False},
+            "options": {"format": "parquet", "bundle": False, "layout": "frame"},
         }
     ]
 
@@ -801,21 +803,6 @@ async def test_identity_mismatch_refuses_capability_unavailable() -> None:
     assert result.structured_content is not None
     assert result.structured_content["code"] == "capability_unavailable"
     assert result.structured_content["retry_mode"] == "do_not_retry"
-
-
-# col_ ids
-
-
-async def test_col_id_refuses_definition_not_held_never_capability_unavailable() -> None:
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        raise AssertionError("no upstream call expected for an unheld collection id")
-
-    col_id = "col_" + "b" * 32
-    result = await _call_get_data(handler, _StubStore(None), {"spec_id": col_id})
-
-    assert result.is_error is True
-    assert result.structured_content is not None
-    assert result.structured_content["code"] == "definition_not_held"
 
 
 # Registry fallback on a store miss
@@ -1661,6 +1648,30 @@ async def test_dropping_a_role_is_named_in_the_acknowledgement() -> None:
     assert "no longer bound" in text_of(result)
 
 
+async def test_an_open_role_the_scope_leaves_out_is_not_named_dropped() -> None:
+    # The open origin stays open under a scope that binds only the destination.
+    stored = _stored_definition(entities={"destination": ["country/NGA"]}, open_roles=["origin"])
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(
+                200,
+                json=_manifest_response(
+                    spec_id=stored.spec_id, entities={"destination": ["country/GHA"]}
+                ),
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(
+        handler,
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, "scope": {"entities": {"destination": ["country/GHA"]}}},
+    )
+
+    assert result.is_error is False
+    assert "no longer bound" not in text_of(result)
+
+
 async def test_explicit_empty_entities_map_does_not_warn_and_clears_entities() -> None:
     stored = _stored_definition(
         entities={"provider": ["country/FRA"], "recipient": ["country/TGO"]}
@@ -2188,36 +2199,6 @@ async def test_invalid_utf8_mint_response_refuses_rather_than_raising() -> None:
     assert result.structured_content["upstream_code"] is None
 
 
-async def test_collection_shaped_mint_response_refuses_rather_than_raising() -> None:
-    """`get_data` always mints via `kind: "spec_id"`, which the mint route never
-    answers with a collection manifest -- but if it ever did, the response
-    would validate cleanly against `Manifest` and only fail later, when the
-    digest renderer finds no `definition` to render.
-    """
-    stored = _stored_definition()
-    collection_response = {
-        "schema_version": 1,
-        "collection": {"collection_id": "col_" + "c" * 32, "members": []},
-        "content_version": "cv_1",
-        "coverage": {"rows": 0, "dimensions": []},
-        "citation": {"text": "OECD DAC2a", "sources": []},
-        "trace": {},
-        "warnings": [],
-        "artifacts": [],
-    }
-
-    result = await _call_get_data(
-        _mint_only_handler(200, collection_response),
-        _StubStore(stored),
-        {"spec_id": stored.spec_id},
-    )
-
-    assert result.is_error is True
-    assert result.structured_content is not None
-    assert result.structured_content["code"] == "upstream_error"
-    assert result.structured_content["retry_mode"] == "do_not_retry"
-
-
 async def test_malformed_artifact_refuses_without_leaking_its_signed_url() -> None:
     """A malformed artifact fails validation before `strip_manifest` ever gets to drop its
     signed `url` -- pydantic-core's default error rendering embeds the raw, un-stripped input
@@ -2362,10 +2343,7 @@ async def test_unforeseen_scope_field_is_rejected_locally() -> None:
     assert result.is_error is True
 
 
-# The selection: the StatVars the search digest listed, passed to `get_data` as
-# `resolved_stat_var_dcids` and posted on the mint unchanged.
-
-_FIXTURES = Path(__file__).parent / "fixtures"
+# The mint input: the spec_id and its stored definition.
 
 
 def _described_identity_doc(
@@ -2394,7 +2372,7 @@ def _described_stored_definition(**identity_kwargs: Any) -> StoredDefinition:
     )
 
 
-async def test_the_mint_posts_the_passed_stat_vars_under_the_requested_spec_id() -> None:
+async def test_the_mint_posts_the_spec_id_and_its_definition_alone() -> None:
     stored = _described_stored_definition()
     requests: list[dict[str, Any]] = []
 
@@ -2406,10 +2384,7 @@ async def test_the_mint_posts_the_passed_stat_vars_under_the_requested_spec_id()
     result = await _call_get_data(
         handler,
         _StubStore(stored),
-        {
-            "spec_id": stored.spec_id,
-            "resolved_stat_var_dcids": ["Count_Person_Female", "Count_Person_Male"],
-        },
+        {"spec_id": stored.spec_id},
     )
 
     assert result.is_error is False
@@ -2422,35 +2397,12 @@ async def test_the_mint_posts_the_passed_stat_vars_under_the_requested_spec_id()
             "spec_id": stored.spec_id,
             "identity": _described_identity_doc(),
         },
-        "resolved_stat_var_dcids": ["Count_Person_Female", "Count_Person_Male"],
     }
     assert result.structured_content is not None
     assert result.structured_content["definition"]["spec_id"] == stored.spec_id
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [{}, {"resolved_stat_var_dcids": None}, {"resolved_stat_var_dcids": []}],
-    ids=["omitted", "null", "empty"],
-)
-async def test_no_stat_vars_passed_posts_none(arguments: dict[str, object]) -> None:
-    """dfo-apis reads an empty list as an omitted one, so neither is sent."""
-    stored = _described_stored_definition()
-    requests: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        requests.append(json.loads(request.content))
-        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, **arguments}
-    )
-
-    assert result.is_error is False
-    assert "resolved_stat_var_dcids" not in requests[0]["input"]
-
-
-async def test_the_registry_fallback_mint_posts_the_passed_stat_vars() -> None:
+async def test_the_registry_fallback_mint_posts_the_spec_id_alone() -> None:
     spec_id = "spec_" + "a" * 32
     requests: list[dict[str, Any]] = []
 
@@ -2461,41 +2413,16 @@ async def test_the_registry_fallback_mint_posts_the_passed_stat_vars() -> None:
     result = await _call_get_data(
         handler,
         _StubStore(None),
-        {"spec_id": spec_id, "resolved_stat_var_dcids": ["Count_Person"]},
+        {"spec_id": spec_id},
     )
 
     assert result.is_error is False
-    assert "definition" not in requests[0]["input"]
-    assert requests[0]["input"]["resolved_stat_var_dcids"] == ["Count_Person"]
+    assert requests[0]["input"] == {"kind": "spec_id", "spec_id": spec_id, "scope": {}}
 
 
-async def test_a_dcid_prefixed_stat_var_refuses_locally_at_its_own_index() -> None:
-    """dfo-apis takes bare dcids only; the caller reads this tool's pointer, not the
-    mint route's validation error."""
-    store = _StubStore(_described_stored_definition())
+async def test_a_member_list_is_refused_before_any_call() -> None:
+    """dfo-apis resolves a family's members itself and takes no list."""
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        raise AssertionError("a refused argument must not reach dfo-apis")
-
-    result = await _call_get_data(
-        handler,
-        store,
-        {
-            "spec_id": "spec_" + "a" * 32,
-            "resolved_stat_var_dcids": ["Count_Person", "dcid:Count_Person_Female"],
-        },
-    )
-
-    assert result.is_error is True
-    content = result.structured_content
-    assert content is not None
-    assert content["code"] == "request_invalid"
-    assert content["fix"]["pointer"] == "/resolved_stat_var_dcids/1"
-    assert "'dcid:Count_Person_Female' must be a bare dcid" in content["message"]
-    assert store.get_calls == []
-
-
-async def test_more_stat_vars_than_dfo_apis_takes_are_refused_before_any_call() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("a refused argument must not reach dfo-apis")
 
@@ -2504,7 +2431,7 @@ async def test_more_stat_vars_than_dfo_apis_takes_are_refused_before_any_call() 
         _StubStore(_described_stored_definition()),
         {
             "spec_id": "spec_" + "a" * 32,
-            "resolved_stat_var_dcids": [f"Count_Person_{n}" for n in range(701)],
+            "resolved_stat_var_dcids": ["Count_Person"],
         },
     )
 
@@ -2531,57 +2458,16 @@ async def test_a_scoped_remint_stores_the_new_identity_alone() -> None:
         {
             "spec_id": stored.spec_id,
             "scope": {"window": window},
-            "resolved_stat_var_dcids": ["Count_Person"],
         },
     )
 
     assert result.is_error is False
-    assert requests[0]["input"]["resolved_stat_var_dcids"] == ["Count_Person"]
+    assert len(requests) == 1
     assert store.put_calls == [
         StoredDefinition(
             spec_id=windowed_spec_id, schema_version=1, canonical_bytes=canonicalize(windowed)
         )
     ]
-
-
-async def test_a_refused_selection_reaches_the_model_naming_the_outsider_at_its_argument() -> None:
-    """The recorded dfo-apis answer to a posted StatVar outside the identity's family."""
-    recorded = json.loads((_FIXTURES / "mint_refused_selection.json").read_text())
-    posted = recorded["request"]
-    definition = posted["definition"]
-    stored = StoredDefinition(
-        spec_id=definition["spec_id"],
-        schema_version=definition["schema_version"],
-        canonical_bytes=canonicalize(definition["identity"]),
-    )
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        body = json.loads(request.content)
-        assert body["input"]["resolved_stat_var_dcids"] == posted["resolved_stat_var_dcids"]
-        return httpx2.Response(recorded["response"]["status"], json=recorded["response"]["body"])
-
-    result = await _call_get_data(
-        handler,
-        _StubStore(stored),
-        {
-            "spec_id": stored.spec_id,
-            "resolved_stat_var_dcids": posted["resolved_stat_var_dcids"],
-        },
-    )
-
-    assert result.is_error is True
-    content = result.structured_content
-    assert content is not None
-    assert content["code"] == "spec_not_exportable"
-    assert content["retry_mode"] == "do_not_retry"
-    assert content["fix"]["not_members"] == ["Count_Household"]
-    assert content["fix"]["pointers"] == ["/resolved_stat_var_dcids/1"]
-    assert content["fix"]["remedy"].startswith(
-        "A variable search listed for this dataset is no longer one of its members."
-    )
-    assert "Count_Household" not in content["message"]
-    assert "call get_data with the spec_id it returns." in content["message"]
-    assert content["trace_id"] == recorded["response"]["body"]["trace_id"]
 
 
 # End-to-end materialisation: a real `get_data` call, through the real
@@ -2653,6 +2539,60 @@ async def test_successful_get_data_call_registers_a_frame_end_to_end(
     assert stored_frame is not None
     frame, _trace = stored_frame
     assert len(frame.rows) == 1
+
+
+async def test_a_frame_request_reads_the_frame_artifact_past_a_long_layout_one_listed_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mint asks for `layout: "frame"`, and of a manifest listing the long-layout
+    file under the same pair first, the frame file is the one fetched, registered and
+    linked."""
+    monkeypatch.undo()  # remove this module's own autouse stub for this one test
+    stored = _stored_definition()
+    content_version = "cv_" + "5" * 32
+    data = _parquet_bytes()
+    frame_digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    manifest = _manifest_response(
+        spec_id=stored.spec_id, content_version=content_version, artifact_digest=frame_digest
+    )
+    long_layout = {
+        **manifest["artifacts"][0],
+        "artifact_digest": "sha256:" + "9" * 64,
+        "rendering": {"bundle": False, "format": "parquet", "layout": 2},
+    }
+    manifest["artifacts"].insert(0, long_layout)
+    posted: list[dict[str, Any]] = []
+    fetched_digests: list[str] = []
+
+    async def fake_fetch(*, artifact_digest: str, **_kwargs: Any) -> bytes:
+        fetched_digests.append(artifact_digest)
+        return data
+
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fake_fetch)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posted.append(json.loads(request.content))
+            return httpx2.Response(200, json=manifest)
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    assert result.is_error is False
+    assert [body["options"] for body in posted] == [
+        {"format": "parquet", "bundle": False, "layout": "frame"}
+    ]
+    assert fetched_digests == [frame_digest]
+    resource_links = [b for b in result.content if isinstance(b, ResourceLink)]
+    assert [str(link.uri) for link in resource_links] == [
+        f"dfo://artifact/{stored.spec_id}/{content_version}/{frame_digest}"
+    ]
+    assert (
+        await frame_store.get(FrameRef(spec_id=stored.spec_id, content_version=content_version))
+        is not None
+    )
 
 
 # Per-series statistics: fetched, rendered, and degraded
@@ -3296,6 +3236,7 @@ def _summed_manifest_response(
     response["artifacts"][0]["rendering"] = {
         "bundle": False,
         "format": "parquet",
+        "layout": "frame",
         "groupby": _SUM_GROUPBY,
     }
     if contributing_member_count is not None:
@@ -3343,7 +3284,12 @@ async def test_a_summed_call_forwards_the_groupby_in_the_mint_body() -> None:
                 },
                 "scope": {},
             },
-            "options": {"format": "parquet", "bundle": False, "groupby": _SUM_GROUPBY},
+            "options": {
+                "format": "parquet",
+                "bundle": False,
+                "layout": "frame",
+                "groupby": _SUM_GROUPBY,
+            },
         }
     ]
 
@@ -3361,12 +3307,12 @@ async def test_a_separate_call_sends_no_groupby() -> None:
     )
 
     assert result.is_error is False
-    assert options == [{"format": "parquet", "bundle": False}]
+    assert options == [{"format": "parquet", "bundle": False, "layout": "frame"}]
 
 
-async def test_one_mint_posts_the_sum_option_and_the_passed_stat_vars() -> None:
-    """A described identity is minted under its own spec_id, with the caller's elected
-    StatVars and the summing option on the same request."""
+async def test_one_mint_posts_the_sum_option() -> None:
+    """A described identity is minted under its own spec_id, with the summing option on
+    the same request."""
     stored = _described_stored_definition()
     requests: list[dict[str, Any]] = []
 
@@ -3381,7 +3327,6 @@ async def test_one_mint_posts_the_sum_option_and_the_passed_stat_vars() -> None:
         {
             "spec_id": stored.spec_id,
             "stat_vars": "sum",
-            "resolved_stat_var_dcids": ["Count_Person"],
         },
     )
 
@@ -3389,10 +3334,11 @@ async def test_one_mint_posts_the_sum_option_and_the_passed_stat_vars() -> None:
     assert len(requests) == 1
     assert requests[0]["input"]["kind"] == "spec_id"
     assert requests[0]["input"]["spec_id"] == stored.spec_id
-    assert requests[0]["input"]["resolved_stat_var_dcids"] == ["Count_Person"]
+    assert "resolved_stat_var_dcids" not in requests[0]["input"]
     assert requests[0]["options"] == {
         "format": "parquet",
         "bundle": False,
+        "layout": "frame",
         "groupby": {"by": ["time_period"], "op": "sum"},
     }
     assert result.structured_content is not None
@@ -3573,6 +3519,7 @@ async def test_an_advertised_breakdown_posts_a_levels_groupby_and_describes_the_
         {
             "format": "parquet",
             "bundle": False,
+            "layout": "frame",
             "groupby": {
                 "by": ["time_period", "crsPurpose"],
                 "op": "sum",
@@ -3889,6 +3836,7 @@ async def test_place_types_asks_for_the_type_column_alone(
         {
             "format": "parquet",
             "bundle": False,
+            "layout": "frame",
             **({} if groupby is None else {"groupby": groupby}),
             "columns": ["observationAbout_type"],
         }

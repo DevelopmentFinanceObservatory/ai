@@ -74,17 +74,6 @@ def test_a_result_that_carries_no_frame_reference_is_refused(
         extract_frame_ref(extract, content)
 
 
-def test_a_collection_manifest_is_refused(manifest: ManifestFactory) -> None:
-    collection = manifest(
-        definition=None,
-        collection={"collection_id": "col_1", "members": []},
-        series_count=None,
-    )
-
-    with pytest.raises(ArtifactError, match="collection, not one definition"):
-        extract_frame_ref(Extract.FRAME_REF_FROM_MANIFEST, collection)
-
-
 def test_parse_manifest_reads_the_series_count(manifest: ManifestFactory) -> None:
     parsed = parse_manifest(manifest())
 

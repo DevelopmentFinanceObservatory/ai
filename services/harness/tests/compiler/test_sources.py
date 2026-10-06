@@ -9,11 +9,12 @@ from typing import Any
 import pytest
 from compiler.sources import (
     DiscoveryStatus,
+    is_family,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
+    stat_var_count,
 )
-from data_mcp.substitution import MAX_RESOLVED_STAT_VAR_DCIDS
 from planner.records import Period
 from planner.workflow import OpenEntityAxis
 
@@ -46,11 +47,7 @@ def _spec(spec_id: str = SPEC_KENYA, **resolved: Any) -> dict[str, Any]:
             "observation_count": 10,
             "window": {"start_year": 2010, "end_year": 2024},
         },
-        "stat_vars": {
-            "items": [{"ref": "DebtServicePaid", "label": "Debt service paid", "slot_values": []}],
-            "member_count": 1,
-            "truncated": False,
-        },
+        "stat_vars": {"member_count": 1, "member_count_exact": True, "served_count": 1},
         "entities": [{"role": "destination", "label": "Kenya", "ref": "country/KEN"}],
         "facets": {
             "unit": {"basis": "declared_default", "ref": "usd", "label": "US dollars"},
@@ -80,8 +77,7 @@ def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
     (source,) = outcome.sources
     assert source.spec_id == SPEC_KENYA
     assert source.has_data is True
-    assert source.stat_vars == ("DebtServicePaid",)
-    assert (source.stat_var_member_count, source.stat_var_truncated) == (1, False)
+    assert (source.stat_var_member_count, source.served_count) == (1, 1)
     assert [(e.role, e.ref, e.label) for e in source.entities] == [
         ("destination", "country/KEN", "Kenya")
     ]
@@ -109,37 +105,33 @@ def test_a_unit_that_varies_per_series_is_read_as_such(
     assert (source.unit_ref, source.unit_per_series) == read
 
 
-def test_stat_vars_is_read_as_the_object_the_wire_actually_sends() -> None:
-    # `resolved.stat_vars` is an object -- `items`, `member_count`,
-    # `truncated` -- never a bare list. A reader that went back to treating
-    # it as a list would find no `items` key on this mapping and read every
-    # field back empty, so this fails first against that regression.
-    block = _spec(
-        stat_vars={
-            "items": [{"ref": "DebtServicePaid", "slot_values": []}],
-            "member_count": 250,
-            "truncated": True,
-        }
-    )
+@pytest.mark.parametrize(
+    ("stat_vars", "read"),
+    [
+        (
+            {"member_count": 250, "member_count_exact": True, "served_count": 250},
+            (250, True, 250),
+        ),
+        (
+            {"member_count": 40, "member_count_exact": False, "served_count": None},
+            (40, False, None),
+        ),
+        # The shape data-mcp sent before `resolved.stat_vars` was read as an
+        # object: a bare list states none of the three.
+        ([{"ref": "DebtServicePaid"}], (None, None, None)),
+    ],
+    ids=["settled", "unsettled", "a-bare-list"],
+)
+def test_the_member_counts_are_read_from_the_stat_vars_object(
+    stat_vars: object, read: tuple[int | None, bool | None, int | None]
+) -> None:
+    source = source_from_spec_block(_spec(stat_vars=stat_vars))
 
-    source = source_from_spec_block(block)
-
-    assert source.stat_vars == ("DebtServicePaid",)
-    assert (source.stat_var_member_count, source.stat_var_truncated) == (250, True)
-
-
-def test_a_bare_list_stat_vars_reads_as_wholly_unknown() -> None:
-    # The shape data-mcp actually sent before the fix: `search`'s own object
-    # replaced by a bare list. `stat_vars` comes back empty exactly as
-    # before, but `member_count`/`truncated` come back `None` rather than a
-    # value the object shape would have supplied, so the caller can tell
-    # "the envelope stated nothing" from "the definition binds nothing".
-    block = _spec(stat_vars=[{"ref": "DebtServicePaid", "label": "Debt service paid"}])
-
-    source = source_from_spec_block(block)
-
-    assert source.stat_vars == ()
-    assert (source.stat_var_member_count, source.stat_var_truncated) == (None, None)
+    assert (
+        source.stat_var_member_count,
+        source.stat_var_member_count_exact,
+        source.served_count,
+    ) == read
 
 
 def test_the_shape_s_member_count_and_digest_are_read_as_the_binding() -> None:
@@ -353,226 +345,59 @@ def test_an_entity_without_its_role_is_refused() -> None:
         source_from_spec_block(_spec(entities=[{"label": "Kenya", "ref": "country/KEN"}]))
 
 
-@pytest.mark.parametrize(
-    "items",
-    [
-        ["DebtServicePaid"],
-        [{"ref": 7, "slot_values": []}],
-        [{"ref": "", "slot_values": []}],
-        [{"label": "Debt service paid", "slot_values": []}],
-        {"ref": "DebtServicePaid"},
-    ],
-    ids=["a-bare-string", "a-number-ref", "an-empty-ref", "no-ref", "items-an-object"],
-)
-def test_an_elected_statvar_without_a_string_ref_is_refused(items: object) -> None:
-    # Every elected StatVar is posted to `get_data`, so an item whose dcid
-    # cannot be read refuses the block. Skipping it would post a shorter list
-    # than the block states, and `str()` would post a dcid nobody elected.
-    block = _spec(stat_vars={"items": items, "member_count": 1, "truncated": False})
+# --- Whether a source mints as one StatVar ------------------------------------------
 
-    with pytest.raises(ValueError, match=r"not usable as a source: resolved\.stat_vars\.items"):
-        source_from_spec_block(block)
-
-
-def _items(refs: list[str]) -> dict[str, Any]:
-    return {
-        "items": [{"ref": ref, "slot_values": []} for ref in refs],
-        "member_count": len(refs),
-        "truncated": False,
-    }
-
-
-def test_an_elected_statvar_with_the_dcid_prefix_is_refused() -> None:
-    # dfo-apis's mint refuses a posted `dcid:` ref, so the block's StatVars
-    # could never be posted.
-    block = _spec(stat_vars=_items(["DebtServicePaid", "dcid:DebtServiceDue"]))
-
-    with pytest.raises(
-        ValueError, match=r"items\[1\]\.ref 'dcid:DebtServiceDue' is not a bare dcid"
-    ):
-        source_from_spec_block(block)
-
-
-def test_more_statvars_than_get_data_takes_are_refused() -> None:
-    block = _spec(
-        stat_vars=_items([f"Var_{index}" for index in range(MAX_RESOLVED_STAT_VAR_DCIDS + 1)])
-    )
-
-    with pytest.raises(
-        ValueError,
-        match=f"holds {MAX_RESOLVED_STAT_VAR_DCIDS + 1} StatVars, past the {MAX_RESOLVED_STAT_VAR_DCIDS}",
-    ):
-        source_from_spec_block(block)
-
-
-def test_as_many_statvars_as_get_data_takes_are_read() -> None:
-    refs = [f"Var_{index}" for index in range(MAX_RESOLVED_STAT_VAR_DCIDS)]
-
-    assert source_from_spec_block(_spec(stat_vars=_items(refs))).stat_vars == tuple(refs)
-
-
-def test_a_block_stating_null_items_elects_none() -> None:
-    block = _spec(stat_vars={"items": None, "member_count": 0, "truncated": False})
-
-    assert source_from_spec_block(block).stat_vars == ()
-
-
-# --- Whether a described identity mints as one StatVar -------------------------------
-
-_GENDER_SLOT_VALUE = {"key": {"property": {"dcid": "gender"}}, "value": {"ref": {"dcid": "Female"}}}
 _GENDER_BLOCK_SLOT = {
     "key": {"axis": "how", "property": {"dcid": "gender", "label": "gender"}},
     "binding": {"kind": "value", "value": {"ref": {"dcid": "Female", "label": "Female"}}},
 }
 
 
-def _described(
-    items: list[dict[str, Any]],
-    *,
-    gender: dict[str, Any] | None = None,
-    entities: dict[str, list[str]] | None = None,
-    slots: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """A spec block whose identity describes the population family of one place,
-    its `gender` slot bound as `gender` states and unbound when it states nothing."""
-    block = _spec(
-        stat_vars={"items": items, "member_count": len(items), "truncated": False},
-        slots=slots if slots is not None else ([_GENDER_BLOCK_SLOT] if gender else []),
-    )
+def _described(*, slots: list[dict[str, Any]]) -> dict[str, Any]:
+    """A spec block whose identity describes the population family of one place."""
+    block = _spec(slots=slots)
     block["definition"]["identity"] = {
         "shape": {"kind": "statvar_schema", "population_type": "Person"},
-        "entities": entities if entities is not None else {"observationAbout": ["country/MEX"]},
+        "entities": {"observationAbout": ["country/MEX"]},
         "slots": [
             {"property": "age", "binding": {"state": "unbound"}},
-            {"property": "gender", "binding": gender or {"state": "unbound"}},
+            {"property": "gender", "binding": {"state": "unbound"}},
         ],
     }
     return block
 
 
-_FEMALE = {"state": "value", "ref": "Female"}
-_TOTAL = {"ref": "Count_Person", "slot_values": [], "constraint_properties": []}
-_FEMALE_TOTAL = {
-    "ref": "Count_Person_Female",
-    "slot_values": [_GENDER_SLOT_VALUE],
-    "constraint_properties": ["gender"],
-}
+@pytest.mark.parametrize(
+    ("served_count", "member_count", "family", "counted"),
+    [(1, 1, False, 1), (3, 3, True, 3), (None, 1, True, 1), (None, None, True, 0)],
+    ids=["one-served", "several-served", "unsettled-one-confirmed", "nothing-stated"],
+)
+def test_a_source_is_one_statvar_exactly_when_search_states_it_serves_one(
+    served_count: int | None, member_count: int | None, family: bool, counted: int
+) -> None:
+    """Search states `served_count` only once the membership settled, so an
+    unsettled membership reads as a family whatever it confirmed."""
+    stat_vars = {"member_count": member_count, "served_count": served_count}
+    source = source_from_spec_block(_spec(stat_vars=stat_vars))
 
-
-def test_one_elected_statvar_asserting_no_constraint_is_the_root_of_an_unbound_family() -> None:
-    block = _described([_TOTAL])
-
-    assert source_from_spec_block(block).pinned is True
-    assert (
-        pinned_stat_var(block["definition"]["identity"], [_TOTAL], slots=block["resolved"]["slots"])
-        == "Count_Person"
-    )
-
-
-def test_one_elected_statvar_constrained_by_the_bound_slot_alone_is_the_root() -> None:
-    assert source_from_spec_block(_described([_FEMALE_TOTAL], gender=_FEMALE)).pinned is True
+    assert is_family(source) is family
+    assert stat_var_count(source) == counted
 
 
 @pytest.mark.parametrize(
-    "item",
+    ("identity", "pinned"),
     [
-        {"ref": "Count_Person", "slot_values": []},
-        {"ref": "Count_Person", "slot_values": [], "constraint_properties": None},
-        {"ref": "Count_Person", "slot_values": [], "constraint_properties": [7]},
-        {"ref": "Count_Person", "constraint_properties": []},
-        {"ref": "Count_Person_Female", "slot_values": [], "constraint_properties": ["gender"]},
+        ({"shape": {"kind": "stat_var", "id": "Count_Person"}}, "Count_Person"),
+        ({"shape": {"kind": "statvar_schema", "population_type": "Person"}}, None),
+        ({"stat_var": "x"}, None),
+        (None, None),
     ],
-    ids=[
-        "constraints-missing",
-        "constraints-null",
-        "constraints-malformed",
-        "slot-values-missing",
-        "constrained-beyond-the-bound-slots",
-    ],
+    ids=["pinned-arm", "described-arm", "no-shape", "no-identity"],
 )
-def test_an_elected_statvar_search_does_not_show_to_be_the_root_is_not_pinned(
-    item: dict[str, Any],
+def test_only_a_pinned_identity_names_its_statvar(
+    identity: dict[str, Any] | None, pinned: str | None
 ) -> None:
-    # A `null` or missing `constraint_properties` says Search does not know
-    # what the StatVar asserts, which is not that it asserts nothing.
-    assert source_from_spec_block(_described([item])).pinned is False
-
-
-def test_a_statvar_constrained_beyond_the_bound_slot_is_not_pinned() -> None:
-    # Its `slot_values` show the bound `gender` alone, so only
-    # `constraint_properties` tells it from the root.
-    urban = {
-        "ref": "Count_Person_Female_Urban",
-        "slot_values": [_GENDER_SLOT_VALUE],
-        "constraint_properties": ["gender", "placeOfResidenceClassification"],
-    }
-
-    assert source_from_spec_block(_described([urban], gender=_FEMALE)).pinned is False
-
-
-def test_a_statvar_holding_another_code_than_the_slot_binds_is_not_pinned() -> None:
-    # Search lists a bound slot's value on an item only when the StatVar holds
-    # that value, so a member constrained to a descendant code shows none.
-    descendant = {
-        "ref": "Count_Person_Female_Adult",
-        "slot_values": [],
-        "constraint_properties": ["gender"],
-    }
-
-    assert source_from_spec_block(_described([descendant], gender=_FEMALE)).pinned is False
-
-
-def test_two_elected_statvars_are_not_pinned_even_when_one_is_the_root() -> None:
-    assert source_from_spec_block(_described([_TOTAL, _FEMALE_TOTAL])).pinned is False
-
-
-@pytest.mark.parametrize(
-    "slots",
-    [
-        [{**_GENDER_BLOCK_SLOT, "expansion": {"added": [{"dcid": "Female_Adult"}]}}],
-        [],
-    ],
-    ids=["expanded", "slot-not-listed"],
-)
-def test_a_bound_value_the_block_does_not_show_to_be_one_code_is_not_pinned(
-    slots: list[dict[str, Any]],
-) -> None:
-    # dfo-apis mints a hierarchical code's whole subtree, which Search reports
-    # as the slot's `expansion`.
-    block = _described([_FEMALE_TOTAL], gender=_FEMALE, slots=slots)
-
-    assert source_from_spec_block(block).pinned is False
-
-
-def test_a_set_bound_slot_is_not_pinned() -> None:
-    block = _described([_FEMALE_TOTAL], gender={"state": "set", "refs": ["Female", "Male"]})
-
-    assert source_from_spec_block(block).pinned is False
-
-
-@pytest.mark.parametrize(
-    "entities",
-    [{"origin": ["country/FRA"]}, {"observationAbout": ["country/MEX"], "origin": ["x"]}, {}],
-    ids=["a-flow-role", "a-place-and-a-flow-role", "no-role"],
-)
-def test_an_identity_keyed_on_anything_but_one_place_role_is_not_pinned(
-    entities: dict[str, list[str]],
-) -> None:
-    assert source_from_spec_block(_described([_TOTAL], entities=entities)).pinned is False
-
-
-def test_an_identity_that_names_its_statvar_states_no_pin_verdict() -> None:
-    block = _described([_TOTAL])
-    block["definition"]["identity"]["shape"] = {"kind": "stat_var", "id": "Count_Person"}
-
-    assert source_from_spec_block(block).pinned is None
-
-
-def test_a_block_carrying_no_identity_states_no_pin_verdict() -> None:
-    block = _described([_TOTAL])
-    del block["definition"]
-
-    assert source_from_spec_block(block).pinned is None
+    assert pinned_stat_var(identity) == pinned
 
 
 _AGE_UNBOUND = {
@@ -624,7 +449,7 @@ _PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbou
 def test_slot_codes_hold_every_code_a_bound_slot_admits(
     gender_slot: dict[str, Any], codes: dict[str, tuple[str, ...] | None] | None
 ) -> None:
-    block = _described([_TOTAL], slots=[_AGE_UNBOUND, gender_slot, _PLACE])
+    block = _described(slots=[_AGE_UNBOUND, gender_slot, _PLACE])
 
     assert source_from_spec_block(block).slot_codes == codes
 

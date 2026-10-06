@@ -1,5 +1,5 @@
-"""Reads the `series-statistics/1` Parquet artifact a `get_data` mint (or a
-collection member) carries for its per-series figures.
+"""Reads the `series-statistics/1` Parquet artifact a `get_data` mint carries for its
+per-series figures.
 
 `find_statistics_artifact` picks the one matching entry off a manifest's
 `artifacts` list, by its `rendering` shape alone -- the same way
@@ -186,12 +186,11 @@ async def fetch_series_statistics_table(
     """Fetch and read `artifact`'s `series-statistics/1` Parquet bytes.
 
     Args:
-        subject_id: The `spec_`/`col_` id `artifact` was minted under.
+        subject_id: The `spec_` id `artifact` was minted under.
         content_version: The `cv_` id naming the exact retrieval.
         artifact: The statistics entry itself, from `find_statistics_artifact`.
         expected_rows: The row count the manifest that named `artifact` already
-            promised (`manifest.series_count` for a definition manifest, or the
-            matching `CollectionMemberModel.series_count`) -- checked against the
+            promised (`manifest.series_count`) -- checked against the
             decoded row count once the fetch succeeds. `None` when the manifest
             carries the artifact but no `series_count` (dfo-apis mints an
             all-years definition that way): there is no count to check.

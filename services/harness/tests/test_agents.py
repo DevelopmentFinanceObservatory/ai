@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from compiler.surface import FixtureSurface, McpSurface, ToolCallResult
 from google.adk.agents import LlmAgent
+from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.function_tool import FunctionTool
 from harness.agents import build_tool_surface, create_planner_with_translator
@@ -83,12 +84,15 @@ def test_the_planner_runs_the_model_its_setting_pins() -> None:
         surface=FixtureSurface(schemas=[]),
     )
 
-    assert agent.model == "gemini-planner"
+    assert isinstance(agent.model, Gemini)
+    assert agent.model.model == "gemini-planner"
 
 
 def test_defaults_to_the_pinned_model() -> None:
     """Covers the branch that reads `AgentSettings` when no settings are passed."""
-    assert _planner().model == "gemini-3.8-flash"
+    model = _planner().model
+    assert isinstance(model, Gemini)
+    assert model.model == "gemini-3.8-flash"
 
 
 def test_build_tool_surface_covers_data_and_analysis_mcp_by_name() -> None:

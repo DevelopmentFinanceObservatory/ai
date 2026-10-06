@@ -51,9 +51,7 @@ Behavioral guarantees the topology encodes:
   and the user could not pick a narrower one from offered candidates
   either, so `execute` closes the turn immediately with the refusal's own
   remedy rather than spending a replan reproducing the identical failing
-  call. The exception is a seed whose StatVars have left its dataset in a
-  turn with other seeds: the turn drops that seed and replans from the
-  others, through the same approval gate.
+  call.
 * Execution-triggered replanning is bounded: after `MAX_REPLANS` rounds the
   turn closes with what ran, naming the step that could not.
 
@@ -88,7 +86,6 @@ from common.materialisation import FrameRef
 from common.telemetry import record_event, record_span
 from compiler.evidence import errors
 from compiler.frame_columns import FRAME_PARAMETER
-from compiler.sources import posted_stat_vars, source_from_spec_block
 from compiler.surface import ProgressCallback, ProgressReport, ToolSurface
 from data_mcp import get_data_digest
 from data_mcp.settings import Settings as DataMcpSettings
@@ -143,7 +140,7 @@ from planner.plan import (
     save_seeded_sources,
     seeded_source,
     seeded_sources,
-    split_dropped,
+    stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
 from planner.workflow import ReadingSetBy, SelectedSource, WorkflowStep
@@ -169,8 +166,6 @@ from harness.seeds import (
     DroppedSeed,
     ReadSeed,
     StaleSeedError,
-    candidate_stat_vars,
-    dropped_seed_shape,
     dropped_seeds_note,
     dropped_seeds_text,
     read_answer,
@@ -180,7 +175,6 @@ from harness.seeds import (
     seed_step,
     seeded_envelope,
     seeds_received,
-    stale_seeds,
     take_seeds,
     unplanned_seeds_text,
 )
@@ -268,6 +262,11 @@ ORCHESTRATOR_KEPT_ASKS_KEY = "orchestrator:kept_asks"
 # The `custom_metadata` key an orchestrator node's own status line travels
 # under ("Reading your question"), read by `_OrchestratorTranslator`.
 ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
+# The status a plan hand-back carries when the planner made no plan, and
+# when the approved plan ran; `_OrchestratorTranslator` shows the first as
+# a failed step and the second as nothing.
+ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading the planner's answer"
+ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 # Characters of planner text one hand-back to the orchestrator may carry per
 # field, and characters the plan record may take. The two recorded plans in
 # `tests/fixtures/turn_records_recorded.json` render whole in 1,347 and 1,638
@@ -592,40 +591,6 @@ def _fetched_seed(ctx: Context) -> SeededSource | None:
     return seeded_source(seeded_sources(ctx.state), spec_id)
 
 
-def _chosen_stat_vars(ctx: Context) -> tuple[str, ...]:
-    """The StatVars `clarify` stored for the state's `spec_id`; empty when it
-    stored none, or stored them for another id."""
-    chosen = _state_json(ctx, "spec_id_stat_vars", default={})
-    if chosen.get("spec_id") != ctx.state.get("spec_id"):
-        return ()
-    return tuple(chosen.get("stat_vars") or ())
-
-
-def _fetched_stat_vars(ctx: Context, fetched: SeededSource | None) -> tuple[str, ...]:
-    """The StatVars `fetch` posts as `get_data`'s `resolved_stat_var_dcids`.
-
-    They are the ones a plan's retrieve step would post for the state's
-    `spec_id` (`compiler.sources.posted_stat_vars`), from whichever answer
-    settled it: the seeded source's on a seeded turn; the `definite` block
-    `probe`'s resolver carried (`resolve_envelope`'s `spec_block`), read the
-    way the compiler reads a source
-    (`compiler.sources.source_from_spec_block`); or the chosen candidate's,
-    which `clarify` stored (`_chosen_stat_vars`). Empty when none of those holds
-    any, or the block cannot be read as a source; `get_data`
-    then resolves the family with no StatVars posted.
-    """
-    if fetched is not None:
-        return posted_stat_vars(fetched.source)
-    block = _state_json(ctx, "resolve_envelope", default={}).get("spec_block")
-    if not isinstance(block, dict) or block.get("spec_id") != ctx.state.get("spec_id"):
-        return _chosen_stat_vars(ctx)
-    try:
-        return posted_stat_vars(source_from_spec_block(block))
-    except ValueError:
-        logger.warning("fetch cannot read the searched block's StatVars", exc_info=True)
-        return ()
-
-
 class GraphState(BaseModel):
     """Session-state schema for the workflow (validated on every delta)."""
 
@@ -670,11 +635,6 @@ class GraphState(BaseModel):
     # `_candidate_wide`. Stale once `spec_id` changes for any other reason,
     # but every path that sets `spec_id` also sets this alongside it.
     spec_id_wide: bool = False
-    # The StatVars `search` elected for the candidate `clarify` chose, as
-    # JSON `{"spec_id": ..., "stat_vars": [...]}` (see
-    # `candidate_stat_vars`). It names the id it belongs to, so it is read
-    # only while `spec_id` is that candidate (`_chosen_stat_vars`).
-    spec_id_stat_vars: str | None = None
     # Whether `spec_id` is the user's own pick, answering a `clarify`
     # round, as opposed to a system default (skip, the round bound, or no
     # clarify at all) -- see `clarify` and `probe`. `spec_id_elected_label`
@@ -716,7 +676,6 @@ PER_TURN_STATE_KEYS: tuple[str, ...] = (
     "part_digests",
     "spec_id",
     "spec_id_wide",
-    "spec_id_stat_vars",
     "spec_id_elected",
     "spec_id_elected_label",
     "parts",
@@ -732,6 +691,38 @@ PER_TURN_STATE_KEYS: tuple[str, ...] = (
 )
 
 
+# What the plan card opens with when the plan the user held was stored in a
+# shape this release does not read, and the question was planned again.
+UNREADABLE_PLAN_NOTE = (
+    "The plan you were shown could not be read after an update, so this is a new plan for "
+    "the same question. Ask again for any change you wanted."
+)
+
+
+# What the closing text opens with when the plan the user held was stored in
+# a shape this release does not read, and the planner drafted no plan in its
+# place. The planner's own refusal follows it.
+UNREADABLE_PLAN_UNPLANNED_NOTE = (
+    "The plan you were shown could not be read after an update, and the question could not "
+    "be planned again."
+)
+
+
+def _readable_plan(ctx: Context, raw: str | None) -> PlannerPlan | None:
+    """The plan `raw` holds, `ctx.state["plan"]` as a node read it; `None` when it holds none.
+
+    A plan stored in a shape `planner.plan.Plan` rejects is none
+    (`planner.plan.stored_plan`), and the slot is cleared here, by the node
+    reading it, so no later node reads it again. `planner` then drafts the
+    question from the start: its own entry, or `approve`'s and `execute`'s
+    `{"unreadable_plan": True}` output, says so.
+    """
+    plan = stored_plan(raw, state_key="plan")
+    if raw and plan is None:
+        ctx.state["plan"] = None
+    return plan
+
+
 def _reset_turn_state(ctx: Context) -> None:
     """Clear every `PER_TURN_STATE_KEYS` entry back to its own `GraphState`
     default, never a bare `None`. `google.adk.sessions.state.State.
@@ -742,7 +733,7 @@ def _reset_turn_state(ctx: Context) -> None:
     for key in PER_TURN_STATE_KEYS:
         ctx.state[key] = GraphState.model_fields[key].default
     # Only `seed` writes the user's datasets, on the turn they start, and
-    # only `seed` and `execute` drop one.
+    # only `seed` drops one.
     ctx.state[SEEDED_SOURCES_STATE_KEY] = None
     ctx.state[DROPPED_SEEDS_STATE_KEY] = None
 
@@ -1444,28 +1435,15 @@ def _question_text(node_input: Any) -> str:
     return ""
 
 
-def _replan_refusal(
-    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused,
-    *,
-    dropped: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
+def _replan_refusal(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
     """The refusal payload the planner node reads on a "replan" route:
     each outcome kind's own identity plus its diagnosis, never a numeric step
     index -- the compiled workflow steps are named, not ordinal. `also_stopped`
     names the same wave's other stops (`outcome.also_stopped`), each in this
-    same per-kind shape, empty when the wave surfaced only this one. A stop on
-    a seed the turn drops (`dropped`, the seed's spec_id by step id, from
-    `stale_seeds`) takes `dropped_seed_shape` instead."""
-
-    def shape(stop: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
-        seed = (dropped or {}).get(stop.step_id or "")
-        if seed is not None and isinstance(stop, Refused) and stop.payload is not None:
-            return dropped_seed_shape(step_id=stop.step_id, seed=seed, failure=stop.payload)
-        return _refusal_shape(stop)
-
+    same per-kind shape, empty when the wave surfaced only this one."""
     return {
-        **shape(outcome),
-        "also_stopped": [shape(sibling) for sibling in outcome.also_stopped],
+        **_refusal_shape(outcome),
+        "also_stopped": [_refusal_shape(sibling) for sibling in outcome.also_stopped],
     }
 
 
@@ -1482,10 +1460,9 @@ def _settle_depth(ctx: Context, envelope: Mapping[str, Any], *, surface: str) ->
     """The depth verdict for a turn that resolved to `envelope`, written to the state's
     `depth`, `depth_reason` and `depth_notice`.
 
-    `choose_depth` settles it when the turn resolves, and `_drop_seeds_from_turn`
-    again for the envelope it builds from the seeds left, so the three keys
-    always describe the envelope the state holds. `surface` is the workflow's
-    own, which the turn's `surface` state overrides.
+    `choose_depth` settles it when the turn resolves, so the three keys
+    describe the envelope the state holds. `surface` is the workflow's own,
+    which the turn's `surface` state overrides.
     """
     signal = decide_depth(
         status=str(envelope.get("status", "")),
@@ -1530,41 +1507,6 @@ def _record_drops(
 def _untold_drops(ctx: Context) -> list[DroppedSeed]:
     """The drops `_record_drops` recorded that the user has not been told of yet."""
     return _state_json(ctx, "dropped_untold", default=[])
-
-
-def _drop_seeds_from_turn(ctx: Context, dropped: Collection[str], *, surface: str) -> None:
-    """Leave the seeds `dropped` names, whose StatVars left their datasets, out of the rest of the turn.
-
-    Each seed, with every copy of it over a plan's period, moves from the
-    turn's seeded sources (`SEEDED_SOURCES_STATE_KEY`) to its dropped ones
-    (`_record_drops`), so the translator holds no source for it. The resolve
-    envelope is built again from the seeds left (`seeded_envelope`), so its
-    top level, the `parts` count, `ctx.state["spec_id"]` and the depth
-    verdict (`_settle_depth`) describe those alone; `execute` drops a seed
-    only when another is left. Each dropped seed is named as the user saw it.
-    """
-    kept_sources, taken = split_dropped(seeded_sources(ctx.state), dropped)
-    save_seeded_sources(ctx.state, kept_sources)
-    envelope = _state_json(ctx, "resolve_envelope", default={})
-    seeds = envelope.get("seeds") or []
-    _record_drops(
-        ctx,
-        taken,
-        [
-            DroppedSeed(name=seed_name(seed), reason=None)
-            for seed in seeds
-            if seed["spec_id"] in dropped
-        ],
-    )
-    kept = [seed for seed in seeds if seed["spec_id"] not in dropped]
-    if kept:
-        rebuilt = seeded_envelope(kept)
-        ctx.state["resolve_envelope"] = json.dumps(rebuilt)
-        ctx.state["parts"] = len(kept)
-        ctx.state["spec_id"] = rebuilt["spec_id"]
-        ctx.state["spec_id_wide"] = rebuilt["wide"]
-        ctx.state["spec_id_elected_label"] = kept[0].get("sentence")
-        _settle_depth(ctx, rebuilt, surface=surface)
 
 
 def _with_untold_drops(ctx: Context, text: str) -> str:
@@ -2622,8 +2564,8 @@ def create_root_workflow(
         The seeds (`GraphState.seeds`) are the Search results the user
         handed to Studio, with the operations their question asked for, as
         `seeds_slot` keeps them: the host reads each posted Spec block as a
-        `harness.wire.Seed`, which keeps its spec_id, identity, StatVar dcids
-        and operations and drops the rest of the block, and checks its
+        `harness.wire.Seed`, which keeps its spec_id, identity and
+        operations and drops the rest of the block, and checks its
         identity against its spec_id, before the session exists. This node
         reads the slot once and clears it, so the identities ride no later
         state write. Each seed is taken once (`take_seeds`): a seed that
@@ -2646,7 +2588,7 @@ def create_root_workflow(
         no longer resolves to a definite part, resolves to another spec_id,
         or answers with a block the turn cannot read is dropped: its own step
         fails as `SEED_DROPPED`, with the reason, and it is recorded as a
-        drop at retrieval is (`_record_drops`), so the plan card's note, or
+        drop (`_record_drops`), so the plan card's note, or
         the turn's closing text, names it and why, and no plan in the turn
         pins it or takes it from a search. The turn plans from the other
         seeds. The `SEEDS_STEP_ID` step counts the seeds kept.
@@ -2770,8 +2712,7 @@ def create_root_workflow(
             )
             drops.append(DroppedSeed(name=name, reason=reason))
         if drops:
-            # The same record a drop at retrieval makes (`_drop_seeds_from_turn`),
-            # named by the seed's position: Search gave no name the turn can trust.
+            # Named by the seed's position: Search gave no name the turn can trust.
             _record_drops(ctx, left_out, drops)
         if not stored:
             seeds_received(
@@ -2947,7 +2888,6 @@ def create_root_workflow(
                 chosen = _top_candidate_spec_id(node_input)
                 ctx.state["spec_id"] = chosen
                 ctx.state["spec_id_wide"] = _candidate_wide(candidates, chosen)
-                ctx.state["spec_id_stat_vars"] = candidate_stat_vars(candidates, chosen)
                 ctx.state["spec_id_elected"] = False
                 ctx.state["spec_id_elected_label"] = None
                 yield Event(output=node_input, route="again")
@@ -2959,7 +2899,6 @@ def create_root_workflow(
                 # through converse ("refine") instead of probe directly.
                 ctx.state["spec_id"] = None
                 ctx.state["spec_id_wide"] = False
-                ctx.state["spec_id_stat_vars"] = None
                 ctx.state["spec_id_elected"] = False
                 ctx.state["spec_id_elected_label"] = None
                 ctx.state["search_parts"] = None
@@ -2972,7 +2911,6 @@ def create_root_workflow(
             chosen = answer.get("spec_id") if isinstance(answer, dict) else str(answer)
             ctx.state["spec_id"] = chosen
             ctx.state["spec_id_wide"] = _candidate_wide(candidates, chosen)
-            ctx.state["spec_id_stat_vars"] = candidate_stat_vars(candidates, chosen)
             ctx.state["spec_id_elected"] = True
             ctx.state["spec_id_elected_label"] = _candidate_label(candidates, chosen)
             yield Event(output=node_input, route="again")
@@ -2983,9 +2921,6 @@ def create_root_workflow(
             chosen = _top_candidate_spec_id(node_input)
             ctx.state["spec_id"] = chosen
             ctx.state["spec_id_wide"] = _candidate_wide(node_input.get("candidates", []), chosen)
-            ctx.state["spec_id_stat_vars"] = candidate_stat_vars(
-                node_input.get("candidates", []), chosen
-            )
             ctx.state["spec_id_elected"] = False
             ctx.state["spec_id_elected_label"] = None
             yield Event(output=node_input, route="again")
@@ -2995,12 +2930,7 @@ def create_root_workflow(
             interrupt_id=CLARIFY_INTERRUPT,
             message=_with_untold_drops(ctx, "Which reading did you mean?"),
             payload={
-                # The StatVars each candidate posts stay in code. The interrupt
-                # reaches models, and a model sees no family's members.
-                "candidates": [
-                    {key: value for key, value in candidate.items() if key != "stat_vars"}
-                    for candidate in node_input.get("candidates", [])
-                ],
+                "candidates": node_input.get("candidates", []),
                 "warnings": node_input.get("warnings", []),
                 "round": rounds + 1,
                 "max_rounds": MAX_CLARIFY_ROUNDS,
@@ -3062,22 +2992,16 @@ def create_root_workflow(
         relays its progress reports as they arrive, the same way `execute`
         relays a plan's. A seed whose question named no year is retrieved
         over the year Search showed (`SeededSource.seen_year`), as the call's
-        `scope.window`; every other spec over its own window. The call posts
-        the StatVars Search elected for the spec (`_fetched_stat_vars`), when
-        it elected any.
+        `scope.window`; every other spec over its own window.
 
         A refused call yields no frame refs and a `failed_step` in the shape
         `execute` gives a stopped plan (`_refused_step`), so `narrate` names
         the refusal and appends its remedy. No plan runs here, so nothing
-        replans: on a seed whose StatVars have left its dataset
-        (`member_not_resolvable`), the remedy asking for a fresh search is the
-        turn's answer.
+        replans.
         """
         del node_input
         args: dict[str, Any] = {"spec_id": ctx.state.get("spec_id")}
         fetched = _fetched_seed(ctx)
-        if stat_vars := _fetched_stat_vars(ctx, fetched):
-            args["resolved_stat_var_dcids"] = list(stat_vars)
         if fetched is not None and fetched.seen_year is not None:
             year = fetched.seen_year
             args["scope"] = {"window": {"kind": "range", "start_year": year, "end_year": year}}
@@ -3171,17 +3095,22 @@ def create_root_workflow(
         -- both end the turn the same plain way `converse`'s and
         `route_status`'s own dead ends do. When the turn dropped seeds the
         user has not been told of (`_untold_drops`: `seed` dropped them as it
-        took them, or `execute` before this replan), the `"ok"` route's plan
-        carries `dropped_seeds_note` as `refusal_note`, which
+        took them), the `"ok"` route's plan carries `dropped_seeds_note` as
+        `refusal_note`, which
         `harness.studio_translate` shows before the plan card, and the
         `"refused"` route's text is `unplanned_seeds_text`, which names the
         dropped seeds and why, the seeds left unplanned, and the planner's
         reason. A question the planner asks during the draft opens with them
-        instead (`PLANNER_STARTED_KEY`). A seam that raises on the replan after
-        `execute` dropped a seed takes the same `"refused"` route with no
-        reason of its own, so that drop is explained; on any other draft a
-        raise fails the turn. On that route `plan_done` lists the asks an
-        earlier run of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
+        instead (`PLANNER_STARTED_KEY`). A seam that raises fails the turn.
+        On the `"refused"` route `plan_done` lists the asks an earlier run
+        of the plan call computed (`ORCHESTRATOR_KEPT_ASKS_KEY`).
+
+        An amendment or a replan of a plan stored in a shape this release
+        does not read (`_readable_plan`) is drafted as a first draft, and
+        the `"ok"` route's plan carries `UNREADABLE_PLAN_NOTE` as
+        `refusal_note`, ahead of any `dropped_seeds_note`, and
+        `"restarted": True`, since its version counts from 1 again. The
+        `"refused"` route's text opens with `UNREADABLE_PLAN_UNPLANNED_NOTE`.
 
         `models.planner(...)` is awaited directly here, with no
         `asyncio.ensure_future` wrapper of its own: ADK's own docstring
@@ -3219,9 +3148,9 @@ def create_root_workflow(
         question = ctx.state.get(ORCHESTRATOR_BRIEF_KEY if orchestrator else "question", "")
         payload = node_input if isinstance(node_input, dict) else {}
         refusal = payload.get("refusal")
-        # Seeds the turn dropped that the user has not been told of: `seed`'s
-        # as it took them, or `execute`'s before this replan. The plan card's
-        # note names them, or the closing text when no plan is drafted.
+        # Seeds `seed` dropped as it took them that the user has not been
+        # told of. The plan card's note names them, or the closing text when
+        # no plan is drafted.
         dropped = _untold_drops(ctx)
         amendment_answer = payload.get("answer")
         amendment = (
@@ -3251,8 +3180,20 @@ def create_root_workflow(
         # with the question fixed -- to draft anything but an amendment to
         # that stale plan.
         envelope = _state_json(ctx, "resolve_envelope", default={})
-        existing = PlannerPlan.model_validate_json(raw) if raw is not None else None
+        existing = _readable_plan(ctx, raw)
         is_first_draft = "plan" not in payload and "refusal" not in payload
+        # The plan this entry amends or replans could not be read: found so
+        # by `approve` or `execute`, which cleared it, or here, on the resume
+        # of a question asked while amending it. Nothing is left to amend or
+        # to replan from, so the question is drafted from the start and the
+        # card says why. A first draft never read the plan on record, and
+        # says nothing of one it cannot read.
+        unreadable = bool(payload.get("unreadable_plan")) or bool(
+            not is_first_draft and raw and existing is None
+        )
+        if unreadable:
+            refusal = amendment = None
+            is_first_draft = True
         started: dict[str, Any] = {"revising": not is_first_draft}
         if dropped:
             started["untold_drops"] = dropped_seeds_text(dropped)
@@ -3298,19 +3239,6 @@ def create_root_workflow(
             # are told.
             ctx.state["dropped_untold"] = None
             raise
-        except Exception:
-            if not (dropped and "refusal" in payload):
-                raise
-            # The replan after `execute` dropped a seed produced nothing
-            # because the seam failed. The user is owed what the drop already
-            # decided: which seed was left out and to search for it again.
-            logger.warning("the replan after a dropped seed failed", exc_info=True)
-            while not progress.empty():
-                yield Event(custom_metadata={"progress": progress.get_nowait()})
-            ctx.state["dropped_untold"] = None
-            kept = [seed_name(seed) for seed in envelope.get("seeds") or []]
-            yield Event(output={"text": unplanned_seeds_text(dropped, kept, "")}, route="refused")
-            return
         ctx.state["dropped_untold"] = None
         while not progress.empty():
             yield Event(custom_metadata={"progress": progress.get_nowait()})
@@ -3345,10 +3273,16 @@ def create_root_workflow(
             if dropped:
                 kept = [seed_name(seed) for seed in envelope.get("seeds") or []]
                 text = unplanned_seeds_text(dropped, kept, text)
+            if unreadable:
+                text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
             yield Event(output={"text": text, "final": bool(refused.get("final"))}, route="refused")
             return
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()
+        notes = [
+            *([UNREADABLE_PLAN_NOTE] if unreadable else []),
+            *([dropped_seeds_note(dropped)] if dropped else []),
+        ]
         yield Event(
             output={
                 **planner_plan.model_dump(mode="json"),
@@ -3356,7 +3290,10 @@ def create_root_workflow(
                 "revision": plan_revision(planner_plan),
                 "depth": ctx.state.get("depth"),
                 "depth_notice": ctx.state.get("depth_notice"),
-                **({"refusal_note": dropped_seeds_note(dropped)} if dropped else {}),
+                **({"refusal_note": " ".join(notes)} if notes else {}),
+                # The draft's version counts from 1 again, on a line of its
+                # own: no earlier card of the turn is a version of this plan.
+                **({"restarted": True} if unreadable else {}),
             },
             route="ok",
         )
@@ -3369,7 +3306,11 @@ def create_root_workflow(
 
         `ctx.state["plan"]` always holds a `planner.plan.Plan`, since every
         `PlannerModel` seam drafts one. A plan is keyed on `plan_revision(plan)`,
-        a content hash that changes with every amendment.
+        a content hash that changes with every amendment. A plan stored in a
+        shape this release does not read (`_readable_plan`) has no revision
+        for the answer to name: it routes `"amend"` with
+        `{"unreadable_plan": True}`, and `planner` drafts the question from
+        the start.
 
         The `"approved"` route records a `plan.approved` span (nesting under
         the turn span `harness.studio_state.begin_turn` opens) and a matching
@@ -3394,8 +3335,12 @@ def create_root_workflow(
             return
         ctx.state["awaiting_approve"] = False
         approved_answer = answer.get("approved") if isinstance(answer, dict) else None
-        raw = ctx.state["plan"]
-        plan = PlannerPlan.model_validate_json(raw)
+        plan = _readable_plan(ctx, ctx.state["plan"])
+        if plan is None:
+            # The card the user answered names a plan this release does not
+            # read, so the answer approves nothing and amends nothing.
+            yield Event(output={"unreadable_plan": True}, route="amend")
+            return
         key: Any = plan_revision(plan)
         if approved_answer == key:
             approved = plan.approve()
@@ -3464,13 +3409,7 @@ def create_root_workflow(
         `Disposition.STOP`: that is a dead end no replan reaches, so the
         turn closes right there with the refusal's own remedy, no replan
         spent, rather than spending the budget reproducing the identical
-        failing call. One dead end does replan: a seed whose StatVars
-        have left its dataset (`stale_seeds`), in a turn with another
-        seed to plan from and no other dead end in the wave. The turn drops
-        that seed (`_drop_seeds_from_turn`), whose name the replanned plan's
-        card opens with.
-        A single seed, or every seed stale, still stops the turn with the
-        refusal's remedy to search again. `Refused(NOT_APPROVED)` and
+        failing call. `Refused(NOT_APPROVED)` and
         `Refused(STALE_REVISION)` mean the graph's own `approve` node let
         through a plan it should not have -- a replan here would loop on the
         same defect, so those raise instead. Any other outcome also corrects
@@ -3483,6 +3422,11 @@ def create_root_workflow(
         (`_step_progress_event`), one per report as it arrives. The task is
         awaited last, so its exceptions propagate here, and cancelled if the
         node exits first (a stop or a disconnect closing the stream).
+
+        A plan stored in a shape this release does not read
+        (`_readable_plan`) runs nothing and spends no replan: it routes
+        `"replan"` with `{"unreadable_plan": True}`, and `planner` drafts the
+        question from the start.
         """
         del node_input
         if tool_surface is None:
@@ -3490,7 +3434,11 @@ def create_root_workflow(
                 "the execute node has no tool surface: create_root_workflow(tool_surface=...) "
                 "was not given one, so the approved plan cannot be run"
             )
-        plan = PlannerPlan.model_validate_json(ctx.state["plan"])
+        plan = _readable_plan(ctx, ctx.state["plan"])
+        if plan is None:
+            # Nothing to run, and no replan is spent on it.
+            yield Event(output={"unreadable_plan": True}, route="replan")
+            return
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
         task, relay = _start_relayed(
             lambda on_progress: execute_approved_plan(
@@ -3551,26 +3499,10 @@ def create_root_workflow(
                 "the approve node let a plan reach execute that execute_approved_plan refused "
                 f"as {outcome.refusal.value}: {outcome.detail}"
             )
-        # A seed whose StatVars left its dataset is dropped, and the turn
-        # replans from the other seeds, when one is left to plan from and no
-        # other stop in the wave is a dead end the replan would meet again.
-        seeded = seeded_sources(ctx.state)
-        stale = stale_seeds(outcome, workflow=workflow, seeded=seeded)
-        drops = (
-            bool(stale)
-            and any(
-                item.windowed_from is None for item in split_dropped(seeded, set(stale.values()))[0]
-            )
-            and not any(
-                _is_dead_end(stop)
-                for stop in (outcome, *outcome.also_stopped)
-                if stop.step_id not in stale
-            )
-        )
         # A dead end: no replan can fix this, so none is spent, and the
         # planner's re-proposal (which would reproduce this exact failing
         # call) never runs.
-        dead_end = not drops and _is_dead_end(outcome)
+        dead_end = _is_dead_end(outcome)
         answers = _answer_frames(outcome)
         _link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
         if finished.asks:
@@ -3580,12 +3512,10 @@ def create_root_workflow(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            refusal = _replan_refusal(outcome, dropped=stale if drops else None)
+            refusal = _replan_refusal(outcome)
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}
-            if drops:
-                _drop_seeds_from_turn(ctx, set(stale.values()), surface=surface)
             yield Event(output=output, route="replan")
             return
         completed = outcome.completed
@@ -4065,7 +3995,7 @@ def create_root_workflow(
                 )
                 listed = f"\n{json.dumps(result)}"
             return {
-                "status": "Reading the planner's answer",
+                "status": ORCHESTRATOR_PLAN_FAILED_STATUS,
                 "text": "The planner could not make a plan: "
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
                 "and fetch where you can, and say plainly what could not be calculated."
@@ -4084,13 +4014,12 @@ def create_root_workflow(
             failed and failed.get("code") == ToolErrorCode.CAPABILITY_UNAVAILABLE.value
         )
         record = ""
-        raw_plan = ctx.state.get("plan")
-        if raw_plan:
+        plan = _readable_plan(ctx, ctx.state.get("plan"))
+        if plan is not None:
             # The plan record names every source by spec_id, so the agent can
             # fetch a part the failure did not touch without searching again,
             # and the readings let `fetch` read such a spec the way the plan
             # did.
-            plan = PlannerPlan.model_validate_json(raw_plan)
             readings = dict(ctx.state.get(ORCHESTRATOR_READINGS_KEY) or {})
             unavailable = dict(ctx.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
             for row in plan_display.step_rows(plan):
@@ -4169,7 +4098,7 @@ def create_root_workflow(
         else:
             lead = "The approved plan ran. Chart its frames and answer."
         return {
-            "status": "Reading the plan's results",
+            "status": ORCHESTRATOR_PLAN_RAN_STATUS,
             "text": f"{lead}\n{json.dumps(result)}{record}",
         }
 
@@ -4277,6 +4206,8 @@ __all__ = [
     "ORCHESTRATOR_CALLS_KEY",
     "ORCHESTRATOR_FRAMES_KEY",
     "ORCHESTRATOR_PENDING_KEY",
+    "ORCHESTRATOR_PLAN_FAILED_STATUS",
+    "ORCHESTRATOR_PLAN_RAN_STATUS",
     "ORCHESTRATOR_READINGS_KEY",
     "ORCHESTRATOR_SPECS_KEY",
     "ORCHESTRATOR_STATUS_KEY",

@@ -26,6 +26,7 @@ from compiler.capabilities import (
     schema_drift,
 )
 from compiler.surface import McpSurface, ToolSchema
+from data_mcp.resolve_definition_tool import RESUBMIT_CALL_BUDGET_S, RESUBMIT_READ_TIMEOUT_S
 from data_mcp.search_tool import SEARCH_CALL_BUDGET_S
 from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
@@ -285,7 +286,7 @@ def test_call_timeouts_returns_exactly_the_rows_that_state_one() -> None:
     assert timeouts == {
         ToolId(server="data-mcp", name="search"): 60.0,
         ToolId(server="data-mcp", name="describe"): 30.0,
-        ToolId(server="data-mcp", name="resolve_definition"): 60.0,
+        ToolId(server="data-mcp", name="resolve_definition"): 110.0,
         ToolId(server="data-mcp", name="get_data"): 180.0,
     }
 
@@ -294,21 +295,36 @@ def test_call_timeouts_returns_exactly_the_rows_that_state_one() -> None:
 # in dfo-apis `src/search/engine/config.py`.
 DFO_APIS_SEARCH_DEADLINE_S = 45.0
 
+# dfo-apis's deadline for a resubmit whose member walk enters the full subject read.
+DFO_APIS_RESUBMIT_DEADLINE_S = 90.0
 
-@pytest.mark.parametrize("tool", ["search", "resolve_definition"])
-def test_search_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness(tool: str) -> None:
+
+def test_search_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness() -> None:
     """Each layer's deadline outlasts the one it waits on, so a slow search surfaces
     dfo-apis's own typed 503 or 504 instead of a timeout raised a layer above it.
     data-mcp's retries run inside `SEARCH_CALL_BUDGET_S`, which ends before the harness's.
-    Both tools reach dfo-apis through `resolve_and_register`.
 
     Read from the shipped defaults, so an environment override cannot mask a
     default that crowds the next layer.
     """
     data_mcp_read_s = DataMcpSettings.model_fields["upstream_read_timeout_s"].default
-    harness_call_s = call_timeouts()[ToolId(server="data-mcp", name=tool)]
+    harness_call_s = call_timeouts()[ToolId(server="data-mcp", name="search")]
 
     assert DFO_APIS_SEARCH_DEADLINE_S < data_mcp_read_s < SEARCH_CALL_BUDGET_S < harness_call_s
+
+
+def test_resubmit_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness() -> None:
+    """A resubmit whose member walk reads the whole subject set runs up to dfo-apis's
+    90 s resubmit deadline; data-mcp's read and budget and the harness's
+    `resolve_definition` timeout each outlast the layer below."""
+    harness_call_s = call_timeouts()[ToolId(server="data-mcp", name="resolve_definition")]
+
+    assert (
+        DFO_APIS_RESUBMIT_DEADLINE_S
+        < RESUBMIT_READ_TIMEOUT_S
+        < RESUBMIT_CALL_BUDGET_S
+        < harness_call_s
+    )
 
 
 def test_get_data_call_timeout_outlasts_data_mcps_call_deadline() -> None:

@@ -1010,10 +1010,10 @@ def _default_series_stats() -> pa.Table:
 def _manifest(**overrides: object) -> Manifest:
     """A `get_data` manifest for ten annual Kenya observations, 2015 to 2024, in USD.
 
-    `trace` binds the spec to `DebtServicePaid` alone by default, matching
-    the `source` fixture's default approved `stat_vars` -- an intact,
-    matching binding -- so a test that does not care about membership does
-    not pick up a finding from it by accident. Carries no per-series
+    `trace` serves `DebtServicePaid` alone by default and states the digest
+    of that one-member family, matching the `source` fixture's approved
+    digest, so a test that does not care about membership does not pick up a
+    finding from it by accident. Carries no per-series
     statistics of its own: those move separately, through `evidence_from_manifest`'s
     `series_stats` argument (`_default_series_stats`/`_series_stats`), since
     the manifest itself carries only `series_count` and a reference to its
@@ -1029,7 +1029,7 @@ def _manifest(**overrides: object) -> Manifest:
         "content_version": "cv_" + "1" * 32,
         "coverage": {"rows": 10, "dimensions": []},
         "citation": {"text": "World Bank", "sources": []},
-        "trace": _trace("DebtServicePaid"),
+        "trace": _trace("DebtServicePaid") | _family_trace(["DebtServicePaid"]),
         "warnings": [],
         "artifacts": [],
     }
@@ -1973,14 +1973,14 @@ def test_a_retrieval_naming_nothing_under_the_open_column_is_an_error(
 def _summed_donor_family() -> tuple[SelectedSource, Manifest]:
     """The recorded education-aid source approved to be read summed, and a manifest for it.
 
-    The approved binding is the two StatVars the recorded block lists, and
-    the manifest's trace resolves the same two.
+    The manifest's trace serves two StatVars and states the family digest the
+    recorded block states, so membership is confirmed.
     """
-    recorded = stat_var_reading(_recorded_role_open_source(), StatVarReading.SUM)
-    refs = [stat_var.removeprefix("dcid:") for stat_var in recorded.stat_vars]
-    approved = recorded.model_copy(
-        update={"shape_member_digest": member_digest(refs), "shape_member_count": len(refs)}
-    )
+    approved = stat_var_reading(_recorded_role_open_source(), StatVarReading.SUM)
+    refs = [
+        "Amount_FinancialFlow_Gross_Disbursement_CRSPurposeCode11110_Nominal",
+        "Amount_FinancialFlow_Gross_Disbursement_CRSPurposeCode11120_Nominal",
+    ]
     manifest = _flow_manifest(
         definition={
             "schema_version": 1,
@@ -1991,7 +1991,9 @@ def _summed_donor_family() -> tuple[SelectedSource, Manifest]:
             "resolved_stat_vars": [
                 {"ref": f"dcid:{ref}", "roles": ["financingProvider", "financingRecipient"]}
                 for ref in refs
-            ]
+            ],
+            "family_member_digest": approved.shape_member_digest,
+            "family_member_count": approved.shape_member_count,
         },
         citation={"text": "OECD CRS", "sources": []},
     )
@@ -2060,377 +2062,154 @@ def test_a_summed_retrieval_that_dropped_its_donors_is_an_error(
 # --- Resolved binding membership: approved versus executed -----------------------
 
 
-def test_equal_bindings_under_a_schema_shaped_identity_produce_no_finding(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid"),
-    )
-    approved = source(identity=schema_identity, stat_vars=("DebtServicePaid",))
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
+_SCHEMA_IDENTITY = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
+_POPULATION_FAMILY = ["Count_Person", "Count_Person_Female", "Count_Person_Male"]
 
 
-_BOUND_BY = pytest.mark.parametrize(
-    "digested", [True, False], ids=["by-digest", "by-untruncated-list"]
-)
-
-
-def _approved_binding(digested: bool, *dcids: str) -> dict[str, Any]:
-    """`SelectedSource` fields stating `dcids` as the approved binding: by its digest, or
-    with no digest as an untruncated list of listed members."""
-    if digested:
-        return {"shape_member_count": len(dcids), "shape_member_digest": member_digest(dcids)}
-    return {"stat_var_member_count": len(dcids), "stat_var_truncated": False}
-
-
-@_BOUND_BY
-def test_a_substituted_series_is_drift(
-    requirement: RequirementFactory, source: SourceFactory, digested: bool
-) -> None:
-    # The headline case: one approved dcid, one different resolved dcid,
-    # under a byte-identical, schema-shaped identity. Nothing else in the
-    # system catches this -- multiplicity is already covered downstream by
-    # `require_single_stat_var`.
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServiceReceived"),
-    )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid",),
-        **_approved_binding(digested, "DebtServicePaid"),
-    )
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_series_stats(_stat("DebtServiceReceived"))),
-        approved=approved,
-    )
-
-    assert [i.code for i in errors(issues)] == [EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert EvidenceIssueCode.SOURCE_DRIFT not in [i.code for i in issues]
-
-
-def _missing_member_issues(
-    requirement: RequirementFactory, source: SourceFactory, *, digested: bool
+def _membership(
+    requirement: RequirementFactory,
+    approved: SelectedSource,
+    *served: str,
+    family: Sequence[str] | None = None,
 ) -> list[EvidenceIssue]:
-    """The findings for an approved `DebtServicePaid` and `DebtStock` retrieved as the first alone."""
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
+    """The `STAT_VAR_MEMBERSHIP_DRIFT` findings for a retrieval serving `served`, whose
+    trace states the digest of `family`, or no family digest when `family` is `None`."""
+    trace: dict[str, object] = _trace(*served)
+    if family is not None:
+        trace |= _family_trace(family)
     manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid"),
+        definition={"schema_version": 1, "spec_id": SPEC, "identity": approved.identity},
+        trace=trace,
     )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid", "DebtStock"),
-        **_approved_binding(digested, "DebtServicePaid", "DebtStock"),
-    )
-    return check_evidence(
+    issues = check_evidence(
         requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
+        evidence_from_manifest(manifest, series_stats=_series_stats(*map(_stat, served))),
         approved=approved,
     )
+    return [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
 
 
-def test_a_listed_member_missing_from_the_retrieved_binding_is_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    issues = _missing_member_issues(requirement, source, digested=False)
-
-    assert [i.code for i in errors(issues)] == [EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-
-
-def test_a_binding_smaller_than_the_digested_population_is_unverified(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    # The digest covers every member the bindings admit and the mint serves
-    # the family reduced to the members no other dominates, so a subset of
-    # the approved population is what an unchanged family with a dominated
-    # member returns, and what a family that lost a member returns.
-    issues = _missing_member_issues(requirement, source, digested=True)
-
-    assert errors(issues) == []
-    (issue,) = [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert issue.severity is Severity.WARNING
-    assert issue.found == {
-        "member_count": 1,
-        "member_digest": member_digest(["DebtServicePaid"]),
+def _family_source(source: SourceFactory, **overrides: object) -> SelectedSource:
+    """A described source `search` approved as the population family, stating its digest."""
+    fields: dict[str, object] = {
+        "identity": _SCHEMA_IDENTITY,
+        "served_count": None,
+        "shape_member_count": len(_POPULATION_FAMILY),
+        "shape_member_digest": member_digest(_POPULATION_FAMILY),
     }
-    assert "cannot be confirmed" in issue.detail
+    return source(**(fields | overrides))
 
 
-def test_a_member_outside_a_wholly_listed_population_is_drift(
+def test_a_family_whose_trace_states_the_approved_digest_has_no_membership_finding(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # Smaller than the approved population, but the approval lists every
-    # member and the retrieval holds one that is not among them: no reduction
-    # of the family yields it.
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    family = ("DebtServicePaid", "DebtStock", "DebtServiceReceived")
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid", "DebtForgiven"),
-    )
-    approved = source(
-        identity=schema_identity, stat_vars=family, **_approved_binding(True, *family)
-    )
+    """The mint serves the family reduced to its root; the trace's family digest is
+    the approved one, so the reduction is no drift."""
+    approved = _family_source(source)
 
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    (drift,) = errors(issues)
-    assert drift.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT
+    assert _membership(requirement, approved, "Count_Person", family=_POPULATION_FAMILY) == []
 
 
-def test_an_extra_member_beyond_an_approved_digest_is_also_drift(
-    requirement: RequirementFactory, source: SourceFactory
+@pytest.mark.parametrize(
+    "family",
+    [
+        ["Count_Person", "Count_Person_Female"],
+        ["Count_Person", "Count_Person_Female", "Count_Person_Urban"],
+        [*_POPULATION_FAMILY, "Count_Person_Urban"],
+    ],
+    ids=["lost-a-member", "swapped-a-member", "gained-a-member"],
+)
+def test_a_family_whose_trace_states_another_digest_is_drift(
+    requirement: RequirementFactory, source: SourceFactory, family: list[str]
 ) -> None:
-    # The digest covers the whole binding, unlike the coverage set: there is
-    # no direction in which "more than approved" is a normal, benign
-    # reading, so an extra member is drift exactly as a missing one is.
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid", "DebtServiceReceived"),
-    )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid",),
-        shape_member_count=1,
-        shape_member_digest=member_digest(["DebtServicePaid"]),
-    )
+    approved = _family_source(source)
 
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
+    (drift,) = _membership(requirement, approved, "Count_Person", family=family)
 
-    (drift,) = errors(issues)
-    assert drift.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT
+    assert drift.severity is Severity.ERROR
+    assert drift.found == {"member_count": len(family), "member_digest": member_digest(family)}
     assert drift.required == {
-        "member_count": 1,
-        "member_digest": member_digest(["DebtServicePaid"]),
-    }
-    assert drift.found == {
-        "member_count": 2,
-        "member_digest": member_digest(["DebtServicePaid", "DebtServiceReceived"]),
+        "member_count": 3,
+        "member_digest": member_digest(_POPULATION_FAMILY),
     }
 
 
-def test_without_a_digest_extra_members_in_the_binding_are_no_finding(
-    requirement: RequirementFactory, source: SourceFactory
+@pytest.mark.parametrize(
+    ("approved_digest", "family"),
+    [(False, _POPULATION_FAMILY), (True, None)],
+    ids=["no-approved-digest", "no-trace-digest"],
+)
+def test_a_side_stating_no_digest_leaves_membership_unverified(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    approved_digest: bool,
+    family: list[str] | None,
 ) -> None:
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid", "DebtServiceReceived", "DebtStock"),
-    )
+    """`search` states no digest for a walk it could not finish, and the mint none for
+    a family it could not state whole: membership is unverified, never confirmed."""
+    approved = _family_source(source, **({} if approved_digest else {"shape_member_digest": None}))
+
+    (drift,) = _membership(requirement, approved, "Count_Person", family=family)
+
+    assert drift.severity is Severity.WARNING
+
+
+@pytest.mark.parametrize(
+    ("served", "found"),
+    [
+        (("DebtServicePaid",), []),
+        (("DebtServiceReceived",), [EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]),
+    ],
+    ids=["its-own-dcid", "another-dcid"],
+)
+def test_a_pinned_identity_is_held_to_the_dcid_it_names(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    served: tuple[str, ...],
+    found: list[EvidenceIssueCode],
+) -> None:
+    """A pinned identity names its one dcid, so no digest is needed to check it."""
     approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid",),
-        stat_var_member_count=1,
-        stat_var_truncated=False,
-        shape_member_count=8,
+        identity={"shape": {"kind": "stat_var", "id": "dcid:DebtServicePaid"}},
+        shape_member_digest=None,
     )
 
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
+    issues = _membership(requirement, approved, *served)
 
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
+    assert [issue.code for issue in issues if issue.severity is Severity.ERROR] == found
 
 
-def test_a_sparse_retrieval_with_an_intact_binding_reports_no_membership_finding(
-    requirement: RequirementFactory, source: SourceFactory
+@pytest.mark.parametrize(
+    ("served", "drift"),
+    [(("Count_Person",), False), (tuple(_POPULATION_FAMILY), True)],
+    ids=["one-served", "three-served"],
+)
+def test_a_source_approved_as_one_series_is_held_to_one_served_stat_var(
+    requirement: RequirementFactory, source: SourceFactory, served: tuple[str, ...], drift: bool
 ) -> None:
-    # The bug this check exists to close: the statistics artifact carries
-    # only a series that returned an observation, so a bound member with
-    # none for the entities and years asked -- `DebtStock` here, absent from
-    # `_default_series_stats` entirely -- is missing from coverage without
-    # being missing from the binding. `trace.resolved_stat_vars` states the
-    # binding is intact, so this is sparsity, not drift.
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid", "DebtStock"),
-    )
-    approved = source(identity=schema_identity, stat_vars=("DebtServicePaid", "DebtStock"))
+    """`served_count` of one made the plan read the source as one series, so a
+    retrieval serving more is drift whatever the family's digest says."""
+    approved = _family_source(source, served_count=1)
 
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
+    issues = _membership(requirement, approved, *served, family=_POPULATION_FAMILY)
 
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
+    assert [issue.found for issue in issues] == ([len(served)] if drift else [])
 
 
-def test_a_pinned_identity_answering_with_another_dcid_is_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    pinned_identity = {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": pinned_identity},
-        trace=_trace("DebtServiceReceived"),
-    )
-    # The pinned arm works even when `stat_vars` itself is empty: the
-    # expectation comes from the identity's `shape`, not the recorded list.
-    approved = source(identity=pinned_identity, stat_vars=())
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_series_stats(_stat("DebtServiceReceived"))),
-        approved=approved,
-    )
-
-    assert [i.code for i in errors(issues)] == [EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-
-
-def test_a_pinned_identity_answering_with_its_own_dcid_is_no_finding(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    pinned_identity = {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": pinned_identity},
-        trace=_trace("DebtServicePaid"),
-    )
-    approved = source(identity=pinned_identity, stat_vars=())
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-
-
-def test_a_truncated_approved_list_missing_a_shown_member_warns(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    # `items` is a subset of the definition, all the more when `search`
-    # capped it, so a retrieved member ABSENT from that subset proves
-    # nothing. A member the subset DOES name is a real elected member: if
-    # the retrieval no longer binds it, that is drift. A capped list promises
-    # only the members it shows, so the finding is a caveat on the approval
-    # summary rather than the ERROR an untruncated list's missing member is.
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtStock"),
-    )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid", "DebtStock"),
-        stat_var_member_count=5,
-        stat_var_truncated=True,
-    )
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    assert errors(issues) == []
-    (issue,) = [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert issue.severity is Severity.WARNING
-    assert issue.found == ["DebtStock"]
-    assert issue.required == ["DebtServicePaid", "DebtStock"]
-
-
-def test_a_truncated_approved_list_whose_shown_members_all_survive_is_no_finding(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid", "DebtStock"),
-    )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid",),
-        stat_var_member_count=2,
-        stat_var_truncated=True,
-    )
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-
-
-def test_a_truncated_standard_spec_with_an_unrelated_population_count_is_no_finding(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    """Regression for issue 212 S9: after dfo-apis #893, a standard
-    (catch-all) spec's `stat_var_member_count` is confirmed candidates at
-    the place, not this spec's own binding size, so it can be large (here,
-    40) for a spec that elects and retrieves a single StatVar. Comparing
-    that count against the retrieval's size would warn on every such
-    workflow; comparing the two dcid sets themselves does not."""
-    schema_identity = {"shape": {"kind": "statvar_schema", "measured_property": "amount"}}
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": schema_identity},
-        trace=_trace("DebtServicePaid"),
-    )
-    approved = source(
-        identity=schema_identity,
-        stat_vars=("DebtServicePaid",),
-        stat_var_member_count=40,
-        stat_var_truncated=True,
-    )
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-
-
-@_BOUND_BY
 def test_an_unapproved_identity_still_gets_the_membership_check(
-    requirement: RequirementFactory, source: SourceFactory, digested: bool
+    requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # The binding comparison needs no identity -- only the pinned arm does,
-    # and that arm already falls back to it when a shape is absent. An
-    # unknown identity is the case with the least protection, so it must not
-    # also get the least checking: a swapped series here would otherwise
-    # pass unnoticed.
+    """An unknown identity is the case with the least protection, so it must not
+    also get the least checking: a family that moved is still drift."""
+    approved = _family_source(source, identity=None)
     manifest = _manifest(
         definition={"schema_version": 1, "spec_id": SPEC, "identity": {"stat_var": "X"}},
-        trace=_trace("DebtServiceReceived"),
-    )
-    approved = source(
-        identity=None,
-        stat_vars=("DebtServicePaid",),
-        **_approved_binding(digested, "DebtServicePaid"),
+        trace=_trace("Count_Person") | _family_trace(["Count_Person_Urban"]),
     )
 
     issues = check_evidence(
         requirement(),
-        evidence_from_manifest(manifest, series_stats=_series_stats(_stat("DebtServiceReceived"))),
+        evidence_from_manifest(manifest, series_stats=_series_stats(_stat("Count_Person"))),
         approved=approved,
     )
 
@@ -2443,47 +2222,17 @@ def test_an_unapproved_identity_still_gets_the_membership_check(
 _FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
-def _france_education_grants() -> tuple[SelectedSource, dict[str, Any], list[dict[str, Any]]]:
-    """The recorded "education grants from France, 2020-2024" approval, its identity, and
-    the binding its mint traced.
-
-    `search` listed 68 StatVars confirmed at France (`truncated` false) and
-    stated a 183-member binding with its digest; the mint's
-    `trace.resolved_stat_vars` holds those 183 members.
-    """
+def test_member_digest_matches_the_digest_dfo_apis_computed() -> None:
+    """The recorded "education grants from France, 2020-2024" block states a 183-member
+    family digest, and the recorded mint's trace serves those 183 members."""
     block = json.loads((_FIXTURES / "family_spec_blocks.json").read_text())[
         "france_education_grants"
     ]["parts"][0]["spec"]
     trace = json.loads((_FIXTURES / "mint_trace_france_education_grants.json").read_text())
+    approved = source_from_spec_block(block)
+    entries = trace["trace"]["resolved_stat_vars"]
+
     assert trace["spec_id"] == block["spec_id"]
-    return (
-        source_from_spec_block(block),
-        block["definition"]["identity"],
-        trace["trace"]["resolved_stat_vars"],
-    )
-
-
-def _france_manifest(
-    identity: dict[str, Any],
-    entries: list[dict[str, Any]],
-    *,
-    family: list[dict[str, Any]] | None = None,
-) -> Manifest:
-    """The mint's manifest serving `entries`; `family`, when given, is the admitted
-    family its trace states the digest and count of."""
-    spec_id = "spec_2de893a95d8c552088831c28e5447147"
-    trace: dict[str, Any] = {"resolved_stat_vars": entries}
-    if family is not None:
-        trace |= _family_trace(e["ref"].removeprefix("dcid:") for e in family)
-    return _manifest(
-        definition={"schema_version": 1, "spec_id": spec_id, "identity": identity},
-        trace=trace,
-    )
-
-
-def test_member_digest_matches_the_digest_dfo_apis_computed() -> None:
-    approved, _, entries = _france_education_grants()
-
     assert approved.shape_member_digest == (
         "7f6018987b665147990da0af3bd8a7b41b77d5acbd0c67d06cc81fcddf26ff83"
     )
@@ -2492,283 +2241,11 @@ def test_member_digest_matches_the_digest_dfo_apis_computed() -> None:
     )
 
 
-def test_the_recorded_family_whose_trace_matches_its_digest_has_no_membership_finding(
-    requirement: RequirementFactory,
-) -> None:
-    approved, identity, entries = _france_education_grants()
-    assert (len(approved.stat_vars), approved.stat_var_truncated) == (68, False)
-    assert (approved.shape_member_count, len(entries)) == (183, 183)
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(
-            _france_manifest(identity, entries), series_stats=_default_series_stats()
-        ),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-    assert EvidenceIssueCode.SOURCE_DRIFT not in [i.code for i in issues]
-
-
-def test_the_recorded_family_whose_trace_lost_a_member_is_unverified(
-    requirement: RequirementFactory,
-) -> None:
-    # `search` listed 68 of the 183 members, so the population is not known
-    # member by member, and 182 of them is a binding the mint's reduction
-    # could return for an unchanged family.
-    approved, identity, entries = _france_education_grants()
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(
-            _france_manifest(identity, entries[1:]), series_stats=_default_series_stats()
-        ),
-        approved=approved,
-    )
-
-    (finding,) = [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert finding.severity is Severity.WARNING
-    assert finding.found == {
-        "member_count": 182,
-        "member_digest": member_digest(e["ref"].removeprefix("dcid:") for e in entries[1:]),
-    }
-
-
-def test_the_recorded_family_that_lost_a_member_is_drift_when_the_trace_states_the_family(
-    requirement: RequirementFactory,
-) -> None:
-    approved, identity, entries = _france_education_grants()
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(
-            _france_manifest(identity, entries[1:], family=entries[1:]),
-            series_stats=_default_series_stats(),
-        ),
-        approved=approved,
-    )
-
-    (drift,) = [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert drift.severity is Severity.ERROR
-    assert drift.found == {
-        "member_count": 182,
-        "member_digest": member_digest(e["ref"].removeprefix("dcid:") for e in entries[1:]),
-    }
-    assert drift.required == {
-        "member_count": 183,
-        "member_digest": approved.shape_member_digest,
-    }
-
-
-def test_the_recorded_family_served_reduced_is_no_drift_when_the_trace_states_the_family(
-    requirement: RequirementFactory,
-) -> None:
-    # 100 of the 183 members served, and the trace states the family of 183
-    # they were reduced from: the approved one.
-    approved, identity, entries = _france_education_grants()
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(
-            _france_manifest(identity, entries[:100], family=entries),
-            series_stats=_default_series_stats(),
-        ),
-        approved=approved,
-    )
-
-    assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-
-
-def test_the_recorded_family_whose_trace_swapped_a_member_is_drift(
-    requirement: RequirementFactory,
-) -> None:
-    # As many members as approved under another digest: no reduction of the
-    # approved family is that large without being the family itself.
-    approved, identity, entries = _france_education_grants()
-    swapped = [{**entries[0], "ref": "dcid:Some_Other_StatVar"}, *entries[1:]]
-
-    issues = check_evidence(
-        requirement(),
-        evidence_from_manifest(
-            _france_manifest(identity, swapped), series_stats=_default_series_stats()
-        ),
-        approved=approved,
-    )
-
-    (drift,) = [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT]
-    assert drift.severity is Severity.ERROR
-
-
-# A described identity whose one elected StatVar is its family's root. `search`
-# digests every member the bindings admit; the mint returns the family reduced
-# to the members no other dominates, which is the root alone.
-_ROOTED_IDENTITY = {
-    "shape": {"kind": "statvar_schema", "population_type": "Person"},
-    "entities": {"observationAbout": ["country/KEN"]},
-}
-_POPULATION_FAMILY = ["Count_Person", "Count_Person_Female", "Count_Person_Male"]
-
-
-def _rooted_source(source: SourceFactory, **overrides: object) -> SelectedSource:
-    fields: dict[str, object] = {
-        "identity": _ROOTED_IDENTITY,
-        "stat_vars": ("Count_Person",),
-        "pinned": True,
-        "shape_member_count": len(_POPULATION_FAMILY),
-        "shape_member_digest": member_digest(_POPULATION_FAMILY),
-    }
-    return source(**(fields | overrides))
-
-
-def _rooted_issues(
-    requirement: RequirementFactory,
-    approved: SelectedSource,
-    *retrieved: str,
-    family: Sequence[str] | None = None,
-) -> list[EvidenceIssue]:
-    """The membership findings for `retrieved` served; `family`, when given, is the
-    admitted family the trace states."""
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": _ROOTED_IDENTITY},
-        trace=_trace(*retrieved) | (_family_trace(family) if family is not None else {}),
-    )
-    return [
-        issue
-        for issue in check_evidence(
-            requirement(),
-            evidence_from_manifest(manifest, series_stats=_default_series_stats()),
-            approved=approved,
-        )
-        if issue.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT
-    ]
-
-
-def test_a_rooted_family_minted_as_its_root_is_no_drift_from_the_family_s_digest(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    approved = _rooted_source(source)
-    assert member_digest(["Count_Person"]) != approved.shape_member_digest
-
-    assert _rooted_issues(requirement, approved, "Count_Person") == []
-
-
-def test_a_rooted_family_stating_no_digest_minted_as_its_root_is_no_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    approved = _rooted_source(source, shape_member_digest=None)
-
-    assert _rooted_issues(requirement, approved, "Count_Person") == []
-
-
-@pytest.mark.parametrize(
-    "retrieved",
-    [("Count_Person_Female",), ("Count_Person", "Count_Person_Female"), _POPULATION_FAMILY],
-    ids=["another-member", "the-root-and-another", "the-whole-family"],
-)
-def test_a_rooted_family_minted_as_anything_but_its_root_is_drift(
-    requirement: RequirementFactory, source: SourceFactory, retrieved: Sequence[str]
-) -> None:
-    # The plan was compiled for one series, so the whole family is drift too,
-    # though its digest is the one `search` stated.
-    (drift,) = _rooted_issues(requirement, _rooted_source(source), *retrieved)
-
-    assert drift.severity is Severity.ERROR
-    assert drift.required == ["Count_Person"]
-    assert drift.found == sorted(retrieved)
-
-
-# A family that has a root the approval could not prove: `search` elected the
-# root beside another member, or stated no constraints for the one it elected.
-# The mint returns the root alone either way, under a digest that covers the
-# whole family.
-_UNPROVEN_ROOT = pytest.mark.parametrize(
-    "overrides",
-    [
-        {"stat_vars": ("Count_Person", "Count_Person_Female")},
-        {"pinned": False},
-        {"pinned": False, "stat_vars": tuple(_POPULATION_FAMILY)},
-    ],
-    ids=["recorded-pinned-over-several", "one-elected-unproven", "the-family-listed-whole"],
-)
-
-
-@_UNPROVEN_ROOT
-def test_an_unproven_root_minted_as_the_root_alone_is_unverified(
-    requirement: RequirementFactory, source: SourceFactory, overrides: dict[str, object]
-) -> None:
-    approved = _rooted_source(source, **overrides)
-
-    (finding,) = _rooted_issues(requirement, approved, "Count_Person")
-
-    assert finding.severity is Severity.WARNING
-    assert finding.required == {
-        "member_count": 3,
-        "member_digest": member_digest(_POPULATION_FAMILY),
-    }
-    assert finding.found == {"member_count": 1, "member_digest": member_digest(["Count_Person"])}
-
-
-@_UNPROVEN_ROOT
-def test_an_unproven_root_minted_as_three_other_members_is_drift(
-    requirement: RequirementFactory, source: SourceFactory, overrides: dict[str, object]
-) -> None:
-    approved = _rooted_source(source, **overrides)
-
-    (drift,) = _rooted_issues(
-        requirement, approved, "Count_Person", "Count_Person_Female", "Count_Person_Urban"
-    )
-
-    assert drift.severity is Severity.ERROR
-
-
-@_UNPROVEN_ROOT
-def test_an_unproven_root_minted_as_the_root_alone_passes_when_the_trace_states_the_family(
-    requirement: RequirementFactory, source: SourceFactory, overrides: dict[str, object]
-) -> None:
-    approved = _rooted_source(source, **overrides)
-
-    assert _rooted_issues(requirement, approved, "Count_Person", family=_POPULATION_FAMILY) == []
-
-
-@_UNPROVEN_ROOT
-def test_an_unproven_root_whose_stated_family_differs_is_drift(
-    requirement: RequirementFactory, source: SourceFactory, overrides: dict[str, object]
-) -> None:
-    # The served root alone is what the fallback calls unverified; the
-    # trace's own family digest decides it.
-    approved = _rooted_source(source, **overrides)
-    moved = ["Count_Person", "Count_Person_Female"]
-
-    (drift,) = _rooted_issues(requirement, approved, "Count_Person", family=moved)
-
-    assert drift.severity is Severity.ERROR
-    assert drift.found == {"member_count": 2, "member_digest": member_digest(moved)}
-
-
-def test_a_served_member_outside_the_wholly_listed_family_the_trace_confirms_is_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    approved = _rooted_source(source, pinned=False, stat_vars=tuple(_POPULATION_FAMILY))
-
-    (drift,) = _rooted_issues(
-        requirement, approved, "Count_Person_Urban", family=_POPULATION_FAMILY
-    )
-
-    assert drift.severity is Severity.ERROR
-    assert drift.found == ["Count_Person_Urban"]
-    assert drift.required == sorted(_POPULATION_FAMILY)
-
-
 def test_a_trace_family_digest_is_read_off_the_manifest() -> None:
-    manifest = _manifest(
-        definition={"schema_version": 1, "spec_id": SPEC, "identity": _ROOTED_IDENTITY},
-        trace=_trace("Count_Person") | _family_trace(_POPULATION_FAMILY),
-    )
+    manifest = _manifest(trace=_trace("Count_Person") | _family_trace(_POPULATION_FAMILY))
     stated = evidence_from_manifest(manifest, series_stats=_default_series_stats())
     silent = evidence_from_manifest(
         _manifest(
-            definition={"schema_version": 1, "spec_id": SPEC, "identity": _ROOTED_IDENTITY},
             trace=_trace("Count_Person")
             | {"family_member_digest": None, "family_member_count": None},
         ),
@@ -2780,26 +2257,6 @@ def test_a_trace_family_digest_is_read_off_the_manifest() -> None:
         3,
     )
     assert (silent.family_member_digest, silent.family_member_count) == (None, None)
-
-
-def test_a_family_listed_whole_minted_as_a_member_outside_it_is_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    approved = _rooted_source(source, pinned=False, stat_vars=tuple(_POPULATION_FAMILY))
-
-    (drift,) = _rooted_issues(requirement, approved, "Count_Person_Urban")
-
-    assert drift.severity is Severity.ERROR
-
-
-def test_a_digest_stated_without_its_count_holds_a_smaller_binding_to_drift(
-    requirement: RequirementFactory, source: SourceFactory
-) -> None:
-    approved = _rooted_source(source, pinned=False, shape_member_count=None)
-
-    (drift,) = _rooted_issues(requirement, approved, "Count_Person")
-
-    assert drift.severity is Severity.ERROR
 
 
 def test_the_code_of_a_substituted_retrieval_still_loads() -> None:
@@ -2875,13 +2332,6 @@ def test_check_evidence_with_no_approved_source_reports_no_membership_finding(
     )
 
     assert [i for i in issues if i.code is EvidenceIssueCode.STAT_VAR_MEMBERSHIP_DRIFT] == []
-
-
-def test_a_collection_manifest_is_not_evidence_for_one_requirement() -> None:
-    collection = _manifest(definition=None, collection={"collection_id": "col_1", "members": []})
-
-    with pytest.raises(ValueError, match="collection, not one definition"):
-        evidence_from_manifest(collection)
 
 
 # --- A large statistics artifact is read column by column ---------------------
