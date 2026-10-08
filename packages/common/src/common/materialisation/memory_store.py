@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from common.materialisation.anchor_record import AnchorRecord
 from common.materialisation.frame_ref import FrameRef
-from common.materialisation.store import FrameExpired, FrameTooLarge, HeldFrame
+from common.materialisation.mint_record import MintRecord
+from common.materialisation.store import FrameExpired, FrameListing, FrameTooLarge, HeldFrame
 from common.materialisation.trace import StoredFrameTrace
 
 if TYPE_CHECKING:
@@ -27,6 +29,16 @@ FRAME_TTL = timedelta(days=30)
 # long-lived shared process: every `get_data` mint and every verb result adds an
 # entry here, so this store needs the same cap its sibling already has.
 DEFAULT_MAX_ENTRIES = 256
+
+# The most mint records held. A record is a few hundred bytes and a derived frame's
+# recipe needs its roots' records after the root frames themselves are evicted, so
+# records get a cap of their own, well above the frame cap.
+MAX_MINT_RECORDS = 8_192
+
+# The most anchor records held. A record is read by each rolling verb call of the
+# recipe it was resolved for and by the recipe built when that recipe's frame is
+# published, so it has a cap of its own, apart from the frames'.
+MAX_ANCHOR_RECORDS = 8_192
 
 
 def _utcnow() -> datetime:
@@ -41,6 +53,10 @@ async def _held(
             ref, reason=f"frame has {frame.num_rows} rows, over this read's {max_rows}-row limit"
         )
     return frame, trace
+
+
+def _listing_order(listing: FrameListing) -> tuple[datetime, str, str]:
+    return listing.created_at, listing.ref.spec_id, listing.ref.content_version
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -64,6 +80,11 @@ class InMemoryMaterialisationStore:
     `get` on the oldest-written entry moves it to the front of the eviction queue
     without changing when it expires -- so `_drop_expired` scans every entry rather
     than assuming the dict is sorted by age.
+
+    Mint records sit in a dict of their own, apart from `_entries`. Evicting or
+    expiring a frame leaves its record, and the oldest-written record goes first
+    once `MAX_MINT_RECORDS` are held. Anchor records sit in a third dict, keyed by
+    their own `anchor_key`, under the same rule with `MAX_ANCHOR_RECORDS`.
     """
 
     def __init__(
@@ -72,6 +93,8 @@ class InMemoryMaterialisationStore:
         self._now = now
         self._max_entries = max_entries
         self._entries: OrderedDict[tuple[str, str], _StoredEntry] = OrderedDict()
+        self._mint_records: dict[tuple[str, str], MintRecord] = {}
+        self._anchor_records: dict[str, AnchorRecord] = {}
 
     async def put(
         self, ref: FrameRef, *, frame: Frame, trace: StoredFrameTrace, writer: str
@@ -116,6 +139,46 @@ class InMemoryMaterialisationStore:
             num_rows=entry.frame.num_rows,
             read=functools.partial(_held, ref, entry.frame, entry.trace),
         )
+
+    async def get_trace(self, ref: FrameRef) -> StoredFrameTrace | None:
+        entry = self._live_entry(ref)
+        return None if entry is None else entry.trace
+
+    async def list_frames(self) -> list[FrameListing]:
+        """Every entry not yet expired, oldest first. Touches no entry's eviction
+        recency."""
+        now = self._now()
+        listings = [
+            FrameListing(
+                ref=FrameRef(spec_id=spec_id, content_version=content_version),
+                created_at=entry.created_at,
+            )
+            for (spec_id, content_version), entry in self._entries.items()
+            if now - entry.created_at <= FRAME_TTL
+        ]
+        return sorted(listings, key=_listing_order)
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        key = (record.frame.spec_id, record.frame.content_version)
+        if key in self._mint_records:
+            return
+        if len(self._mint_records) >= MAX_MINT_RECORDS:
+            del self._mint_records[next(iter(self._mint_records))]
+        self._mint_records[key] = record
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        return self._mint_records.get((ref.spec_id, ref.content_version))
+
+    async def put_anchor_record(self, record: AnchorRecord) -> None:
+        key = record.anchor_key
+        if key in self._anchor_records:
+            return
+        if len(self._anchor_records) >= MAX_ANCHOR_RECORDS:
+            del self._anchor_records[next(iter(self._anchor_records))]
+        self._anchor_records[key] = record
+
+    async def get_anchor_record(self, anchor_key: str) -> AnchorRecord | None:
+        return self._anchor_records.get(anchor_key)
 
     def _live_entry(self, ref: FrameRef) -> _StoredEntry | None:
         key = (ref.spec_id, ref.content_version)

@@ -112,6 +112,7 @@ from compiler.sources import (
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    wire_groups,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -129,17 +130,17 @@ from planner.plan import (
     discovery_time_left,
     load_plan,
     names_dropped_seed,
-    period_window,
     pin_sources,
     plan_revision,
     recorded_identity,
+    retrieves_period,
     seeded_source,
     seeded_sources,
     windowed_pins,
 )
 from planner.records import Identifier, SpecId, StrictModel, warn_left_out
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import SelectedSource, ToolId
+from planner.workflow import ResolvedGroup, SelectedSource, ToolId
 from pydantic import Field, ValidationError
 
 from translator.referral import ReferralKind
@@ -1080,7 +1081,12 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     part: dict[str, object] = {"variable": variable}
     if entities:
         part["entities"] = entities
-    part["time"] = f"{requirement.period.start} to {requirement.period.end}"
+    # "since YYYY" is the form Search binds as a range with no end year.
+    part["time"] = (
+        f"since {requirement.period.start}"
+        if requirement.period_end_open
+        else f"{requirement.period.start} to {requirement.period.end}"
+    )
     if requirement.unit is not None:
         part["unit"] = _unit_phrase(requirement.unit)
     if open_roles := _open_roles(requirement):
@@ -1464,8 +1470,16 @@ async def resolve_definition(
     *,
     spec_id: str,
     identity: Mapping[str, Any],
+    groups: Sequence[ResolvedGroup] = (),
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
+
+    `groups`, the sets a role's places were asked for as, are posted beside
+    the identity (`compiler.sources.wire_groups`), so Search names them again.
+    Search keeps a posted set only when it names a graph node whose members
+    are the identity's places on that role (dfo-apis
+    `resubmit_request.resubmit_named_groups`). A set with no node, such as
+    the G7, is dropped: its places still bind, and its name is lost.
 
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
@@ -1477,6 +1491,8 @@ async def resolve_definition(
             refused it, or the envelope holds no part.
     """
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
+    if groups:
+        arguments["entity_groups"] = wire_groups(groups)
     try:
         answer = await _call_within_entry(surface, tool=RESOLVE_DEFINITION, arguments=arguments)
     except ToolSurfaceUnavailableError as exc:
@@ -1643,11 +1659,15 @@ async def _seeded_source(
         return source
     window = source.identity.get("requested_window")
     window = window if isinstance(window, Mapping) else {}
-    asked = f'"{source.sentence}" over {window.get("start_year")} to {window.get("end_year")}'
+    start, end = window.get("start_year"), window.get("end_year")
+    years = f"from {start} on" if end is None else f"over {start} to {end}"
+    asked = f'"{source.sentence}" {years}'
     kind = ReferralKind.REQUIREMENT_UNMEETABLE
     no_data_reason: str | None = None
     try:
-        part = await resolve_definition(surface, spec_id=spec_id, identity=source.identity)
+        part = await resolve_definition(
+            surface, spec_id=spec_id, identity=source.identity, groups=source.groups
+        )
         return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
@@ -1703,7 +1723,9 @@ async def _recorded_source(
     The identity is the copy over the requirement's period that
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one a search in the conversation recorded for the pin itself
-    (`planner.plan.recorded_identity`) when its window is that period. It
+    (`planner.plan.recorded_identity`) when its window is that period, or
+    a range with no end year for a requirement stating `period_end_open`
+    (`planner.plan.retrieves_period`). It
     is resolved through data-mcp (`resolve_definition`), which stores the
     definition for the plan's `get_data`, and the source is read from
     Search's part (`resolved_spec`), so its sentence, coverage and member
@@ -1722,12 +1744,14 @@ async def _recorded_source(
     if (
         recorded is None
         or identity is None
-        or identity.get("requested_window") != period_window(requirement.period)
+        or not retrieves_period(identity.get("requested_window"), requirement)
         or names_dropped_seed(tool_context.state, spec_id=spec_id, identity=identity)
     ):
         return None
     try:
-        part = await resolve_definition(surface, spec_id=spec_id, identity=identity)
+        part = await resolve_definition(
+            surface, spec_id=spec_id, identity=identity, groups=recorded.groups
+        )
         return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
     except DefinitionNotResolvedError as exc:
         if not exc.retryable:

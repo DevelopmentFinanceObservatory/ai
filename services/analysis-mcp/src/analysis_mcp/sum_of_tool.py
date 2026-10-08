@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from common.materialisation import ComposedStatVar
+from dfo_frame_grammar import Frame
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
@@ -23,7 +25,8 @@ from analysis_mcp.compare_tool import (
     resolve_slice_pair,
 )
 from analysis_mcp.digest import render_sum_of_digest
-from analysis_mcp.engine.sum_of import run_sum_of
+from analysis_mcp.engine.aggregate import ComposedUnitSumError
+from analysis_mcp.engine.sum_of import SumOfResult, run_sum_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_entity_binding,
     derive_frame_content_version,
@@ -36,7 +39,7 @@ from analysis_mcp.frame_ref_resolution import (
 )
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import PinnedUnit, SumOfOpSpec
-from analysis_mcp.tool_errors import to_tool_result
+from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
     exclusions_for_trace,
@@ -45,6 +48,31 @@ from analysis_mcp.tool_pipeline import (
 )
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from analysis_mcp.units import unit_json
+
+
+def _sum_or_refusal(
+    op_spec: SumOfOpSpec, *, left: Frame, right: Frame, stat_var: str
+) -> SumOfResult | ToolResult:
+    """Run the engine over the two resolved sides, labelling the result
+    `dcid:<stat_var>`, or return the refusal of the rule the call breaks:
+    one of the pairing's, as `compare` refuses it, or a side in a composed
+    unit (`composed_unit_sum_unsupported`)."""
+    try:
+        return run_sum_of(
+            left,
+            right,
+            stat_var=f"dcid:{stat_var}",
+            left_entity=canonical_entity_binding(op_spec.left_entity),
+            right_entity=canonical_entity_binding(op_spec.right_entity),
+            left_pinned_unit=op_spec.left_unit,
+            right_pinned_unit=op_spec.right_unit,
+        )
+    except SLICE_PAIR_ERRORS as exc:
+        return to_tool_result(_refusal_for_engine_error(exc))
+    except ComposedUnitSumError as exc:
+        return to_tool_result(
+            ToolRefusal.composed_unit_sum_unsupported(verb="sum_of", unit=exc.unit, side=exc.side)
+        )
 
 
 @holds_input_rows
@@ -90,7 +118,8 @@ async def sum_of(
             default=None,
             description=(
                 "Pins the left side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -100,7 +129,8 @@ async def sum_of(
             default=None,
             description=(
                 "Pins the right side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -153,18 +183,9 @@ async def sum_of(
         return sides
     left, right, input_content_versions = sides
 
-    try:
-        result = run_sum_of(
-            left.frame,
-            right.frame,
-            stat_var=f"dcid:{op_spec_hash}",
-            left_entity=canonical_entity_binding(op_spec.left_entity),
-            right_entity=canonical_entity_binding(op_spec.right_entity),
-            left_pinned_unit=op_spec.left_unit,
-            right_pinned_unit=op_spec.right_unit,
-        )
-    except SLICE_PAIR_ERRORS as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+    result = _sum_or_refusal(op_spec, left=left.frame, right=right.frame, stat_var=op_spec_hash)
+    if isinstance(result, ToolResult):
+        return result
 
     identity = mint_identity_or_refusal(op_spec, input_content_versions=input_content_versions)
     if isinstance(identity, ToolResult):
@@ -232,6 +253,13 @@ async def sum_of(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[left.trace, right.trace],
+        own_composed_stat_var=ComposedStatVar(
+            stat_var=f"dcid:{op_spec_hash}",
+            relation="sum",
+            first=tuple(result.left_stat_vars),
+            second=tuple(result.right_stat_vars),
+        ),
         digest=lambda: render_sum_of_digest(
             result=result,
             op_spec_hash=op_spec_hash,

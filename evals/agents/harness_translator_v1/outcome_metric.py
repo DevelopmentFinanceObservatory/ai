@@ -3,8 +3,8 @@
 The rubric metrics judge behaviour a judge model reads off the trace --
 whether a call was made at all, whether a judgement was answered. None of
 them can assert on what a tool actually answered: a rubric asking whether
-the plan was translated can be satisfied by a `translate` call that came
-back referred. That gap is what this metric closes.
+the plan was translated can be satisfied by a `propose_plan` whose
+translation came back referred. That gap is what this metric closes.
 
 How a case states its expectation
 ----------------------------------
@@ -13,19 +13,21 @@ lives in `planner:plan`, not in anything an `Invocation` carries), so this
 metric works from the one thing every run does carry: the tool responses in
 the trace. A case states what it expects by adding a `FunctionResponse` to a
 turn's `intermediate_data.tool_responses` in the `.evalset.json` file, named
-for one of the tools in `SCORED_TOOLS` --
-`{"name": "translate", "response": {"outcome": "ok"}}` for a plan that has to
-compile, `{"name": "translate", "response": {"outcome": "invalid_input",
+for one of `SCORED_TOOLS` --
+`{"name": "translation", "response": {"outcome": "ok"}}` for a plan that has to
+compile, `{"name": "translation", "response": {"outcome": "invalid_input",
 "kind": ..., "requirement_id": ...}}` for one that has to come back referred,
 `{"name": "propose_plan", "response": {"outcome": "ok", "version": 2}}` for a
 planner turn that has to amend rather than start over, or `{"name":
 "reject_plan", "response": {"outcome": "ok"}}` for one that has to record a
-rejection. `translate` answers `ok` once the plan compiled, or with the
-referral itself, whose `outcome` is one of `translator.referral.OUTCOME_OF`'s.
-This metric finds the *actual*
+rejection. `translation` is no tool of the agent's: it is the verdict an
+accepted `propose_plan` carries under its own `translation` key, `ok` once the
+plan compiled, or the referral itself, whose `outcome` is one of
+`translator.referral.OUTCOME_OF`'s. `_with_translations` lists each such
+verdict as a response of its own. This metric finds the *actual*
 response of that same name -- the last one whose `outcome` is the one the
 case states, so a
-retry the tool refused after the accepted call does not hide it (`_by_name`)
+later proposal that came back differently does not hide it (`_by_name`)
 -- and checks it against the expectation as a **subset**: every key the case
 names has to be present and equal on the actual response; keys the case
 leaves out (an operation id the model chose, `reason` prose, `sentence`,
@@ -39,11 +41,11 @@ in.
 
 A turn is also failed when the agent hedged: a reject case that also had
 `submit_plan` answer `ok` -- an agent cannot both record a rejection and
-declare the same plan ready for the user's answer. A `translate` case hedges
-the same way -- a case expecting `ok` that also had `translate` answer a
-referral, or a referral case that also had `translate` answer `ok` -- since `_by_name` picks whichever response carries the stated
-outcome and would otherwise miss a second, contradicting call the model also
-made on the same turn (`_hedged`). A plan-proposal case has nothing to hedge
+declare the same plan ready for the user's answer. A `translation` case hedges
+the same way -- a case expecting `ok` that also had a proposal's translation
+answer a referral, or a referral case that also had one answer `ok` -- since `_by_name` picks whichever response carries the stated
+outcome and would otherwise miss a second, contradicting proposal the model
+also made on the same turn (`_hedged`). A plan-proposal case has nothing to hedge
 against: `submit_plan` approves and executes nothing itself, so calling it
 alongside `propose_plan` is an ordinary turn, not a contradiction.
 
@@ -102,12 +104,14 @@ from google.genai import types as genai_types
 # The tools whose response a case may state an expectation on. A
 # `tool_responses` entry naming anything else is not an expectation this
 # metric scores -- `test_eval_sets.py` imports this to refuse such a turn.
-# `translate` is the planner's tool that runs translation; it answers `ok` or
-# the referral translation stopped on.
+# `translation` is the verdict an accepted `propose_plan` returns under its own
+# `translation` key: `ok` or the referral translation stopped on. No tool of
+# that name exists; `_with_translations` reads it off `propose_plan`'s response.
+TRANSLATION = "translation"
 SCORED_TOOLS = (
     "propose_plan",
     "reject_plan",
-    "translate",
+    TRANSLATION,
 )
 
 # The one list a case's expectation names whose order is the compiler's,
@@ -196,8 +200,8 @@ def _by_name(
     The last response of `expected`'s name whose `outcome` is the one
     `expected` states; failing that, the last of that name. Grading the last
     response alone scored zero for a translator that compiled correctly and
-    then made one more call the tool refused -- a second `translate`
-    the compiler turned down leaves the accepted workflow exactly where it
+    then made one more proposal the tool refused -- a second proposal
+    the planner turned down leaves the accepted workflow exactly where it
     was, so the refusal is not the turn's outcome. Preferring the response
     that carries the stated outcome only ever turns that zero into a one: a
     turn whose last response already carries the stated outcome grades the
@@ -216,10 +220,31 @@ def _by_name(
     return (preferred or matching)[-1]
 
 
+def _with_translations(
+    responses: list[genai_types.FunctionResponse],
+) -> list[genai_types.FunctionResponse]:
+    """`responses`, each `propose_plan` that carried a verdict followed by it as a `translation` response.
+
+    A proposal the planner refused ran no translation and carries no verdict,
+    so it adds nothing.
+    """
+    listed: list[genai_types.FunctionResponse] = []
+    for response in responses:
+        listed.append(response)
+        verdict = (
+            response.response.get("translation")
+            if response.name == "propose_plan" and isinstance(response.response, dict)
+            else None
+        )
+        if isinstance(verdict, dict):
+            listed.append(genai_types.FunctionResponse(name=TRANSLATION, response=verdict))
+    return listed
+
+
 def _is_referral(response: genai_types.FunctionResponse) -> bool:
-    """Whether `response` is a `translate` referral: the one answer naming a `kind`."""
+    """Whether `response` is a translation referral: the one answer naming a `kind`."""
     return (
-        response.name == "translate"
+        response.name == TRANSLATION
         and isinstance(response.response, dict)
         and "kind" in response.response
     )
@@ -247,10 +272,10 @@ def _hedged(
 ) -> bool:
     """Whether `actual_responses` covers itself alongside the outcome `expected` wants.
 
-    A case expecting `translate` to answer `ok` is hedged by a `translate`
+    A case expecting the translation to answer `ok` is hedged by a translation
     that also answered a referral (`_is_referral`); a referral case is
-    hedged by a `translate` that also answered `ok`. A call the tool refused
-    answers with a problem, which names no `kind`, wrote nothing, and hedges
+    hedged by a translation that also answered `ok`. A translation that
+    answered with a problem names no `kind`, wrote nothing, and hedges
     nothing. A reject case is hedged
     by an accepted `submit_plan`: `submit_plan` answering `ok` declares the
     plan ready for the user's answer, and an agent cannot both do that and
@@ -262,10 +287,10 @@ def _hedged(
     is keyed on, not a way to have it both ways.
     """
     match expected.name:
-        case "translate" if _outcome(expected) == "ok":
+        case "translation" if _outcome(expected) == "ok":
             return any(_is_referral(r) for r in actual_responses)
-        case "translate" if _is_referral(expected):
-            return any(_answered_by(r, "translate", "ok") for r in actual_responses)
+        case "translation" if _is_referral(expected):
+            return any(_answered_by(r, TRANSLATION, "ok") for r in actual_responses)
         case "reject_plan":
             return any(_answered_by(r, "submit_plan", "ok") for r in actual_responses)
         case _:
@@ -285,7 +310,7 @@ def _turn_score(actual: Invocation, expected: Invocation) -> float | None:
     if expected_response is None:
         return None
 
-    actual_responses = get_all_tool_responses(actual.intermediate_data)
+    actual_responses = _with_translations(get_all_tool_responses(actual.intermediate_data))
     actual_response = _by_name(actual_responses, expected_response)
     matched = actual_response is not None and matches_subset(
         expected_response.response, actual_response.response

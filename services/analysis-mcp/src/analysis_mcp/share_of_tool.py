@@ -8,7 +8,10 @@ different result (left alone stands for "two slices of one frame_ref", the
 same unification `CompareOpSpec`'s own docstring explains) -> run the engine
 (`analysis_mcp.engine.share_of.run_share_of`), translating each of its typed
 exceptions to its own refusal -> mint identity, build the trace, write the
-store under the result's own pair -> render the digest. Every typed failure this
+store under the result's own pair -> render the digest. The result's rows sit
+under `dcid:<op_spec_hash>`, the operation's own StatVar, so the hash is minted
+before the engine runs, and the stored trace describes that StatVar as a
+`ComposedStatVar` with relation `share`. Every typed failure this
 function itself anticipates is returned via `to_tool_result`, never raised.
 An exception outside that set would escape this function; `server.py`'s
 registration-site wrapper is the backstop that turns it into an
@@ -20,6 +23,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated
 
+from common.materialisation import ComposedStatVar
+from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
@@ -29,6 +34,7 @@ if TYPE_CHECKING:
     from analysis_mcp.frame_ref_resolution import AdmittedFrame
 
 from analysis_mcp.digest import render_share_of_digest
+from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.common import (
     FacetHeterogeneousError,
     PlaceLevelsMixedError,
@@ -43,6 +49,7 @@ from analysis_mcp.engine.share_of import (
     ShareOfKeyUnknownError,
     ShareOfKeyUnmatchedError,
     ShareOfNonFiniteResultError,
+    ShareOfResult,
     ShareOfUnitMismatchError,
     ShareOfUnitUnboundError,
     run_share_of,
@@ -56,6 +63,7 @@ from analysis_mcp.frame_ref_resolution import (
     input_content_version,
     merge_derived_markers,
     merged_time,
+    op_spec_hash_or_refusal,
     read_derived_marker,
     resolve_input_frames,
 )
@@ -78,9 +86,10 @@ from analysis_mcp.units import unit_json
 # `share_of_zero_denominator`, `share_of_key_unknown`,
 # `share_of_key_unmatched`, `cross_frame_unit_mismatch`,
 # `cross_frame_unit_unbound`, and `cross_frame_facet_mismatch` are what
-# share_of introduces or reuses in a new way; the other five reuse
+# share_of introduces or reuses in a new way; the others reuse
 # `aggregate`'s existing refusal factories directly, the same unit/facet/
-# stat_var/entity resolution rule every verb here shares.
+# stat_var/entity resolution rule every verb here shares, and
+# `composed_unit_sum_unsupported` names the side as `sum_of`'s does.
 _EngineError = (
     ShareOfGrainMismatchError
     | ShareOfKeyUnknownError
@@ -95,6 +104,7 @@ _EngineError = (
     | UnknownEntityColumnError
     | FacetHeterogeneousError
     | PlaceLevelsMixedError
+    | ComposedUnitSumError
 )
 
 # `run_share_of` never records which side (numerator/denominator) an
@@ -118,9 +128,6 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         refusal = ToolRefusal.share_of_grain_mismatch(
             numerator_periods=list(exc.numerator_periods),
             denominator_periods=list(exc.denominator_periods),
-            numerator_coverage_fraction=exc.numerator_coverage_fraction,
-            denominator_coverage_fraction=exc.denominator_coverage_fraction,
-            matched_periods=list(exc.matched_periods),
             key=dict(exc.key),
         )
     elif isinstance(exc, ShareOfKeyUnknownError):
@@ -164,6 +171,7 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             axis=exc.axis,
             left_ref=exc.numerator_ref,
             right_ref=exc.denominator_ref,
+            stat_vars=(exc.stat_var,),
         )
     elif isinstance(exc, StatVarUnresolvedError):
         refusal = ToolRefusal.stat_var_unresolved(
@@ -187,6 +195,10 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         )
     elif isinstance(exc, PlaceLevelsMixedError):
         refusal = ToolRefusal.place_levels_mixed(column=exc.column, types=list(exc.types))
+    elif isinstance(exc, ComposedUnitSumError):
+        refusal = ToolRefusal.composed_unit_sum_unsupported(
+            verb="share_of", unit=exc.unit, side=exc.side, sums_a_cell=True
+        )
     else:
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     return refusal
@@ -252,6 +264,60 @@ async def _resolve_sides(
     return numerator, denominator, input_content_versions
 
 
+def _share_or_refusal(
+    op_spec: ShareOfOpSpec, *, numerator: AdmittedFrame, denominator: AdmittedFrame
+) -> ShareOfResult | ToolResult:
+    """Run the engine over the two resolved sides, labelling the result
+    `dcid:<op_spec_hash>`, or return the refusal of the first rule the call
+    breaks: a `numerator_by` that cannot be canonicalised, an op-spec that
+    cannot be hashed, or one of the engine's typed exceptions.
+
+    `numerator_by` is canonicalised before the engine runs, so execution
+    matches the order `identity._normalise_parameters` already normalises it
+    to before minting `op_spec_hash` (`aggregate_tool.aggregate` has the
+    identical comment for `group_by`). `denominator_by` and both entity
+    bindings need no canonicalisation for correctness (their lookups are by
+    key, not iteration order), but go through `canonical_entity_binding` for
+    a stable execution-side key order, the same "canonicalise before
+    executing" discipline every array/object parameter here follows.
+    """
+    numerator_by = canonical_columns_or_refusal(op_spec.numerator_by, description="numerator_by")
+    if isinstance(numerator_by, ToolResult):
+        return numerator_by
+    op_spec_hash = op_spec_hash_or_refusal(op_spec)
+    if isinstance(op_spec_hash, ToolResult):
+        return op_spec_hash
+    try:
+        return run_share_of(
+            numerator.frame,
+            denominator.frame,
+            stat_var=f"dcid:{op_spec_hash}",
+            numerator_entity=canonical_entity_binding(op_spec.numerator_entity),
+            denominator_entity=canonical_entity_binding(op_spec.denominator_entity),
+            numerator_by=numerator_by,
+            denominator_by=canonical_entity_binding(op_spec.denominator_by),
+            numerator_pinned_unit=op_spec.numerator_unit,
+            denominator_pinned_unit=op_spec.denominator_unit,
+        )
+    except (
+        ShareOfGrainMismatchError,
+        ShareOfKeyUnknownError,
+        ShareOfKeyUnmatchedError,
+        ShareOfNonFiniteResultError,
+        ShareOfUnitMismatchError,
+        ShareOfUnitUnboundError,
+        ShareOfFacetMismatchError,
+        StatVarUnresolvedError,
+        UnitNotPresentError,
+        UnitHeterogeneousError,
+        UnknownEntityColumnError,
+        FacetHeterogeneousError,
+        PlaceLevelsMixedError,
+        ComposedUnitSumError,
+    ) as exc:
+        return to_tool_result(_refusal_for_engine_error(exc))
+
+
 @holds_input_rows
 async def share_of(
     frame_ref: Annotated[
@@ -296,7 +362,8 @@ async def share_of(
             default=None,
             description=(
                 "Pins the numerator's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -306,7 +373,8 @@ async def share_of(
             default=None,
             description=(
                 "Pins the denominator's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -338,7 +406,9 @@ async def share_of(
 ) -> ToolResult:
     """Compute the numerator's share of the denominator, per matched (key, period).
 
-    Each side is narrowed by its own `entity` binding, then every remaining
+    The result is in per cent, unit `Percent` (5.3 means 5.3%), the unit a
+    published share such as a "% of GDP" series carries, under its own
+    stat_var. Each side is narrowed by its own `entity` binding, then every remaining
     row sharing both `numerator_by`'s own key values and a `time_period` is
     summed (`math.fsum`); more than one row per (key, period) is a
     deliberate total here, though `compare` treats it as an ambiguity.
@@ -351,15 +421,16 @@ async def share_of(
     (`op_spec_invalid`); a non-empty `denominator_by` that leaves a
     `numerator_by` column out refuses (`share_of_key_unknown`); a numerator
     key with no matching denominator group under that mapping refuses
-    (`share_of_key_unmatched`). Each key's own numerator and denominator
-    period sets must be identical or this refuses
-    (`share_of_grain_mismatch`), naming both sides' own periods, coverage,
-    the key, and (when non-empty) the overlap a `filter` retry could narrow
-    both sides to -- share_of never reports one side's own coverage and
-    proceeds on the other's say-so. A period whose denominator sums to zero
+    (`share_of_key_unmatched`). Each key divides over the periods both
+    sides report for it, and every period one side holds alone is left out
+    and recorded as an exclusion on that side, as `quotient_of` records it;
+    a key sharing no period refuses (`share_of_grain_mismatch`), naming
+    both sides' periods and the key. A period whose denominator sums to zero
     refuses (`share_of_zero_denominator`) before any division is attempted,
     and is retryable, since a different denominator source can sum to
-    nonzero; a genuine overflow (`non_finite_result`) is not.
+    nonzero; a genuine overflow (`non_finite_result`) is not. One measure
+    per unit of another in two different units, such as GDP per person, is
+    `quotient_of`.
 
     Args:
         frame_ref: The numerator's frame_ref.
@@ -372,8 +443,9 @@ async def share_of(
         denominator_by: {numerator_by column: denominator column}, pairing by name.
 
     Returns:
-        A digest: each matched (key, period)'s numerator/denominator values
-        and share, both sides' units, and the result's {spec_id,
+        A digest: the first and latest share, each matched (key,
+        period)'s numerator/denominator values and share in per cent, each
+        side's stat_var and unit, and the result's {spec_id,
         content_version} pair and identity fields. On refusal, a typed
         error with a machine-readable fix.
     """
@@ -397,22 +469,6 @@ async def share_of(
     if isinstance(op_spec, ToolResult):
         return op_spec
 
-    # `numerator_by` is canonicalised here, before the engine ever runs, so
-    # execution matches exactly the order `identity._normalise_parameters`
-    # already normalises it to before minting `op_spec_hash` -- see
-    # `aggregate_tool.aggregate`'s own identical comment for `group_by`.
-    # `denominator_by` needs no canonicalisation step of its own for
-    # pairing correctness (its lookups are by key, not iteration order),
-    # but is still routed through `canonical_entity_binding` for a stable
-    # execution-side key order, the same "canonicalise before executing"
-    # discipline every array/object parameter here follows.
-    numerator_by_canonical = canonical_columns_or_refusal(
-        op_spec.numerator_by, description="numerator_by"
-    )
-    if isinstance(numerator_by_canonical, ToolResult):
-        return numerator_by_canonical
-    denominator_by_canonical = canonical_entity_binding(op_spec.denominator_by)
-
     # Resolves both sides (the denominator reuses the numerator's own frame
     # when `denominator_frame_ref` is `None`) and checks both for
     # `DerivedMarker.ordinal` in the same step -- a share over a per-period
@@ -423,40 +479,11 @@ async def share_of(
     if isinstance(resolved_sides, ToolResult):
         return resolved_sides
     numerator, denominator, input_content_versions = resolved_sides
-    numerator_frame, numerator_trace = numerator.frame, numerator.trace
-    denominator_frame, denominator_trace = denominator.frame, denominator.trace
+    numerator_trace, denominator_trace = numerator.trace, denominator.trace
 
-    # `numerator_entity`/`denominator_entity` are canonicalised (key order
-    # sorted) before the engine runs -- see `compare_tool.compare`'s own
-    # identical comment and `frame_ref_resolution.canonical_entity_binding`'s
-    # own docstring.
-    try:
-        result = run_share_of(
-            numerator_frame,
-            denominator_frame,
-            numerator_entity=canonical_entity_binding(op_spec.numerator_entity),
-            denominator_entity=canonical_entity_binding(op_spec.denominator_entity),
-            numerator_by=numerator_by_canonical,
-            denominator_by=denominator_by_canonical,
-            numerator_pinned_unit=op_spec.numerator_unit,
-            denominator_pinned_unit=op_spec.denominator_unit,
-        )
-    except (
-        ShareOfGrainMismatchError,
-        ShareOfKeyUnknownError,
-        ShareOfKeyUnmatchedError,
-        ShareOfNonFiniteResultError,
-        ShareOfUnitMismatchError,
-        ShareOfUnitUnboundError,
-        ShareOfFacetMismatchError,
-        StatVarUnresolvedError,
-        UnitNotPresentError,
-        UnitHeterogeneousError,
-        UnknownEntityColumnError,
-        FacetHeterogeneousError,
-        PlaceLevelsMixedError,
-    ) as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+    result = _share_or_refusal(op_spec, numerator=numerator, denominator=denominator)
+    if isinstance(result, ToolResult):
+        return result
 
     identity = mint_identity_or_refusal(op_spec, input_content_versions=input_content_versions)
     if isinstance(identity, ToolResult):
@@ -464,20 +491,16 @@ async def share_of(
     op_spec_hash, execution_identity, content_version = identity
 
     # The derived-ness marker (see `frame_ref_resolution.DerivedMarker`): a
-    # share is dimensionless (`engine/share_of.py` already writes
-    # `unit=None`), and its own `stat_var` is inherited from the numerator
-    # rather than newly minted (see that engine's own docstring for why).
-    # Both are already-honest metadata, informational only, like `growth`'s
-    # own marker. Routed through
-    # `derived_marker_detail`, merging both sides' own markers
-    # (`merge_derived_markers`), so an informational flag either side
-    # already carried survives onto this call's own output too.
+    # share is dimensionless, a per cent of its own denominator, so
+    # `quotient_of` refuses it as a side. Its unit and `stat_var` are its
+    # own. Routed through `derived_marker_detail`, merging both sides' own
+    # markers (`merge_derived_markers`), so a flag either side already
+    # carried survives onto this call's own output too.
     derived = derived_marker_detail(
         inherited=merge_derived_markers(
             read_derived_marker(numerator_trace), read_derived_marker(denominator_trace)
         ),
         dimensionless=True,
-        inherited_stat_var=True,
     )
 
     # `share_of` sets no interval of its own: each period's share is a
@@ -497,18 +520,24 @@ async def share_of(
         op_spec_hash=op_spec_hash,
         execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
         applied_policy=AppliedPolicy(
-            policy_name="share_of_refuse_grain_mismatch",
+            policy_name="share_of_intersect_periods",
             realised_coverage_fraction=min(
                 result.numerator_coverage_fraction, result.denominator_coverage_fraction
             ),
             skipped_row_count=0,
-            resolved_unit=unit_json(result.numerator_resolved_unit),
+            resolved_unit=PERCENT_UNIT,
             resolved_facets={
                 selection.axis: selection.ref for selection in result.numerator_facet_selections
             },
             detail={
+                "numerator_stat_var": result.numerator_stat_var,
+                "denominator_stat_var": result.denominator_stat_var,
+                "numerator_resolved_unit": unit_json(result.numerator_resolved_unit),
                 "numerator_periods": list(result.numerator_periods),
                 "denominator_periods": list(result.denominator_periods),
+                "matched_periods": list(result.matched_periods),
+                "numerator_coverage_fraction": result.numerator_coverage_fraction,
+                "denominator_coverage_fraction": result.denominator_coverage_fraction,
                 "denominator_resolved_unit": unit_json(result.denominator_resolved_unit),
                 "denominator_resolved_facets": {
                     selection.axis: selection.ref
@@ -527,6 +556,13 @@ async def share_of(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[numerator_trace, denominator_trace],
+        own_composed_stat_var=ComposedStatVar(
+            stat_var=result.stat_var,
+            relation="share",
+            first=(result.numerator_stat_var,),
+            second=(result.denominator_stat_var,),
+        ),
         digest=lambda: render_share_of_digest(
             result=result,
             op_spec_hash=op_spec_hash,

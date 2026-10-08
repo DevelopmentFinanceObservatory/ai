@@ -26,13 +26,14 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 | `submit_plan`       | Declares the current plan's compiled workflow ready for the user's answer                    |
 
 The planner reaches the translator directly. `create_planner_agent` takes
-`translator.tool`'s `translate` function tool, which `harness.agents` builds,
-alongside the four above and, when the planner is built with a surface, the
-two skill tools below. The planner calls it with no arguments inside its own
-turn, and the plan travels through session state. Omit it and
-`create_planner_agent` returns the standalone planner, which is what the
-planner's own eval set scores and why that set needs no reachable tool
-surface.
+`translator.tool`'s `build_translate` function as `translate`, which
+`harness.agents` builds. The model cannot call it: every `propose_plan` that
+records a plan runs it on that plan and answers with the verdict under
+`translation`, beside its own `ok`, so the model spends no generation on
+translation. The plan travels through session state. Omit it and
+`create_planner_agent` returns the standalone planner, whose `propose_plan`
+records the plan and stops; that is what the planner's own eval set scores
+and why that set needs no reachable tool surface.
 
 ## Skills
 
@@ -41,7 +42,7 @@ surface.
 `get_skill` and `get_skill_file` from `planner.skills`, each calling data-mcp's
 tool of the same name through that surface, and its instruction gains the
 paragraph that names them. `harness.agents.create_planner_with_translator`
-passes the same surface `translate` discovers on. Without a surface, as the
+passes the same surface translation discovers on. Without a surface, as the
 standalone eval agents build it, the planner has neither tool and the
 instruction says nothing about skills.
 
@@ -60,9 +61,13 @@ Every tool in the table above answers with one of `planner.tool_results`' typed 
 caller has to parse back into a decision. A `problem` carries a stable `code`
 from the shared `ProblemCode` vocabulary and, where the next step is known, an
 `action` naming which tool to call next. The translator's core functions
-answer the same way, from one vocabulary. `translate` answers `ok` once the
-plan compiled, or the `Referral`'s own fields, with its `outcome` from the
-closed set, read straight off the tool result.
+answer the same way, from one vocabulary. `propose_plan`'s `translation` is
+`ok` once the plan compiled, or the `Referral`'s own fields, with its
+`outcome` from the closed set, read straight off the tool result. The
+proposal's own `outcome` stays `ok` either way, since the version is recorded.
+A transient referral is retried by proposing again with `amends_version` set to
+the recorded version and nothing else changed: translation runs again on that
+version, and no new version is recorded and no plan round is spent.
 
 ## The plan record
 
@@ -94,7 +99,11 @@ period only one reports; `RankRequirement`
 orders every entity, and keeps the top or bottom N when it states `limit`,
 reducing an input that spans several years to one value each first; `ShareOfRequirement` divides one
 requirement's result by another's, period by period, when the two sources declare one unit
-or both declare none; `JoinRequirement` joins
+or both declare none; `QuotientRequirement` divides one measure by another
+at each period both report, in the unit the two compose, either as one figure
+or per entity of `axis`, where `denominator_axis` names the same entities
+on the denominator, by the role they state there or `'country'` where they
+state none, so each divides by its own counterpart; `JoinRequirement` joins
 two requirements' results on the keys they share; and `FilterRequirement` keeps
 the rows that satisfy every one of a conjunction of predicates: a value or
 year threshold, an `EntityIn` naming entities, or a `PlaceLevel` keeping one
@@ -140,12 +149,19 @@ calculation; under `answer_mode="series"`, a dataset requirement nothing
 reads is itself the answer. Once a plan states any requirement, every
 decision has to be cited by one.
 
+The planner chooses between the two dividing kinds by what the question asks
+for, without reading a source's unit: `share_of` for a part of its whole, both
+in one unit, and `quotient_of` for one measure per unit of another, such as a
+per-head figure or "divide one by the other". An `axis` or a
+`denominator_axis` names a role its side's entities state, or `'country'` for
+places that state none.
+
 A dataset requirement whose `across` names the place party, such as
 `'country'`, names no place (`planner.plan.names_no_place`). Its retrieval holds
 every place with data at every level: the world, regions, World Bank groups,
 countries and their subdivisions, or the countries alone when dfo-apis cannot
-list them all. A rank, an aggregate that does not group by entity, and a
-`share_of` over it are refused until a filter with a `PlaceLevel` predicate
+list them all. A rank, an aggregate that does not group by entity, a
+`share_of` and a `quotient_of` over it are refused until a filter with a `PlaceLevel` predicate
 keeps one level, named by its Data Commons type (`PlaceType`: `Country`,
 `Continent`, `AdministrativeArea1` and the rest). That filter reads the
 requirement directly or through other filters, and states one level. The
@@ -185,7 +201,7 @@ consistent.
 
 **Submission requires a compiled plan.** `submit_plan` refuses a plan that is
 still a `DRAFT` or carries no workflow, as `workflow_missing` with
-`action.call == "translate"`. A draft states what to do rather than what
+`action.call == "propose_plan"`, which translates the plan it records. A draft states what to do rather than what
 to run, so declaring one ready would put nothing real in front of the user. A
 pending referral is checked first and refused the same way, as
 `referral_pending`, with the referral itself in `detail`. Its `action.call` is
@@ -228,10 +244,15 @@ proposal supersedes whatever the translator referred back about the version it
 replaces. For an `unsupported_ask` or `requirement_unmeetable` referral,
 `propose_plan` refuses until the user has answered an `adk_request_input` call
 made after the referral, since a patch replaces a requirement whole and would
-otherwise drop what the referral names. The amended plan passes through the same validators as a first draft.
-`starts_new_plan` begins a plan at version 1 instead. The wording of `question`
-plays no part in that choice, so a reworded question cannot be read as a new
-plan.
+otherwise drop what the referral names. A `requirement_unmeetable` referral
+marked `source_mismatch` offers the sources discovery found in place of the
+source the requirement states. A requirement the next proposal pins to the one
+the user picked, answering an ask raised after the referral, drops its stated
+`source`, so the compiler accepts the source they chose. A pin the planner chose
+keeps the stated source, and the compiler refuses it again. The amended plan
+passes through the same validators as a first draft. `starts_new_plan` begins a
+plan at version 1 instead. The wording of `question` plays no part in that
+choice, so a reworded question cannot be read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**
 `create_planner_agent(..., question_fixed=True)` -- the harness graph's own
@@ -304,6 +325,32 @@ only as much as it means to. The model writes a decision to `propose_plan` as a
 and refuses a named field no citing requirement states (`fix_unstated`) or one
 they state differently (`fix_disagrees`). The decision `propose_plan` writes
 for a pin a search settled on is dropped once no requirement cites it.
+
+**A period can follow the newest data.** A growth, a rank and a period threshold
+state their years as the plan read them, and a `rolling` field beside the years
+says which of them are relative to the newest year the data holds
+(`planner.records.RelativePeriod`, an offset of 0 or less from `latest`). Every
+rule that compares years reads the stated years. A relative period needs
+`period_end_open` on each dataset requirement it rests on, and `propose_plan`
+pins such a requirement to its dataset over a range with no end year
+(`_window_pins`, `planner.plan.period_window`), which dfo-apis ends at the
+current year at every mint. The range starts at the requirement's own first
+year when only ends roll. When a start rolls, the newest year the data holds
+can sit behind the one the plan read, so the range starts at the first year
+the dataset holds (`planner.plan.full_history`, read from a Search answer over
+no window). Search answers a question that names years over those years, so
+when no answer on record is over no window `propose_plan` reads the pinned
+identity over no window itself, with one `resolve_definition` call through the
+planner's tool surface (`_read_full_history`), and holds the answer in session
+state for the turn (`planner.plan.full_histories`). That window is read for
+its first year and never retrieved. An unpinned requirement whose start is
+fixed stays unpinned, and the translator searches for it from that year on.
+`propose_plan` refuses with `detail.issue` `rolling_needs_open_period` when a
+dataset is closed (`dataset_closed`), has no identity on record where it needs
+one (`no_source_on_record`), or has no first year because the read did not
+complete or stated none (`first_year_read_failed`), `rolling_years_disagree` when the
+offsets and the years differ, and `rolling_frame_too_large` when Search counted
+more rows in the whole history than data-mcp's `max_frame_rows`.
 
 **A plan is a value.** No part of a plan can be assigned to after construction,
 and none accepts a field it does not declare. `plan_revision()` is therefore

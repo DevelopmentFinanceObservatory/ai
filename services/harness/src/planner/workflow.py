@@ -67,6 +67,21 @@ class ResolvedEntity(StrictModel):
     label: str = Field(min_length=1)
 
 
+class ResolvedGroup(StrictModel):
+    """A named set whose members a source binds on one role column.
+
+    `search` binds the members of a set asked for as one ("African
+    countries") and names the set beside them, keyed by the role column its
+    members fill (`resolved.entity_groups`). `label` is the set's name, which
+    a requirement's `Entity.name` asking for its members is matched against,
+    and `ref` its own graph node, `None` when the graph holds none.
+    """
+
+    role: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    ref: str | None = None
+
+
 class OpenAxis(StrictModel):
     """One constraint property a source's family of StatVars varies along.
 
@@ -181,6 +196,9 @@ class SelectedSource(StrictModel):
     `translator.discovery.DiscoveryLog.selectable` does not offer such a
     source to a requirement that states `across`.
 
+    `groups` are the named sets whose members the source binds, one per role
+    column at most (`ResolvedGroup`); empty when the block names none.
+
     `definition` is the source's own definition, read from data-mcp's
     `describe` rather than `search`; for a StatVar it is the graph's
     constraint encoding ("mp=count,pt=Person"), not prose.
@@ -204,6 +222,7 @@ class SelectedSource(StrictModel):
     shape_member_count: int | None = None
     shape_member_digest: str | None = None
     entities: tuple[ResolvedEntity, ...] = ()
+    groups: Annotated[tuple[ResolvedGroup, ...], HASHED_WHEN_SET] = ()
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
     unit_ref: str | None = None
     unit_label: str | None = None

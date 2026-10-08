@@ -48,11 +48,11 @@ requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 # planner (the plan record and the Planner Agent), compiler (the workflow
-# build), translator (the `translate` tool), executor (the run) and
-# orchestrator (the Orchestrator Agent) live at src/planner/, src/compiler/,
-# src/translator/, src/executor/ and src/orchestrator/, top-level modules
-# alongside src/harness/, so they ship on harness's own dependencies, tests,
-# and CI.
+# build), translator (the translation `propose_plan` runs), executor (the run)
+# and orchestrator (the Orchestrator Agent) live at src/planner/,
+# src/compiler/, src/translator/, src/executor/ and src/orchestrator/,
+# top-level modules alongside src/harness/, so they ship on harness's own
+# dependencies, tests, and CI.
 [tool.uv.build-backend]
 module-name = ["harness", "planner", "compiler", "translator", "executor", "orchestrator"]
 
@@ -81,5 +81,5 @@ precision = 2
 analysis_mcp = { workspace = true }
 common = { workspace = true }
 data_mcp = { workspace = true }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "29e07c2b2e6550677ed71d84a0edfd6b83b096c2", subdirectory = "python/frame-grammar" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "a9b8df5234195d5eb023749cf9d745d9f5acd24b", subdirectory = "python/frame-grammar" }
 presentation_mcp = { workspace = true }

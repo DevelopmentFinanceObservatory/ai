@@ -2,8 +2,9 @@
 
 `test_context_budget.py` measures what such a seed puts into the planner's
 brief, a tool result and session state, and `translator/test_mechanical.py`
-what `translate` returns for a plan that retrieves one many times. Search's
-answer for each identity is the block the seed carries (`read_seed`).
+what the translation `propose_plan` runs returns for a plan that retrieves one
+many times. Search's answer for each identity is the block the seed carries
+(`read_seed`).
 """
 
 from __future__ import annotations

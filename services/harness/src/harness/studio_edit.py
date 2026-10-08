@@ -6,6 +6,13 @@ window, frame_ref), and the platform write streams back as
 `component.revised` or `component.created`. A recreated component takes
 the replaced block's slot on the canvas.
 
+A card on a frame whose period follows the latest data stands on the frame of
+the series it draws (`harness.rolling_cards`, applied by the executor to every
+write). A revise cannot move a card to another frame, so when the executor
+refuses one `rolling_select_needs_new_frame` the edit is written as a new card
+from the stored intent with the patch merged in, on the frame the executor
+picks, and takes the old block's slot.
+
 A revise needs the write token the platform issued when this conversation
 created the card (`ConversationState.write_tokens`). A card the
 conversation holds no token for (one it did not create, or one created
@@ -27,6 +34,7 @@ from typing import Any
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 
 from harness.conversation import current_conversation_id
+from harness.rolling_cards import ROLLING_SELECT_NEEDS_NEW_FRAME
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -168,12 +176,16 @@ async def _edit_flow(
         return
 
     write_token = c.write_tokens.get(component_id)
+    # Set when the revise was refused because the new select needs another frame.
+    moved = False
     if patch and write_token:
         written = await recorder(
             tool="write_component",
             args={"intent": patch, "component_id": component_id, WRITE_TOKEN_KEY: write_token},
         )
         recorder.drain(current_conversation_id.get())
+        moved = (written.get("refusal") or {}).get("code") == ROLLING_SELECT_NEEDS_NEW_FRAME
+    if patch and write_token and not moved:
         if written.get("outcome") != "ok" or not written.get("component"):
             yield _step("e2", "Apply the edit", failed=_refusal_text(written))
             frames = _close(f"The edit was refused: {_refusal_text(written)}.")
@@ -208,9 +220,13 @@ async def _edit_flow(
                 yield frame
             return
         intent = _merge_patch(stored, patch)
-        step_label = "Rebuild as a new card"
-        # The model drafted `text` for an in-place revise; this is a new card.
-        closing = _REBUILT_TEXT
+        if moved:
+            step_label = "Rebuild the card"
+            closing = text or "Done -- the card was rebuilt with your change."
+        else:
+            step_label = "Rebuild as a new card"
+            # The model drafted `text` for an in-place revise; this is a new card.
+            closing = _REBUILT_TEXT
     else:
         intent = {**recreate, "frame_ref": stored.get("frame_ref")}
         step_label = "Rebuild the card"

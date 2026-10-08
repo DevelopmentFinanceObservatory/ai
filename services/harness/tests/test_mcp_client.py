@@ -49,7 +49,7 @@ from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
 from harness.tool_contracts import ResolverError, graph_envelope
-from harness.wire import FactSummary
+from harness.wire import FactSummary, usable_component
 from mcp import MCPError
 from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
@@ -648,6 +648,115 @@ async def test_the_executor_asks_presentation_mcp_for_no_projection_or_image_on_
 
     assert client.arguments == [{**args, "include_projection": "none"}]
     assert "include_projection" not in args
+
+
+async def test_a_revise_is_held_to_the_basis_the_stored_revision_resolved(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """`describe_component` carries the stored revision's resolved payload in
+    `_meta`, and its `change.basis` labels are the periods a title may not
+    name when the stored intent states that basis against the latest data."""
+    frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    envelope = resolved_revision("stat_card", component_id="cmp_1", frame_ref=frame_ref)
+    latest = envelope["component"]["change"]["basis"][1]
+    relative = [{"anchor": "latest", "offset": -1}, {"anchor": "latest", "offset": 0}]
+    stored = _tool_result(
+        {
+            "component_id": "cmp_1",
+            "revision": 1,
+            "stored_intent": {
+                "type": "stat_card",
+                "frame_ref": frame_ref,
+                "change": {"basis": relative},
+            },
+        },
+        meta={RESOLVED_PAYLOAD_META_KEY: envelope},
+    )
+    client = scripted_presentation_client([stored])
+    executor = McpExecutor(settings=Settings())
+
+    result = await executor(
+        tool="write_component",
+        args={"component_id": "cmp_1", "intent": {"title": f"Aid in {latest[:4]}"}},
+    )
+
+    assert client.calls == ["describe_component"]
+    assert result["refusal"]["code"] == "title_quotes_rolling_period"
+
+
+async def test_a_revise_stating_a_new_basis_is_held_to_the_basis_it_resolved(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """A patch that replaces `change` with a relative basis keeps the stored
+    title, and is refused after the write when that title names a period the
+    new revision resolved."""
+    frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    envelope = resolved_revision(
+        "stat_card", component_id="cmp_1", frame_ref=frame_ref, title="Aid in 2024"
+    )
+    stored = _tool_result(
+        {
+            "component_id": "cmp_1",
+            "revision": 1,
+            "stored_intent": {"type": "stat_card", "frame_ref": frame_ref, "title": "Aid in 2024"},
+        }
+    )
+    scripted_presentation_client([stored, _write_result(envelope)])
+    store = ProvenanceStore()
+    store.put(conversation=current_conversation_id.get(), manifest={}, **frame_ref)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    relative = [{"anchor": "latest", "offset": -1}, {"anchor": "latest", "offset": 0}]
+
+    result = await executor(
+        tool="write_component",
+        args={"component_id": "cmp_1", "intent": {"change": {"basis": relative}}},
+    )
+
+    assert result["outcome"] == "refusal"
+    assert result["refusal"]["fix"] == {"period": "2024"}
+
+
+async def test_a_revise_changing_only_the_select_is_held_to_the_window_it_resolved(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """Another select can move the latest period of a card whose window is
+    relative, so the stored title is judged after the write against the window
+    the new revision resolved, which the stored one did not reach."""
+    frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    envelope = resolved_revision("line_chart", component_id="cmp_1", frame_ref=frame_ref)
+    relative = {
+        "start": {"anchor": "latest", "offset": -5},
+        "end": {"anchor": "latest", "offset": 0},
+    }
+    stored = _tool_result(
+        {
+            "component_id": "cmp_1",
+            "revision": 1,
+            "stored_intent": {
+                "type": "line_chart",
+                "frame_ref": frame_ref,
+                "title": "Aid to 2023",
+                "window": relative,
+            },
+            "fact_summary": {"window": {"start": "2017", "end": "2022"}},
+        },
+        meta={RESOLVED_PAYLOAD_META_KEY: envelope},
+    )
+    written = _write_result(envelope)
+    written.structured_content["fact_summary"] = {"window": {"start": "2018", "end": "2023"}}
+    client = scripted_presentation_client([stored, written])
+    store = ProvenanceStore()
+    store.put(conversation=current_conversation_id.get(), manifest={}, **frame_ref)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+
+    result = await executor(
+        tool="write_component",
+        args={"component_id": "cmp_1", "intent": {"select": {"reporter": "FRA"}}},
+    )
+
+    assert client.calls == ["describe_component", "write_component"]
+    assert result["outcome"] == "refusal"
+    assert result["refusal"]["fix"] == {"period": "2023"}
 
 
 async def test_the_executor_refuses_a_write_whose_result_carries_no_resolved_revision(
@@ -1481,7 +1590,7 @@ async def test_a_sums_ref_is_named_by_the_two_sides_it_adds_and_never_described(
         sources=[bilateral, imputed],
         stat_var_count=1,
         carried=[bilateral, imputed],
-        sum_of_sides={total_ref: ((bilateral,), (imputed,))},
+        own_stat_vars={total_ref: ("sum_of", (bilateral,), (imputed,))},
         **total,
     )
     describing = _DescribingClient()
@@ -1499,6 +1608,168 @@ async def test_a_sums_ref_is_named_by_the_two_sides_it_adds_and_never_described(
     (row,) = component["fact_summary"]["indicators"]
     assert row["id"] == total_ref
     assert row["name"] == "Bilateral ODA plus label ImputedOda"
+
+
+_DIVIDED = "The first divided by the second for each year both report."
+_SHARED = "The first as a share of the second, in per cent, for each year both report."
+
+
+@pytest.mark.parametrize(
+    ("verb", "numerator", "denominator", "name", "description", "described"),
+    [
+        (
+            "quotient_of",
+            ("bilateral",),
+            ("population",),
+            "Bilateral ODA per label Count_Person",
+            _DIVIDED,
+            ["Count_Person"],
+        ),
+        # Two slices of one frame.
+        ("quotient_of", ("bilateral",), ("bilateral",), "Ratio of Bilateral ODA", _DIVIDED, []),
+        # A numerator that is itself a sum of two retrievals.
+        (
+            "quotient_of",
+            ("bilateral", "imputed"),
+            ("population",),
+            "Bilateral ODA and label ImputedOda per label Count_Person",
+            _DIVIDED,
+            ["ImputedOda", "Count_Person"],
+        ),
+        (
+            "share_of",
+            ("imputed",),
+            ("population",),
+            "label ImputedOda as a share of label Count_Person",
+            _SHARED,
+            ["ImputedOda", "Count_Person"],
+        ),
+        # A part of its total, both read from one frame.
+        ("share_of", ("bilateral",), ("bilateral",), "Share of Bilateral ODA", _SHARED, []),
+        (
+            "sum_of",
+            ("bilateral",),
+            ("bilateral",),
+            "Bilateral ODA",
+            "The two added together for each year both report.",
+            [],
+        ),
+        # Each side an earlier quotient, named by its own sides.
+        (
+            "share_of",
+            (("quotient_of", ("imputed",), ("population",)),),
+            (("quotient_of", ("bilateral",), ("population",)),),
+            "label ImputedOda per label Count_Person as a share of "
+            "Bilateral ODA per label Count_Person",
+            _SHARED,
+            ["ImputedOda", "Count_Person"],
+        ),
+        # A numerator that is an earlier sum of two retrievals.
+        (
+            "quotient_of",
+            (("sum_of", ("bilateral",), ("imputed",)),),
+            ("population",),
+            "Bilateral ODA plus label ImputedOda per label Count_Person",
+            _DIVIDED,
+            ["ImputedOda", "Count_Person"],
+        ),
+    ],
+    ids=[
+        "two frames",
+        "one frame",
+        "summed numerator",
+        "share",
+        "share of one frame",
+        "sum of one frame",
+        "share of two quotients",
+        "quotient of a sum",
+    ],
+)
+async def test_a_verbs_own_ref_is_named_by_its_two_sides_and_cites_both(
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    numerator: tuple[Any, ...],
+    denominator: tuple[Any, ...],
+    name: str,
+    description: str,
+    described: list[str],
+) -> None:
+    """A `quotient_of`, a `share_of` or a `sum_of` writes its rows under
+    `dcid:<its spec_id>`. The card names that ref "<numerator> per
+    <denominator>" or "<numerator> as a share of <denominator>"; two sides
+    of one StatVar read "Ratio of <side>", "Share of <side>" or "<side>", as
+    dfo-apis labels a published frame. Each side is named as a sum's side
+    is, and every retrieval under either side is listed as an input (a frame
+    resting on one retrieval lists itself alone). A side that is an earlier
+    verb's own ref, written here as `(verb, first, second)`, reads as that
+    verb's own name."""
+    conversation = current_conversation_id.get()
+    store = ProvenanceStore()
+    manifests: dict[str, dict[str, Any]] = {
+        "bilateral": {"summed_stat_var_count": 12, "summed_stat_var_label": "Bilateral ODA"},
+        "imputed": {"trace": {"resolved_stat_vars": [{"ref": "dcid:ImputedOda", "roles": []}]}},
+        "population": {
+            "trace": {"resolved_stat_vars": [{"ref": "dcid:Count_Person", "roles": []}]}
+        },
+    }
+    keys = {
+        key: (f"spec_{index}" + "0" * 31, f"cv_{index}" + "0" * 31)
+        for index, key in enumerate(manifests)
+    }
+    for key, manifest in manifests.items():
+        store.put(
+            conversation=conversation,
+            spec_id=keys[key][0],
+            content_version=keys[key][1],
+            manifest=manifest,
+        )
+    written: dict[str, tuple[str, tuple[Any, ...], tuple[Any, ...]]] = {}
+    retrieved: list[str] = []
+
+    def parts(side: tuple[Any, ...]) -> tuple[Any, ...]:
+        out: list[Any] = []
+        for part in side:
+            if isinstance(part, str):
+                retrieved.append(part)
+                out.append(keys[part])
+                continue
+            nested_verb, first, second = part
+            nested_ref = f"dcid:ops_{len(written)}" + "8" * 31
+            written[nested_ref] = (nested_verb, parts(first), parts(second))
+            out.append(nested_ref)
+        return tuple(out)
+
+    ratio = {"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32}
+    ratio_ref = f"dcid:{ratio['spec_id']}"
+    written[ratio_ref] = (verb, parts(numerator), parts(denominator))
+    sources = [keys[key] for key in dict.fromkeys(retrieved)]
+    assert store.alias(
+        conversation=conversation,
+        sources=sources,
+        stat_var_count=1,
+        carried=sources,
+        own_stat_vars=written,
+        **ratio,
+    )
+    describing = _DescribingClient()
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    facts = {"series": [{"id": "s0", "coordinates": {"stat_var": ratio_ref}}], "series_cut": 0}
+
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
+        envelope=resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=ratio),
+    )
+
+    assert component is not None
+    assert sorted(ref for batch in describing.batches for ref in batch) == sorted(described)
+    assert component["fact_summary"]["indicators"] == [
+        {"id": ratio_ref, "name": name, "description": description}
+    ]
+    assert [
+        (source["spec_id"], source["content_version"])
+        for source in component["provenance"]["inputs"]
+    ] == [(ratio["spec_id"], ratio["content_version"]), *(sources if len(sources) > 1 else [])]
 
 
 async def test_a_chart_with_no_stat_var_coordinate_lists_no_indicators(
@@ -1542,6 +1813,36 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary(
     # The strict wire model sees only the members `_wire_fact_summary` names, so a
     # member the platform adds later does not break the frame.
     FactSummary.model_validate(with_defaults["fact_summary"])
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        None,
+        "US Dollar",
+        {"currency": "USD", "prices": "constant", "base_year": 2023},
+        {
+            "numerator": {"currency": "USD", "prices": "current"},
+            "denominator": {"stat_var": "dcid:Count_Person", "label": "Total population"},
+        },
+    ],
+    ids=["none", "name", "structured", "composed"],
+)
+async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(
+    monkeypatch: pytest.MonkeyPatch, unit: object
+) -> None:
+    store, describing, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    facts["unit"] = unit
+
+    component = await executor._assemble_component(
+        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
+    )
+
+    assert component is not None
+    assert component["fact_summary"].get("unit") == unit
+    assert usable_component(component)
 
 
 async def test_each_series_states_the_periods_of_its_first_and_last_values(
@@ -2124,3 +2425,34 @@ async def test_a_write_retry_cut_off_at_the_call_deadline_raises_the_timeout_not
     assert client.calls == ["write_component", "write_component"]
     assert excinfo.value.timeout_tool == "write_component"
     assert excinfo.value.error.code == REQUEST_TIMEOUT
+
+
+async def test_a_retrieval_with_no_observations_reports_its_row_count_and_warnings(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """dfo-apis serves a mint whose places or window hold nothing as 200 with zero rows
+    and an `empty_result` warning; the outcome carries both, so a caller can tell it
+    from data."""
+    frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    warning = {
+        "code": "empty_result",
+        "severity": "warn",
+        "message": "The materialised frame holds zero observations.",
+    }
+    result = {
+        "definition": {"spec_id": frame_ref["spec_id"]},
+        "content_version": frame_ref["content_version"],
+        "coverage": {"rows": 0, "dimensions": []},
+        "warnings": [warning],
+        "trace": {},
+        "frame_ref": frame_ref,
+    }
+    scripted_presentation_client([_tool_result(result)])
+
+    outcome = await McpExecutor(settings=Settings(), provenance=ProvenanceStore())(
+        tool="get_data", args={"spec_id": frame_ref["spec_id"]}
+    )
+
+    assert outcome["outcome"] == "ok"
+    assert outcome["rows"] == 0
+    assert outcome["warnings"] == [warning]

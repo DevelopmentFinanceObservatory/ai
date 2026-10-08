@@ -29,6 +29,7 @@ from pydantic import Field
 from analysis_mcp.digest import render_aggregate_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    ComposedUnitSumError,
     NonFiniteAggregateResultError,
     StatVarUnresolvedError,
     UnknownGroupByColumnError,
@@ -69,6 +70,7 @@ from analysis_mcp.units import unit_json
 # refusal, via `_refusal_for_engine_error` below.
 _EngineError = (
     UnsupportedAggregationError
+    | ComposedUnitSumError
     | UnknownGroupByColumnError
     | StatVarUnresolvedError
     | UnitNotPresentError
@@ -109,6 +111,8 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     elif isinstance(exc, PlaceLevelsMixedError):
         refusal = ToolRefusal.place_levels_mixed(column=exc.column, types=list(exc.types))
+    elif isinstance(exc, ComposedUnitSumError):
+        refusal = ToolRefusal.composed_unit_sum_unsupported(verb="aggregate", unit=exc.unit)
     else:
         refusal = ToolRefusal.non_finite_result(
             group_key=exc.group_key, aggregation=exc.aggregation
@@ -160,8 +164,9 @@ async def aggregate(
             default=None,
             description=(
                 "Pins the unit to aggregate over, when the input frame carries more than "
-                "one: a unit ref, or a converted unit as its {currency, prices, base_year} "
-                "object. Retry with one of a unit_heterogeneous refusal's fix.units values."
+                "one: a unit ref, a converted unit as its {currency, prices, base_year} "
+                "object, or a composed unit as its {numerator, denominator} object. "
+                "Retry with one of a unit_heterogeneous refusal's fix.units values."
             ),
         ),
     ] = None,
@@ -233,6 +238,7 @@ async def aggregate(
         )
     except (
         UnsupportedAggregationError,
+        ComposedUnitSumError,
         UnknownGroupByColumnError,
         StatVarUnresolvedError,
         UnitNotPresentError,
@@ -309,6 +315,7 @@ async def aggregate(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[input_trace],
         digest=lambda: render_aggregate_digest(
             group_by=group_by,
             aggregation=op_spec.aggregation,

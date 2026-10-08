@@ -59,6 +59,7 @@ from harness.wire import (
     Surface,
     TurnRequest,
     check_resolved_bounds,
+    usable_component,
 )
 from pydantic import ValidationError
 
@@ -190,6 +191,67 @@ def test_an_unknown_frame_member_is_refused() -> None:
 
     with pytest.raises(ValidationError):
         STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+_PER_HEAD = {"stat_var": "dcid:Count_Person", "label": "Total population"}
+_CONSTANT_USD = {"currency": "USD", "prices": "constant", "base_year": 2023}
+
+
+def _written_component(unit: object) -> dict[str, Any]:
+    """A `write_component` result's `component` whose fact summary states `unit`."""
+    component = _load("event-06-component-created.json")
+    del component["event"], component["seq"]
+    component["fact_summary"]["unit"] = unit
+    return component
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        None,
+        "US Dollar",
+        _CONSTANT_USD,
+        {"magnitude": "trillions"},
+        {"numerator": "US Dollar", "denominator": _PER_HEAD},
+        {"numerator": _CONSTANT_USD, "denominator": "Square Kilometer"},
+    ],
+    ids=["none", "name", "structured", "one-member", "per-stat-var", "structured-per-name"],
+)
+def test_a_component_is_usable_with_each_unit_the_platform_states(unit: object) -> None:
+    assert usable_component(_written_component(unit))
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "",
+        {},
+        {"currency": "USD", "price_basis": "constant"},
+        {"currency": "usd"},
+        {"numerator": "US Dollar"},
+        {"numerator": "US Dollar", "denominator": None},
+        {"numerator": "US Dollar", "denominator": _PER_HEAD, "label": "per head"},
+        {"numerator": "US Dollar", "denominator": {"stat_var": "dcid:Count_Person"}},
+        {"numerator": "US Dollar", "denominator": {**_PER_HEAD, "stat_var": "Count_Person"}},
+        {"numerator": "US Dollar", "denominator": {"numerator": "a", "denominator": "b"}},
+        _PER_HEAD,
+    ],
+    ids=[
+        "empty-name",
+        "no-member",
+        "unknown-member",
+        "lower-case-currency",
+        "no-denominator",
+        "null-side",
+        "extra-member",
+        "stat-var-without-a-label",
+        "stat-var-without-dcid",
+        "composed-side",
+        "bare-stat-var",
+    ],
+)
+def test_a_component_whose_unit_is_malformed_is_not_usable(unit: object) -> None:
+    assert not usable_component(_written_component(unit))
 
 
 def test_an_unknown_event_discriminator_is_refused() -> None:
@@ -739,3 +801,52 @@ def test_a_target_year_outside_search_s_bounds_refuses_its_seed(target_year: obj
 
     with pytest.raises(ValidationError, match="target_year"):
         Seed.model_validate(raw["seed_spec"][0])
+
+
+def _region_members_block() -> dict[str, Any]:
+    """dfo-apis#1222's spec block for health expenditure per capita over Africa's countries."""
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    return json.loads(fixture.read_text())["spec"]
+
+
+def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
+    """A block whose role was asked for as a set ("African countries") hands the set
+    over beside the identity, so the seed's resubmit asks Search for it again."""
+    seed = Seed.model_validate({"spec": _region_members_block(), "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert {
+        role: group.model_dump(exclude_none=True) for role, group in seed.spec.entity_groups.items()
+    } == {"observationAbout": {"dcid": "africa", "label": "Africa"}}
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        {"label": ""},
+        {"label": None, "dcid": "africa"},
+        {"label": "A" * 121, "dcid": "africa"},
+        "Africa",
+    ],
+    ids=["empty-label", "null-label", "label-too-long", "not-an-object"],
+)
+def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(group: object) -> None:
+    # A set with no usable name is left out, as `compiler.sources` leaves out a
+    # nameless one; the seed's spec_id and identity still hand over.
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is None
+    assert seed.spec.definition.spec_id == block["spec_id"]
+
+
+def test_a_set_on_a_role_the_identity_binds_nothing_on_is_dropped() -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"]["origin"] = {"label": "G7", "dcid": "G7"}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert list(seed.spec.entity_groups) == ["observationAbout"]

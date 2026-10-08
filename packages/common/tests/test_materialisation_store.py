@@ -16,10 +16,14 @@ from typing import Any
 import pytest
 from common.materialisation import (
     FrameExpired,
+    FrameListing,
     FrameRef,
     FrameTooLarge,
     HeldFrame,
     InMemoryMaterialisationStore,
+    MintRecord,
+    decode_mint_record,
+    encode_mint_record,
 )
 from common.materialisation.memory_store import FRAME_TTL
 from common.materialisation.store import MaterialisationStore
@@ -373,3 +377,104 @@ async def test_open_returns_none_for_a_miss_and_raises_for_an_expired_pair() -> 
     now += FRAME_TTL + timedelta(seconds=1)
     with pytest.raises(FrameExpired):
         await store.open(ref)
+
+
+def _mint_record(ref: FrameRef, *, scope: dict[str, Any] | None = None) -> MintRecord:
+    return MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=ref.spec_id, content_version="cv_" + "d" * 32),
+        options={"layout": "frame", "columns": ["observationAbout_type"]},
+        scope=scope or {},
+    )
+
+
+async def test_get_trace_returns_the_stored_trace_and_none_for_a_miss() -> None:
+    store = InMemoryMaterialisationStore()
+    ref = _ref()
+    trace = _FakeTrace(upstream_trace={"n": 1})
+
+    assert await store.get_trace(ref) is None
+
+    await store.put(ref, frame=object(), trace=trace, writer="writer-a")
+    assert await store.get_trace(ref) is trace
+
+
+async def test_a_mint_record_is_kept_without_its_frame_and_the_first_writer_wins() -> None:
+    store = InMemoryMaterialisationStore()
+    ref = _ref()
+    first = _mint_record(ref)
+
+    assert await store.get_mint_record(ref) is None
+
+    await store.put_mint_record(first)
+    await store.put_mint_record(_mint_record(ref, scope={"window": {"kind": "all"}}))
+
+    assert await store.get_mint_record(ref) == first
+    assert await store.get(ref) is None
+
+
+async def test_a_mint_record_outlives_its_frames_eviction() -> None:
+    store = InMemoryMaterialisationStore(max_entries=1)
+    ref = _ref()
+    other = FrameRef(spec_id="spec_" + "c" * 32, content_version="cv_" + "b" * 32)
+    await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.put_mint_record(_mint_record(ref))
+
+    await store.put(other, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+
+    assert await store.get(ref) is None
+    assert await store.get_mint_record(ref) == _mint_record(ref)
+
+
+def test_a_mint_record_encodes_to_the_same_bytes_whatever_order_its_members_were_given() -> None:
+    ref = _ref()
+    dataset = FrameRef(spec_id=ref.spec_id, content_version="cv_" + "d" * 32)
+    one = MintRecord(
+        frame=ref, dataset=dataset, options={"layout": "frame", "bundle": False}, scope={}
+    )
+    other = MintRecord(
+        scope={}, options={"bundle": False, "layout": "frame"}, dataset=dataset, frame=ref
+    )
+
+    assert encode_mint_record(one) == encode_mint_record(other)
+    assert decode_mint_record(encode_mint_record(one)) == one
+
+
+def test_a_stored_mint_record_with_a_member_this_process_never_declared_still_decodes() -> None:
+    record = _mint_record(_ref())
+    stored = encode_mint_record(record).replace(b'{"dataset"', b'{"added_later":1,"dataset"', 1)
+
+    assert decode_mint_record(stored) == record
+
+
+def test_a_mint_record_stored_without_a_stat_var_count_reads_as_unknown() -> None:
+    record = _mint_record(_ref())
+    counted = record.model_copy(update={"stat_var_count": 3})
+    stored = encode_mint_record(counted).replace(b',"stat_var_count":3', b"", 1)
+
+    assert decode_mint_record(encode_mint_record(counted)) == counted
+    assert decode_mint_record(stored) == record
+    assert record.stat_var_count is None
+
+
+async def test_list_frames_is_oldest_first_by_first_write_whatever_was_read_since() -> None:
+    """A read moves an entry in the eviction order and leaves its place in the listing,
+    and an expired entry is not listed."""
+    clock = [datetime(2026, 9, 1, tzinfo=UTC)]
+    store = InMemoryMaterialisationStore(now=lambda: clock[0])
+    refs = [
+        FrameRef(spec_id="spec_" + "a" * 32, content_version=f"cv_{digit * 32}") for digit in "321"
+    ]
+    written = []
+    for days, ref in zip((0, 20, 25), refs, strict=True):
+        clock[0] = datetime(2026, 9, 1, tzinfo=UTC) + timedelta(days=days)
+        written.append(clock[0])
+        await store.put(ref, frame=object(), trace=_FakeTrace(upstream_trace={}), writer="w")
+    await store.get(refs[1])
+
+    assert await store.list_frames() == [
+        FrameListing(ref=ref, created_at=at) for ref, at in zip(refs, written, strict=True)
+    ]
+
+    clock[0] = written[0] + FRAME_TTL + timedelta(seconds=1)
+    assert [listing.ref for listing in await store.list_frames()] == refs[1:]

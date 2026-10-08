@@ -25,9 +25,11 @@ from analysis_mcp.op_spec import (
     AggregateOpSpec,
     CategoryMatchPredicate,
     OpSpecAdapter,
+    QuotientOfOpSpec,
     ShareOfOpSpec,
 )
 from common.materialisation import FrameRef
+from common.recipe import normal_form
 from dfo_frame_grammar import Frame
 from pydantic import ValidationError
 
@@ -102,21 +104,38 @@ def test_duplicate_group_by_column_refuses() -> None:
     assert exc_info.value.category == "duplicate_member"
 
 
-def _share_of_op_spec(**overrides: object) -> ShareOfOpSpec:
-    return ShareOfOpSpec(
+_TWO_SIDED_OP_SPECS = pytest.mark.parametrize("model", [ShareOfOpSpec, QuotientOfOpSpec])
+
+
+def _two_sided_op_spec(
+    model: type[ShareOfOpSpec | QuotientOfOpSpec], **overrides: object
+) -> ShareOfOpSpec | QuotientOfOpSpec:
+    return model(
         frame_ref=FrameRef(**SNAPSHOT_REF),
         numerator_by=overrides.get("numerator_by", ()),
         denominator_by=overrides.get("denominator_by", {}),
     )
 
 
-def test_op_spec_hash_is_independent_of_numerator_by_order() -> None:
-    a = op_spec_hash_for(_share_of_op_spec(numerator_by=("donor", "sector")))
-    b = op_spec_hash_for(_share_of_op_spec(numerator_by=("sector", "donor")))
+@_TWO_SIDED_OP_SPECS
+def test_op_spec_hash_is_independent_of_numerator_by_order(
+    model: type[ShareOfOpSpec | QuotientOfOpSpec],
+) -> None:
+    a = op_spec_hash_for(_two_sided_op_spec(model, numerator_by=("donor", "sector")))
+    b = op_spec_hash_for(_two_sided_op_spec(model, numerator_by=("sector", "donor")))
     assert a == b
 
 
-def test_op_spec_hash_is_independent_of_denominator_by_key_order() -> None:
+def test_share_of_and_quotient_of_over_the_same_parameters_mint_different_hashes() -> None:
+    assert op_spec_hash_for(_two_sided_op_spec(ShareOfOpSpec)) != op_spec_hash_for(
+        _two_sided_op_spec(QuotientOfOpSpec)
+    )
+
+
+@_TWO_SIDED_OP_SPECS
+def test_op_spec_hash_is_independent_of_denominator_by_key_order(
+    model: type[ShareOfOpSpec | QuotientOfOpSpec],
+) -> None:
     """Two calls differing only in `denominator_by`'s own key insertion
     order mint one `op_spec_hash` and (via `frame_ref_resolution.
     canonical_entity_binding`) execute over one order -- JCS sorts an
@@ -124,14 +143,16 @@ def test_op_spec_hash_is_independent_of_denominator_by_key_order() -> None:
     requires no explicit registration in `identity._normalise_parameters`,
     unlike an array-shaped field."""
     a = op_spec_hash_for(
-        _share_of_op_spec(
+        _two_sided_op_spec(
+            model,
             numerator_by=("donor", "sector"),
             denominator_by={"donor": "provider", "sector": "area"},
         )
     )
     b = op_spec_hash_for(
-        _share_of_op_spec(
-            numerator_by=("donor", "sector"),
+        _two_sided_op_spec(
+            model,
+            numerator_by=("sector", "donor"),
             denominator_by={"sector": "area", "donor": "provider"},
         )
     )
@@ -245,6 +266,94 @@ class TestOpSpecHashVectors:
             with pytest.raises((ValidationError, OpSpecIdentityError)):
                 op_spec = OpSpecAdapter.validate_python(op_spec_dict)
                 op_spec_hash_for(op_spec)
+
+
+_ROLLING_VECTORS = json.loads(
+    (_FIXTURES / "vectors" / "op_spec_rolling_hash_vectors.json").read_text()
+)["vectors"]
+_ROLLING_POSITIVE = {v["name"]: v for v in _ROLLING_VECTORS if v["classification"] == "positive"}
+
+
+class TestRollingOpSpecHashVectors:
+    """The `ops1` vectors for the rolling overlay, each beside its fixed twin."""
+
+    @pytest.mark.parametrize("vector", _ROLLING_VECTORS, ids=lambda v: v["name"])
+    def test_vector(self, vector: dict[str, object]) -> None:
+        if vector["classification"] == "positive":
+            op_spec = OpSpecAdapter.validate_python(vector["op_spec"])
+            assert canonicalize_op_spec(op_spec).decode() == vector["expected_canonical"]
+            assert op_spec_hash_for(op_spec) == vector["expected_op_spec_hash"]
+            assert (
+                recompute_op_spec_hash(vector["expected_canonical"].encode())
+                == (vector["expected_op_spec_hash"])
+            )
+        else:
+            with pytest.raises(ValidationError):
+                OpSpecAdapter.validate_python(vector["op_spec"])
+
+    def test_a_population_stating_no_level_hashes_as_one_without_the_member(self) -> None:
+        vector = _ROLLING_POSITIVE["growth-rolling-end"]
+        stated = json.loads(json.dumps(vector["op_spec"]))
+        for population in stated["rolling"]["population"]:
+            population["levels"] = {}
+        levelled = _ROLLING_POSITIVE["growth-rolling-end-country-level"]
+
+        op_spec = OpSpecAdapter.validate_python(stated)
+
+        assert canonicalize_op_spec(op_spec).decode() == vector["expected_canonical"]
+        assert levelled["expected_op_spec_hash"] != vector["expected_op_spec_hash"]
+        assert '"levels":{"observationAbout_type":"Country"}' in levelled["expected_canonical"]
+
+    def test_only_the_respelled_population_shares_a_hash(self) -> None:
+        names_by_hash: dict[str, set[str]] = {}
+        for name, vector in _ROLLING_POSITIVE.items():
+            names_by_hash.setdefault(vector["expected_op_spec_hash"], set()).add(name)
+
+        assert [names for names in names_by_hash.values() if len(names) > 1] == [
+            {"growth-rolling-end-two-roots", "growth-rolling-population-respelled"}
+        ]
+
+    @pytest.mark.parametrize(
+        ("name", "moved"),
+        [
+            ("growth-rolling-end", {"window_end": "2025"}),
+            ("growth-rolling-both-ends", {"window_start": "2020", "window_end": "2025"}),
+            ("rank-rolling-window", {"window_start": "2020", "window_end": "2025"}),
+        ],
+    )
+    def test_a_rolling_window_keeps_its_recipe_normal_form_when_the_latest_period_moves(
+        self, name: str, moved: dict[str, str]
+    ) -> None:
+        op_spec = _ROLLING_POSITIVE[name]["op_spec"]
+        twin = {key: value for key, value in op_spec.items() if key != "rolling"}
+
+        assert _normal_form_of({**op_spec, **moved}) == _normal_form_of(op_spec)
+        assert _normal_form_of({**twin, **moved}) != _normal_form_of(twin)
+
+    def test_a_rolling_predicate_keeps_its_recipe_normal_form_when_the_latest_period_moves(
+        self,
+    ) -> None:
+        def at(vector: str, period: str) -> dict[str, object]:
+            op_spec = _ROLLING_POSITIVE[vector]["op_spec"]
+            predicates = [
+                {**predicate, "value": period}
+                if predicate["column"] == "time_period"
+                else predicate
+                for predicate in op_spec["predicates"]
+            ]
+            return {**op_spec, "predicates": predicates}
+
+        rolling = "filter-one-rolling-predicate"
+        assert _normal_form_of(at(rolling, "2020")) == _normal_form_of(at(rolling, "2019"))
+        fixed = "filter-fixed-predicates"
+        assert _normal_form_of(at(fixed, "2020")) != _normal_form_of(at(fixed, "2019"))
+
+
+def _normal_form_of(op_spec: dict[str, object]) -> dict[str, object]:
+    """The recipe normal form of one verb call over a dataset root."""
+    canonical = json.loads(canonicalize_op_spec(OpSpecAdapter.validate_python(op_spec)))
+    tree = {"op_spec": canonical, "inputs": {"frame_ref": {"root": 0}}}
+    return normal_form(tree, [{"dataset": {"spec_id": "spec_" + "a" * 32}, "options": {}}])
 
 
 def test_an_unset_rank_limit_stays_out_of_the_preimage_and_a_set_one_enters() -> None:

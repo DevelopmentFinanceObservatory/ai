@@ -1,4 +1,4 @@
-"""Run the translator's discover-then-compile loop as code, behind the `translate` tool.
+"""Run the translator's discover-then-compile loop as code, for `propose_plan` to call.
 
 Finding each dataset requirement's source, reading the `action` a
 non-`definite` answer carries and following it, building a `Translation`
@@ -57,6 +57,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     RankOperation,
     RetrieveOperation,
     ShareOfOperation,
@@ -73,12 +74,13 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     ShareOfRequirement,
     SumOfRequirement,
     inputs_of,
 )
-from planner.tool_results import Action, Outcome, ProblemCode
+from planner.tool_results import Action, ProblemCode
 
 from translator.discovery import (
     current_draft,
@@ -86,7 +88,7 @@ from translator.discovery import (
     load_log,
     settled_sources,
 )
-from translator.referral import Referral, ReferralKind, clear_referral, load_referral
+from translator.referral import ReferralKind
 
 # How many propose-then-fix rounds this loop tries before it gives up and
 # escalates. `translator.discovery.DISCOVERY_CALL_BUDGET` bounds how many
@@ -97,7 +99,7 @@ from translator.referral import Referral, ReferralKind, clear_referral, load_ref
 # does not cover.
 MAX_ROUNDS = 4
 
-# `translate`'s own core: the three functions this loop drives directly,
+# The translator's core: the three functions this loop drives directly,
 # bypassing ADK's model-turn dispatch. `discover_source` and
 # `propose_operations` are async (they call the tool surface);
 # `return_to_planner` is not.
@@ -110,8 +112,8 @@ ReturnToPlanner = Callable[..., dict[str, object]]
 class TranslatorCore:
     """The translator's three core functions.
 
-    Built once by `translator.tool` and closed over by the `translate`
-    tool.
+    Built once by `translator.tool` and closed over by the translation
+    `propose_plan` runs (`translator.tool.build_translate`).
     """
 
     discover_source: DiscoverSource
@@ -201,6 +203,7 @@ def _growth(requirement: GrowthRequirement, discovered: Mapping[str, str]) -> Op
         window_start=requirement.window_start,
         window_end=requirement.window_end,
         change=requirement.change,
+        rolling=requirement.rolling,
     )
 
 
@@ -238,6 +241,7 @@ def _rank(requirement: RankRequirement, discovered: Mapping[str, str]) -> Operat
         window_end=requirement.window_end,
         per_period=requirement.per_period,
         limit=requirement.limit,
+        rolling=requirement.rolling,
     )
 
 
@@ -250,6 +254,18 @@ def _share_of(requirement: ShareOfRequirement, discovered: Mapping[str, str]) ->
         denominator=_side(requirement.denominator.input_id, requirement.denominator.entity),
         axis=requirement.axis,
         denominator_scope=requirement.denominator_scope,
+    )
+
+
+def _quotient_of(requirement: QuotientRequirement, discovered: Mapping[str, str]) -> Operation:
+    del discovered
+    return QuotientOfOperation(
+        id=requirement.id,
+        requirement_id=requirement.id,
+        numerator=_side(requirement.numerator.input_id, requirement.numerator.entity),
+        denominator=_side(requirement.denominator.input_id, requirement.denominator.entity),
+        axis=requirement.axis,
+        denominator_axis=requirement.denominator_axis,
     )
 
 
@@ -287,6 +303,7 @@ _BUILDERS: dict[type, Callable[[Any, Mapping[str, str]], Operation]] = {
     SumOfRequirement: _sum_of,
     RankRequirement: _rank,
     ShareOfRequirement: _share_of,
+    QuotientRequirement: _quotient_of,
     JoinRequirement: _join,
     FilterRequirement: _filter,
 }
@@ -394,7 +411,7 @@ def _settle_discovery(
     """Settle one `discover_source` answer, following its action or naming a stop.
 
     Returns the discovered `spec_id` to continue with, or a `_Stopped`
-    naming the result the whole `translate` call ends on: the referral a
+    naming the result the whole translation ends on: the referral a
     complete `return_to_planner` action names, a `source_ambiguous` one
     included; a `discovery_unavailable` referral,
     raised here rather than by an `action`, when a data-service failure is
@@ -402,7 +419,7 @@ def _settle_discovery(
     anything else the answer does not resolve to a single source with no
     action attached.
 
-    Writes `translate`'s single-slot referral state when it stops, so a
+    Writes the single-slot referral state when it stops, so a
     caller settling more than one requirement's answer must do it one call at a time, checking each
     result for a `_Stopped` before settling the next: two settlements in
     flight together would let the later one's write clobber the earlier
@@ -478,7 +495,7 @@ async def _resolve_dataset_sources(
 
     A requirement whose own searched content (`requirement_revision`) and pin
     already have a settled `DiscoveryLog` record -- from an earlier
-    `translate()` call, an earlier round of this loop, or a plan amendment
+    translation run, an earlier round of this loop, or a plan amendment
     that left this requirement untouched -- takes that record's source
     directly, the same way `propose_operations` does
     (`requirement_keys`/`pinned`/`log.selectable`), rather than spending a
@@ -494,7 +511,7 @@ async def _resolve_dataset_sources(
     is already safe to run alongside its siblings -- `discovery_lock` guards
     only the budget check, and the log records each requirement under its
     own key. Settling what each call answered (`_settle_discovery`) is not:
-    it is what writes the referral to `translate`'s
+    it is what writes the referral to the
     single-slot state, so the answers are walked back in requirement order
     and settled one at a time -- the first genuine exception is re-raised,
     the first settlement that yields a `_Stopped` is returned at once, and
@@ -637,33 +654,16 @@ async def _propose_until_settled(
     )
 
 
-def _referred_again(
-    core: TranslatorCore, tool_context: ToolContext, referral: Referral
-) -> dict[str, object]:
-    """Answer with the referral already pending on the plan, as `return_to_planner` built it.
-
-    The plan is unchanged since it was referred (`propose_plan` clears the
-    referral), so translating it again could only reach the same stop. A
-    transient referral is the exception, and `run_translate` retries it.
-    """
-    return core.return_to_planner(
-        tool_context=tool_context,
-        **referral.model_dump(
-            exclude={"candidates", "no_data_reason", "stale_pins"}, exclude_defaults=True
-        ),
-    )
-
-
 # --- the public entry point --------------------------------------------------
 
 
 async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> dict[str, object]:
     """Run the translator's whole discover-then-compile loop without a model turn.
 
-    Answers with the referral already pending on the plan, unless it is
-    transient. Otherwise drives `discover_source` for every dataset
-    requirement, then `propose_operations`, following each step's own
-    `action`.
+    Drives `discover_source` for every dataset requirement, then
+    `propose_operations`, following each step's own `action`. It runs on
+    a plan with no referral pending, since `propose_plan` clears the last one
+    when it records the plan it translates.
 
     Returns:
         `{"outcome": "ok", ...}` once `propose_operations` succeeds;
@@ -675,12 +675,6 @@ async def run_translate(tool_context: ToolContext, *, core: TranslatorCore) -> d
     plan = current_draft(tool_context)
     if isinstance(plan, dict):
         return plan
-
-    pending = load_referral(tool_context.state)
-    if pending is not None:
-        if pending.outcome is not Outcome.TRANSIENT:
-            return _referred_again(core, tool_context, pending)
-        clear_referral(tool_context.state)
 
     unsupported = _unsupported_requirement(plan)
     if unsupported is not None:

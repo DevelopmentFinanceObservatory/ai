@@ -40,6 +40,13 @@ type ThinkingLevelName = Literal["LOW", "MEDIUM", "HIGH"]
 # between two default-level runs.
 DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
+# How long after its deadline `harness.live_refresh` cancels a refresh, and how
+# long the website waits for one. A refresh answers by its deadline plus the
+# grace, so the largest deadline accepted is the caller's timeout less the grace.
+LIVE_REFRESH_HARD_STOP_GRACE_S = 8.0
+LIVE_REFRESH_CALLER_TIMEOUT_S = 60.0
+LIVE_REFRESH_DEADLINE_MAX_S = LIVE_REFRESH_CALLER_TIMEOUT_S - LIVE_REFRESH_HARD_STOP_GRACE_S
+
 
 class Settings(BaseServiceSettings):
     """Config for the harness agentic-loop service.
@@ -134,6 +141,48 @@ class Settings(BaseServiceSettings):
     once rather than queueing, since a queued call would spend its own 45 s
     waiting. The cap is per instance because nothing shares a count across
     instances, so n instances run up to n times it.
+
+    `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) is the bearer
+    `POST /api/studio/refresh` takes (`harness.live_refresh`), and the principal
+    this service presents to dfo-apis' frame refresh and render routes. Unset or
+    blank, the route refuses every caller. It must differ from
+    `studio_api_token`: the studio routes refuse it, so one value for both would
+    close them.
+
+    `live_refresh_deadline_s` is how long one refresh has before its replay
+    starts no new mint, verb, or publish. The run is cancelled
+    `LIVE_REFRESH_HARD_STOP_GRACE_S` (8 s) later and answers `pending`, so no
+    request runs past 53 s at the default of 45. The website gives the call
+    `LIVE_REFRESH_CALLER_TIMEOUT_S` (60 s), which leaves it 7 s to receive that
+    answer. A value above `LIVE_REFRESH_DEADLINE_MAX_S` (52, the caller's timeout
+    less the grace) is refused: its hard stop would fall after the website had
+    given up, so the `pending` answer would reach nobody. A root mint needs about
+    25 s of the deadline left to start (`data_mcp.deadline.EXTERNAL_CALL_BUDGET`),
+    and the reads before the replay take a few seconds, so a value under 30 never
+    mints a root and is refused.
+
+    `live_refresh_requests_per_s`, `live_refresh_burst`, and
+    `live_refresh_max_in_flight` are the refresh route's own token bucket and
+    in-flight cap, per instance, apart from the combined server's, so neither
+    kind of traffic uses up the other's allowance. A request over either answers
+    `pending` with a wait. The burst of 20 is one live canvas, which holds at
+    most 20 data cards and asks for all of them as it opens. The rate of 2 a
+    second is under half the combined server's 5: the website asks about a card
+    once in 300 s whatever the traffic, so only a `pending` poll repeats sooner.
+    The cap of 8 is half the combined server's 16, since a refresh that replays
+    holds its slot for up to 53 s against a tool call's 45.
+
+    `live_refresh_rows_in_flight_max` sizes a second `common.row_budget.RowBudget`
+    that `harness.recipe_replay.replay_recipe` claims from: the input rows of
+    each verb call, the root rows of an anchor call, and the published frame's
+    rows. It caps the rows all replays in this process put through the tools at
+    once. The tools and the publish also claim the same rows from the
+    process-wide budget (`frame_rows_in_flight_max`), and a root mint claims
+    there only. The default of 500,000 is one two-input verb on two full frames,
+    the largest single claim, and leaves 700,000 of the process-wide 1,200,000
+    to Studio conversations and outside MCP callers. A claim the rows in flight
+    leave no room for, in either budget, answers `pending`. A replay step whose
+    rows exceed this whole budget is refused `rows_over_refresh_budget`.
     """
 
     data_mcp_url: str = ""
@@ -187,6 +236,15 @@ class Settings(BaseServiceSettings):
     combined_mcp_requests_per_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     combined_mcp_burst: int = Field(default=20, ge=1)
     combined_mcp_max_in_flight: int = Field(default=16, ge=1)
+    # The refresh route's credential, deadline, and limits; see the class docstring.
+    live_refresh_principal: str | None = None
+    live_refresh_deadline_s: float = Field(
+        default=45.0, ge=30.0, le=LIVE_REFRESH_DEADLINE_MAX_S, allow_inf_nan=False
+    )
+    live_refresh_requests_per_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    live_refresh_burst: int = Field(default=20, ge=1)
+    live_refresh_max_in_flight: int = Field(default=8, ge=1)
+    live_refresh_rows_in_flight_max: int = Field(default=500_000, ge=1)
 
     @field_validator(
         "mcp_call_timeout_s",
@@ -205,10 +263,11 @@ class Settings(BaseServiceSettings):
             )
         return value
 
-    @field_validator("studio_api_token", mode="before")
+    @field_validator("studio_api_token", "live_refresh_principal", mode="before")
     @classmethod
     def _blank_token_is_unset(cls, value: object) -> object:
-        # A blank `STUDIO_API_TOKEN=` in an env file leaves the setting unset.
+        # A blank `STUDIO_API_TOKEN=` or `LIVE_REFRESH_PRINCIPAL=` in an env file
+        # leaves the setting unset.
         if isinstance(value, str) and not value.strip():
             return None
         return value
@@ -242,6 +301,19 @@ class Settings(BaseServiceSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _refuse_one_value_for_both_studio_credentials(self) -> Settings:
+        if (
+            self.live_refresh_principal is not None
+            and self.live_refresh_principal == self.studio_api_token
+        ):
+            raise ValueError(
+                "LIVE_REFRESH_PRINCIPAL and STUDIO_API_TOKEN hold the same value. The "
+                "studio routes refuse the live-refresh principal (harness.auth), so "
+                "they would refuse every caller: set two different secrets."
+            )
+        return self
 
     @model_validator(mode="after")
     def _default_mcp_urls_to_loopback(self) -> Settings:

@@ -1,11 +1,11 @@
-"""Tests for `translator.tool`: proposing, referring, and the `translate` tool.
+"""Tests for `translator.tool`: proposing, referring, and the translation `propose_plan` runs.
 
 `propose_operations` and `return_to_planner` are exercised directly, through
 `translator.tool.build_translator_core`, against a fake tool context: they
 are not model-facing tools in their own right, but the same functions
-`translate` (`translator.mechanical.run_translate`) drives, and this is what
+translation (`translator.mechanical.run_translate`) drives, and this is what
 belongs to this package -- the logic each one runs, independent of who
-calls it. `translate`'s own loop has its own suite,
+calls it. Translation's own loop has its own suite,
 `tests/translator/test_mechanical.py`; the compiler's own checks have
 theirs.
 
@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 import translator.tool
-from compiler.compile import CompileIssue, CompileIssueCode
+from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
 from compiler.sources import DiscoveryStatus
 from compiler.surface import (
     FixtureSurface,
@@ -39,12 +39,15 @@ from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
+    Coverage,
     DatasetRequirement,
+    Period,
     Plan,
     PlanStatus,
     SeededSource,
     Unit,
     UnsupportedOperation,
+    load_optional_declines,
     load_unsupported,
     plan_revision,
     save_dropped_seeds,
@@ -55,13 +58,13 @@ from translator.discovery import DiscoveryRecord, load_log, requirement_revision
 from translator.mechanical import TranslatorCore
 from translator.referral import Referral, ReferralKind, load_referral, save_referral
 from translator.tool import (
-    TRANSLATE_TOOL_NAME,
     IssueResolution,
     _compile_failure_action,
     _referral_payload,
-    build_translate_tool,
+    build_translate,
     build_translator_core,
     issue_resolution,
+    permitted_repair,
 )
 
 DraftFactory = Callable[..., Plan]
@@ -182,19 +185,6 @@ def _stored(context: Any) -> Plan:
     return Plan.model_validate_json(context.state[PLAN_STATE_KEY])
 
 
-def test_translate_is_one_ungated_tool_taking_no_arguments(real_schemas: list[ToolSchema]) -> None:
-    # The plan is read from session state, so the model passes nothing. No
-    # `discover_source`/`propose_operations`/`return_to_planner` tool either:
-    # `translate` drives all three directly, in Python.
-    tool = build_translate_tool(surface=FixtureSurface(schemas=real_schemas))
-    declaration = tool._get_declaration()
-
-    assert tool.name == TRANSLATE_TOOL_NAME == "translate"
-    assert tool._require_confirmation is False
-    assert declaration is not None
-    assert (declaration.parameters, declaration.parameters_json_schema) == (None, None)
-
-
 @pytest.mark.parametrize(
     ("kind", "recorded"),
     [
@@ -219,9 +209,7 @@ async def test_translate_records_an_unsupported_referral_the_plan_must_decline(
     monkeypatch.setattr(translator.tool, "run_translate", run_translate)
     context = context_holding(draft())
 
-    answer = await build_translate_tool(surface=FixtureSurface(schemas=real_schemas)).func(
-        tool_context=context
-    )
+    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(context)
 
     assert answer["kind"] == kind.value
     assert load_unsupported(context.state) == recorded
@@ -497,6 +485,30 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
     }
 
 
+@pytest.mark.parametrize(
+    ("requirement_overrides", "source_overrides", "code", "offered"),
+    [
+        (
+            {"unit": Unit(currency="USD", prices="constant", base_year=2015)},
+            {},
+            "requirement_unmeetable",
+            [],
+        ),
+        (
+            {"period": Period(start=2000, end=2024), "coverage": Coverage(on_missing="fail")},
+            {},
+            "source_unusable",
+            [],
+        ),
+        (
+            {"source": "World Development Indicators"},
+            {"provenance_ref": "worldbank/ids", "provenance_label": "World Bank IDS"},
+            "source_unusable",
+            [SPEC_KENYA],
+        ),
+    ],
+    ids=["constant-prices", "period-outside-coverage", "stated-source-not-found"],
+)
 async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     real_schemas: list[ToolSchema],
     draft: DraftFactory,
@@ -504,24 +516,39 @@ async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    requirement_overrides: dict[str, Any],
+    source_overrides: dict[str, Any],
+    code: str,
+    offered: list[str],
 ) -> None:
-    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
-    context = context_holding(draft(evidence_requirements=[constant, derived_requirement()]))
-    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
+    # Only a stated source that the source found does not name offers the
+    # sources discovery found, for the user to take one in its place; a
+    # source found for the same search misses a period or a price basis
+    # just the same, so those offer nothing.
+    unmeetable = requirement(**requirement_overrides)
+    context = context_holding(draft(evidence_requirements=[unmeetable, derived_requirement()]))
+    _discovered(context, source(**source_overrides), status=DiscoveryStatus.DEFINITE)
+    core = _core(real_schemas)
 
-    result = await _core(real_schemas).propose_operations(
+    result = await core.propose_operations(
         translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
     )
 
-    assert [issue["code"] for issue in result["detail"]["issues"]] == ["requirement_unmeetable"]
+    assert [issue["code"] for issue in result["detail"]["issues"]] == [code]
     assert result["action"] == {
         "call": "return_to_planner",
         "arguments": {
             "kind": "requirement_unmeetable",
             "requirement_id": "annual_debt_service",
             "reason": result["detail"]["issues"][0]["reason"],
+            **({"source_mismatch": True} if offered else {}),
         },
     }
+    handed_back = core.return_to_planner(tool_context=context, **result["action"]["arguments"])
+    referral = handed_back["referral"]
+    assert referral["kind"] == "requirement_unmeetable"
+    assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
+    assert referral.get("source_mismatch", False) is bool(offered)
 
 
 async def test_a_proposal_failing_only_on_structure_closes_as_an_internal_failure(
@@ -857,6 +884,47 @@ def test_an_uncovered_operation_refers_its_requirement_as_unsupported_before_a_r
     assert action.needs == ()
 
 
+@pytest.mark.parametrize(
+    ("code", "resolution"),
+    [
+        (CompileIssueCode.SHARE_UNITS_DIFFER, IssueResolution.REPAIR),
+        (CompileIssueCode.QUOTIENT_AXIS_REQUIRED, IssueResolution.REPAIR),
+        (CompileIssueCode.QUOTIENT_KEY_UNKNOWN, IssueResolution.REPAIR),
+        (CompileIssueCode.FRAME_UNIT_UNBOUND, IssueResolution.UNSUPPORTED),
+        (CompileIssueCode.FRAME_PRICE_BASES_DIFFER, IssueResolution.REPAIR),
+        (CompileIssueCode.FRAME_UNITS_IRRECONCILABLE, IssueResolution.UNMEETABLE),
+    ],
+)
+def test_a_two_sided_verbs_unit_and_key_codes_each_resolve_one_way(
+    code: CompileIssueCode, resolution: IssueResolution
+) -> None:
+    """A share's unit pair, a quotient's key and a pair of price bases are
+    repaired; a unit-less side no operation pairs stays unsupported; a pinned
+    side that no unit pairs with the other goes to the user."""
+    assert issue_resolution(code) is resolution
+
+
+def test_a_share_refused_on_its_units_refers_a_repair_naming_quotient_of() -> None:
+    issue = CompileIssue(code=CompileIssueCode.SHARE_UNITS_DIFFER, reason="r", operation_id="op")
+
+    action = _compile_failure_action([issue], requirement_of={"op": "per_head"})
+
+    assert action.arguments["kind"] == "requirement_needs_repair"
+    assert action.arguments["requirement_id"] == "per_head"
+    assert action.arguments["constraint"] == "share_units_differ"
+    assert "`quotient_of`" in str(action.arguments["repair"])
+
+
+@pytest.mark.parametrize(
+    "code", [CompileIssueCode.QUOTIENT_AXIS_REQUIRED, CompileIssueCode.QUOTIENT_KEY_UNKNOWN]
+)
+def test_a_quotients_key_repair_names_both_of_its_axes(code: CompileIssueCode) -> None:
+    repair = permitted_repair(code)
+
+    assert "`axis`" in repair
+    assert "`denominator_axis`" in repair
+
+
 @pytest.mark.parametrize("code", list(CompileIssueCode))
 def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
     code: CompileIssueCode,
@@ -885,6 +953,55 @@ def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
     assert (referral.kind is ReferralKind.REQUIREMENT_NEEDS_REPAIR) == (
         issue_resolution(code) is IssueResolution.REPAIR
     )
+
+
+@pytest.mark.parametrize(
+    ("code", "about", "recorded"),
+    [
+        (
+            CompileIssueCode.FRAME_UNITS_IRRECONCILABLE,
+            "annual_debt_service",
+            {UnsupportedOperation.NO_OPERATION_COVERS},
+        ),
+        (CompileIssueCode.REQUIREMENT_UNMEETABLE, "multilateral", set()),
+    ],
+)
+async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decline(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+    code: CompileIssueCode,
+    about: str,
+    recorded: set[UnsupportedOperation],
+) -> None:
+    """An irreconcilable pair closes before another unmeetable issue listed
+    first, asks the user about the pinned side's requirement, and records the
+    `no_operation_covers` a later decline of the pair rests on as optional, for
+    the rest of the planner entry, which no later plan owes. The referral's
+    reason names that decline, the field the planner's instruction keys it on."""
+    issues = (
+        CompileIssue(
+            code=CompileIssueCode.SOURCE_UNUSABLE, reason="r", requirement_id="multilateral"
+        ),
+        CompileIssue(code=code, reason="r", operation_id="total", requirement_id=about),
+    )
+    monkeypatch.setattr(translator.tool, "compile_plan", lambda **_: CompileResult(issues=issues))
+    context = context_holding(draft())
+
+    result = await _core(real_schemas).propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
+
+    assert result["action"]["call"] == "return_to_planner"
+    assert result["action"]["arguments"]["kind"] == "requirement_unmeetable"
+    assert result["action"]["arguments"]["requirement_id"] == about
+    assert load_optional_declines(context.state) == recorded
+    assert load_unsupported(context.state) == set()
+    reason = result["action"]["arguments"]["reason"]
+    assert {
+        operation for operation in UnsupportedOperation if operation.value in reason
+    } == recorded
 
 
 def test_a_source_issue_is_tried_before_an_unmeetable_one() -> None:

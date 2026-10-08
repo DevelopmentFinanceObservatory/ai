@@ -40,7 +40,8 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 def resolved_revision(member: str) -> dict[str, Any]:
     """A catalogue member's resolved envelope, dfo-spec-kit's
     `catalogue/fixtures/<member>/payload.json` at 6e9b6735, copied verbatim
-    into `fixtures/resolved_revision/`."""
+    into `fixtures/resolved_revision/`. `<member>_composed_unit` names the
+    member's `payload_composed_unit.json` at bf584e3, copied the same way."""
     path = _FIXTURES / "resolved_revision" / f"{member}.json"
     return json.loads(path.read_text(encoding="utf-8"))
 

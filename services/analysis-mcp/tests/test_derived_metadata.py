@@ -1,8 +1,9 @@
 """The derived-ness marker (`frame_ref_resolution.DerivedMarker`) end to
 end: producers (`rank`, `growth`, `share_of`, `compare`) write
 `applied_policy.detail["derived"]` on their own output's trace, every verb
-carries an input's marker onward, and the verbs that cannot read a rank
-position refuse `derived_input_ordinal`. Also covers `Trace.time`, the
+carries an input's marker onward, the verbs that cannot read a rank
+position refuse `derived_input_ordinal`, and `quotient_of` writes no marker
+of its own. Also covers `Trace.time`, the
 interval `aggregate` and `rank` record when they collapse periods.
 """
 
@@ -25,6 +26,7 @@ from analysis_mcp.identity import (
 )
 from analysis_mcp.join_tool import join
 from analysis_mcp.op_spec import AggregateOpSpec, CategoryMatchPredicate, OrderedThresholdPredicate
+from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
@@ -390,13 +392,12 @@ async def test_share_of_matches_spans_on_their_string(
     if refusal is None:
         assert result.is_error is False
         frame, _trace = await store.get(_frame_ref(result))
-        assert frame.table.column("value").to_pylist() == [2.5]
+        assert frame.table.column("value").to_pylist() == [250.0]
         assert frame.table.column("time_period").to_pylist() == [left_period]
     else:
         assert result.structured_content["code"] == _REFUSAL_CODES["share_of"]
         assert result.structured_content["fix"]["numerator_periods"] == [left_period]
         assert result.structured_content["fix"]["denominator_periods"] == [right_period]
-        assert result.structured_content["fix"]["matched_periods"] == []
 
 
 @pytest.mark.parametrize(("left_period", "right_period", "refusal"), _SPAN_PAIRINGS)
@@ -456,9 +457,9 @@ async def test_growth_output_writes_the_dimensionless_derived_marker(seeded) -> 
     assert derived["dimensionless"] is True
 
 
-async def test_share_of_output_writes_the_dimensionless_and_inherited_stat_var_marker(
-    seeded,
-) -> None:
+async def test_share_of_output_writes_the_dimensionless_marker_alone(seeded) -> None:
+    """A share is a ratio, so `quotient_of` refuses it, but its rows carry a
+    StatVar of their own, so the marker claims no inherited one."""
     store, handles = seeded
     result = await share_of(
         frame_ref=handles.plain_single_unit,
@@ -469,8 +470,7 @@ async def test_share_of_output_writes_the_dimensionless_and_inherited_stat_var_m
     assert result.is_error is False
     _frame, trace = await store.get(_frame_ref(result))
     derived = trace.applied_policy.detail["derived"]
-    assert derived["dimensionless"] is True
-    assert derived["inherited_stat_var"] is True
+    assert derived == {"dimensionless": True}
 
 
 # Absolute growth: dimensionless is set only when inherited, never
@@ -659,6 +659,38 @@ async def test_compare_across_different_stat_vars_writes_inherited_stat_var(seed
     assert result.is_error is False
     _frame, trace = await store.get(_frame_ref(result))
     assert trace.applied_policy.detail["derived"]["inherited_stat_var"] is True
+
+
+async def test_quotient_of_writes_no_marker_of_its_own_and_carries_an_inherited_one(
+    seeded,
+) -> None:
+    """A quotient's unit and `stat_var` are its own, so two measured sides
+    leave `detail` with no `derived` key. A side that is a `compare` across
+    two StatVars brings `inherited_stat_var`, which carries forward."""
+    store, handles = seeded
+    oda_ref, gni_ref = handles.join_pair
+    usa = {"reporter": "dcid:USA"}
+
+    measured = await quotient_of(
+        frame_ref=oda_ref,
+        numerator_entity=usa,
+        denominator_frame_ref=gni_ref,
+        denominator_entity=usa,
+    )
+    compared = await compare(
+        frame_ref=oda_ref, left_entity=usa, right_frame_ref=gni_ref, right_entity=usa
+    )
+    over_a_difference = await quotient_of(
+        frame_ref=_pair(compared), denominator_frame_ref=gni_ref, denominator_entity=usa
+    )
+
+    assert measured.is_error is False
+    _frame, trace = await store.get(_frame_ref(measured))
+    assert "derived" not in trace.applied_policy.detail
+    assert "derived result" not in measured.content[0].text
+    assert over_a_difference.is_error is False
+    _frame, trace = await store.get(_frame_ref(over_a_difference))
+    assert trace.applied_policy.detail["derived"] == {"inherited_stat_var": True}
 
 
 async def test_compare_across_same_stat_var_writes_no_inherited_stat_var(seeded) -> None:

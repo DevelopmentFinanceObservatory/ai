@@ -15,6 +15,11 @@ before the call deadline leaves only its post-mint reserve
 ._mint_payload_or_refusal` calls it once, immediately after a mint POST comes back
 202, and reads its `ResolvedOperation.manifest_payload` the same way a 200
 response's own parsed body is treated -- ready for `data_mcp.manifest.strip_manifest`.
+
+`operation_without_waiting` is the same seam for a caller that must not wait:
+it returns a `QueuedOperation` at once for an operation still pending or running,
+and fetches the manifest of one already done. `get_data_tool.mint_recorded_root`
+calls it.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from fastmcp.tools import ToolResult
@@ -114,6 +119,20 @@ class ResolvedOperation:
     operation_id: str
     poll_attempts: int
     elapsed_s: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class QueuedOperation:
+    """A 202 operation dfo-apis has not finished, as `operation_without_waiting`
+    left it. `status` is the last dfo-apis reported. `retry_after_s` is the wait
+    dfo-apis named on the submit response, else the caller's poll interval. Sending
+    the same mint again after it rejoins this operation: dfo-apis derives
+    `operation_id` from the request, and answers a repeat with the operation it
+    already holds."""
+
+    operation_id: str
+    status: Literal["pending", "running", "done", "failed"]
+    retry_after_s: float
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -442,3 +461,79 @@ async def resolve_operation_response(
         from_poll = True
         last_poll_error = None
         await _report(resource.operation, elapsed_s=deadline.clock() - start)
+
+
+async def operation_without_waiting(
+    *,
+    client: UpstreamClient,
+    submit_payload: Mapping[str, Any],
+    deadline: CallDeadline,
+    poll_interval_s: float,
+) -> ResolvedOperation | QueuedOperation | ToolResult:
+    """Read a mint POST's 202 body without waiting for the operation to finish.
+
+    An operation the submit response reports `pending` or `running` comes back as a
+    `QueuedOperation` and nothing is polled. One it reports `done` or `failed`
+    carries no manifest or problem body on that response, so it is polled once,
+    at once, against `deadline`. `done` gives the `ResolvedOperation`, and `failed`
+    the refusal `resolve_operation_response` gives it. A poll that fails
+    retryably leaves the operation a `QueuedOperation` with the status the submit
+    response reported.
+
+    Args:
+        client: The same upstream client the mint POST itself used.
+        submit_payload: The 202 response's own parsed JSON body.
+        deadline: Bounds the one poll.
+        poll_interval_s: The `retry_after_s` of a `QueuedOperation` whose submit
+            response named no `retry_after_ms`.
+    """
+    resource = _parse_operation_resource(submit_payload, context="202 operation response")
+    if isinstance(resource, ToolResult):
+        return resource
+    submitted = resource.operation
+    queued = QueuedOperation(
+        operation_id=submitted.operation_id,
+        status=submitted.status,
+        retry_after_s=(
+            poll_interval_s
+            if submitted.retry_after_ms is None
+            else submitted.retry_after_ms / 1000.0
+        ),
+    )
+    if submitted.status not in _TERMINAL_STATUSES:
+        return queued
+    return await _fetch_finished(client, submitted, queued=queued, deadline=deadline)
+
+
+async def _fetch_finished(
+    client: UpstreamClient,
+    submitted: OperationEnvelope,
+    *,
+    queued: QueuedOperation,
+    deadline: CallDeadline,
+) -> ResolvedOperation | QueuedOperation | ToolResult:
+    """`operation_without_waiting`'s one poll of an operation whose submit response
+    reported it `done` or `failed`. `queued` is what a poll that settles nothing
+    returns."""
+    start = deadline.clock()
+    try:
+        polled = await _poll_and_pin(
+            client, submitted, deadline=deadline, operation_id=submitted.operation_id
+        )
+    except UpstreamError as exc:
+        return queued if is_retryable(exc) else to_tool_result(from_upstream_error(exc))
+    if isinstance(polled, ToolResult):
+        return polled
+    if polled.operation.status == "done" and polled.manifest is not None:
+        return ResolvedOperation(
+            manifest_payload=polled.manifest,
+            operation_id=submitted.operation_id,
+            poll_attempts=1,
+            elapsed_s=deadline.clock() - start,
+        )
+    if polled.operation.status in _TERMINAL_STATUSES:
+        return _malformed_operation_response(
+            detail=f"operation {submitted.operation_id!r}'s poll response reports "
+            f"{polled.operation.status!r} but carries no manifest"
+        )
+    return replace(queued, status=polled.operation.status)

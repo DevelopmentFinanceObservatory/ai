@@ -170,15 +170,18 @@ async def test_replay_from_execution_record_reproduces_the_stored_frame(seeded) 
     assert replayed.frame == stored_frame
 
 
-async def test_sum_of_warns_on_the_facet_difference_compare_refuses(seeded) -> None:
+async def test_sum_of_and_compare_both_warn_on_the_facet_difference(seeded) -> None:
+    """The pair holds two different StatVars from two sources, so neither
+    verb refuses on their differing facets; both name them in a warning."""
     _store, handles = seeded
     bilateral, imputed = handles.sum_pair
 
     summed = await sum_of(frame_ref=bilateral, right_frame_ref=imputed)
     compared = await compare(frame_ref=bilateral, right_frame_ref=imputed)
 
-    assert compared.structured_content["code"] == "cross_frame_facet_mismatch"
-    assert summed.is_error is False
+    for result in (summed, compared):
+        assert result.is_error is False
+        assert "facet 'provenance' differs" in result.content[0].text
 
 
 @pytest.mark.parametrize(

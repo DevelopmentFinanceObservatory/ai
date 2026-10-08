@@ -32,6 +32,7 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     ShareOfRequirement,
     SumOfRequirement,
@@ -123,7 +124,7 @@ def datasets_of(requirement: EvidenceRequirement, plan: Plan) -> tuple[DatasetRe
         return datasets_of(plan.requirement(requirement.left.input_id), plan) + datasets_of(
             plan.requirement(requirement.right.input_id), plan
         )
-    if isinstance(requirement, ShareOfRequirement):
+    if isinstance(requirement, ShareOfRequirement | QuotientRequirement):
         return datasets_of(plan.requirement(requirement.numerator.input_id), plan)
     if isinstance(requirement, JoinRequirement):
         return datasets_of(plan.requirement(requirement.left_id), plan) + datasets_of(
@@ -159,16 +160,20 @@ def narrowing_step(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequ
     of rows that remains.
 
     An aggregate, a growth, a rank with no `limit` and a filter on years
-    alone keep every row of each period they keep, and a share_of keeps its
-    numerator's rows unless that side narrows to one entity, so the walk
-    goes on through each one's input. Every other step drops rows: a filter
-    on entities or values, a rank with a `limit`, a comparison, a sum_of and
-    a join.
+    alone keep every row of each period they keep, and a share_of or a
+    quotient_of keeps its numerator's rows unless that side narrows to one
+    entity, so the walk goes on through each one's input. Every other step
+    drops rows: a filter on entities or values, a rank with a `limit`, a
+    comparison, a sum_of, a join, and a quotient_of stating
+    `denominator_axis`, which drops each entity its denominator does not
+    hold.
     """
     current = requirement
     while not isinstance(current, DatasetRequirement):
-        if isinstance(current, ShareOfRequirement):
-            if current.numerator.entity is not None:
+        if isinstance(current, ShareOfRequirement | QuotientRequirement):
+            if current.numerator.entity is not None or (
+                isinstance(current, QuotientRequirement) and current.denominator_axis is not None
+            ):
                 return current
             current = plan.requirement(current.numerator.input_id)
         elif (

@@ -15,7 +15,13 @@ from analysis_mcp.engine.common import (
     smallest_distinct,
 )
 from dfo_frame_grammar import Frame
-from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS
+from dfo_frame_grammar.grammar import (
+    FACET_IDENTITY_COLUMNS,
+    ComposedUnit,
+    StatVarPart,
+    UnitCell,
+    UnitRequest,
+)
 
 
 def _frame(rows: list[dict[str, object]], *, role_keys: list[str] | None = None) -> Frame:
@@ -35,7 +41,7 @@ def _row(
 
 
 def _resolved(
-    frame: Frame, *, pinned_unit: str | None = None, exclude_unitless: bool = False
+    frame: Frame, *, pinned_unit: UnitCell | None = None, exclude_unitless: bool = False
 ) -> ResolvedUnitAndFacets:
     _table, resolved, _exclusions = narrow_and_resolve(
         frame, pinned_unit=pinned_unit, exclude_unitless=exclude_unitless
@@ -74,6 +80,51 @@ def test_pinned_unit_absent_from_the_frame_refuses() -> None:
     with pytest.raises(UnitNotPresentError) as exc_info:
         _resolved(frame, pinned_unit="dcid:Percent")
     assert exc_info.value.units == ("dcid:USDollar",)
+
+
+_USD_REQUEST = UnitRequest(currency="USD", prices="current")
+_USD_PER_PERSON = ComposedUnit(
+    numerator="dcid:USDollar", denominator=StatVarPart(stat_var="dcid:Count_Person")
+)
+_USD_PER_KM = ComposedUnit(numerator="dcid:USDollar", denominator="dcid:SquareKilometer")
+
+
+def _object_unit_frame() -> Frame:
+    """One row in each of a ref, a converted unit and two composed units."""
+    units = [_USD_PER_PERSON, _USD_REQUEST, _USD_PER_KM, "dcid:USDollar"]
+    return _frame(
+        [
+            _row(year=str(2020 + index), unit=unit.as_json() if not isinstance(unit, str) else unit)
+            for index, unit in enumerate(units)
+        ]
+    )
+
+
+def test_heterogeneous_unit_objects_refuse_in_grammar_order() -> None:
+    with pytest.raises(UnitHeterogeneousError) as exc_info:
+        _resolved(_object_unit_frame())
+    assert exc_info.value.units == (
+        "dcid:USDollar",
+        _USD_REQUEST,
+        _USD_PER_KM,
+        _USD_PER_PERSON,
+    )
+
+
+def test_a_pinned_composed_unit_narrows_to_its_rows() -> None:
+    table, resolved, _exclusions = narrow_and_resolve(
+        _object_unit_frame(), pinned_unit=_USD_PER_PERSON
+    )
+    assert resolved.unit == _USD_PER_PERSON
+    assert table.column("time_period").to_pylist() == ["2020"]
+
+
+def test_a_pinned_composed_unit_absent_from_the_frame_refuses() -> None:
+    absent = ComposedUnit(numerator="dcid:Euro", denominator="dcid:SquareKilometer")
+    with pytest.raises(UnitNotPresentError) as exc_info:
+        _resolved(_object_unit_frame(), pinned_unit=absent)
+    assert exc_info.value.pinned_unit == absent
+    assert len(exc_info.value.units) == 4
 
 
 def test_facet_axis_wholly_unbound_resolves_to_nothing() -> None:

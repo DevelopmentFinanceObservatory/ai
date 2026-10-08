@@ -62,6 +62,7 @@ from common.mcp_telemetry import (
 )
 from common.refusal import internal_error_message, log_unexpected_error, refusal_meta
 from common.telemetry import init_telemetry
+from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import Context, FastMCP
 from fastmcp.apps import (
     UI_EXTENSION_ID,
@@ -73,7 +74,7 @@ from fastmcp.apps import (
 from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.tools import Tool, ToolResult
 from fastmcp.utilities.types import Image
-from mcp.types import ClientCapabilities, ImageContent, TextContent
+from mcp.types import ClientCapabilities, ImageContent, TextContent, ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -121,6 +122,18 @@ _CALLER = Caller.EXTERNAL
 # write_component and describe_component open it.
 _RENDERER_URI = renderer_uri(settings.presentation_public_url)
 _APP_META = {"ui": app_config_to_meta_dict(AppConfig(resource_uri=_RENDERER_URI))}
+
+# `write_component` creates a component or appends a revision to one, and
+# earlier revisions stay readable, so the write is additive. A second call
+# with the same arguments can store a second draft, so the write is not
+# idempotent. Anyone holding a component's id can read it, so the write
+# reaches beyond DFO's own catalogue and is open-world.
+_WRITE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
 
 # Per member type, the intent fields in the catalogue's intent schemas that
 # change how a component looks and none of the facts it shows: `title` on
@@ -575,17 +588,31 @@ def _register_tools(
     """
     registered: list[str] = []
     try:
-        write_tool = Tool.from_function(write_component, meta=_APP_META)
+        write_tool = Tool.from_function(
+            write_component,
+            title="Create or revise a chart, table or card",
+            annotations=_WRITE_ANNOTATIONS,
+            meta=_APP_META,
+        )
         write_tool.parameters = write_schema
         mcp.add_tool(write_tool)
         registered.append(write_tool.name)
 
-        frame_tool = Tool.from_function(describe_frame)
+        frame_tool = Tool.from_function(
+            describe_frame,
+            title="Describe a result",
+            annotations=READ_ONLY_CATALOGUE,
+        )
         frame_tool.parameters = frame_schema
         mcp.add_tool(frame_tool)
         registered.append(frame_tool.name)
 
-        describe_tool = Tool.from_function(describe_component, meta=_APP_META)
+        describe_tool = Tool.from_function(
+            describe_component,
+            title="Describe a saved component",
+            annotations=READ_ONLY_CATALOGUE,
+            meta=_APP_META,
+        )
         describe_tool.parameters = describe_schema
         mcp.add_tool(describe_tool)
         registered.append(describe_tool.name)

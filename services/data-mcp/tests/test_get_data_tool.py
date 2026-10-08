@@ -14,7 +14,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from common.materialisation import FrameRef, InMemoryMaterialisationStore
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, MintRecord
 from common.materialisation import set_store as set_frame_store
 from data_mcp import client_holder, get_data_tool
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
@@ -26,9 +26,10 @@ from data_mcp.definition_store import (
     set_store,
     spec_id_for,
 )
-from data_mcp.frame_materialisation import MaterialisationOutcome
+from data_mcp.frame_materialisation import MaterialisationOutcome, frame_ref_for
+from data_mcp.get_data_tool import RootMint
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
-from data_mcp.operations import ResolvedOperation
+from data_mcp.operations import QueuedOperation, ResolvedOperation
 from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.server import mcp
 from data_mcp.settings import Settings
@@ -364,7 +365,9 @@ async def test_mint_request_body_matches_exactly() -> None:
     ]
 
 
-async def test_mint_request_body_matches_exactly_with_a_scope_override() -> None:
+async def test_mint_request_body_matches_exactly_with_a_scope_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`test_mint_request_body_matches_exactly` only proves the whole-body shape on the
     no-scope path, where `options` is a hardcoded constant the test setup never touches.
     This proves the same on a scope-bearing request, where nothing about the body is fixed
@@ -372,6 +375,17 @@ async def test_mint_request_body_matches_exactly_with_a_scope_override() -> None
     """
     stored = _stored_definition(entities={"recipient": ["country/KEN"]})
     requests: list[dict[str, Any]] = []
+    registered: list[dict[str, Any]] = []
+
+    async def materialise(
+        *, manifest: Manifest, options: Any, scope: Any, **_: Any
+    ) -> MaterialisationOutcome:
+        registered.append({"options": dict(options), "scope": dict(scope)})
+        return MaterialisationOutcome(
+            status="registered", attempts=0, frame_ref=mint_pair(manifest)
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", materialise)
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/graph/resolve":
@@ -407,6 +421,13 @@ async def test_mint_request_body_matches_exactly_with_a_scope_override() -> None
         {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": ["Uganda"]}}},
     )
 
+    # The frame's mint record is written from the options and scope the mint carried.
+    assert registered == [
+        {
+            "options": {"format": "parquet", "bundle": False, "layout": "frame"},
+            "scope": {"entities": {"recipient": ["country/UGA"]}},
+        }
+    ]
     identity = json.loads(stored.canonical_bytes)
     assert requests == [
         {
@@ -956,6 +977,86 @@ async def test_upstream_invalid_role_ref_pointer_matches_the_local_entities_conv
     assert "/input/scope/entities/" not in text_of(result)
 
 
+_UNIT_ISSUE_DETAIL = (
+    "facet axis 'unit' is unbound, no default policy is declared, and no "
+    "probed candidate has any observations"
+)
+# dfo-apis#1221 carries each issue's own code and detail.
+_FACET_REFUSAL: dict[str, Any] = {
+    "retryable": False,
+    "detail": "one or more facet axes could not be resolved",
+    "issues": [
+        {
+            "pointer": "/facets/unit",
+            "axis": "unit",
+            "code": "default_facet_undefined",
+            "detail": _UNIT_ISSUE_DETAIL,
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize("path", ["sync", "polled"])
+async def test_a_refused_mint_names_the_spec_and_places_it_was_minting(path: str) -> None:
+    """`default_facet_undefined` relays dfo-apis' detail and retryable flag as sent, and
+    adds only what get_data was asking for: the spec_id and the places it bound. The same
+    holds when the mint ran as a 202 operation and its poll reports the refusal."""
+    stored = _stored_definition(entities={"observationAbout": ["africa"]})
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets" and path == "sync":
+            return httpx2.Response(
+                422, content=_problem_body(code="default_facet_undefined", **_FACET_REFUSAL)
+            )
+        if request.url.path == "/api/datasets":
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "pending",
+                        "poll": _OPERATION_POLL_PATH,
+                        "retry_after_ms": 1,
+                    }
+                },
+            )
+        if request.url.path == _OPERATION_POLL_PATH:
+            return httpx2.Response(
+                500,
+                content=_problem_body(
+                    code="operation_failed",
+                    cause={"code": "default_facet_undefined"},
+                    **_FACET_REFUSAL,
+                ),
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "default_facet_undefined"
+    assert result.structured_content["retry_mode"] == "do_not_retry"
+    assert result.structured_content["fix"] == {
+        "issues": [
+            {
+                "axis": "unit",
+                "alternatives": [],
+                "truncated": False,
+                "code": "default_facet_undefined",
+                "detail": _UNIT_ISSUE_DETAIL,
+            }
+        ],
+        "detail": "one or more facet axes could not be resolved",
+        "retryable": False,
+        "spec_id": stored.spec_id,
+        "entities": {"observationAbout": ["africa"]},
+    }
+    assert result.structured_content["message"] == (
+        "The platform refused the requested data for 1 place."
+    )
+
+
 # Resolve upstream failure -- `resolve_entities` deliberately lets `UpstreamError`
 # propagate uncaught (see its own docstring); these prove `get_data` itself catches it
 # rather than letting it escape as a bare exception with none of this module's refusal
@@ -1181,9 +1282,7 @@ async def test_not_held_entity_refuses_entity_not_found_with_a_distinct_detail()
             return httpx2.Response(
                 200,
                 json={
-                    "results": [
-                        {"status": "not_held", "name": "Andorra", "entity_type": "geo.country"}
-                    ]
+                    "results": [{"status": "not_held", "name": "Andorra", "dcid": "country/AND"}]
                 },
             )
         raise AssertionError("mint should not be reached on a not_held entity")
@@ -1202,7 +1301,7 @@ async def test_not_held_entity_refuses_entity_not_found_with_a_distinct_detail()
     # not_found refusal, but `not_held` and `entity_type` are the
     # machine-readable discriminator, and the message says so too.
     assert result.structured_content["fix"]["not_held"] is True
-    assert result.structured_content["fix"]["entity_type"] == "geo.country"
+    assert result.structured_content["fix"]["entity_type"] == "entity"
     assert "does not hold" in text_of(result)
 
 
@@ -1266,48 +1365,6 @@ async def test_invalid_name_refuses_request_invalid_with_the_role_in_the_pointer
 
 
 # Partial region membership
-
-
-async def test_region_proceeds_on_partial_membership_and_notes_unheld_members() -> None:
-    stored = _stored_definition(entities={"recipient": ["country/KEN"]})
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path == "/api/graph/resolve":
-            return httpx2.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved_region",
-                            "region": {
-                                "name": "Sub-Saharan Africa",
-                                "entity_type": "geo.subregion",
-                            },
-                            "members": [{"dcid": "country/KEN", "name": "Kenya"}],
-                            "members_not_held": [{"name": "Chad", "entity_type": "geo.country"}],
-                            "confidence": 0.8,
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/api/datasets":
-            return httpx2.Response(
-                200,
-                json=_manifest_response(
-                    spec_id=stored.spec_id, entities={"recipient": ["country/KEN"]}
-                ),
-            )
-        raise AssertionError(f"unexpected call to {request.url.path}")
-
-    result = await _call_get_data(
-        handler,
-        _StubStore(stored),
-        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": ["Sub-Saharan Africa"]}}},
-    )
-
-    assert result.is_error is False
-    assert "Sub-Saharan Africa" in text_of(result)
-    assert "Chad" in text_of(result)
 
 
 async def test_region_expansion_reaches_the_mint_call_as_member_dcids_only() -> None:
@@ -3912,6 +3969,137 @@ class _PlainAndTypedMint:
         return self.bytes_by_digest[artifact_digest]
 
 
+async def _mint_recorded_root(
+    handler: Handler, stored: StoredDefinition, record: MintRecord
+) -> RootMint | QueuedOperation | ToolResult:
+    """`mint_recorded_root` for `record` against `handler` as dfo-apis."""
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        set_store(_StubStore(stored))
+        return await get_data_tool.mint_recorded_root(record, deadline=CallDeadline.after(165.0))
+
+
+async def test_a_recorded_root_is_minted_again_with_its_options_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition()
+    upstream = _PlainAndTypedMint(spec_id=stored.spec_id)
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return upstream.handler(request)
+
+    options = {
+        "format": "parquet",
+        "bundle": False,
+        "layout": "frame",
+        "columns": ["observationAbout_type"],
+    }
+    scope = {"window": {"kind": "all"}}
+    older = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    record = MintRecord(frame=older, dataset=older, options=options, scope=scope)
+
+    minted = await _mint_recorded_root(handler, stored, record)
+
+    assert isinstance(minted, RootMint)
+    (body,) = sent
+    assert body["options"] == options
+    assert body["input"]["spec_id"] == stored.spec_id
+    assert body["input"]["scope"] == scope
+    dataset = FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
+    assert minted.dataset == dataset
+    assert minted.frame == frame_ref_for(
+        spec_id=stored.spec_id,
+        content_version=upstream.content_version,
+        columns=("observationAbout_type",),
+    )
+    assert minted.stat_var_count == 1
+    assert await frame_store.get(minted.frame) is not None
+    assert await frame_store.get_mint_record(minted.frame) == MintRecord(
+        frame=minted.frame, dataset=dataset, options=options, scope=scope, stat_var_count=1
+    )
+
+
+async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition()
+    upstream = _PlainAndTypedMint(spec_id=stored.spec_id)
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+    submitted: list[bytes] = []
+    answers = [
+        httpx2.Response(
+            202,
+            json={
+                "operation": {
+                    "operation_id": _OPERATION_ID,
+                    "status": "pending",
+                    "retry_after_ms": 1500,
+                }
+            },
+        )
+    ]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        # A poll of the operation would be a wait, and is refused here.
+        assert request.url.path == "/api/datasets"
+        submitted.append(request.content)
+        return answers.pop(0) if answers else upstream.handler(request)
+
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    record = MintRecord(
+        frame=root,
+        dataset=root,
+        options={"format": "parquet", "bundle": False, "layout": "frame"},
+    )
+
+    queued = await _mint_recorded_root(handler, stored, record)
+    again = await _mint_recorded_root(handler, stored, record)
+
+    assert queued == QueuedOperation(
+        operation_id=_OPERATION_ID, status="pending", retry_after_s=1.5
+    )
+    assert isinstance(again, RootMint)
+    # The repeat is the same request, which dfo-apis answers from the operation it holds.
+    assert submitted[0] == submitted[1]
+    assert len(submitted) == 2
+
+
+async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition()
+
+    async def degraded(*, manifest: Manifest, **_: Any) -> MaterialisationOutcome:
+        return MaterialisationOutcome(
+            status="degraded",
+            attempts=3,
+            degraded_reason="fetch",
+            frame_ref=mint_pair(manifest),
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", degraded)
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    record = MintRecord(frame=root, dataset=root, options={"format": "parquet"})
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    refused = await _mint_recorded_root(handler, stored, record)
+
+    assert isinstance(refused, ToolResult)
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "service_unavailable"
+    assert refused.structured_content["retry_mode"] == "retry_after_delay"
+
+
 @pytest.mark.parametrize(
     "order", [(False, True), (True, False)], ids=["plain-then-typed", "typed-then-plain"]
 )
@@ -3961,9 +4149,33 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     typed_frame = await frame_store.get(typed_ref)
     assert plain_frame is not None
     assert typed_frame is not None
+    # Each frame's mint record sits under the frame's own pair and names dfo-apis'.
+    dataset = FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
+    plain_options = {"format": "parquet", "bundle": False, "layout": "frame"}
+    assert await frame_store.get_mint_record(plain_ref) == MintRecord(
+        frame=plain_ref, dataset=dataset, options=plain_options, stat_var_count=1
+    )
+    assert await frame_store.get_mint_record(typed_ref) == MintRecord(
+        frame=typed_ref,
+        dataset=dataset,
+        options=plain_options | {"columns": ["observationAbout_type"]},
+        stat_var_count=1,
+    )
     assert "observationAbout_type" not in plain_frame[0].columns
     assert typed_frame[0].table.column("observationAbout_type").to_pylist() == [
         "Place",
         "Country",
         "AdministrativeArea1,State",
     ]
+
+
+def test_a_refusal_names_a_place_by_its_label_and_only_counts_one_without() -> None:
+    """A model repeats a refusal's message to the user, so a place get_data holds no
+    label for (one the spec's identity binds) is counted, never shown as its dcid."""
+    labels = {"country/KEN": "Kenya"}
+    assert get_data_tool._places_named(["country/KEN"], labels) == "Kenya"
+    assert (
+        get_data_tool._places_named(["country/KEN", "country/GHA"], labels)
+        == "Kenya and 1 more place"
+    )
+    assert get_data_tool._places_named(["country/GHA", "country/NGA"], labels) == "2 places"

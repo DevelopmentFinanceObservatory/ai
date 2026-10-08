@@ -6,7 +6,9 @@ scripted plan with a decision that fixes its reduction (`aggregate`), and a
 population rank compiled against the tool schemas the servers declared at
 that commit (`rank`). It also holds the scripted plan with a decline
 (`declined`), as the code at d8fd80b serialised it before `Decline` gained
-`ask_ref`. Each plan's source is converted to the `SelectedSource` that
+`ask_ref`, and a growth over a period filter (`growth`), as the code at
+aa8d7e1 serialised it before a growth, a rank and a period threshold gained
+`rolling` and a dataset requirement `period_end_open`. Each plan's source is converted to the `SelectedSource` that
 keeps no member list (`stat_vars` and `stat_var_truncated` dropped, the one
 StatVar it bound stated as `served_count`), with the revisions recomputed.
 `fixtures/revision_base_fields.json` lists every field of every model a plan
@@ -135,6 +137,29 @@ def test_a_field_added_since_the_base_format_enters_the_revision_once_set() -> N
     (requirement,) = (r for r in limited.evidence_requirements if isinstance(r, RankRequirement))
     assert revision_content(requirement)["limit"] == 3
     assert "limit" not in revision_content(requirement.model_copy(update={"limit": None}))
+
+
+def test_a_rolling_period_enters_the_revision_once_stated() -> None:
+    plan = Plan.model_validate(_RECORDED["growth"]["plan"])
+    content = plan.model_dump(mode="json")
+    latest = {"anchor": "latest", "offset": 0}
+    content["evidence_requirements"][0]["period_end_open"] = True
+    for section in (content["evidence_requirements"], content["translation"]["operations"]):
+        recent, growth = section[1], section[2]
+        recent["predicates"][0]["rolling"] = {"anchor": "latest", "offset": -9}
+        growth["rolling"] = {"window_end": latest}
+
+    rolling = Plan.model_validate(content)
+
+    assert plan_revision(rolling) != plan_revision(plan)
+    dataset, recent, growth = (revision_content(r) for r in rolling.evidence_requirements)
+    assert dataset["period_end_open"] is True
+    assert recent["predicates"][0]["rolling"] == {"anchor": "latest", "offset": -9}
+    assert growth["rolling"] == {"window_start": None, "window_end": latest}
+    for requirement in plan.evidence_requirements:
+        unset = json.dumps(revision_content(requirement))
+        assert "rolling" not in unset
+        assert "period_end_open" not in unset
 
 
 def test_every_hashed_field_is_in_the_base_format_or_declared_hashed_when_set() -> None:

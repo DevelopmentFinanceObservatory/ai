@@ -138,3 +138,21 @@ names as an override.
 **Meanwhile:** the planner grammar names the fixed columns and the usual
 entity column; a wrong name costs one replan and one further approval, after
 which the turn closes naming the step that could not run.
+
+## 11. A part refused for its denominator names neither side (per-head questions)
+
+Search answers "debt service per head" for Kenya `no_data` with reason
+`denominator_not_available`. The `no_data` block carries `reason`,
+`category`, `message`, `elected_count`, `entity_terms`,
+`ambiguous_entities` and `unbound_qualifiers`. It omits the
+measure search read once the per-capita phrasing is set aside and the
+denominator it looked for.
+
+**Ask:** on `denominator_not_available`, return the measure's variable
+text without the normalising phrase, the denominator as a variable text
+or StatVar, and which of the part's entities the denominator is about.
+**Meanwhile:** the harness asks a model for those three things
+(`harness.generative.GeminiDenominatorSplit`), builds the two search
+parts from the refused part, and searches again, with one model call per
+refused part and one search for all of them. With the fields above it would build the parts
+without the model call.

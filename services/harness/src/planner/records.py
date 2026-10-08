@@ -10,10 +10,11 @@ finding a workflow carries about a requirement it was approved against.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, override
 
+from common.hashed_fields import HASHED_WHEN_SET
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -300,6 +301,141 @@ class DenominatorScope(TitlelessEnum):
     POOLED = "pooled"
 
 
+# --- Rolling periods ----------------------------------------------------------
+#
+# A requirement states its years as calendar years, read from the data Search
+# found. `RelativePeriod` says beside a year that it follows the newest period
+# the data holds, so a card drawn from the plan moves as new years arrive. The
+# year stays on the record as the reading at planning time, and every rule that
+# compares years reads it.
+
+# The furthest back a relative period reaches, which is the span `Year` allows.
+MIN_ROLLING_OFFSET = -200
+
+
+class RollingIssue(TitlelessEnum):
+    """Why a plan's rolling periods cannot be recorded, as `RollingPlanError` names it."""
+
+    # A period that follows the newest data reads a dataset retrieved with a
+    # closed end, or one that cannot be retrieved with an open one.
+    NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
+    # A relative period disagrees with the year stated beside it.
+    YEARS_DISAGREE = "rolling_years_disagree"
+    # The dataset's whole history holds more rows than one frame may.
+    FRAME_TOO_LARGE = "rolling_frame_too_large"
+
+
+class OpenPeriodFault(TitlelessEnum):
+    """Which part of `RollingIssue.NEEDS_OPEN_PERIOD` holds."""
+
+    # The dataset the relative period reads does not state `period_end_open`.
+    DATASET_CLOSED = "dataset_closed"
+    # The dataset is pinned to no definition on record, so it is found by a
+    # search over its stated years.
+    NO_SOURCE_ON_RECORD = "no_source_on_record"
+    # No Search answer on record states the first year the dataset holds.
+    FIRST_YEAR_UNKNOWN = "first_year_unknown"
+    # The read of the dataset over no window did not complete, or its answer
+    # states no first year.
+    FIRST_YEAR_READ_FAILED = "first_year_read_failed"
+
+
+class RollingPlanError(ValueError):
+    """A plan rule refused a rolling period.
+
+    `issue` names the rule, `requirement_ids` the requirements to change, and
+    `fault` the part of `RollingIssue.NEEDS_OPEN_PERIOD` that holds, so
+    `planner.agent.propose_plan` answers with a code a caller can branch on.
+    `spec_id` is the pinned dataset whose first year is missing, under
+    `OpenPeriodFault.FIRST_YEAR_UNKNOWN` and `FIRST_YEAR_READ_FAILED`.
+    """
+
+    def __init__(
+        self,
+        issue: RollingIssue,
+        message: str,
+        *,
+        requirement_ids: Sequence[str],
+        fault: OpenPeriodFault | None = None,
+        spec_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.issue = issue
+        self.requirement_ids = tuple(requirement_ids)
+        self.fault = fault
+        self.spec_id = spec_id
+
+
+class RelativePeriod(StrictModel):
+    """A year stated against the newest year the data holds."""
+
+    anchor: Literal["latest"] = Field(
+        default="latest",
+        description="Always 'latest': the newest year the data holds.",
+    )
+    offset: int = Field(
+        ge=MIN_ROLLING_OFFSET,
+        le=0,
+        strict=True,
+        description="Years back from the newest: 0 is the newest year, -5 five years before it.",
+    )
+
+    def latest_implied_by(self, year: int) -> int:
+        """The newest year under which this relative period is `year`."""
+        return year - self.offset
+
+
+class RollingWindow(StrictModel):
+    """Which ends of a window of years follow the newest data, and how far back each sits."""
+
+    window_start: RelativePeriod | None = Field(
+        default=None,
+        description="The start as a relative period; unset for a fixed year.",
+    )
+    window_end: RelativePeriod | None = Field(
+        default=None,
+        description="The end as a relative period; unset for a fixed year.",
+    )
+
+    @model_validator(mode="after")
+    def _names_a_bound(self) -> RollingWindow:
+        if self.window_start is None and self.window_end is None:
+            raise ValueError(
+                "a rolling window names window_start, window_end or both; leave `rolling` "
+                "unset for a window of fixed years"
+            )
+        return self
+
+
+def check_rolling_window(
+    rolling: RollingWindow | None,
+    *,
+    window_start: int | None,
+    window_end: int | None,
+    error: Callable[[str], Exception],
+) -> None:
+    """Raise `error(fault)` when `rolling` disagrees with the years stated beside it.
+
+    A relative bound needs its year, and two relative bounds stand for one
+    newest year: `window_start - window_end` equals the difference of their
+    offsets. No `rolling` agrees with any years.
+    """
+    if rolling is None:
+        return
+    if window_start is None or window_end is None:
+        raise error("its `rolling` names a bound of a window it does not state")
+    if rolling.window_start is None or rolling.window_end is None:
+        return
+    stated = window_start - window_end
+    relative = rolling.window_start.offset - rolling.window_end.offset
+    if stated != relative:
+        raise error(
+            f"its window spans {-stated} years ({window_start}-{window_end}) and its "
+            f"`rolling` offsets span {-relative}; state the years the offsets give under "
+            "one newest year"
+        )
+
+
 ThresholdOp = Literal["gt", "gte", "lt", "lte", "eq", "ne"]
 
 
@@ -325,6 +461,13 @@ class PeriodThreshold(TaggedModel):
         description="How a row's year compares to `year`: gt, gte, lt, lte, eq or ne."
     )
     year: Year = Field(description="The year a row's year is compared against.")
+    rolling: Annotated[RelativePeriod | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        description=(
+            "Set when `year` follows the newest data; `year` still states the year. Needs "
+            "`period_end_open` on the dataset requirement read."
+        ),
+    )
 
 
 class EntityIn(TaggedModel):

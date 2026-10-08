@@ -32,6 +32,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     RankOperation,
     RetrieveOperation,
     ShareOfOperation,
@@ -52,12 +53,21 @@ from planner.records import (
     Predicate,
     StatVarReading,
 )
-from planner.shapes import SEVERAL, FrameShape, MeasureCount, RoleDimension, ShapeVerb, year_filter
+from planner.shapes import (
+    SEVERAL,
+    FrameShape,
+    MeasureCount,
+    RoleDimension,
+    ShapeVerb,
+    place_role,
+    year_filter,
+)
 from planner.shapes import aggregated as _aggregated
 from planner.shapes import compared as _compared
 from planner.shapes import filtered as _filtered
 from planner.shapes import grown as _grown
 from planner.shapes import joined as _joined
+from planner.shapes import quotiented as _quotiented
 from planner.shapes import ranked as _ranked
 from planner.shapes import rejects as _rejects
 from planner.shapes import retrieved as _retrieved
@@ -96,7 +106,9 @@ class ResolvedRole:
     wherever the frame travels, until a filter narrows it. `breakdown`
     mirrors the dimension's own flag: the column holds a breakdown's codes.
     `open` mirrors it too and marks the column as the open entity axis the
-    requirement's `across` covers.
+    requirement's `across` covers. `place` mirrors it as well: the column
+    holds the places the measure is about, which a place word names
+    (`planner.shapes.roles_named`).
     """
 
     column: str
@@ -107,6 +119,7 @@ class ResolvedRole:
     surplus: bool
     breakdown: bool = False
     open: bool = False
+    place: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +240,12 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
         if numerator is None or denominator is None:
             return None
         return _share_of_resolved(operation, numerator, denominator)
+    if isinstance(operation, QuotientOfOperation):
+        numerator = _input_shape(operation.numerator.input, operations, shapes)
+        denominator = _input_shape(operation.denominator.input, operations, shapes)
+        if numerator is None or denominator is None:
+            return None
+        return _quotient_of_resolved(operation, numerator, denominator)
     if isinstance(operation, CompareOperation):
         left = _input_shape(operation.left.input, operations, shapes)
         right = _input_shape(operation.right.input, operations, shapes)
@@ -287,7 +306,9 @@ def _retrieve_resolved(
     The columns kept are the ones the requirement's own entities resolve
     under, in the source's order, as `compile._role_columns` reads them,
     then the open entity axis `compiler.evidence.open_axis_for` matches to
-    its `across`, marked `open`. A requirement with no `across` falls back
+    its `across`, marked `open`. A column an entity stating no role resolves
+    under, or one under a place phrase, is marked `place`, as
+    `planner.plan._dataset_shape` marks the dimension. A requirement with no `across` falls back
     to every column the source resolves when none of its entities do. An
     `across` no open entity axis matches builds no shape:
     `compile._check_sources` reports it as the source's
@@ -314,13 +335,16 @@ def _retrieve_resolved(
             every_column.append(entity.role)
     named = {entity.name.casefold() for entity in requirement.entities}
     wanted: set[str] = set()
+    unplaced: set[str] = set()
     phrase_by_column: dict[str, str] = {}
     for entity in requirement.entities:
         resolved = resolve_entity(entity, source.entities)
         if resolved is None:
             continue
         wanted.add(resolved.role)
-        if entity.role is not None:
+        if entity.role is None:
+            unplaced.add(resolved.role)
+        else:
             phrase_by_column.setdefault(resolved.role, entity.role)
     chosen = [column for column in every_column if column in wanted]
     open_column: str | None = None
@@ -338,12 +362,18 @@ def _retrieve_resolved(
     for column in chosen:
         phrase = phrase_by_column.get(column, column)
         is_open = column == open_column
+        is_place = column in unplaced or place_role(phrase_by_column.get(column, column))
         surplus = any(
             entity.role == column and entity.label.casefold() not in named
             for entity in source.entities
         )
         dims.append(
-            RoleDimension(role=phrase, requirement_id=operation.requirement_id, open=is_open)
+            RoleDimension(
+                role=phrase,
+                requirement_id=operation.requirement_id,
+                open=is_open,
+                place=is_place,
+            )
         )
         columns.append(
             ResolvedRole(
@@ -354,6 +384,7 @@ def _retrieve_resolved(
                 narrowed=False,
                 surplus=surplus,
                 open=is_open,
+                place=is_place,
             )
         )
     if requirement.breakdown is not None:
@@ -416,6 +447,7 @@ def _aggregate_resolved(
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        reduction=operation.reduction,
     )
     if reason is not None:
         return reason
@@ -451,6 +483,7 @@ def _rank_resolved(operation: RankOperation, upstream: ResolvedShape) -> Resolve
         among=operation.among,
         window=window,
         per_period=operation.per_period,
+        reduction=operation.reduction,
     )
     if reason is not None:
         return reason
@@ -473,7 +506,9 @@ def _resolved_narrowed_roles(
     """Which of `columns`' own role phrases an `EntityIn` predicate actually narrows.
 
     A predicate that states its own `role` narrows that phrase directly --
-    the plan already said which dimension it means. An unqualified predicate
+    the plan already said which dimension it means, and
+    `planner.shapes.filtered` finds it as an axis phrase is found
+    (`planner.shapes.roles_named`). An unqualified predicate
     -- `role is None` -- names no dimension, so each of `columns` is checked
     in turn: `resolve_entity` matches the predicate's names against that
     column's own source, the same way a fresh retrieval resolves its own
@@ -558,6 +593,33 @@ def _share_of_resolved(
         return reason
     shape = _shared(
         numerator.shape, denominator.shape, axis=operation.axis, scope=operation.denominator_scope
+    )
+    return ResolvedShape(shape=shape, columns=_carry_columns(numerator.columns, shape.roles))
+
+
+def _quotient_of_resolved(
+    operation: QuotientOfOperation, numerator: ResolvedShape, denominator: ResolvedShape
+) -> ResolvedShape | str:
+    # As for a share_of: the denominator's own *in* rule is checked with no
+    # axis, and the numerator's call states both keys, with the denominator
+    # passed as `other`. The output carries the numerator's key column alone.
+    reason = _rejects(ShapeVerb.QUOTIENT_OF, denominator.shape)
+    if reason is not None:
+        return reason
+    reason = _rejects(
+        ShapeVerb.QUOTIENT_OF,
+        numerator.shape,
+        axis=operation.axis,
+        denominator_axis=operation.denominator_axis,
+        other=denominator.shape,
+    )
+    if reason is not None:
+        return reason
+    shape = _quotiented(
+        numerator.shape,
+        denominator.shape,
+        axis=operation.axis,
+        denominator_axis=operation.denominator_axis,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(numerator.columns, shape.roles))
 

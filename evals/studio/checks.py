@@ -612,13 +612,17 @@ def no_repeated_failed_step(evidence: Evidence) -> list[str]:
 def translation_stops_on_a_repeated_failure(evidence: Evidence) -> list[str]:
     """Once a translation fails the same way it failed before, nothing is
     translated again in that planner entry. The plan did not change where it
-    failed, so a further attempt reaches the same stop."""
+    failed, so a further attempt reaches the same stop. A translation is the
+    `translation` an accepted `propose_plan` answers with."""
     if missing := _need_log(evidence, "translation_stops_on_a_repeated_failure"):
         return missing
     translations = [
-        entry["response"]
+        entry["response"]["translation"]
         for entry in evidence.log or []
-        if entry["kind"] == "call" and entry["layer"] == "planner" and entry["tool"] == "translate"
+        if entry["kind"] == "call"
+        and entry["layer"] == "planner"
+        and entry["tool"] == "propose_plan"
+        and isinstance(entry["response"].get("translation"), dict)
     ]
     repeated = next(
         (index for index, answer in enumerate(translations) if answer.get("repeated")), None

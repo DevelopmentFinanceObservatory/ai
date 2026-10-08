@@ -14,9 +14,11 @@ calling verb declares (`fix["parameter"]`); `facet_heterogeneous` has no pin,
 so its payload names the axis and candidates for a caller to act on by
 choosing a differently-scoped `frame_ref`. A unit refusal's `fix["units"]`
 lists each candidate in the form the pin parameter accepts: a unit ref as
-its string, a converted unit (a `UnitRequest` cell) as its request object.
-A converted candidate's label names its price basis and currency, and its
-`id` is the request object to pin. `role_ambiguous` names whichever
+its string, a converted unit (a `UnitRequest` cell) as its request object,
+a composed unit (a `ComposedUnit` cell) as its `{numerator, denominator}`
+object. A converted candidate's label names its price basis and currency, a
+composed candidate's label reads "<numerator> per <denominator>", and the
+`id` of either is the object to pin. `role_ambiguous` names whichever
 column-list parameter the calling verb actually has in `fix["parameter"]`,
 never a hardcoded name borrowed from `aggregate`.
 
@@ -27,18 +29,43 @@ both of growth's endpoint years. `cross_frame_unit_mismatch`/`cross_frame_unit_u
 (`compare`'s left/right, `share_of`'s numerator/denominator) disagree on
 unit or facet -- distinct from `unit_heterogeneous`/`facet_heterogeneous`,
 which fire when *one* frame itself carries more than one value.
+`cross_frame_facet_mismatch` fires only when the two sides hold the same
+StatVar; two different measures each keep their own facet selection.
 `cross_frame_unit_unbound` is the narrower case where one side's rows leave
 `unit` unbound entirely rather than resolving to a second, differing unit.
 
-`share_of_grain_mismatch` refuses rather than reporting both sides'
-coverage when numerator and denominator periods don't match;
-`fix["matched_periods"]` names the overlap the two sides do share, if any,
-for a `filter`-then-retry repair; `fix["key"]` names the offending
-`numerator_by` key (empty for an un-keyed call), since a keyed `share_of`
-checks the identical-period-set rule per key, not pooled across every key.
+`share_of_grain_mismatch` fires when a numerator key shares no period with
+its denominator group; `share_of` divides every other key over the periods
+both sides report and records the rest as exclusions. `fix["key"]` names
+the key (empty for an un-keyed call).
 `share_of_zero_denominator` is split out from `non_finite_result` because a
 different `frame_ref` or entity binding can produce a nonzero sum, so it is
 retryable.
+
+`quotient_of` leaves out what `share_of` refuses, so its three codes name
+the calls that have nothing left to return or no unit to state.
+`quotient_of_no_key_matched` fires when no numerator key has a denominator
+group under `denominator_by`; `fix` samples each side's keys under its own
+column names. `quotient_of_zero_denominator` fires when the denominator sums
+to zero in every matched cell. `quotient_of_side_unit_unsupported` fires
+when a side can be no part of a composed unit; `fix["reason"]` is
+`dimensionless` (a share or a relative growth rate), `composed` (a quotient
+already) or `operation_stat_var` (rows with no unit under a `sum_of`
+result's own stat_var, which nothing names). A quotient whose keys pair but
+share no period reuses `comparison_periods_disjoint` under the labels
+`numerator` and `denominator`.
+
+`composed_unit_sum_unsupported` fires when a verb is asked to add values in
+a composed unit, the unit a `quotient_of` result carries: `aggregate` and
+`rank` with `aggregation="sum"`, `sum_of` on either side, and `share_of`
+on a side whose (key, period) cell holds more than one row. Two figures
+per head added together are not a figure per head, so no total is written
+under that unit. `fix` names the verb, the composed unit and, for `sum_of`
+and `share_of`, the side. A `share_of` side of one row per cell computes,
+as does a mean, max or min over the same frame, and one figure
+pooled across entities comes from totalling each measure first and dividing
+the totals with `quotient_of`. A frame holding more than one unit refuses
+`unit_heterogeneous` first.
 
 `share_of_key_unknown` fires when `denominator_by` is non-empty but leaves
 out a `numerator_by` column -- a partial mapping has no defined pairing for
@@ -52,10 +79,11 @@ own mapping.
 its declared cell type doesn't admit that predicate kind, or an
 `ordered_threshold` operand carries the wrong type; it is retryable.
 `filter_unit_conversion_unsupported` fires when a `category_match` on `unit`
-meets a frame whose `unit` cells carry a converted unit, which no unit string
-matches. Predicates on every other column still apply to that frame, so it is
-retryable: without the unit predicate, or after a `get_data` call that binds
-one unit.
+meets a frame whose `unit` cells carry a converted or composed unit, which no
+unit string matches. Predicates on every other column still apply to that
+frame, so it is retryable: without the unit predicate, or after a `get_data`
+call that binds one unit, or, for a composed unit, with the unit pinned in the
+verb that reads the frame.
 
 `join_output_collision` fires when both sides of a `join` resolve to the
 identical `stat_var`, unit, and facets, so a matched key's two rows would
@@ -106,12 +134,14 @@ years they cover and no retry over the same result fixes it.
 `DerivedMarker.ordinal` -- a per-period `rank`'s own `value` column holds a
 rank position, not a measured value, and no verb here may treat a position
 as a quantity to ratio, grow at a percentage rate or rank again. Raised by
-`share_of` on either side (a share has no meaning over a position), by
+`share_of` and `quotient_of` on either side (a ratio has no meaning over a
+position), by
 `growth` when `change="relative"` (a rank moves by places, not by a
 percentage of one) and by `rank` (highest first over positions puts the
 last-placed entity first). The message names the retry for `growth`
 (`change="absolute"`) and for `rank` (the frame the per-period rank read,
-with `limit` set on that call); `share_of` has none to name.
+with `limit` set on that call); `share_of` and `quotient_of` have none to
+name.
 
 `place_levels_mixed` fires when `rank`, an `aggregate` whose `group_by`
 leaves a place column out, or either side of a `share_of` reads a frame
@@ -131,25 +161,36 @@ type column).
 `retry_after_delay` code: the same call succeeds once other calls release
 their rows.
 
+`rolling_anchor_unresolved` fires when the latest period a rolling call stands
+on is not established. `resolve_anchor` raises it when its populations and
+root frames do not fit together or no period is held by half of the series,
+and `growth`, `rank` and `filter` raise it for a rolling call whose
+`anchor_key` names no stored record, or a record that does not cover the
+call. `fix["detail"]` names the check that failed. It is retryable, since a
+`resolve_anchor` call over the question's populations and root frames gives
+the key and the period to write the literals from. `rolling_grain_unsupported`
+fires when a population's periods are not calendar years, which the frames
+do not change between calls, so it is `do_not_retry`.
+
 `internal_error` is the registration-site catch-all's code (see
 `server.py`): every other code names something a specific, anticipated
 failure produced; `internal_error` names the absence of one. Every other
-refusal `compare`, `growth`, `rank`, `share_of`, `join`, and `filter` can
-reach reuses one of the existing codes/factories where the shape fits.
+refusal `compare`, `growth`, `rank`, `share_of`, `quotient_of`, `join`, and
+`filter` can reach reuses one of the existing codes/factories where the shape fits.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from common.place_type import PLACE_LEVELS
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
-from dfo_frame_grammar.grammar import UnitRequest
+from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
 from fastmcp.tools import ToolResult
 
 from analysis_mcp.disambiguation import (
@@ -157,7 +198,7 @@ from analysis_mcp.disambiguation import (
     DisambiguationCandidate,
     DisambiguationPayload,
 )
-from analysis_mcp.units import converted_unit_label, unit_json, unit_name
+from analysis_mcp.units import unit_json, unit_name
 
 
 class RetryMode(StrEnum):
@@ -195,12 +236,18 @@ class ToolErrorCode(StrEnum):
     SHARE_OF_ZERO_DENOMINATOR = "share_of_zero_denominator"
     SHARE_OF_KEY_UNKNOWN = "share_of_key_unknown"
     SHARE_OF_KEY_UNMATCHED = "share_of_key_unmatched"
+    QUOTIENT_OF_ZERO_DENOMINATOR = "quotient_of_zero_denominator"
+    QUOTIENT_OF_NO_KEY_MATCHED = "quotient_of_no_key_matched"
+    QUOTIENT_OF_SIDE_UNIT_UNSUPPORTED = "quotient_of_side_unit_unsupported"
+    COMPOSED_UNIT_SUM_UNSUPPORTED = "composed_unit_sum_unsupported"
     JOIN_OUTPUT_COLLISION = "join_output_collision"
     JOIN_NO_COMMON_KEY_COLUMNS = "join_no_common_key_columns"
     DERIVED_INPUT_UNUSABLE = "derived_input_unusable"
     DERIVED_INPUT_UNRECOVERABLE = "derived_input_unrecoverable"
     DERIVED_INPUT_ORDINAL = "derived_input_ordinal"
     PLACE_LEVELS_MIXED = "place_levels_mixed"
+    ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
+    ROLLING_GRAIN_UNSUPPORTED = "rolling_grain_unsupported"
     SERVICE_UNAVAILABLE = "service_unavailable"
     INTERNAL_ERROR = "internal_error"
 
@@ -213,11 +260,13 @@ class ToolErrorCode(StrEnum):
 # period labels misstate its years, so only a fresh run from the source data
 # fixes it.
 # `derived_input_ordinal` stays `correct_and_retry`: `growth` retries with
-# `change="absolute"` over the identical frame_ref, and `share_of` and `rank`
-# retry with a frame_ref that isn't itself a per-period rank's own output -- the
+# `change="absolute"` over the identical frame_ref, `rank` retries over the
+# frame_ref the per-period rank read, and `share_of` and `quotient_of` retry
+# with a frame_ref that isn't itself a per-period rank's own output -- the
 # same "a different input fixes this" shape `derived_input_unusable` has.
 # `frame_integrity_failed`: a corrupted or tampered stored object, so the
 # identical frame_ref reaches the identical bytes.
+# `rolling_grain_unsupported`: the root frames' periods don't change between calls.
 # `service_unavailable` is `retry_after_delay`: the identical call fits once
 # other calls release their frame rows.
 # Every other code names something a caller can change (a different
@@ -247,12 +296,18 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.SHARE_OF_ZERO_DENOMINATOR: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.SHARE_OF_KEY_UNKNOWN: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.SHARE_OF_KEY_UNMATCHED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.QUOTIENT_OF_ZERO_DENOMINATOR: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.QUOTIENT_OF_NO_KEY_MATCHED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.QUOTIENT_OF_SIDE_UNIT_UNSUPPORTED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.COMPOSED_UNIT_SUM_UNSUPPORTED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.JOIN_OUTPUT_COLLISION: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.JOIN_NO_COMMON_KEY_COLUMNS: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.DERIVED_INPUT_UNUSABLE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.DERIVED_INPUT_ORDINAL: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.PLACE_LEVELS_MIXED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.SERVICE_UNAVAILABLE: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.INTERNAL_ERROR: RetryMode.DO_NOT_RETRY,
 }
@@ -265,6 +320,10 @@ if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
 # the same bound as `data_mcp.tool_errors.ENTITY_CANDIDATE_CAP`.
 _DISAMBIGUATION_CANDIDATE_CAP = 10
 
+# How many of each side's sampled keys a `quotient_of_no_key_matched` message
+# lists; `fix` carries the whole sample.
+_KEY_SAMPLE_IN_MESSAGE = 5
+
 
 # How the `filter` refusal over a converted unit tells a caller to get a
 # frame with one unit.
@@ -272,29 +331,37 @@ _REFETCH_ONE_UNIT = (
     "call get_data again with scope.facets binding a single unit, then retry with the new frame_ref"
 )
 
+# How the same refusal over a composed unit tells a caller to select one
+# unit: a verb wrote the frame, so no `get_data` call returns it in one unit.
+_PIN_ONE_UNIT = (
+    "set the unit parameter of the verb that reads this frame_ref to that unit's object, "
+    "as a unit_heterogeneous refusal lists it"
+)
 
-def _quoted_unit(unit: str | UnitRequest) -> str:
-    """`unit` as a message quotes it: a ref as its `repr`, a converted unit
-    as its label's."""
+
+def _quoted_unit(unit: UnitCell) -> str:
+    """`unit` as a message quotes it: the `repr` of its `unit_name`."""
     return repr(unit_name(unit))
 
 
-def _pin_values(units: Sequence[str | UnitRequest]) -> str:
+def _pin_values(units: Sequence[UnitCell]) -> str:
     """`units` as a message lists them for a retry: each as the JSON value
     the unit-pin parameter accepts, a ref as a JSON string and a converted
-    unit as its request object."""
+    or composed unit as its object."""
     return ", ".join(json.dumps(unit_json(unit)) for unit in units)
 
 
-def _candidate(value: str | UnitRequest) -> DisambiguationCandidate:
+def _candidate(value: UnitCell) -> DisambiguationCandidate:
     """A unit as a candidate whose `id` is the value the unit-pin parameter
-    accepts: a ref as its string, a converted unit as its request object."""
-    if isinstance(value, str):
-        return DisambiguationCandidate(id=value, label=value[:MAX_LABEL_CHARS])
-    return DisambiguationCandidate(id=value.as_json(), label=converted_unit_label(value))
+    accepts (a ref as its string, a converted or composed unit as its
+    object) and whose label is its `unit_name`, cut to `MAX_LABEL_CHARS`."""
+    return DisambiguationCandidate(
+        id=value if isinstance(value, str) else value.as_json(),
+        label=unit_name(value)[:MAX_LABEL_CHARS],
+    )
 
 
-def _disambiguation_payload(candidates: Sequence[str | UnitRequest]) -> dict[str, Any] | None:
+def _disambiguation_payload(candidates: Sequence[UnitCell]) -> dict[str, Any] | None:
     """A `DisambiguationPayload`, dumped to JSON, or `None` if `candidates`
     is empty. `DisambiguationPayload.candidates` has `min_length=1`, and a
     frame whose every declared unit is `None` (see `UnitNotPresentError`)
@@ -417,15 +484,15 @@ class ToolRefusal:
         )
 
     @classmethod
-    def unit_heterogeneous(cls, *, parameter: str, units: Sequence[str | UnitRequest]) -> Self:
+    def unit_heterogeneous(cls, *, parameter: str, units: Sequence[UnitCell]) -> Self:
         """`parameter` names the calling verb's own unit-pin parameter
         (`unit`, or, for a two-sided verb, both sides' own names together,
         e.g. `"left_unit or right_unit"`), since `compare`/`share_of`/`join`
         have no single `unit` field.
 
-        `filter` refuses `category_match` on a converted unit, so when
-        `units` holds one the message offers only the pin, listing each
-        unit as the JSON value `parameter` accepts.
+        `filter` refuses `category_match` on a converted or composed unit,
+        so when `units` holds one the message offers only the pin, listing
+        each unit as the JSON value `parameter` accepts.
         """
         fix: dict[str, Any] = {"parameter": parameter, "units": [unit_json(u) for u in units]}
         disambiguation = _disambiguation_payload(units)
@@ -451,12 +518,12 @@ class ToolRefusal:
         cls,
         *,
         parameter: str,
-        pinned_unit: str | UnitRequest,
-        units: Sequence[str | UnitRequest],
+        pinned_unit: UnitCell,
+        units: Sequence[UnitCell],
     ) -> Self:
         """`parameter` names the calling verb's own unit-pin parameter that
         `pinned_unit` was passed to. `unit_heterogeneous` documents the
-        handling of a converted unit in `units`."""
+        handling of a converted or composed unit in `units`."""
         fix: dict[str, Any] = {
             "parameter": parameter,
             "pinned_unit": unit_json(pinned_unit),
@@ -606,16 +673,25 @@ class ToolRefusal:
 
     @classmethod
     def comparison_periods_disjoint(
-        cls, *, left_periods: list[str], right_periods: list[str]
+        cls,
+        *,
+        left_periods: list[str],
+        right_periods: list[str],
+        left_label: str = "left",
+        right_label: str = "right",
     ) -> Self:
+        """`left_label`/`right_label` name the calling verb's two sides in
+        the message and in `fix`'s keys: `left` and `right` for `compare` and
+        `sum_of`, `numerator` and `denominator` for `quotient_of`."""
         return cls(
             code=ToolErrorCode.COMPARISON_PERIODS_DISJOINT,
             message=(
-                f"The two sides share no overlapping time_period. Left side has {left_periods}; "
-                f"right side has {right_periods}. Retry with a frame_ref (or entity binding) "
-                "whose periods actually overlap the other side's."
+                "The two sides share no overlapping time_period. "
+                f"{left_label.capitalize()} side has {left_periods}; "
+                f"{right_label} side has {right_periods}. Retry with a frame_ref (or entity "
+                "binding) whose periods actually overlap the other side's."
             ),
-            fix={"left_periods": left_periods, "right_periods": right_periods},
+            fix={f"{left_label}_periods": left_periods, f"{right_label}_periods": right_periods},
         )
 
     @classmethod
@@ -623,9 +699,9 @@ class ToolRefusal:
         cls,
         *,
         left_label: str,
-        left_unit: str | UnitRequest,
+        left_unit: UnitCell,
         right_label: str,
-        right_unit: str | UnitRequest,
+        right_unit: UnitCell,
     ) -> Self:
         """Two independently-resolved sides (`compare`'s left/right,
         `share_of`'s numerator/denominator) carry different units. Distinct
@@ -633,9 +709,20 @@ class ToolRefusal:
         carries more than one unit -- here each side resolved to exactly
         one unit on its own, and it's the pairing across sides that's
         unsafe to combine. When either side holds a converted unit, the
-        message asks for both sides again in one unit.
+        message asks for both sides again in one unit. A composed unit is
+        written by `quotient_of`, so no `get_data` binding and no pin changes
+        it; when either side holds one, the message asks for sides divided
+        from inputs in matching units.
         """
-        if isinstance(left_unit, UnitRequest) or isinstance(right_unit, UnitRequest):
+        units = (left_unit, right_unit)
+        if any(isinstance(unit, ComposedUnit) for unit in units):
+            retry = (
+                "A unit of the form 'X per Y' is the unit quotient_of gives one frame "
+                "divided by another, and no unit pin or get_data binding changes it. Retry "
+                "with two sides whose units match: each a quotient_of result over inputs in "
+                "the same units as the other."
+            )
+        elif any(isinstance(unit, UnitRequest) for unit in units):
             retry = (
                 "Call get_data for both sides with scope.facets binding the same unit, "
                 "then retry with the new frame_refs."
@@ -657,7 +744,7 @@ class ToolRefusal:
 
     @classmethod
     def cross_frame_unit_unbound(
-        cls, *, unbound_label: str, bound_label: str, bound_unit: str | UnitRequest
+        cls, *, unbound_label: str, bound_label: str, bound_unit: UnitCell
     ) -> Self:
         """One side's own rows leave `unit` unbound entirely, while the
         other resolved to a real declared unit. Distinct from
@@ -688,20 +775,25 @@ class ToolRefusal:
         axis: str,
         left_ref: str,
         right_ref: str,
+        stat_vars: Sequence[str],
     ) -> Self:
         """Two independently-resolved sides (`compare`'s left/right,
-        `share_of`'s numerator/denominator) disagree on one facet axis.
+        `share_of`'s numerator/denominator) hold the same `stat_vars` and
+        disagree on one facet axis: one measure from two sources or methods.
         Distinct from `facet_heterogeneous`, which fires when one side's own
         slice carries more than one declared value. Here each side is
         internally uniform, and it's the pairing across sides that's unsafe.
+        Sides holding different StatVars never raise it.
         """
         return cls(
             code=ToolErrorCode.CROSS_FRAME_FACET_MISMATCH,
             message=(
-                f"{left_label} resolved facet {axis!r} to {left_ref!r}, {right_label} to "
-                f"{right_ref!r} -- combining values across different {axis!r} selections is "
-                "silently wrong, not merely inconvenient. Retry with both sides scoped to a "
-                "frame_ref that agrees on this facet."
+                f"{left_label} and {right_label} both hold {', '.join(stat_vars)}, but "
+                f"{left_label} resolved facet {axis!r} to {left_ref!r} and {right_label} to "
+                f"{right_ref!r} -- one measure from two different {axis!r} selections, whose "
+                f"values do not combine. Retry with {', '.join(stat_vars)} read under one "
+                f"{axis!r} on both sides, {left_ref!r} or {right_ref!r}: with get_data, bind "
+                f"scope.facets {axis!r} to that one ref for both sides' frames."
             ),
             fix={"axis": axis, left_label: left_ref, right_label: right_ref},
         )
@@ -788,50 +880,32 @@ class ToolRefusal:
         *,
         numerator_periods: list[str],
         denominator_periods: list[str],
-        numerator_coverage_fraction: float,
-        denominator_coverage_fraction: float,
-        matched_periods: list[str],
         key: dict[str, str] | None = None,
     ) -> Self:
-        """`matched_periods` is the sorted intersection of the two sides'
-        own periods -- possibly empty. When non-empty, it names an in-toolkit
-        repair: `filter` each side's frame_ref with a `category_match`
-        predicate on `time_period` naming exactly these values, then retry
-        `share_of` on the two resulting pairs. `key` names the offending
-        `numerator_by` key for a keyed call, `{}` (the default) for an
-        un-keyed one, since the identical-period-set rule applies per key.
+        """A numerator key shares no period with its denominator group.
+        share_of divides each key over the periods both sides report and
+        records the rest, so this fires only when that leaves a key with
+        nothing. `key` names the key for a keyed call, `{}` (the default)
+        for an un-keyed one.
         """
         key = key or {}
-        repair = (
-            f"Both sides do share {matched_periods}: filter each side's frame_ref with a "
-            "category_match predicate on time_period naming these values, then retry "
-            "share_of on the two resulting pairs."
-            if matched_periods
-            else "The two sides share no periods at all -- narrow either side's frame_ref "
-            "or entity binding to a source that actually overlaps the other's, and retry."
-        )
-        # Both sides empty is a distinct fault from a genuine mismatch: two
-        # empty period lists are trivially equal as sets, so
-        # `numerator_periods != denominator_periods` alone never catches this
-        # (see `run_share_of`'s own `or not numerator_periods` guard). The
-        # generic message below would otherwise read "The denominator's
-        # periods [] do not match the numerator's periods []" -- two
-        # identical empty lists framed as disagreeing, never naming the
-        # actual fault: neither side's own entity binding matched any row at
-        # all.
+        # Both lists empty is a distinct fault: neither side's entity
+        # binding matched a row, so there are no two period sets to compare.
         if not numerator_periods and not denominator_periods:
             message = (
                 "Neither the numerator's nor the denominator's own entity binding matched "
-                "any row -- both sides summed to zero periods, not to two disagreeing period "
-                "sets. share_of never reports one side's own coverage and proceeds on the "
-                "other's. Retry with a numerator_entity and/or denominator_entity that "
-                "actually narrows to rows this frame_ref carries, or a frame_ref that does."
+                "any row -- both sides summed to zero periods. Retry with a numerator_entity "
+                "and/or denominator_entity that actually narrows to rows this frame_ref "
+                "carries, or a frame_ref that does."
             )
         else:
+            for_key = f" for {key}" if key else ""
             message = (
-                f"The denominator's periods {denominator_periods} do not match the "
-                f"numerator's periods {numerator_periods}. share_of never reports one side's "
-                f"own coverage and proceeds on the other's. {repair}"
+                f"The numerator's periods {numerator_periods} share none with the "
+                f"denominator's periods {denominator_periods}{for_key}, so there is no period "
+                "to divide. Retry with a numerator and denominator whose years overlap: "
+                "narrow either side's frame_ref or entity binding to data covering the "
+                "other's years."
             )
         return cls(
             code=ToolErrorCode.SHARE_OF_GRAIN_MISMATCH,
@@ -839,9 +913,6 @@ class ToolRefusal:
             fix={
                 "numerator_periods": numerator_periods,
                 "denominator_periods": denominator_periods,
-                "numerator_coverage_fraction": numerator_coverage_fraction,
-                "denominator_coverage_fraction": denominator_coverage_fraction,
-                "matched_periods": matched_periods,
                 "key": key,
             },
         )
@@ -906,6 +977,156 @@ class ToolRefusal:
         )
 
     @classmethod
+    def quotient_of_zero_denominator(cls, *, time_periods: list[str], cell_count: int) -> Self:
+        """Every matched (key, period) has a denominator that sums to exactly
+        zero. `cell_count` is how many cells that is and `time_periods` the
+        periods they fall in. A call with some nonzero cell returns those and
+        records the rest, so it never reaches here."""
+        return cls(
+            code=ToolErrorCode.QUOTIENT_OF_ZERO_DENOMINATOR,
+            message=(
+                f"The denominator summed to exactly zero in all {cell_count} matched cell(s), "
+                f"over time_period(s) {time_periods}, so the call has no quotient to return. "
+                "Retry with a denominator_frame_ref or denominator_entity that sums to a "
+                "nonzero value in these periods."
+            ),
+            fix={"time_periods": time_periods, "cell_count": cell_count},
+        )
+
+    @classmethod
+    def quotient_of_no_key_matched(
+        cls,
+        *,
+        numerator_keys: list[dict[str, str]],
+        denominator_keys: list[dict[str, str]],
+        numerator_key_count: int,
+        denominator_key_count: int,
+    ) -> Self:
+        """No numerator key has a denominator group. `numerator_keys` and
+        `denominator_keys` are a sorted sample of each side's keys, each a
+        `{column: value}` object under that side's own column names, and the
+        two counts are how many keys each side holds in all."""
+        return cls(
+            code=ToolErrorCode.QUOTIENT_OF_NO_KEY_MATCHED,
+            message=(
+                f"None of the numerator's {numerator_key_count} key(s) matches any of the "
+                f"denominator's {denominator_key_count}. Numerator keys include "
+                f"{numerator_keys[:_KEY_SAMPLE_IN_MESSAGE]}; denominator keys include "
+                f"{denominator_keys[:_KEY_SAMPLE_IN_MESSAGE]}. denominator_by must map each "
+                "numerator_by column to the denominator column holding the same entities. "
+                "Retry with that mapping, with a denominator_frame_ref that holds the "
+                "numerator's entities, or without denominator_by to divide every key by one "
+                "total."
+            ),
+            fix={
+                "numerator_keys": numerator_keys,
+                "denominator_keys": denominator_keys,
+                "numerator_key_count": numerator_key_count,
+                "denominator_key_count": denominator_key_count,
+            },
+        )
+
+    @classmethod
+    def quotient_of_side_unit_unsupported(
+        cls,
+        *,
+        side: str,
+        reason: Literal["dimensionless", "composed", "operation_stat_var"],
+        unit: UnitCell | None = None,
+        stat_var: str | None = None,
+    ) -> Self:
+        """`side` (`numerator` or `denominator`) can be no part of the
+        result's composed unit. `reason` says why and decides the retry:
+
+        - `dimensionless`: the side is a share or a relative growth rate, or
+          a result derived from one. Its values are a ratio already, a per
+          cent of its own denominator or a rate of change, not an amount.
+        - `composed`: the side resolved to `unit`, a composed unit, and a
+          composed unit holds no composed part.
+        - `operation_stat_var`: the side's rows declare no unit and their
+          stat_var is `stat_var`, a `sum_of` result's own ref, which no graph
+          node or stored definition names.
+
+        `fix` carries `unit` for `composed` and `stat_var` for
+        `operation_stat_var`.
+        """
+        fix: dict[str, Any] = {"side": side, "reason": reason}
+        if reason == "dimensionless":
+            why = (
+                f"The {side} is a share or a relative growth rate, or a result derived from "
+                "one: its values are a ratio already, not an amount to divide"
+            )
+            retry = (
+                f"Retry with a {side} frame_ref that holds a measured quantity, such as the "
+                "frame the share_of or growth call read."
+            )
+        elif reason == "composed":
+            assert unit is not None
+            fix["unit"] = unit_json(unit)
+            why = (
+                f"The {side} resolved to unit {_quoted_unit(unit)}, a quotient already, and "
+                "a unit of the form 'X per Y' holds one unit on each side"
+            )
+            retry = (
+                f"Retry with a {side} frame_ref that holds a measure in a single unit, such "
+                "as one of the frames the earlier quotient_of call read."
+            )
+        else:
+            fix["stat_var"] = stat_var
+            why = (
+                f"The {side}'s rows declare no unit and their stat_var {stat_var!r} is a "
+                "sum_of result's own ref, which no dataset names"
+            )
+            retry = (
+                f"Retry with a {side} frame_ref get_data returned, whose stat_var names what "
+                "it counts; a get_data call can sum several variables into one series itself."
+            )
+        return cls(
+            code=ToolErrorCode.QUOTIENT_OF_SIDE_UNIT_UNSUPPORTED,
+            message=(f"{why}, so it cannot be the {side} part of the result's unit. {retry}"),
+            fix=fix,
+        )
+
+    @classmethod
+    def composed_unit_sum_unsupported(
+        cls, *, verb: str, unit: UnitCell, side: str | None = None, sums_a_cell: bool = False
+    ) -> Self:
+        """`verb` was asked to add values in `unit`, a composed unit. `side`
+        is the side that resolved to it (`left` or `right` for `sum_of`,
+        `numerator` or `denominator` for `share_of`), and `None` for a verb
+        with one input. `fix` carries `side` only when it is set.
+        `sums_a_cell` is whether `side` computes over one row per key and
+        period and refuses only a cell holding several, as a `share_of`
+        side does; the message then names the `<side>_entity`,
+        `numerator_by` and `denominator_by` arguments that leave one row."""
+        fix: dict[str, Any] = {"verb": verb, "unit": unit_json(unit)}
+        if side is None:
+            what = f'{verb} with aggregation="sum" adds values'
+            instead = 'Retry with aggregation="mean", "max" or "min"'
+        elif sums_a_cell:
+            fix["side"] = side
+            what = f"The {side} side of {verb} sums more than one row for a period, with values"
+            instead = (
+                f"Narrow that side to one entity with {side}_entity, or key the share with "
+                "numerator_by and denominator_by so each key reads one row, or take a mean, "
+                "max or min of the figures with aggregate first"
+            )
+        else:
+            fix["side"] = side
+            what = f"The {side} side of {verb} holds values"
+            instead = "Take a mean, max or min of the figures with aggregate"
+        return cls(
+            code=ToolErrorCode.COMPOSED_UNIT_SUM_UNSUPPORTED,
+            message=(
+                f"{what} in unit {_quoted_unit(unit)}, a quotient, and quotients added "
+                f"together are not a quotient in that unit. {instead}. For one figure pooled "
+                "across entities, total each measure across them first, then divide the "
+                "totals with quotient_of."
+            ),
+            fix=fix,
+        )
+
+    @classmethod
     def filter_predicate_type_mismatch(
         cls, *, column: str, predicate_kind: str, actual_type: str
     ) -> Self:
@@ -947,17 +1168,34 @@ class ToolRefusal:
         )
 
     @classmethod
-    def filter_unit_conversion_unsupported(cls, *, column: str, predicate_kind: str) -> Self:
+    def filter_unit_conversion_unsupported(
+        cls, *, column: str, predicate_kind: str, actual_type: str
+    ) -> Self:
+        """`actual_type` names what the frame's `unit` cells hold beside
+        refs: `"UnitRequest"`, `"ComposedUnit"`, or both joined by `" | "`.
+        A frame holding a composed unit came from a verb, so its retry pins
+        the unit in the verb that reads the frame, where a converted frame's
+        retry fetches one unit."""
+        if actual_type == "UnitRequest":
+            held = "a converted unit"
+            select_one = _REFETCH_ONE_UNIT
+        else:
+            held = (
+                "a composed unit"
+                if actual_type == "ComposedUnit"
+                else "converted and composed units"
+            )
+            select_one = _PIN_ONE_UNIT
         return cls(
             code=ToolErrorCode.FILTER_UNIT_CONVERSION_UNSUPPORTED,
             message=(
                 f"A {predicate_kind!r} predicate on column {column!r} cannot match this "
-                "frame's units: its unit cells hold a converted unit, and category_match "
+                f"frame's units: its unit cells hold {held}, and category_match "
                 "compares unit strings. Predicates on value, time_period and role columns "
                 "still apply to this frame. Retry without the unit predicate, or, to select "
-                f"one unit, {_REFETCH_ONE_UNIT}."
+                f"one unit, {select_one}."
             ),
-            fix={"column": column, "predicate_kind": predicate_kind, "actual_type": "UnitRequest"},
+            fix={"column": column, "predicate_kind": predicate_kind, "actual_type": actual_type},
         )
 
     @classmethod
@@ -1028,9 +1266,9 @@ class ToolRefusal:
                 "a ranking over a rank position is not a meaningful number. growth retries with "
                 'change="absolute" over the identical frame_ref -- a rank moves by places, not '
                 "by percentage; rank retries over the frame_ref the per-period rank itself "
-                "read, with limit set on that one call to keep a top or bottom N; share_of has "
-                "no such retry and needs a frame_ref that isn't itself a per-period rank's own "
-                "output."
+                "read, with limit set on that one call to keep a top or bottom N; share_of and "
+                "quotient_of have no such retry and need a frame_ref that isn't itself a "
+                "per-period rank's own output."
             ),
             fix={"reason": reason},
         )
@@ -1054,6 +1292,33 @@ class ToolRefusal:
                 "that carry it alone."
             ),
             fix={"column": column, "types": list(types)},
+        )
+
+    @classmethod
+    def rolling_anchor_unresolved(
+        cls, *, detail: str, reason: str, context: Mapping[str, Any] | None = None
+    ) -> Self:
+        """`detail` is the machine-readable name of the check that failed and
+        `reason` says it in words. `context` adds the values the check read."""
+        return cls(
+            code=ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED,
+            message=(
+                f"The latest period of the data is not established: {reason}. Call "
+                "resolve_anchor with the populations and every root frame of the question, "
+                "then retry with the anchor_key and the periods it gives."
+            ),
+            fix={"detail": detail, **(context or {})},
+        )
+
+    @classmethod
+    def rolling_grain_unsupported(cls, *, reason: str, periods: Sequence[str]) -> Self:
+        return cls(
+            code=ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
+            message=(
+                f"A latest period can be taken over calendar years only: {reason}. "
+                "State the periods as fixed years instead."
+            ),
+            fix={"periods": list(periods)},
         )
 
     @classmethod

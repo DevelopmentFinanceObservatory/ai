@@ -57,7 +57,14 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frame,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import GrowthOpSpec, PinnedUnit
+from analysis_mcp.op_spec import (
+    ANCHOR_KEY_PATTERN,
+    GrowthOpSpec,
+    PinnedUnit,
+    WindowRolling,
+    with_anchor_key,
+)
+from analysis_mcp.rolling_tool import anchored_input
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
@@ -209,8 +216,9 @@ async def growth(
             default=None,
             description=(
                 "Pins the unit to compute over, when the input frame carries more than "
-                "one: a unit ref, or a converted unit as its {currency, prices, base_year} "
-                "object. Retry with one of a unit_heterogeneous refusal's fix.units values."
+                "one: a unit ref, a converted unit as its {currency, prices, base_year} "
+                "object, or a composed unit as its {numerator, denominator} object. "
+                "Retry with one of a unit_heterogeneous refusal's fix.units values."
             ),
         ),
     ] = None,
@@ -227,6 +235,34 @@ async def growth(
             ),
         ),
     ] = "relative",
+    rolling: Annotated[
+        WindowRolling | None,
+        Field(
+            default=None,
+            description=(
+                "Marks window_start, window_end, or both as following the latest period of "
+                "the data: {window_end: {anchor: 'latest', offset: 0, rule: 'half1'}}, with "
+                "offset counting whole years back from the latest. The window's years stay "
+                "literal and are what is computed; two rolling bounds must be the same latest "
+                "year at their offsets. population is required: one {spec_id, bindings} for "
+                "each root dataset of the question, bindings narrowing its series as {column: "
+                "[values]}; the latest period is taken over those series. Left None, the "
+                "window is fixed."
+            ),
+        ),
+    ] = None,
+    anchor_key: Annotated[
+        str | None,
+        Field(
+            default=None,
+            pattern=ANCHOR_KEY_PATTERN,
+            description=(
+                "The handle of the stored record of the latest period this call's rolling "
+                "periods were written from: rak_ and 32 hex digits. Required when the call "
+                "is rolling and refused when it is not. It is no part of the result's identity."
+            ),
+        ),
+    ] = None,
 ) -> ToolResult:
     """Compute each entity's growth across `[window_start, window_end]`.
 
@@ -255,6 +291,13 @@ async def growth(
     (`derived_input_unusable`), because growth reads one row per period.
     Retry over the frame that result was computed from.
 
+    `rolling` records that a window year follows the latest period of the
+    data. The call computes over the literal years it is given, as a fixed
+    call does, and the result's {spec_id, content_version} pair differs from
+    the fixed call's. Such a call runs only when the record `anchor_key` names
+    covers it (`rolling_tool.anchored_input`), and refuses
+    `rolling_anchor_unresolved` otherwise.
+
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
         window_start: The window's first calendar year.
@@ -263,6 +306,9 @@ async def growth(
         unit: Pins the unit, to answer a prior unit_heterogeneous refusal.
         change: 'relative' for a percentage rate, 'absolute' for a difference
             in the input's own unit.
+        rolling: Which window years follow the latest period, and the
+            populations that period is taken over.
+        anchor_key: The handle of the stored latest period, set on a rolling call.
 
     Returns:
         A digest: each computed entity's growth value and its endpoint
@@ -275,13 +321,17 @@ async def growth(
         instead. On refusal, a typed error with a machine-readable fix.
     """
     op_spec = build_op_spec_or_refusal(
-        lambda: GrowthOpSpec(
-            frame_ref=frame_ref,
-            window_start=window_start,
-            window_end=window_end,
-            entity_by=tuple(entity_by),
-            unit=unit,
-            change=change,
+        lambda: with_anchor_key(
+            GrowthOpSpec(
+                frame_ref=frame_ref,
+                window_start=window_start,
+                window_end=window_end,
+                entity_by=tuple(entity_by),
+                unit=unit,
+                change=change,
+                rolling=rolling,
+            ),
+            anchor_key,
         )
     )
     if isinstance(op_spec, ToolResult):
@@ -294,7 +344,9 @@ async def growth(
         op_spec.entity_by,
         op_spec.frame_ref,
         description="entity_by",
-        resolve=lambda ref: resolve_input_frame(ref, settings=settings),
+        resolve=lambda ref: anchored_input(
+            op_spec, anchor_key, resolve_input_frame(ref, settings=settings)
+        ),
     )
     if isinstance(prelude, ToolResult):
         return prelude
@@ -341,10 +393,10 @@ async def growth(
     # own OR-merge carry the flag forward only when the *input* already
     # carried it.
     # `engine/growth.py` does stamp the input's own `stat_var` verbatim onto
-    # the output row in either mode, the same situation `share_of` flags with
-    # `inherited_stat_var` -- both are informational only (see that
-    # dataclass's own docstring), routed through `derived_marker_detail` so
-    # any marker growth's own input already carried survives alongside them.
+    # the output row in either mode, which `inherited_stat_var` flags.
+    # Both flags are informational only (see that dataclass's own docstring),
+    # and are routed through `derived_marker_detail` so any marker growth's
+    # own input already carried survives alongside them.
     derived = derived_marker_detail(
         inherited=read_derived_marker(input_trace),
         dimensionless=op_spec.change == "relative",
@@ -406,6 +458,7 @@ async def growth(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[input_trace],
         digest=lambda: render_growth_digest(
             window_start=op_spec.window_start,
             window_end=op_spec.window_end,

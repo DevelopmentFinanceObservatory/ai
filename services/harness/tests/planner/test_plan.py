@@ -5,12 +5,16 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+from compiler.sources import source_from_spec_block
+from planner.agent import _Patch
 from planner.operations import (
     AggregateOperation,
+    FilterOperation,
     GrowthOperation,
     RankOperation,
     RetrieveOperation,
@@ -47,14 +51,17 @@ from planner.plan import (
     EvidenceRequirement,
     FilterRequirement,
     FixedField,
+    FullHistory,
     GrowthRequirement,
     JoinRequirement,
     Period,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    SeededSource,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
@@ -62,8 +69,14 @@ from planner.plan import (
     UnsupportedPlanError,
     cut_user_text,
     frame_shapes,
+    full_history,
     load_plan,
+    period_window,
     plan_revision,
+    retrieves_period,
+    rolls_from_its_start,
+    windowed_copy,
+    windowed_pin,
 )
 from planner.proof import mismatches
 from planner.records import (
@@ -74,12 +87,17 @@ from planner.records import (
     EvidenceIssueCode,
     GroupBy,
     GrowthChange,
+    OpenPeriodFault,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
     RankAmong,
     RankDirection,
     Reduction,
+    RelativePeriod,
+    RollingIssue,
+    RollingPlanError,
+    RollingWindow,
     Severity,
     TaggedModel,
     ValueThreshold,
@@ -89,6 +107,7 @@ from planner.workflow import (
     ArtifactKind,
     Binding,
     EvidenceBinding,
+    ResolvedGroup,
     SelectedSource,
     ToolId,
     Workflow,
@@ -141,8 +160,9 @@ def _every_kind_plan(decision: Decision) -> Plan:
     one value per entity -- `decision` has to cite `fixes.among='population'`
     for `rank_a`'s population claim to validate). `dataset_b` feeds
     `filtered_b` (filter). `joined` (join), `share_a` (share_of),
-    `comparison_a` (comparison) and `sum_a` (sum_of) each read both
-    `totals_a` and `filtered_b`; `comparison_a` is terminal.
+    `quotient_a` (quotient_of), `comparison_a` (comparison) and `sum_a`
+    (sum_of) each read both `totals_a` and `filtered_b`; `comparison_a` is
+    terminal.
     """
     dataset_a = DatasetRequirement(
         id="dataset_a",
@@ -195,6 +215,12 @@ def _every_kind_plan(decision: Decision) -> Plan:
         numerator=RequirementSide(input_id="totals_a"),
         denominator=RequirementSide(input_id="filtered_b"),
     )
+    quotient_a = QuotientRequirement(
+        id="quotient_a",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="totals_a"),
+        denominator=RequirementSide(input_id="filtered_b"),
+    )
     comparison_a = ComparisonRequirement(
         id="comparison_a",
         decision_ids=["measure"],
@@ -218,6 +244,7 @@ def _every_kind_plan(decision: Decision) -> Plan:
             rank_a,
             joined,
             share_a,
+            quotient_a,
             comparison_a,
             sum_a,
         ],
@@ -808,9 +835,12 @@ def test_sum_of_sides_must_read_different_requirements() -> None:
         )
 
 
-def test_share_of_sides_must_differ() -> None:
+@pytest.mark.parametrize("two_sided", [ShareOfRequirement, QuotientRequirement])
+def test_share_of_and_quotient_of_sides_must_differ(
+    two_sided: type[ShareOfRequirement | QuotientRequirement],
+) -> None:
     with pytest.raises(ValidationError, match="numerator and denominator must differ"):
-        ShareOfRequirement(
+        two_sided(
             id="share",
             decision_ids=["measure"],
             numerator=RequirementSide(input_id="annual_debt_service"),
@@ -2028,6 +2058,449 @@ def test_an_unkeyed_share_of_cannot_state_a_denominator_scope() -> None:
             denominator=RequirementSide(input_id="b"),
             denominator_scope=DenominatorScope.PER_AXIS,
         )
+
+
+def test_a_quotient_of_states_a_denominator_axis_only_with_an_axis() -> None:
+    with pytest.raises(ValidationError, match="stated only with axis"):
+        QuotientRequirement(
+            id="per_head",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="a"),
+            denominator=RequirementSide(input_id="b"),
+            denominator_axis="country",
+        )
+
+
+def _aid_per_head(
+    requirement: RequirementFactory, **quotient: Any
+) -> tuple[DatasetRequirement, DatasetRequirement, QuotientRequirement]:
+    """Aid by recipient over population by country, the same two places on each side."""
+    aid = requirement(
+        id="aid",
+        measure="aid received",
+        entities=[Entity(name="Kenya", role="recipient"), Entity(name="Ghana", role="recipient")],
+    )
+    population = requirement(
+        id="population",
+        measure="population",
+        entities=[Entity(name="Kenya", role="country"), Entity(name="Ghana", role="country")],
+        unit=None,
+    )
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=aid.id),
+        denominator=RequirementSide(input_id=population.id),
+        **quotient,
+    )
+    return aid, population, per_head
+
+
+@pytest.mark.parametrize(
+    ("quotient", "refusal"),
+    [
+        pytest.param({}, None, id="un-keyed"),
+        pytest.param({"axis": "recipient"}, None, id="every-key-over-one-total"),
+        pytest.param(
+            {"axis": "recipient", "denominator_axis": "country"},
+            None,
+            id="each-key-over-its-counterpart",
+        ),
+        pytest.param(
+            {"axis": "country"},
+            "axis 'country' does not name a role the numerator carries",
+            id="an-axis-the-numerator-lacks",
+        ),
+        pytest.param(
+            {"axis": "recipient", "denominator_axis": "recipient"},
+            "denominator_axis 'recipient' does not name a role the denominator carries",
+            id="a-denominator-axis-the-denominator-lacks",
+        ),
+    ],
+)
+def test_a_quotient_of_keys_each_side_by_its_own_role_and_cites_no_decision_for_it(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    quotient: dict[str, str],
+    refusal: str | None,
+) -> None:
+    requirements = list(_aid_per_head(requirement, **quotient))
+
+    if refusal is None:
+        # `decision()` fixes nothing: neither form is a claim a decision has to state.
+        plan = _plan(decision(), evidence_requirements=requirements)
+        assert plan.requirement("per_head") == requirements[-1]
+    else:
+        with pytest.raises(ValidationError, match=refusal):
+            _plan(decision(), evidence_requirements=requirements)
+
+
+@pytest.mark.parametrize(
+    ("axis", "refusal"),
+    [
+        pytest.param("recipient", None, id="the-numerators-phrase"),
+        pytest.param(None, None, id="the-lone-role"),
+        pytest.param(
+            "country", "does not name a role this input carries", id="the-denominators-phrase"
+        ),
+    ],
+)
+def test_a_rank_reads_a_keyed_quotient_of_by_the_numerators_phrase(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    axis: str | None,
+    refusal: str | None,
+) -> None:
+    aid, population, per_head = _aid_per_head(
+        requirement, axis="recipient", denominator_axis="country"
+    )
+    rank = _rank(per_head.id, axis=axis, reduction=Reduction.MEAN)
+    requirements = [aid, population, per_head, rank]
+
+    if refusal is None:
+        plan = _plan(_population_decision(decision), evidence_requirements=requirements)
+        assert plan.requirement("ranked").input_id == "per_head"
+    else:
+        with pytest.raises(ValidationError, match=refusal):
+            _plan(_population_decision(decision), evidence_requirements=requirements)
+
+
+def _places(*names: str) -> list[Entity]:
+    """Places the measure is about: entities stating no role."""
+    return [Entity(name=name) for name in names]
+
+
+def _over_places(
+    requirement: RequirementFactory, derived: str, *, numerator_role: str | None, **keys: Any
+) -> list[EvidenceRequirement]:
+    """A measure of three places divided, by `derived`, by a second measure of the same places.
+
+    The numerator names its places under `numerator_role`, or with no role.
+    The denominator names them with none.
+    """
+    names = ("Kenya", "Uganda", "Tanzania")
+    numerator = requirement(
+        id="numerator",
+        measure="aid received",
+        entities=[Entity(name=name, role=numerator_role) for name in names],
+    )
+    denominator = requirement(
+        id="denominator",
+        measure="population",
+        entities=_places(*names),
+        unit=None if derived == "quotient_of" else numerator.unit,
+    )
+    fields: dict[str, Any] = {
+        "id": "divided",
+        "decision_ids": ["measure"],
+        "numerator": RequirementSide(input_id=numerator.id),
+        "denominator": RequirementSide(input_id=denominator.id),
+        **keys,
+    }
+    divided = (
+        QuotientRequirement(**fields) if derived == "quotient_of" else ShareOfRequirement(**fields)
+    )
+    return [numerator, denominator, divided]
+
+
+@pytest.mark.parametrize(
+    ("derived", "numerator_role", "keys"),
+    [
+        pytest.param(
+            "quotient_of",
+            "recipient",
+            {"axis": "recipient", "denominator_axis": "country"},
+            id="quotient-of-a-role-over-places",
+        ),
+        pytest.param(
+            "quotient_of",
+            None,
+            {"axis": "country", "denominator_axis": "country"},
+            id="quotient-of-places-over-places",
+        ),
+        pytest.param(
+            "quotient_of",
+            None,
+            {"axis": "countries", "denominator_axis": "place"},
+            id="any-place-word",
+        ),
+        pytest.param(
+            "share_of",
+            None,
+            {"axis": "country", "denominator_scope": DenominatorScope.PER_AXIS},
+            id="share-of-places-over-places",
+        ),
+    ],
+)
+def test_a_place_word_keys_a_side_whose_places_state_no_role(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived: str,
+    numerator_role: str | None,
+    keys: dict[str, Any],
+) -> None:
+    # A place the measure is about states no role, so no role phrase names
+    # its dimension; a place word does. The draft passes `propose_plan`'s own
+    # check of an entity's role as well as the plan's.
+    requirements = _over_places(requirement, derived, numerator_role=numerator_role, **keys)
+
+    _patch_of(requirements)
+    plan = _plan(decision(), evidence_requirements=requirements)
+
+    assert plan.requirement("divided") == requirements[-1]
+
+
+def _patch_of(requirements: list[EvidenceRequirement]) -> None:
+    """Validate `requirements` as the lists one `propose_plan` call states."""
+    _Patch.model_validate(
+        {
+            "decisions": [],
+            "evidence_requirements": [r.model_dump(mode="json") for r in requirements],
+            "removed_decisions": [],
+            "removed_evidence_requirements": [],
+            "declined": [],
+            "answered": [],
+        }
+    )
+
+
+def test_a_rank_reads_role_less_places_by_a_place_word(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    dataset = requirement(entities=_places("Kenya", "Uganda"))
+    rank = _rank(dataset.id, axis="country", reduction=Reduction.MEAN)
+
+    plan = _plan(_population_decision(decision), evidence_requirements=[dataset, rank])
+
+    assert plan.requirement("ranked").axis == "country"
+
+
+def test_a_filter_narrows_role_less_places_by_a_place_word(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # A named rank needs its axis narrowed, and the filter names the place
+    # dimension as the rank's axis does.
+    dataset = requirement(entities=_places("Kenya", "Uganda"))
+    named = FilterRequirement(
+        id="named",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(EntityIn(names=["Kenya", "Uganda"], role="country"),),
+    )
+    rank = _rank(named.id, axis="place", among=RankAmong.NAMED, reduction=Reduction.MEAN)
+
+    plan = _plan(decision(), evidence_requirements=[dataset, named, rank])
+
+    assert plan.requirement("ranked").among == RankAmong.NAMED
+
+
+@pytest.mark.parametrize("derived", ["quotient_of", "share_of", "rank"])
+def test_a_place_word_naming_two_dimensions_of_a_side_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory, derived: str
+) -> None:
+    # One place under a place role and one with no role are two dimensions,
+    # and "country" names both.
+    mixed = [Entity(name="Kenya", role="country"), Entity(name="Uganda")]
+    requirements: list[EvidenceRequirement]
+    if derived == "rank":
+        dataset = requirement(entities=mixed)
+        requirements = [dataset, _rank(dataset.id, axis="country", reduction=Reduction.MEAN)]
+    else:
+        keys: dict[str, Any] = (
+            {"axis": "country"}
+            if derived == "quotient_of"
+            else {"axis": "country", "denominator_scope": DenominatorScope.PER_AXIS}
+        )
+        requirements = _over_places(requirement, derived, numerator_role=None, **keys)
+        requirements[0] = requirements[0].model_copy(update={"entities": tuple(mixed)})
+
+    with pytest.raises(ValidationError, match="names more than one dimension"):
+        _plan(_population_decision(decision), evidence_requirements=requirements)
+
+
+@pytest.mark.parametrize(
+    ("reduction", "group_by", "refused"),
+    [
+        (Reduction.SUM, (GroupBy.PERIOD,), True),
+        (Reduction.SUM, (GroupBy.ENTITY,), True),
+        (Reduction.SUM, (GroupBy.ENTITY, GroupBy.PERIOD), True),
+        (Reduction.MEAN, (GroupBy.PERIOD,), False),
+        (Reduction.MEAN, (GroupBy.ENTITY,), False),
+        (Reduction.MAX, (GroupBy.ENTITY,), False),
+        (Reduction.MIN, (GroupBy.PERIOD,), False),
+    ],
+)
+def test_an_aggregate_over_a_quotient_takes_any_reduction_but_a_sum(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    reduction: Reduction,
+    group_by: tuple[GroupBy, ...],
+    refused: bool,
+) -> None:
+    # Two countries' dollars per person add up to no per-person figure.
+    per_head = _aid_per_head(requirement, axis="recipient", denominator_axis="country")
+    reduced = AggregateRequirement(
+        id="reduced",
+        decision_ids=["measure"],
+        input_id="per_head",
+        reduction=reduction,
+        group_by=group_by,
+    )
+    requirements = [*per_head, reduced]
+
+    if refused:
+        with pytest.raises(ValidationError, match="'reduced'"):
+            _plan(decision(), evidence_requirements=requirements)
+    else:
+        plan = _plan(decision(), evidence_requirements=requirements)
+        assert plan.requirement("reduced") == reduced
+
+
+def test_a_rank_over_a_quotient_refuses_a_summing_reduction(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    per_head = _aid_per_head(requirement, axis="recipient", denominator_axis="country")
+    rank = _rank("per_head", reduction=Reduction.SUM)
+
+    with pytest.raises(ValidationError, match="'ranked'"):
+        _plan(_population_decision(decision), evidence_requirements=[*per_head, rank])
+
+
+@pytest.mark.parametrize("derived", ["comparison", "share_of"])
+@pytest.mark.parametrize("rate_side", ["first", "second", "both"])
+def test_a_quotient_pairs_only_with_another_quotient(
+    decision: DecisionFactory, requirement: RequirementFactory, derived: str, rate_side: str
+) -> None:
+    # A composed unit equals no source's own unit, so a quotient beside a
+    # measured side is refused before analysis-mcp refuses it.
+    aid = requirement(id="aid", entities=[Entity(name="Kenya", role="recipient")])
+    other = requirement(id="other", entities=[Entity(name="Uganda", role="recipient")])
+    population = requirement(id="population", entities=_places("Kenya"), unit=None)
+
+    def quotient(name: str, numerator: str) -> QuotientRequirement:
+        return QuotientRequirement(
+            id=name,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=numerator),
+            denominator=RequirementSide(input_id="population"),
+        )
+
+    first = "aid_per_head" if rate_side in ("first", "both") else "aid"
+    second = "other_per_head" if rate_side in ("second", "both") else "other"
+    sides = (RequirementSide(input_id=first), RequirementSide(input_id=second))
+    paired: EvidenceRequirement = (
+        ComparisonRequirement(id="paired", decision_ids=["measure"], left=sides[0], right=sides[1])
+        if derived == "comparison"
+        else ShareOfRequirement(
+            id="paired", decision_ids=["measure"], numerator=sides[0], denominator=sides[1]
+        )
+    )
+    requirements = [
+        aid,
+        other,
+        population,
+        quotient("aid_per_head", "aid"),
+        quotient("other_per_head", "other"),
+        paired,
+    ]
+
+    if rate_side == "both":
+        plan = _plan(decision(), evidence_requirements=requirements)
+        assert plan.requirement("paired") == paired
+    else:
+        with pytest.raises(ValidationError, match="'paired'"):
+            _plan(decision(), evidence_requirements=requirements)
+
+
+def _growth(name: str, input_id: str, change: GrowthChange) -> GrowthRequirement:
+    return GrowthRequirement(
+        id=name,
+        decision_ids=["measure"],
+        input_id=input_id,
+        change=change,
+        window_start=2015,
+        window_end=2024,
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "reader", "refused"),
+    [
+        # An absolute change in dollars per person is still in dollars per person.
+        pytest.param(GrowthChange.ABSOLUTE, "sum", True, id="absolute-summed"),
+        pytest.param(GrowthChange.ABSOLUTE, "mean", False, id="absolute-averaged"),
+        pytest.param(GrowthChange.ABSOLUTE, "quotient_of", True, id="absolute-divided-again"),
+        pytest.param(GrowthChange.ABSOLUTE, "comparison", True, id="absolute-beside-a-measure"),
+        pytest.param(GrowthChange.ABSOLUTE, "share_of", True, id="absolute-over-a-measure"),
+        pytest.param(
+            GrowthChange.ABSOLUTE, "comparison_of_two", False, id="absolute-beside-its-like"
+        ),
+        # A relative change has no unit, so it reads as any ratio does.
+        pytest.param(GrowthChange.RELATIVE, "sum", False, id="relative-summed"),
+        pytest.param(GrowthChange.RELATIVE, "quotient_of", True, id="relative-divided-again"),
+        pytest.param(GrowthChange.RELATIVE, "comparison", False, id="relative-beside-a-ratio"),
+    ],
+)
+def test_a_change_in_a_quotient_keeps_its_composed_unit_only_when_absolute(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    change: GrowthChange,
+    reader: str,
+    refused: bool,
+) -> None:
+    aid, population, per_head = _aid_per_head(
+        requirement, axis="recipient", denominator_axis="country"
+    )
+    # The change in aid per head, and the same change in each plain measure.
+    grew = _growth("grew", "per_head", change)
+    aid_grew = _growth("aid_grew", "aid", change)
+    people_grew = _growth("people_grew", "population", change)
+    sides = (RequirementSide(input_id="grew"), RequirementSide(input_id="aid_grew"))
+    reading: EvidenceRequirement
+    if reader in ("sum", "mean"):
+        reading = AggregateRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            input_id="grew",
+            reduction=Reduction(reader),
+            group_by=(GroupBy.PERIOD,),
+        )
+    elif reader == "quotient_of":
+        reading = QuotientRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            numerator=sides[0],
+            denominator=RequirementSide(input_id="people_grew"),
+        )
+    elif reader == "share_of":
+        reading = ShareOfRequirement(
+            id="reading", decision_ids=["measure"], numerator=sides[0], denominator=sides[1]
+        )
+    else:
+        right = "grew_again" if reader == "comparison_of_two" else "aid_grew"
+        reading = ComparisonRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            left=sides[0],
+            right=RequirementSide(input_id=right),
+        )
+    requirements = [
+        aid,
+        population,
+        per_head,
+        grew,
+        _growth("grew_again", "per_head", change),
+        aid_grew,
+        people_grew,
+        reading,
+    ]
+
+    if refused:
+        with pytest.raises(ValidationError, match="'reading'"):
+            _plan(decision(), evidence_requirements=requirements)
+    else:
+        plan = _plan(decision(), evidence_requirements=requirements, answer_mode=AnswerMode.SERIES)
+        assert plan.requirement("reading") == reading
 
 
 def test_denominator_scope_pooled_with_no_decision_fixing_it_fails(
@@ -3760,6 +4233,7 @@ def test_json_without_answer_mode_loads_as_series(
         ComparisonRequirement,
         RankRequirement,
         ShareOfRequirement,
+        QuotientRequirement,
         JoinRequirement,
         FilterRequirement,
         ValueThreshold,
@@ -3775,7 +4249,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Nine requirements, the four predicates a filter carries, and the nine
+    # Ten requirements, the four predicates a filter carries, and the ten
     # operations a plan's `translation` holds.
     definitions = Plan.model_json_schema()["$defs"]
     tagged = {
@@ -3784,7 +4258,7 @@ def test_the_plan_schema_advertises_kind_as_required_for_every_tagged_part() -> 
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 22
+    assert len(tagged) == 24
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 
@@ -3918,6 +4392,7 @@ def test_every_decision_and_requirement_validates_at_its_limits() -> None:
         "comparison",
         "rank",
         "share_of",
+        "quotient_of",
         "join",
         "filter",
     }
@@ -4025,16 +4500,32 @@ _LIMITS: list[tuple[str, tuple[str | int, ...], int]] = [
         ("evidence_requirements", 8, "predicates", 0, "role"),
         MAX_ENTITY_ROLE_CHARS,
     ),
-    ("Aggregate.group_by", ("evidence_requirements", 18, "group_by"), MAX_GROUP_BY),
-    ("Rank.axis", ("evidence_requirements", 20, "axis"), MAX_ENTITY_ROLE_CHARS),
-    ("ShareOf.axis", ("evidence_requirements", 21, "axis"), MAX_ENTITY_ROLE_CHARS),
+    ("Aggregate.group_by", ("evidence_requirements", 17, "group_by"), MAX_GROUP_BY),
+    ("Rank.axis", ("evidence_requirements", 19, "axis"), MAX_ENTITY_ROLE_CHARS),
+    ("ShareOf.axis", ("evidence_requirements", 20, "axis"), MAX_ENTITY_ROLE_CHARS),
     (
         "ShareOf.numerator.entity",
-        ("evidence_requirements", 21, "numerator", "entity"),
+        ("evidence_requirements", 20, "numerator", "entity"),
         MAX_ENTITY_NAME_CHARS,
     ),
     (
         "ShareOf.denominator.entity",
+        ("evidence_requirements", 20, "denominator", "entity"),
+        MAX_ENTITY_NAME_CHARS,
+    ),
+    ("Quotient.axis", ("evidence_requirements", 21, "axis"), MAX_ENTITY_ROLE_CHARS),
+    (
+        "Quotient.denominator_axis",
+        ("evidence_requirements", 21, "denominator_axis"),
+        MAX_ENTITY_ROLE_CHARS,
+    ),
+    (
+        "Quotient.numerator.entity",
+        ("evidence_requirements", 21, "numerator", "entity"),
+        MAX_ENTITY_NAME_CHARS,
+    ),
+    (
+        "Quotient.denominator.entity",
         ("evidence_requirements", 21, "denominator", "entity"),
         MAX_ENTITY_NAME_CHARS,
     ),
@@ -4060,6 +4551,7 @@ _UNION_TAGS = frozenset(
         "comparison",
         "rank",
         "share_of",
+        "quotient_of",
         "join",
         "filter",
         "value_threshold",
@@ -4076,12 +4568,13 @@ def test_one_more_than_a_limit_is_refused_naming_the_field(
     record = field_limits_record()
     # The paths above index into the maximal plan's requirements by position.
     ids = [requirement["id"] for requirement in record["evidence_requirements"]]
-    assert (ids[0], ids[8], ids[18], ids[20], ids[21], ids[22], ids[23]) == (
+    assert (ids[0], ids[8], ids[17], ids[19], ids[20], ids[21], ids[22], ids[23]) == (
         "dataset_0",
         "filter_0",
         "totals",
         "rank",
         "share",
+        "quotient",
         "comparison",
         "joined",
     )
@@ -4362,3 +4855,319 @@ def test_a_cut_question_is_a_valid_plan_question(
 
     assert plan.question == question
     assert MAX_QUESTION_CHARS == 2_000
+
+
+# --- periods that follow the newest data ---------------------------------------
+
+
+def _rolling_error(exc: ValidationError) -> RollingPlanError:
+    """The `RollingPlanError` behind `exc`, as `planner.agent` reads it."""
+    (cause,) = [
+        error["ctx"]["error"]
+        for error in exc.errors()
+        if isinstance(error.get("ctx", {}).get("error"), RollingPlanError)
+    ]
+    return cause
+
+
+_LAST_FIVE = RollingWindow(
+    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+)
+
+
+def _rolling_growth(input_id: str, **overrides: Any) -> GrowthRequirement:
+    fields: dict[str, Any] = {
+        "id": "growth",
+        "decision_ids": ["measure"],
+        "input_id": input_id,
+        "window_start": 2019,
+        "window_end": 2024,
+        "rolling": _LAST_FIVE,
+    }
+    return GrowthRequirement(**(fields | overrides))
+
+
+@pytest.mark.parametrize("offset", [1, -201, -1.0, "-1", True])
+def test_a_relative_period_counts_whole_years_back_from_the_newest(offset: object) -> None:
+    assert RelativePeriod(offset=-5).model_dump() == {"anchor": "latest", "offset": -5}
+
+    with pytest.raises(ValidationError):
+        RelativePeriod.model_validate({"anchor": "latest", "offset": offset})
+
+
+def test_a_rolling_window_names_at_least_one_bound() -> None:
+    with pytest.raises(ValidationError, match="names window_start, window_end or both"):
+        RollingWindow()
+
+
+def test_a_growth_whose_offsets_span_other_years_than_its_window_is_refused() -> None:
+    assert _rolling_growth("d").window_start == 2019
+
+    with pytest.raises(ValidationError) as refused:
+        _rolling_growth("d", window_start=2020)
+
+    error = _rolling_error(refused.value)
+    assert error.issue is RollingIssue.YEARS_DISAGREE
+    assert error.requirement_ids == ("growth",)
+
+
+def test_a_window_rolling_at_one_end_keeps_any_fixed_year_at_the_other() -> None:
+    since = RollingWindow(window_end=RelativePeriod(offset=0))
+
+    growth = _rolling_growth("d", window_start=2015, rolling=since)
+
+    assert (growth.window_start, growth.window_end) == (2015, 2024)
+
+
+def _windowed_rank(**overrides: Any) -> RankRequirement:
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "input_id": "d",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "reduction": Reduction.SUM,
+        "window_start": 2019,
+        "window_end": 2024,
+        "rolling": _LAST_FIVE,
+    }
+    return RankRequirement(**(fields | overrides))
+
+
+@pytest.mark.parametrize(
+    "window", [{"window_start": None, "window_end": None}, {"window_start": 2021}]
+)
+def test_a_rank_rolling_disagreeing_with_its_window_is_refused(window: dict[str, Any]) -> None:
+    assert _windowed_rank().rolling == _LAST_FIVE
+
+    with pytest.raises(ValidationError) as refused:
+        _windowed_rank(**window)
+
+    assert _rolling_error(refused.value).issue is RollingIssue.YEARS_DISAGREE
+
+
+def test_rolling_thresholds_of_one_filter_stand_for_one_newest_year() -> None:
+    since = PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5))
+    until = PeriodThreshold(op="lte", year=2024, rolling=RelativePeriod(offset=0))
+    assert FilterRequirement(id="recent", input_id="d", predicates=(since, until))
+
+    with pytest.raises(ValidationError) as refused:
+        FilterRequirement(
+            id="recent",
+            input_id="d",
+            predicates=(since, until.model_copy(update={"year": 2023})),
+        )
+
+    error = _rolling_error(refused.value)
+    assert error.issue is RollingIssue.YEARS_DISAGREE
+    assert error.requirement_ids == ("recent",)
+
+
+def test_a_rolling_period_over_a_dataset_with_a_fixed_end_is_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+) -> None:
+    """The check reaches the dataset through the requirements between, and
+    names the dataset to open, which is what the planner changes."""
+    totals = derived_requirement()
+    growth = _rolling_growth(totals.id)
+    opened = requirement(period_end_open=True)
+    assert _plan(decision(), evidence_requirements=[opened, totals, growth])
+
+    with pytest.raises(ValidationError) as refused:
+        _plan(decision(), evidence_requirements=[requirement(), totals, growth])
+
+    error = _rolling_error(refused.value)
+    assert error.issue is RollingIssue.NEEDS_OPEN_PERIOD
+    assert error.fault is OpenPeriodFault.DATASET_CLOSED
+    assert error.requirement_ids == (opened.id,)
+
+
+def test_a_rolling_threshold_needs_an_open_dataset_too(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    latest = PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0))
+    newest = FilterRequirement(
+        id="newest", decision_ids=["measure"], input_id="annual_debt_service", predicates=(latest,)
+    )
+    assert _plan(decision(), evidence_requirements=[requirement(period_end_open=True), newest])
+
+    with pytest.raises(ValidationError) as refused:
+        _plan(decision(), evidence_requirements=[requirement(), newest])
+
+    assert _rolling_error(refused.value).fault is OpenPeriodFault.DATASET_CLOSED
+
+
+@pytest.mark.parametrize(
+    ("requirement_", "from_start"),
+    [
+        (_rolling_growth("d"), True),
+        (_rolling_growth("d", rolling=RollingWindow(window_end=RelativePeriod(offset=0))), False),
+        (_rolling_growth("d", rolling=None), False),
+        (_windowed_rank(), True),
+        *(
+            (
+                FilterRequirement(
+                    id="f",
+                    input_id="d",
+                    predicates=(
+                        PeriodThreshold(op=op, year=2024, rolling=RelativePeriod(offset=0)),
+                    ),
+                ),
+                from_start,
+            )
+            for op, from_start in [("gte", True), ("gt", True), ("eq", True), ("lte", False)]
+        ),
+    ],
+)
+def test_a_requirement_rolls_from_its_start_when_its_earliest_year_is_relative(
+    requirement_: EvidenceRequirement, from_start: bool
+) -> None:
+    assert rolls_from_its_start(requirement_) is from_start
+
+
+def test_an_open_period_window_states_its_start_year_alone() -> None:
+    period = Period(start=2015, end=2024)
+
+    assert period_window(period) == {"kind": "range", "start_year": 2015, "end_year": 2024}
+    assert period_window(period, end_open=True) == {"kind": "range", "start_year": 2015}
+
+
+def _answer(window: dict[str, Any], resolved: dict[str, Any]) -> dict[str, Any]:
+    """A Search spec block over `window` resolving `resolved`."""
+    return {"definition": {"identity": {"requested_window": window}}, "resolved": resolved}
+
+
+_ALL = {"kind": "all"}
+
+
+@pytest.mark.parametrize(
+    ("block", "history"),
+    [
+        (
+            _answer(_ALL, {"download": {"rows": 3120, "window": {"start_year": 1973}}}),
+            FullHistory(first_year=1973, rows=3120),
+        ),
+        # The mint's own window wins over the served members' date range.
+        (
+            _answer(
+                _ALL,
+                {
+                    "download": {"rows": None, "window": {"start_year": 1973, "end_year": 2024}},
+                    "stat_vars": {"data_date_range": {"start": "1990", "end": "2024"}},
+                },
+            ),
+            FullHistory(first_year=1973, rows=None),
+        ),
+        (
+            _answer(_ALL, {"stat_vars": {"data_date_range": {"start": "1990", "end": "2024"}}}),
+            FullHistory(first_year=1990, rows=None),
+        ),
+        (_answer(_ALL, {}), None),
+        # An answer over a window reads the years inside it, not the dataset's first.
+        (
+            _answer(
+                {"kind": "range", "start_year": 2020, "end_year": 2024},
+                {"download": {"rows": 40, "window": {"start_year": 2020, "end_year": 2024}}},
+            ),
+            None,
+        ),
+        (
+            _answer(
+                {"kind": "range", "start_year": 2015},
+                {"download": {"rows": 40, "window": {"start_year": 2015, "end_year": 2024}}},
+            ),
+            None,
+        ),
+        ({"resolved": {"download": {"window": {"start_year": 1973}}}}, None),
+    ],
+)
+def test_only_an_answer_over_no_window_states_a_datasets_first_year(
+    block: dict[str, Any], history: FullHistory | None
+) -> None:
+    assert full_history(block) == history
+
+
+@pytest.mark.parametrize(
+    ("window", "end_open", "retrieved"),
+    [
+        ({"kind": "range", "start_year": 2015, "end_year": 2024}, False, True),
+        ({"kind": "range", "start_year": 2015}, False, False),
+        ({"kind": "range", "start_year": 2015}, True, True),
+        # From the first year the dataset holds, for a start that follows the newest year.
+        ({"kind": "range", "start_year": 1970}, True, True),
+        ({"kind": "range", "start_year": 2016}, True, False),
+        ({"kind": "range", "start_year": 2015, "end_year": 2024}, True, False),
+        ({"kind": "all"}, True, False),
+        (None, True, False),
+    ],
+)
+def test_a_requirement_is_retrieved_over_its_period_or_an_open_range_covering_it(
+    requirement: RequirementFactory, window: object, end_open: bool, retrieved: bool
+) -> None:
+    stated = requirement(period=Period(start=2015, end=2024), period_end_open=end_open)
+
+    assert retrieves_period(window, stated) is retrieved
+
+
+def test_an_operation_stating_other_rolling_than_its_requirement_is_a_mismatch() -> None:
+    growth = _rolling_growth("d")
+    carried = GrowthOperation(
+        id="g", requirement_id="growth", input="d", window_start=2019, window_end=2024
+    )
+    assert mismatches(growth, carried, {"d": "d"}) == ["rolling"]
+    assert mismatches(growth, carried.model_copy(update={"rolling": _LAST_FIVE}), {"d": "d"}) == []
+
+    ranked = _windowed_rank()
+    ordering = RankOperation(
+        id="r",
+        requirement_id="ranked",
+        input="d",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        reduction=Reduction.SUM,
+        window_start=2019,
+        window_end=2024,
+    )
+    assert mismatches(ranked, ordering, {"d": "d"}) == ["rolling"]
+
+    latest = PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0))
+    newest = FilterRequirement(id="f", input_id="d", predicates=(latest,))
+    fixed = FilterOperation(
+        id="f", requirement_id="f", input="d", predicates=(PeriodThreshold(op="eq", year=2024),)
+    )
+    assert mismatches(newest, fixed, {"d": "d"}) == ["predicates"]
+
+
+def test_an_operation_rolling_must_agree_with_its_own_window() -> None:
+    with pytest.raises(ValidationError, match="offsets span 5"):
+        GrowthOperation(
+            id="g",
+            requirement_id="growth",
+            input="d",
+            window_start=2020,
+            window_end=2024,
+            rolling=_LAST_FIVE,
+        )
+
+
+@dataclass(frozen=True)
+class _Recorded:
+    identity: dict[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+
+
+def test_a_copy_of_a_seed_over_another_window_keeps_the_set_its_places_stand_for() -> None:
+    # A seed or a recorded dataset over Africa's countries, copied over the
+    # question's own years, still names Africa, so the copy's resubmit asks for it.
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    africa = source_from_spec_block(json.loads(fixture.read_text())["spec"])
+    assert africa.identity is not None
+    window = {"kind": "range", "start_year": 2010, "end_year": 2020}
+
+    copied = windowed_copy(SeededSource(source=africa), window)
+    pinned = windowed_pin(africa.spec_id, _Recorded(africa.identity, africa.groups), window)
+
+    assert africa.groups
+    assert copied.source.groups == africa.groups
+    assert pinned.groups == africa.groups

@@ -6,7 +6,7 @@ description: How a question to the DFO MCP server becomes a cited answer, and th
 
 Connect a client as described in [Connect](connect.md).
 
-The DFO MCP server answers questions about any series it holds for a country, subregion or continent. You can compare, rank or aggregate the results. Every answer carries the dataset's source and a frame reference that names the exact data used. The server refuses requests over 250,000 rows and tells the model why and how to retry.
+The DFO MCP server answers questions about any series it holds for a country, subregion or continent. You can compare, rank, aggregate or divide the results. Every answer carries the dataset's source and a frame reference that names the exact data used. The server refuses requests over 250,000 rows and tells the model why and how to retry.
 
 ## One question, start to finish
 
@@ -66,7 +66,13 @@ Kenya's series is available in international dollars and US dollars. The server 
 
 <!-- TODO: replace this paragraph with a real session that runs search, get_data and compare. No recorded session calls compare yet. -->
 
-The analysis tools operate on frame references. `aggregate` groups and reduces, `growth` measures change across a window, `rank` orders entities, `share_of` gives one entity's share of another, `filter` keeps matching rows, and `join` combines two frames.
+The analysis tools operate on frame references. `aggregate` groups and reduces, `growth` measures change across a window, `rank` orders entities, `share_of` gives one entity's share of another in one unit, `quotient_of` divides one measure by another in any two units, `sum_of` adds series, `filter` keeps matching rows, and `join` combines two frames.
+
+## Dividing one measure by another
+
+`quotient_of` divides one series by another at each period both report, whatever their units, and states the result in the unit the two compose. To answer "What was Kenya's debt service per head of population?", run `search` with two parts, one for debt service and one for population, call `get_data` once per part, then call `quotient_of` with both frame references. The population frame declares no unit, so the result's unit names it by its StatVar: `CurrencyUSD` per `Count_Person`.
+
+To get one figure per entity, such as aid per head for each of several recipients, set `numerator_by` to the numerator's role column and `denominator_by` to the column the population frame holds the same entities on. A period only one side reports is left out and recorded, and so is a key with no counterpart or a period where the denominator is zero. The call refuses when no period is shared, when no key pairs, or when every matched period has a zero denominator. `share_of` divides a part by its whole in one unit and refuses two sides in different units.
 
 ## Skills
 
@@ -107,5 +113,5 @@ A single `search` call takes up to six parts, one per measured variable, and `de
 
 ## Next
 
-- [Connect](connect.md) shows how to add the server to Claude, ChatGPT, Codex or Gemini CLI.
+- [Connect](connect.md) shows how to add the server to Claude, ChatGPT, Gemini, Claude Code, Codex or Gemini CLI.
 - The Tools reference lists every argument, error code and retry mode. <!-- TODO: link when the generated Tools reference is published. -->

@@ -65,8 +65,9 @@ drafted plan as `prior_plan`, the way `harness.graph`'s own planner node hands
 it one, and the realistic round's brief carries the search readings, the two
 digests, the asks and the question a deployed planner call recorded
 (`_RECORDED_BRIEF_PATH`). The planner's model loads a skill with `get_skill`,
-answered with one full page, then calls `translate`, which runs the real mechanical loop
-against a canned `no_data` search and refers the plan back. The planner then has
+answered with one full page, then proposes the drafted plan again unchanged
+(`propose_plan` with only `amends_version`), whose translation runs the real
+mechanical loop against a canned `no_data` search and refers the plan back. The planner then has
 no `submit_plan` to reach, so the seam raises `PlannerSeamError` after its
 correction rounds: an unfinished turn, which is what leaves the largest
 planner request on record.
@@ -212,37 +213,34 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 12,533 with the skill tools and
-# `translate` attached. The margin is 8.5% and covers a hand edit of
+# `planner.agent.planner_instruction`. Measured 14,219 with the skill tools and
+# translation attached. The margin is 4.1% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 13_600
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 14_800
 
-# Every planner tool declaration together: 32,006 (`propose_plan` 27,122,
-# `translate` 338, and 4,546 across the smaller ones). The margin is 10%.
-PLANNER_DECLARATIONS_TOTAL_CEILING = 35_210
+# Every planner tool declaration together: 35,165 (`propose_plan` 30,487 and
+# 4,678 across the smaller ones). The margin is 10%.
+PLANNER_DECLARATIONS_TOTAL_CEILING = 38_880
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 27,122. It sits in the static prefix every planner call
+# arguments. Measured 30,487. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
 # the planner writes a plan from. The margin is 2%.
-PROPOSE_PLAN_DECLARATION_CEILING = 27_670
+PROPOSE_PLAN_DECLARATION_CEILING = 31_070
 
-# `translate`'s declaration, built by ADK from the function's name and
-# docstring. Measured 338.
-TRANSLATE_DECLARATION_CEILING = 420
-
-# The smaller planner declarations at once: `adk_request_input` 1,713,
+# The smaller planner declarations at once: `adk_request_input` 1,845,
 # `get_skill_file` 1,084, `submit_plan` 840, `get_skill` 651 and `reject_plan`
 # 258.
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_690
 
 # The planner's `contents` history on its largest captured generation, less
 # the skill text `SKILL_PAGE_CEILING` and the brief `RECORDED_BRIEF_CEILING`
-# bound on their own (792 chars, the fifth generation of the realistic
-# scenario).
-PLANNER_CONTENTS_CEILING = 1_000
+# bound on their own (1,600 chars, the fifth generation of the realistic
+# scenario). The `propose_plan` answer is 1,052 of them, since it carries the
+# translation's referral beside the plan's own summary. The margin is 5%.
+PLANNER_CONTENTS_CEILING = 1_680
 
 # The `get_skill` answer in the planner's `contents`, bucketed as
 # `functionResponse:get_skill`: one full page of a skill file
@@ -332,13 +330,14 @@ def _skill_page() -> ToolCallResult:
 def _script() -> list[Any]:
     """The planner's script for one round.
 
-    The planner loads a skill, calls `translate`, and then produces text,
-    which the seam corrects twice before raising. The later entries only exist
+    The planner loads a skill, proposes the drafted plan again unchanged (which
+    translates it), and then produces text, which the seam corrects twice
+    before raising. The later entries only exist
     to close a turn the seam's own stall guard may already have ended.
     """
     return [
         [("get_skill", {"skill_id": "dfo-faq"})],
-        [("translate", {})],
+        [("propose_plan", {"amends_version": 1})],
         *["nothing to submit"] * 4,
     ]
 
@@ -565,11 +564,6 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
             PROPOSE_PLAN_DECLARATION_CEILING,
         ),
         (
-            "translate declaration",
-            _declaration(record, "translate"),
-            TRANSLATE_DECLARATION_CEILING,
-        ),
-        (
             "minor planner declarations",
             _minor_declarations(record),
             MINOR_DECLARATIONS_TOTAL_CEILING,
@@ -590,10 +584,9 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
 SKILL_BUCKET = "functionResponse:get_skill"
 
 
-# Everything a planner request declares other than `propose_plan` and
-# `translate`: the two declarations bounded individually above, not lumped
-# into this total.
-_NAMED_DECLARATIONS = ("propose_plan", "translate")
+# Everything a planner request declares other than `propose_plan`, the one
+# declaration bounded individually above, not lumped into this total.
+_NAMED_DECLARATIONS = ("propose_plan",)
 
 
 def _minor_declarations(record: dict[str, Any]) -> int:
@@ -633,7 +626,7 @@ def test_no_relayed_foreign_agent_text_reaches_the_planner(
 ) -> None:
     """No relayed text reaches the planner, tagged with an author or not.
 
-    `translate` runs inside the planner's own tool call, and
+    Translation runs inside the planner's own `propose_plan` call, and
     `harness.planner_seam._PLANNER_BRANCH` keeps another agent's turns off the
     planner's branch, so no fenced relay belongs in a planner request.
     """
@@ -764,7 +757,7 @@ def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) 
 # fabricated here, not by editing production code to inflate the real scenario.
 
 # Size of every segment in the deliberately inflated request: past every ceiling
-# above, `propose_plan`'s own 29,578 included.
+# above.
 _INFLATED = 50_000
 
 
@@ -818,7 +811,7 @@ def _request(
                 parts=[
                     types.Part(
                         text=(
-                            f"[{author}] called tool `translate` with parameters:\n"
+                            f"[{author}] called tool `propose_plan` with parameters:\n"
                             f"{RELAY_MARKER}\n{{}}\n<<<END_QUOTED_AGENT_CONTENT>>>"
                         )
                     ),
@@ -844,7 +837,7 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
     `get_skill` answer past its own.
     """
     request = _request(
-        tool_names=["propose_plan", "translate", "adk_request_input", "submit_plan"],
+        tool_names=["propose_plan", "adk_request_input", "submit_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
         skill=SKILL_PAGE_CEILING + 1,
@@ -967,6 +960,7 @@ def _seam_brief(
     question: str = "compare population and gdp for guatemala since the year 2000",
     refusal: dict[str, Any] | None = None,
     amendment: str | None = None,
+    seed_of: dict[str, str] | None = None,
 ) -> str:
     """One `_message` render, the way `PlannerSeam.__call__` asks for it."""
     seam = PlannerSeam(
@@ -982,6 +976,7 @@ def _seam_brief(
         amendment=amendment,
         canvas_digest=canvas_digest,
         conversation_digest=conversation_digest,
+        seed_of=seed_of,
     )
 
 
@@ -1081,7 +1076,7 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
     past the ceiling), and requires the bound to report.
     """
     request = _request(
-        tool_names=["propose_plan", "translate", "adk_request_input", "submit_plan"],
+        tool_names=["propose_plan", "adk_request_input", "submit_plan"],
         texts=["t" * _INFLATED] * 3,
         seam=_INFLATED,
     )
@@ -1491,7 +1486,7 @@ def test_the_envelope_ceiling_fails_when_a_cap_is_removed(
 # The description a model reads of one seed is `compact_source` of its source.
 # It is held to `MAX_SEED_SOURCE_CHARS` where the seed is read, and discovery
 # stamps the requirement's measure on it as `searched_as`, at most
-# `MAX_MEASURE_CHARS`. What a whole `translate` result and the `planner:plan`
+# `MAX_MEASURE_CHARS`. What a whole translation result and the `planner:plan`
 # state hold for a plan that retrieves `MAX_SEEDS` such seeds through
 # `MAX_PLAN_REQUIREMENTS` requirements is measured on `run_translate` itself,
 # in `tests/translator/test_mechanical.py`.
@@ -1570,10 +1565,10 @@ class _ToolContext:
 
 
 # The most dataset requirements, each with its own decision pinning a seed, a
-# plan of the shortest fields fits under `MAX_PLAN_RECORD_CHARS`: 21 take
-# 16,303 characters. So no plan pins `MAX_PLAN_REQUIREMENTS` copies at once,
+# plan of the shortest fields fits under `MAX_PLAN_RECORD_CHARS`: 20 take
+# 16,349 characters. So no plan pins `MAX_PLAN_REQUIREMENTS` copies at once,
 # and the ceiling above holds them with room.
-_MOST_PINNED_REQUIREMENTS = 20
+_MOST_PINNED_REQUIREMENTS = 19
 
 
 def test_the_seeded_sources_state_stays_under_its_ceiling_across_drafts_and_amendments(
@@ -1873,22 +1868,70 @@ _ASKS = ("amendment", "refusal")
 
 def _maximal_refusal() -> dict[str, Any]:
     """An executor refusal far past the cut: one 100,000-character message and a
-    hundred wave siblings that each carry the same."""
+    hundred wave siblings that each carry the same.
+
+    Every stop names a refused spec, half of them seeds (`_MAXIMAL_SEED_OF`),
+    and is also a step refusing its sides on their units under a
+    100,000-character step id: a `share_of` on the odd stops, which gets the
+    repair, and a `compare` on the even ones, which earns a decline. The run
+    computed 100,000 asks first. So the ask carries every sentence
+    `PlannerSeam._message` can add to a refusal, each at its largest.
+    """
 
     def refused(index: int) -> dict[str, Any]:
         return {
             "kind": "rediscovery_needed",
             "spec_id": _spec(index),
             "refusal": {"code": "over_ceiling", "message": "m" * _BIG},
+            **_share_units_stop("s" * _BIG),
+            "tool": "share_of" if index % 2 else "compare",
         }
 
-    return {**refused(1), "also_stopped": [refused(index) for index in range(2, 102)]}
+    return {
+        **refused(1),
+        "also_stopped": [refused(index) for index in range(2, 102)],
+        "computed_asks": list(range(_BIG)),
+    }
+
+
+# The refused specs of `_maximal_refusal` that are seeds, each its own seed.
+_MAXIMAL_SEED_OF = {_spec(index): _spec(index) for index in range(52, 102)}
+
+
+def _share_units_stop(step_id: str) -> dict[str, Any]:
+    """The members that make a stop a `share_of` step refusing its sides on their units."""
+    return {"tool": "share_of", "code": "cross_frame_unit_unbound", "step_id": step_id}
+
+
+def _share_units_repair_ceiling() -> int:
+    """The most the sentence repairing refused `share_of` steps renders.
+
+    The seam cuts its list of steps at `MAX_QUESTION_CHARS`, and the wording
+    around the list is measured by rendering it for a placeholder.
+    """
+    one = planner_seam._share_units_repair_sentence(_share_units_stop("s"))
+    return len(one) - len(repr("s")) + MAX_QUESTION_CHARS
+
+
+def _failed_run_ceiling() -> int:
+    """The most the sentence on what a failed run computed adds to the one for a plan held to no asks.
+
+    The seam cuts its list of ask numbers at `MAX_QUESTION_CHARS`.
+    """
+    listed = len(planner_seam._failed_run_sentence([0])) - len("0") + MAX_QUESTION_CHARS
+    return listed - len(planner_seam._failed_run_sentence(None))
+
+
+def _earned_decline_ceiling() -> int:
+    """The sentence naming every decline a run-time refusal can earn."""
+    earnable = set(planner_seam._UNSUPPORTED_BY_RUN_TIME_CODE.values())
+    return len(planner_seam._earned_decline_sentence(earnable))
 
 
 def _ask_kwargs(ask: str) -> dict[str, Any]:
     """`_seam_brief`'s arguments for the amendment ask or the refusal ask."""
     if ask == "refusal":
-        return {"refusal": _maximal_refusal()}
+        return {"refusal": _maximal_refusal(), "seed_of": _MAXIMAL_SEED_OF}
     return {"amendment": _BRIEF_AMENDMENT}
 
 
@@ -1906,7 +1949,11 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
         "envelope": _envelope_context(
-            _maximal_envelope(), refusal=refusal, spec_id_elected=False, spec_id_elected_label=None
+            _maximal_envelope(),
+            refusal=refusal,
+            spec_id_elected=False,
+            spec_id_elected_label=None,
+            seed_of=_MAXIMAL_SEED_OF if refusal else None,
         ),
         "canvas digest": _section(_CANVAS_TITLE, _largest_canvas_digest()),
         "conversation digest": _section(_CONVERSATION_TITLE, _conversation_digest()),
@@ -1939,15 +1986,24 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
     """What each part of `_maximal_brief_parts(ask)` can be, from the caps that bound it.
 
     The question and the amendment are cut at `MAX_QUESTION_CHARS`. A refusal
-    is cut there as JSON, then again in the sentence naming the specs to avoid,
-    and, on a fresh render, in the envelope's paragraph naming the specs it left
-    out. The wording around each cut is measured from the renderer.
+    is cut there as JSON, then again in each sentence the ask adds to it: the
+    asks the failed run computed, the specs to avoid, the seeds to keep
+    pinned, and the `share_of` steps to repair. The declines it earned are a
+    closed set. On a fresh render the envelope's paragraph naming the specs it
+    left out is cut too. The wording around each cut is measured from the
+    renderer.
     """
     envelope = MAXIMAL_ENVELOPE_CEILING
     if ask == "refusal":
         framing = _continuing_chars(refusal={"kind": "x"}) - len(json.dumps({"kind": "x"}))
         ask_ceiling = (
-            framing + MAX_QUESTION_CHARS + _refused_sentence_ceiling(planner_seam._avoid_sentence)
+            framing
+            + MAX_QUESTION_CHARS
+            + _failed_run_ceiling()
+            + _refused_sentence_ceiling(planner_seam._avoid_sentence)
+            + _refused_sentence_ceiling(planner_seam._keep_seeds_sentence)
+            + _earned_decline_ceiling()
+            + _share_units_repair_ceiling()
         )
         envelope += _refused_sentence_ceiling(planner_seam._refused_spec_reason)
     else:

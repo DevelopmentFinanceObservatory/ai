@@ -30,6 +30,12 @@ Everything past `upstream_trace` is what only the toolkit knows:
 - `exclusions`: every row this result's verb narrowed away, and why
   (`analysis_mcp.artifact.Exclusion`). `()` when nothing was dropped, or on
   a `Trace` predating this field.
+- `composed_stat_vars`: what each StatVar an operation minted is made of
+  (`common.materialisation.ComposedStatVar`), for every such StatVar the
+  stored frame holds and every one those name.
+  `tool_pipeline.store_result_and_render` sets it; no identity field reads
+  it. `()` when the frame holds none, or on a `Trace` stored without the
+  field.
 - `time`: whether this result's `time_period` names a genuine single
   observation (`analysis_mcp.artifact.Observation`, the default) or stands
   for a collapsed span of more than one real period
@@ -45,7 +51,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from common.materialisation import register_trace_codec
+from common.materialisation import ComposedStatVar, register_trace_codec
 from pydantic import BaseModel, ConfigDict, Field
 
 from analysis_mcp.artifact import Exclusion, Observation, Time
@@ -109,7 +115,7 @@ class AppliedPolicy(BaseModel):
     scalar `realised_coverage_fraction` -- `compare`'s per-side coverages,
     `growth`'s per-entity coverage breakdown and window bounds, `rank`'s
     coverage of each entity it keeps and the entity count and coverage range
-    of its whole ranked population, and every one of the eight verbs' own
+    of its whole ranked population, and every one of the nine verbs' own
     `detail["derived"]` marker (see `frame_ref_resolution.DerivedMarker`).
     Every verb documents its own `detail` shape in its own tool module
     rather than this schema growing a field per verb.
@@ -147,6 +153,14 @@ class Trace(BaseModel):
     applied_policy: AppliedPolicy
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)
+    composed_stat_vars: tuple[ComposedStatVar, ...] = Field(
+        default=(),
+        description=(
+            "The description of every operation-minted StatVar this result's stored "
+            "frame holds, and of every one those descriptions name, each after the "
+            "entries its sides name."
+        ),
+    )
     content_version: str = Field(pattern=TOOLKIT_CONTENT_VERSION_PATTERN)
     input_content_versions: tuple[
         Annotated[str, Field(pattern=_INPUT_CONTENT_VERSION_PATTERN)], ...
@@ -155,11 +169,12 @@ class Trace(BaseModel):
             "Every input frame's own `cv_` content_version this result was minted from -- "
             "exactly the values `identity.mint_toolkit_content_version`'s own "
             "`input_content_versions` argument was called with (one for a single-frame "
-            "verb, more than one for `join`/`compare`/`share_of`/`sum_of` when their two sides "
-            "differ). `content_version` above names the mint's own output; this names its "
+            "verb, more than one for `join`/`compare`/`share_of`/`sum_of`/`quotient_of` when "
+            "their two sides differ). `content_version` above names the mint's own output; "
+            "this names its "
             "inputs, so a stored result can be traced back to what it was computed from "
             "without re-deriving `input_content_version` from `upstream_trace` by hand. "
-            "Every one of this toolkit's eight verbs populates it; `()` only ever appears "
+            "Every one of this toolkit's nine verbs populates it; `()` only ever appears "
             "on a `Trace` predating this field (e.g. a frozen test fixture)."
         ),
     )

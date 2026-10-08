@@ -899,20 +899,22 @@ def _scope_window_issues(
     if kind != "range":
         return []
     start, end = requested.get("start_year"), requested.get("end_year")
-    if not (isinstance(start, int) and isinstance(end, int)) or end < start:
+    # A range with no end year holds every year from its start on.
+    if not isinstance(start, int) or not (end is None or (isinstance(end, int) and end >= start)):
         return []
-    if start <= period.start and period.end <= end:
+    if start <= period.start and (end is None or period.end <= end):
         return []
+    disjoint = period.end < start or (end is not None and end < period.start)
+    asked = f"{start} on" if end is None else f"{start}-{end}"
     # A range that shares no year with the period can never cover it; one
     # that merely falls short is a gap the requirement's coverage decides.
-    disjoint = end < period.start or period.end < start
     return [
         EvidenceIssue(
             code=EvidenceIssueCode.SCOPE_WINDOW_SHORT,
             severity=Severity.ERROR if disjoint else _coverage_severity(requirement),
             requirement_id=requirement.id,
             detail=(
-                f"the definition requests {start}-{end}, "
+                f"the definition requests {asked}, "
                 f"the requirement asks for {period.start}-{period.end}"
             ),
             found=requested,
@@ -1054,9 +1056,18 @@ def _detect_price_basis(text: str) -> tuple[PriceBasis | None, int | None]:
     return basis, int(years[0]) if len(years) == 1 else None
 
 
+def read_source_unit(source: SelectedSource) -> UnitReading:
+    """What `source`'s own unit states, read as `check_evidence` reads it: by the
+    unit id's structure, then by the unit's text for whatever that leaves unstated."""
+    evidence = evidence_from_source(source)
+    return _read_unit(evidence, _describe_unit(evidence))
+
+
 def _unit_issues(
     requirement: DatasetRequirement, evidence: RetrievalEvidence
 ) -> list[EvidenceIssue]:
+    """The findings on whether the unit `evidence` states is the one `requirement` asks for,
+    checking its currency, then its price basis. Empty when the requirement states no unit."""
     unit = requirement.unit
     if unit is None:
         return []

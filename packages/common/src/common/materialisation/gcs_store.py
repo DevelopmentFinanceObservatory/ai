@@ -2,7 +2,7 @@
 survives a process restart in one shared bucket, keyed by the reference
 pair a `FrameRef` names.
 
-One object per reference: `frames/v2/{spec_id}/{content_version}.parquet`,
+One object per reference: `frames/v3/{spec_id}/{content_version}.parquet`,
 uploaded with `if_generation_match=0` -- insert-only, first-writer-wins. A
 pair is content-addressed by construction (the reference pair names the
 exact frame it names), so a `PreconditionFailed` (412) means the bytes are
@@ -60,32 +60,44 @@ the identical wrong object.
 `open` runs step 1 alone and returns a `HeldFrame` whose `num_rows` is the
 recorded row count, so a caller claims the rows (`common.row_budget`)
 before any byte is downloaded. An object stored without a recorded count
-(every `frames/v1/` object, and `frames/v2/` objects written before `put`
-recorded one) has `num_rows` `None`, and its caller claims its own row
+(every `frames/v1/` object, and a `frames/v2/` object written without
+one) has `num_rows` `None`, and its caller claims its own row
 ceiling instead. The `HeldFrame`'s `read(max_rows=...)` downloads the
 object, runs steps 2 to 4 with `max_rows` as the claim, and decodes it.
 `get` is `open` then `read` with this store's row ceiling as the claim. The
 key prefix names the layout, so `open` knows which decoder applies before
-it reads a byte:
+it reads a byte. `_layouts` lists them in lookup order: `put` writes the
+first, and `open` reads each later one only when every name before it is a
+miss.
 
-- `frames/v2/` holds `frame_to_parquet_bytes`'s canonical Arrow layout,
-  which only this store writes. `frame_from_verified_parquet_bytes` reads
-  it with `pq.read_table` and wraps the table with `Frame.from_table`,
-  which checks the schema against the canonical frame schema and trusts
-  the cells.
-- `frames/v1/` holds the earlier layout (JSON-text `unit`, no `status`).
-  `put` does not write it, and `get` reads it only when the v2 name is a
-  miss. `frame_from_parquet_bytes` validates every cell through
-  `build_frame_from_arrow`. A v1 object ages out under the bucket's
-  lifecycle rule like any other.
+- `frames/v3/` holds `frame_to_parquet_bytes`'s canonical Arrow layout,
+  whose `unit` struct is `{ref, request, composed}`.
+  `frame_from_verified_parquet_bytes` reads it with `pq.read_table` and
+  wraps the table with `Frame.from_table`, which checks the schema against
+  the canonical frame schema and trusts the cells.
+- `frames/v2/` holds the same layout with `unit` as the two-member struct
+  `{ref, request}`, which holds no composed unit.
+  `frame_from_verified_two_member_parquet_bytes` gives the struct its
+  `composed` member, null on every row, and wraps the table the same way,
+  so the frame has the canonical bytes its rows have in any layout.
+- `frames/v1/` holds the text layout (JSON-text `unit`, no `status`).
+  `frame_from_parquet_bytes` validates every cell through
+  `build_frame_from_arrow`.
 
-An object that passes all four checks and still fails to decode (a v2
-schema other than the canonical one, a v1 cell the grammar refuses) raises
+`put` writes neither `frames/v2/` nor `frames/v1/`, and an object under
+either ages out under the bucket's lifecycle rule like any other.
+
+An object that passes all four checks and still fails to decode (a v3
+schema other than the canonical one, a v2 schema that is canonical under
+neither `unit` struct, a v1 cell the grammar refuses) raises
 `FrameIntegrityError`.
 
-A deployment that predates `frames/v2/` reads only `frames/v1/` names, so a
-pair this store wrote reaches it as a plain miss, never as bytes it would
-decode with the wrong layout.
+A deployment reads only the prefixes it knows. One whose newest layout is
+`frames/v2/` or `frames/v1/` sees a pair stored under `frames/v3/` as a
+plain miss, never as bytes it would decode with the wrong layout. During a
+rollout that is the intended reading: a frame a `frames/v3/` writer stores
+is not held for a reader still on `frames/v2/`, and the caller re-runs the
+tool that made it.
 
 `verify_content_version_on_read` (off by default, since it costs a full
 recompute on every read) additionally re-derives the frame's own
@@ -110,6 +122,31 @@ from `open` and `get` as a plain miss (`None`), indistinguishable from a
 pair that was never registered. The one `FrameExpired` this store raises
 comes from `HeldFrame.read`, for an object deleted after `open` found it.
 
+`get_trace` downloads the object and runs steps 1 to 4, then returns the trace
+from the footer's envelope. It decodes no column, so it claims no rows. The
+encoded-bytes ceiling bounds what it holds.
+
+A root frame's mint record (`common.materialisation.mint_record`) is one more
+object per reference, `mints/v1/{spec_id}/{content_version}.json`, holding
+`encode_mint_record`'s bytes. It is uploaded with `if_generation_match=0` like a
+frame, and a 412 means a record is already held, which stands. It is written
+apart from the frame's object, so a frame the bucket already holds gains one on
+its next mint. A stored record that does not decode, or whose `frame` is not the
+reference it was read under, raises `FrameIntegrityError`. The bucket's lifecycle
+rule deletes it on the schedule it deletes any object.
+
+An anchor record (`common.materialisation.anchor_record`) is one object per
+`anchor_key`, `anchors/v1/{anchor_key}.json`, holding `encode_anchor_record`'s
+bytes. It is uploaded with `if_generation_match=0`, and a 412 means a record is
+already held, which stands. A stored record that does not decode, or whose
+populations, roots and rule hash to another key, raises
+`AnchorRecordIntegrityError`. The bucket's lifecycle rule deletes it on the
+schedule it deletes any object.
+
+`list_frames` lists the object names under `frames/` with each object's creation
+time and downloads nothing. A pair held under both prefixes is listed once, at the
+earlier creation time. A name that is not a frame's is skipped.
+
 `asyncio.to_thread` crosses the synchronous `google-cloud-storage` client
 into this async protocol.
 """
@@ -122,22 +159,34 @@ import hashlib
 import io
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pyarrow.parquet as pq
 from dfo_frame_grammar import FrameError
 from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
+from pydantic import ValidationError
 
+from common.materialisation.anchor_record import (
+    AnchorRecord,
+    AnchorRecordIntegrityError,
+    decode_anchor_record,
+    encode_anchor_record,
+)
 from common.materialisation.frame_codec import (
     frame_from_parquet_bytes,
     frame_from_verified_parquet_bytes,
+    frame_from_verified_two_member_parquet_bytes,
     frame_to_parquet_bytes,
 )
+from common.materialisation.frame_ref import FrameRef
+from common.materialisation.mint_record import MintRecord, decode_mint_record, encode_mint_record
 from common.materialisation.store import (
     FrameExpired,
     FrameIntegrityError,
+    FrameListing,
     FrameTooLarge,
     HeldFrame,
 )
@@ -146,10 +195,10 @@ from common.materialisation.trace_codec import decode_trace, encode_trace
 if TYPE_CHECKING:
     from dfo_frame_grammar import Frame
 
-    from common.materialisation.frame_ref import FrameRef
     from common.materialisation.trace import StoredFrameTrace
 
 _PARQUET_CONTENT_TYPE = "application/octet-stream"
+_RECORD_CONTENT_TYPE = "application/json"
 _SHA256_METADATA_KEY = "frame_sha256"
 _WRITER_METADATA_KEY = "writer"
 _ROWS_METADATA_KEY = "frame_rows"
@@ -209,6 +258,11 @@ class _Bucket(Protocol):
     def blob(self, name: str) -> _Blob: ...
 
 
+class _ListedBlob(Protocol):
+    name: str
+    time_created: datetime | None
+
+
 class _StorageClient(Protocol):
     """The narrow slice of `google.cloud.storage.Client` this module calls.
 
@@ -218,15 +272,42 @@ class _StorageClient(Protocol):
     """
 
     def bucket(self, name: str) -> _Bucket: ...
+    def list_blobs(self, bucket_or_name: str, *, prefix: str) -> Iterable[_ListedBlob]: ...
     def close(self) -> None: ...
 
 
-_FRAME_PREFIX = "frames/v2"
-_LEGACY_FRAME_PREFIX = "frames/v1"
+def _layouts() -> tuple[tuple[str, Callable[[bytes], Frame]], ...]:
+    """Every key prefix this store reads, in lookup order, with the decoder its
+    layout needs. `put` writes under the first."""
+    return (
+        ("frames/v3", frame_from_verified_parquet_bytes),
+        ("frames/v2", frame_from_verified_two_member_parquet_bytes),
+        ("frames/v1", frame_from_parquet_bytes),
+    )
 
 
-def _frame_object_name(ref: FrameRef, *, prefix: str = _FRAME_PREFIX) -> str:
+_MINT_RECORD_PREFIX = "mints/v1"
+_ANCHOR_RECORD_PREFIX = "anchors/v1"
+
+# The prefix every frame layout sits under, and the name of a frame's object in any
+# of them. `FrameRef` decides whether the two ids are a frame's.
+_FRAMES_ROOT = "frames/"
+_FRAME_OBJECT_NAME = re.compile(
+    "(?:" + "|".join(re.escape(prefix) for prefix, _ in _layouts()) + ")"
+    r"/(?P<spec_id>[^/]+)/(?P<content_version>[^/]+)\.parquet"
+)
+
+
+def _frame_object_name(ref: FrameRef, *, prefix: str) -> str:
     return f"{prefix}/{ref.spec_id}/{ref.content_version}.parquet"
+
+
+def _mint_record_object_name(ref: FrameRef) -> str:
+    return f"{_MINT_RECORD_PREFIX}/{ref.spec_id}/{ref.content_version}.json"
+
+
+def _anchor_record_object_name(anchor_key: str) -> str:
+    return f"{_ANCHOR_RECORD_PREFIX}/{anchor_key}.json"
 
 
 class GcsMaterialisationStore:
@@ -300,7 +381,8 @@ class GcsMaterialisationStore:
         frame_bytes = frame_to_parquet_bytes(
             frame, metadata={_ENVELOPE_METADATA_KEY: json.dumps(envelope).encode("utf-8")}
         )
-        blob = bucket.blob(_frame_object_name(ref))
+        written_prefix, _ = _layouts()[0]
+        blob = bucket.blob(_frame_object_name(ref, prefix=written_prefix))
         blob.metadata = {
             _SHA256_METADATA_KEY: hashlib.sha256(frame_bytes).hexdigest(),
             _WRITER_METADATA_KEY: writer,
@@ -325,12 +407,7 @@ class GcsMaterialisationStore:
 
     def _open_one(self, ref: FrameRef) -> HeldFrame | None:
         bucket = self._client.bucket(self._bucket_name)
-        # Every prefix `open` reads, in lookup order, with the decoder its layout needs.
-        layouts = (
-            (_FRAME_PREFIX, frame_from_verified_parquet_bytes),
-            (_LEGACY_FRAME_PREFIX, frame_from_parquet_bytes),
-        )
-        for prefix, decode in layouts:
+        for prefix, decode in _layouts():
             blob = bucket.blob(_frame_object_name(ref, prefix=prefix))
             try:
                 # `reload()` fetches the object's resource -- size and custom
@@ -525,6 +602,118 @@ class GcsMaterialisationStore:
                     ref, reason="recomputed content_version does not match the expected value"
                 )
         return frame
+
+    async def get_trace(self, ref: FrameRef) -> StoredFrameTrace | None:
+        return await asyncio.to_thread(self._trace_of, ref)
+
+    def _trace_of(self, ref: FrameRef) -> StoredFrameTrace | None:
+        bucket = self._client.bucket(self._bucket_name)
+        for prefix, _ in _layouts():
+            blob = bucket.blob(_frame_object_name(ref, prefix=prefix))
+            try:
+                blob.reload()
+            except NotFound:
+                continue
+            recorded_rows = self._admit(ref, blob)
+            try:
+                frame_bytes = blob.download_as_bytes()
+            except NotFound as exc:
+                raise FrameExpired(ref) from exc
+            return self._verify(ref, blob, frame_bytes, recorded_rows, self._max_frame_rows)
+        return None
+
+    async def list_frames(self) -> list[FrameListing]:
+        return await asyncio.to_thread(self._list_frames)
+
+    def _list_frames(self) -> list[FrameListing]:
+        oldest: dict[tuple[str, str], FrameListing] = {}
+        for blob in self._client.list_blobs(self._bucket_name, prefix=_FRAMES_ROOT):
+            named = _FRAME_OBJECT_NAME.fullmatch(blob.name)
+            if named is None or blob.time_created is None:
+                continue
+            try:
+                ref = FrameRef(**named.groupdict())
+            except ValidationError:
+                continue
+            key = (ref.spec_id, ref.content_version)
+            if key not in oldest or blob.time_created < oldest[key].created_at:
+                oldest[key] = FrameListing(ref=ref, created_at=blob.time_created)
+        return sorted(
+            oldest.values(),
+            key=lambda listing: (
+                listing.created_at,
+                listing.ref.spec_id,
+                listing.ref.content_version,
+            ),
+        )
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        await asyncio.to_thread(self._put_mint_record, record)
+
+    def _put_mint_record(self, record: MintRecord) -> None:
+        blob = self._client.bucket(self._bucket_name).blob(_mint_record_object_name(record.frame))
+        # A record already under this name stands (see the module docstring).
+        with contextlib.suppress(PreconditionFailed):
+            blob.upload_from_string(
+                encode_mint_record(record),
+                content_type=_RECORD_CONTENT_TYPE,
+                if_generation_match=0,
+            )
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        return await asyncio.to_thread(self._mint_record_of, ref)
+
+    def _mint_record_of(self, ref: FrameRef) -> MintRecord | None:
+        blob = self._client.bucket(self._bucket_name).blob(_mint_record_object_name(ref))
+        try:
+            data = blob.download_as_bytes()
+        except NotFound:
+            return None
+        try:
+            record = decode_mint_record(data)
+        except ValueError as exc:
+            raise FrameIntegrityError(
+                ref, reason=f"stored mint record does not decode: {exc}"
+            ) from exc
+        if record.frame != ref:
+            raise FrameIntegrityError(ref, reason="stored mint record names a different reference")
+        return record
+
+    async def put_anchor_record(self, record: AnchorRecord) -> None:
+        await asyncio.to_thread(self._put_anchor_record, record)
+
+    def _put_anchor_record(self, record: AnchorRecord) -> None:
+        blob = self._client.bucket(self._bucket_name).blob(
+            _anchor_record_object_name(record.anchor_key)
+        )
+        # A record already under this name stands (see the module docstring).
+        with contextlib.suppress(PreconditionFailed):
+            blob.upload_from_string(
+                encode_anchor_record(record),
+                content_type=_RECORD_CONTENT_TYPE,
+                if_generation_match=0,
+            )
+
+    async def get_anchor_record(self, anchor_key: str) -> AnchorRecord | None:
+        return await asyncio.to_thread(self._anchor_record_of, anchor_key)
+
+    def _anchor_record_of(self, anchor_key: str) -> AnchorRecord | None:
+        blob = self._client.bucket(self._bucket_name).blob(_anchor_record_object_name(anchor_key))
+        try:
+            data = blob.download_as_bytes()
+        except NotFound:
+            return None
+        try:
+            record = decode_anchor_record(data)
+        except ValueError as exc:
+            raise AnchorRecordIntegrityError(
+                anchor_key, reason=f"stored anchor record does not decode: {exc}"
+            ) from exc
+        if record.anchor_key != anchor_key:
+            raise AnchorRecordIntegrityError(
+                anchor_key, reason="stored anchor record hashes to a different key"
+            )
+        return record
 
     async def aclose(self) -> None:
         await asyncio.to_thread(self._client.close)

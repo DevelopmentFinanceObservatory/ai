@@ -25,7 +25,12 @@ from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
-from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
+from common.materialisation import (
+    ComposedStatVar,
+    FrameRef,
+    InMemoryMaterialisationStore,
+    set_store,
+)
 from dfo_frame_grammar import Frame
 from fastmcp import Client
 
@@ -93,13 +98,13 @@ async def test_unregistered_denominator_pair_refuses_frame_not_held(seeded) -> N
     assert result.structured_content["code"] == "frame_not_held"
 
 
-async def test_grain_mismatch_refuses(seeded) -> None:
+async def test_grain_mismatch_refuses_when_no_period_is_shared(seeded) -> None:
     store, _handles = seeded
     numerator = Frame.build(
         role_keys=["reporter"],
         rows=[
-            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 1.0},
-            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 2.0},
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 1.0},
+            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2022", "value": 2.0},
         ],
     )
     denominator = Frame.build(
@@ -111,9 +116,11 @@ async def test_grain_mismatch_refuses(seeded) -> None:
 
     result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
     assert result.structured_content["code"] == "share_of_grain_mismatch"
-    assert result.structured_content["fix"]["numerator_periods"] == ["2020", "2021"]
-    assert result.structured_content["fix"]["denominator_periods"] == ["2020"]
-    assert result.structured_content["fix"]["matched_periods"] == ["2020"]
+    assert result.structured_content["fix"] == {
+        "numerator_periods": ["2021", "2022"],
+        "denominator_periods": ["2020"],
+        "key": {},
+    }
 
 
 async def test_both_sides_empty_names_the_real_fault_not_two_matching_empty_lists(seeded) -> None:
@@ -137,12 +144,11 @@ async def test_both_sides_empty_names_the_real_fault_not_two_matching_empty_list
     assert "matched" in message
 
 
-async def test_grain_mismatch_fix_names_the_filter_chain_and_common_periods(seeded) -> None:
-    """`share_of_grain_mismatch`'s refusal is fully recoverable inside the
-    toolkit when the two sides share some (not all) periods: a `filter`
-    call with a `category_match` on `time_period` narrowing both sides to
-    `matched_periods`, retried as `share_of`, succeeds. The refusal itself
-    must say so."""
+async def test_partial_overlap_divides_as_the_filtered_pair_does(seeded) -> None:
+    """A pair sharing some periods divides over those periods with no
+    narrowing first: the shares equal those of the same call after `filter`
+    narrows the numerator to the shared period, and the period left out is
+    recorded on the numerator."""
     store, _handles = seeded
     numerator = Frame.build(
         role_keys=["reporter"],
@@ -158,51 +164,33 @@ async def test_grain_mismatch_fix_names_the_filter_chain_and_common_periods(seed
     numerator_ref = await _seed_custom_frame(store, numerator)
     denominator_ref = await _seed_custom_frame(store, denominator)
 
-    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
-    message = result.content[0].text
-    assert "filter" in message
-    assert "category_match" in message
-    assert "time_period" in message
-    assert "['2020']" in message
-
-
-async def test_grain_mismatch_repair_chain_actually_works_end_to_end(seeded) -> None:
-    """Proves the chain `share_of_grain_mismatch`'s own message names is a
-    real repair, not just documentation: filtering the numerator down to
-    `matched_periods` via a `category_match` on `time_period`, then retrying
-    `share_of` on the resulting pair, succeeds."""
-    store, _handles = seeded
-    numerator = Frame.build(
-        role_keys=["reporter"],
-        rows=[
-            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2020", "value": 1.0},
-            {"stat_var": "dcid:X", "reporter": "dcid:USA", "time_period": "2021", "value": 2.0},
-        ],
-    )
-    denominator = Frame.build(
-        role_keys=["reporter"],
-        rows=[{"stat_var": "dcid:Y", "reporter": "dcid:USA", "time_period": "2020", "value": 10.0}],
-    )
-    numerator_ref = await _seed_custom_frame(store, numerator)
-    denominator_ref = await _seed_custom_frame(store, denominator)
-
-    refusal = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
-    matched_periods = refusal.structured_content["fix"]["matched_periods"]
-
+    direct = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
     narrowed = await filter_verb(
         frame_ref=numerator_ref,
-        predicates=(
-            {"kind": "category_match", "column": "time_period", "values": matched_periods},
-        ),
+        predicates=({"kind": "category_match", "column": "time_period", "values": ["2020"]},),
     )
-    assert narrowed.is_error is False
     narrowed_ref = {
         "spec_id": narrowed.structured_content["spec_id"],
         "content_version": narrowed.structured_content["content_version"],
     }
+    filtered = await share_of(frame_ref=narrowed_ref, denominator_frame_ref=denominator_ref)
 
-    retried = await share_of(frame_ref=narrowed_ref, denominator_frame_ref=denominator_ref)
-    assert retried.is_error is False
+    assert direct.is_error is False
+    assert filtered.is_error is False
+    (direct_frame, direct_trace), (filtered_frame, _filtered_trace) = [
+        await store.get(
+            FrameRef(
+                spec_id=result.structured_content["spec_id"],
+                content_version=result.structured_content["content_version"],
+            )
+        )
+        for result in (direct, filtered)
+    ]
+    assert direct_frame.table.column("value").to_pylist() == [10.0]
+    assert direct_frame.table.column("value").equals(filtered_frame.table.column("value"))
+    assert [
+        (exclusion.reason, exclusion.side, exclusion.rows) for exclusion in direct_trace.exclusions
+    ] == [("period_unmatched", "numerator", 1)]
 
 
 async def test_zero_denominator_refuses_share_of_zero_denominator(seeded) -> None:
@@ -326,6 +314,132 @@ async def test_cross_frame_unit_mismatch_refuses(seeded) -> None:
     assert result.structured_content["code"] == "cross_frame_unit_mismatch"
     assert result.structured_content["fix"]["numerator"] == "dcid:USDollar"
     assert result.structured_content["fix"]["denominator"] == "dcid:Percent"
+
+
+def _sourced_frame(
+    *, stat_var: str, provenance: str, value: float, years: range = range(2024, 2025)
+) -> Frame:
+    return Frame.build(
+        role_keys=["debtor"],
+        rows=[
+            {
+                "stat_var": stat_var,
+                "debtor": "dcid:country/NGA",
+                "time_period": str(year),
+                "value": value,
+                "unit": "dcid:USDollar",
+                "provenance": provenance,
+            }
+            for year in years
+        ],
+    )
+
+
+_IDS = "dcid:provenance/WorldBankInternationalDebtStatistics"
+_WDI = "dcid:dc/base/WorldDevelopmentIndicators"
+
+
+async def test_two_measures_from_two_sources_divide_with_both_sources_on_the_trace(
+    seeded,
+) -> None:
+    """Nigeria's debt service from IDS (1970-2024) as a share of its GDP
+    from WDI (1960-2025): two StatVars, so their differing provenance warns
+    in full, the share divides over the 55 years both report, the 11 GDP
+    years outside them are recorded on the denominator, and the trace
+    records each side's own provenance. Every row holds the share in per
+    cent under the operation's own StatVar, which the trace describes, and
+    the digest states the first and latest share straight after its
+    header."""
+    store, _handles = seeded
+    debt_service, gdp = 5.0, 200.0
+    numerator_ref = await _seed_custom_frame(
+        store,
+        _sourced_frame(
+            stat_var="dcid:DebtService",
+            provenance=_IDS,
+            value=debt_service,
+            years=range(1970, 2025),
+        ),
+    )
+    denominator_ref = await _seed_custom_frame(
+        store,
+        _sourced_frame(
+            stat_var="dcid:Amount_EconomicActivity_GDP",
+            provenance=_WDI,
+            value=gdp,
+            years=range(1960, 2026),
+        ),
+    )
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+
+    assert result.is_error is False
+    assert result.structured_content["rows"] == 55
+    digest = result.content[0].text
+    assert digest.startswith(
+        "share_of: 55 matched period(s), in per cent (Percent)\n\n"
+        "first 1970: 2.500%; latest 2024: 2.500%\n\n"
+    )
+    assert "periods left out: only the denominator reports 1960" in digest
+    assert "(11 total)" in digest
+    assert "coverage numerator 100.0%, denominator 83.3%" in digest
+    warning_lines = [
+        line for line in result.content[0].text.splitlines() if "facet 'provenance'" in line
+    ]
+    assert len(warning_lines) == 1
+    assert _IDS in warning_lines[0]
+    assert _WDI in warning_lines[0]
+    assert warning_lines[0].endswith("each keeps its own")
+    frame, trace = await store.get(
+        FrameRef(
+            spec_id=result.structured_content["spec_id"],
+            content_version=result.structured_content["content_version"],
+        )
+    )
+    assert frame.table.column("time_period").to_pylist() == [str(y) for y in range(1970, 2025)]
+    own_stat_var = f"dcid:{result.structured_content['spec_id']}"
+    assert frame.table.column("value").to_pylist() == [debt_service / gdp * 100] * 55
+    assert {row[frame.columns.index("unit")] for row in frame.rows} == {"Percent"}
+    assert set(frame.table.column("stat_var").to_pylist()) == {own_stat_var}
+    assert trace.composed_stat_vars == (
+        ComposedStatVar(
+            stat_var=own_stat_var,
+            relation="share",
+            first=("dcid:DebtService",),
+            second=("dcid:Amount_EconomicActivity_GDP",),
+        ),
+    )
+    assert trace.applied_policy.resolved_unit == "Percent"
+    assert trace.applied_policy.detail["numerator_resolved_unit"] == "dcid:USDollar"
+    assert trace.applied_policy.detail["derived"] == {"dimensionless": True}
+    assert trace.applied_policy.policy_name == "share_of_intersect_periods"
+    assert trace.applied_policy.detail["matched_periods"] == [str(y) for y in range(1970, 2025)]
+    assert trace.applied_policy.realised_coverage_fraction == pytest.approx(55 / 66)
+    assert [
+        (exclusion.reason, exclusion.side, exclusion.rows) for exclusion in trace.exclusions
+    ] == [("period_unmatched", "denominator", 11)]
+    assert trace.applied_policy.resolved_facets == {"provenance": _IDS}
+    assert trace.applied_policy.detail["denominator_resolved_facets"] == {"provenance": _WDI}
+
+
+async def test_one_measure_from_two_sources_refuses_naming_the_measure(seeded) -> None:
+    store, _handles = seeded
+    numerator_ref = await _seed_custom_frame(
+        store, _sourced_frame(stat_var="dcid:DebtService", provenance=_IDS, value=5.0)
+    )
+    denominator_ref = await _seed_custom_frame(
+        store, _sourced_frame(stat_var="dcid:DebtService", provenance=_WDI, value=20.0)
+    )
+
+    result = await share_of(frame_ref=numerator_ref, denominator_frame_ref=denominator_ref)
+
+    assert result.structured_content["code"] == "cross_frame_facet_mismatch"
+    assert result.structured_content["fix"] == {
+        "axis": "provenance",
+        "numerator": _IDS,
+        "denominator": _WDI,
+    }
+    assert "dcid:DebtService" in result.structured_content["message"]
 
 
 async def test_denominator_by_key_not_in_numerator_by_refuses_op_spec_invalid(seeded) -> None:
@@ -570,6 +684,7 @@ async def test_replay_from_execution_record_content_is_bit_identical(seeded) -> 
     replayed = run_share_of(
         numerator_frame,
         denominator_frame,
+        stat_var=f"dcid:{stored_trace.op_spec_hash}",
         numerator_entity=parameters["numerator_entity"],
         denominator_entity=parameters["denominator_entity"],
         numerator_pinned_unit=parameters["numerator_unit"],

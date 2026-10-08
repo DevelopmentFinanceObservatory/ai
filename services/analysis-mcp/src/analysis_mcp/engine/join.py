@@ -38,7 +38,7 @@ construction) -- so this engine never calls `math.fsum`: single-op verbs
 need no reduction, and this one carries no non-finite refusal. Each
 emitted `unit` is copied the same way, from the matched row, which after
 narrowing declares its side's resolved unit (a ref, a converted
-`grammar.UnitRequest`, or none).
+`grammar.UnitRequest`, a `grammar.ComposedUnit`, or none).
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
 from analysis_mcp.engine.columnar import frame_from_columns, keys_unique, repeated
@@ -233,8 +233,8 @@ class JoinResult:
     `frame.rows`."""
 
     frame: Frame
-    left_resolved_unit: str | UnitRequest | None
-    right_resolved_unit: str | UnitRequest | None
+    left_resolved_unit: UnitCell | None
+    right_resolved_unit: UnitCell | None
     left_facet_selections: tuple[FacetSelection, ...]
     right_facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
@@ -291,8 +291,8 @@ def _keyed_table(
     *,
     side: Literal["left", "right"],
     key_columns: Sequence[str],
-    pinned_unit: str | UnitRequest | None,
-) -> tuple[pa.Table, str | UnitRequest | None, tuple[FacetSelection, ...], Exclusions]:
+    pinned_unit: UnitCell | None,
+) -> tuple[pa.Table, UnitCell | None, tuple[FacetSelection, ...], Exclusions]:
     """Resolve `frame`'s unit/facets and narrow its table to the rows that
     take part in the join. Refuses (`JoinAmbiguousKeyError`) if any join key
     (`key_columns` values plus `time_period`) repeats.
@@ -338,8 +338,8 @@ def run_join(
     right_frame: Frame,
     *,
     join_keys: Sequence[str] = (),
-    left_pinned_unit: str | UnitRequest | None = None,
-    right_pinned_unit: str | UnitRequest | None = None,
+    left_pinned_unit: UnitCell | None = None,
+    right_pinned_unit: UnitCell | None = None,
     max_output_rows: int | None = None,
 ) -> JoinResult:
     """Inner-join `left_frame` and `right_frame` on their shared role

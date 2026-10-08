@@ -15,8 +15,8 @@ a second, independent retrieve-then-aggregate pair reading a population
 requirement -- for tests that check a step's evidence is bound to the source
 it was compiled to retrieve, not whichever one a tool happens to answer with.
 `join_plan` retrieves a debt and a GDP series and joins them into one terminal
-frame, and `two_input_plan` does the same for a compare or a share_of -- for
-tests of a terminal frame that rests on more than one retrieval.
+frame, and `two_input_plan` does the same for a compare, a share_of or a
+quotient_of -- for tests of a terminal frame that rests on more than one retrieval.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from planner.operations import (
     GroupBy,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     Reduction,
     RetrieveOperation,
     ShareOfOperation,
@@ -63,6 +64,7 @@ from planner.plan import (
     Period,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RequirementSide,
     ShareOfRequirement,
 )
@@ -531,8 +533,8 @@ def two_input_plan(
     """Return a factory for an approved plan whose one terminal frame rests on two retrievals.
 
     A debt retrieval (`debt`) and a GDP retrieval (`gdp`) feed a single
-    terminal step named `combined`, a `join` by default or a `compare` or
-    `share_of` when `kind` says so. Either side reads its own retrieval
+    terminal step named `combined`, a `join` by default or a `compare`, a
+    `share_of` or a `quotient_of` when `kind` says so. Either side reads its own retrieval
     directly, so the terminal frame's lineage is exactly those two.
     `retrieval_ids` renames the two retrieval steps, debt first.
     """
@@ -576,6 +578,19 @@ def two_input_plan(
                     denominator=RequirementSide(input_id="annual_gdp"),
                 )
                 operation = ShareOfOperation(
+                    id="combined",
+                    requirement_id="combined",
+                    numerator=Side(input=debt_id),
+                    denominator=Side(input=gdp_id),
+                )
+            case "quotient_of":
+                derived = QuotientRequirement(
+                    id="combined",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="annual_debt_service"),
+                    denominator=RequirementSide(input_id="annual_gdp"),
+                )
+                operation = QuotientOfOperation(
                     id="combined",
                     requirement_id="combined",
                     numerator=Side(input=debt_id),

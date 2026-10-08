@@ -2,15 +2,16 @@
 
 Holds infrastructure: the FastMCP instance, the `/healthz` liveness route,
 the fixture-store lifespan, and the console-script entry point (settings,
-logging, telemetry, transport). Registers the closed eight-verb set, one
-tool per verb, each under an explicit wire name. `filter` needs the
-explicit name because the Python function backing it cannot be called
-`filter` without shadowing the builtin (see `filter_tool.py`'s own
-docstring).
+logging, telemetry, transport). Registers the closed nine-verb set, one
+tool per verb, each under an explicit wire name, and `resolve_anchor`
+(`rolling_tool.py`), which finds the latest period rolling calls follow and
+computes no frame. `filter` needs the explicit name because the Python
+function backing it cannot be called `filter` without shadowing the builtin
+(see `filter_tool.py`'s own docstring).
 
 Refusal policy: every anticipated failure gets its own typed refusal, built
 and returned via `to_tool_result` inside that verb's own tool module (see
-each `*_tool.py`'s own module docstring). Underneath all eight sits the
+each `*_tool.py`'s own module docstring). Underneath all nine sits the
 backstop: `_with_internal_error_backstop` wraps each verb at its
 registration site, so an exception the verb's own typed handling missed
 becomes an `internal_error` refusal instead of a raw traceback crossing the
@@ -18,7 +19,7 @@ MCP wire. Wrapping the verb puts that backstop inside the tool boundary,
 after `fastmcp` has resolved the tool and validated its arguments, which
 leaves a bad argument to report itself as the protocol error it is. An
 unknown tool name is also left to report itself as a protocol error, but
-`_NameUnknownVerbsMiddleware` names the eight registered verbs and points
+`_NameUnknownVerbsMiddleware` names the nine registered verbs and points
 the caller at `tools/list` in that error's text.
 """
 
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,6 +45,7 @@ from common.materialisation import (
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
 from common.refusal import log_unexpected_error
 from common.telemetry import init_telemetry
+from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -57,8 +59,14 @@ from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.fixtures import seed_fixture_store
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
+from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
+from analysis_mcp.rolling_tool import (
+    RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+    RESOLVE_ANCHOR_VERSION,
+    resolve_anchor,
+)
 from analysis_mcp.settings import Settings
 from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.sum_of_tool import sum_of
@@ -141,9 +149,22 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
 mcp = FastMCP(name="analysis-mcp", lifespan=_lifespan, auth=BearerTokenVerifier())
 
 
+_TITLES: Mapping[str, str] = {
+    "aggregate": "Aggregate by group",
+    "compare": "Compare two series",
+    "growth": "Calculate growth",
+    "rank": "Rank entities",
+    "share_of": "Calculate share of total",
+    "join": "Join two results",
+    "filter": "Filter rows",
+    "sum_of": "Add two series",
+    "quotient_of": "Divide two series",
+}
+
+
 def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
     """Register one verb under its wire name, behind the internal-error
-    backstop, declaring its `IMPLEMENTATION_VERSIONS` entry and
+    backstop, declaring its `_TITLES` and `IMPLEMENTATION_VERSIONS` entries and
     `VERB_OUTPUT_SCHEMA` -- the schema `result.VerbResult` derives and
     `tool_pipeline.store_result_and_render` builds every successful payload
     from. `-> ToolResult` on the wrapped function suppresses fastmcp's own
@@ -154,6 +175,8 @@ def _register(fn: Callable[..., Awaitable[ToolResult]], wire_name: str) -> None:
         _with_internal_error_backstop(fn, wire_name),
         name=wire_name,
         version=IMPLEMENTATION_VERSIONS[wire_name],
+        title=_TITLES[wire_name],
+        annotations=READ_ONLY_CATALOGUE,
         output_schema=VERB_OUTPUT_SCHEMA,
     )
 
@@ -166,6 +189,18 @@ _register(share_of, "share_of")
 _register(join, "join")
 _register(filter_verb, "filter")
 _register(sum_of, "sum_of")
+_register(quotient_of, "quotient_of")
+
+# `resolve_anchor` computes no frame, so it declares its own result schema and
+# version in place of the verbs'.
+mcp.tool(
+    _with_internal_error_backstop(resolve_anchor, "resolve_anchor"),
+    name="resolve_anchor",
+    version=RESOLVE_ANCHOR_VERSION,
+    title="Find the latest period",
+    annotations=READ_ONLY_CATALOGUE,
+    output_schema=RESOLVE_ANCHOR_OUTPUT_SCHEMA,
+)
 
 
 class _NameUnknownVerbsMiddleware(Middleware):

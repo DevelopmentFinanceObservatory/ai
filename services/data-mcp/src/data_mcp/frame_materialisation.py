@@ -2,6 +2,12 @@
 registers the result in the shared materialisation store under its frame
 reference (`frame_ref_for`) -- the step that closes the gap between a mint and
 an analysis-mcp verb's own `frame_ref` resolution.
+
+Each mint that reads or parses the frame also writes its mint record
+(`common.materialisation.MintRecord`) to the store: the dfo-apis pair, the
+`options` and `scope` the mint was sent with, which a later mint of the same
+rendering needs and the frame's own trace does not hold, and the frame's
+distinct StatVar count.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
+from types import MappingProxyType
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +35,7 @@ from common.materialisation import (
     FrameTooLarge,
     MaterialisationStore,
     MaterialisationTrace,
+    MintRecord,
     get_store,
 )
 from common.place_type import PLACE_ROLE, UNTYPED, type_column
@@ -41,10 +49,13 @@ from dfo_frame_grammar import (
     VALUE_COLUMN,
     Frame,
     FrameError,
+    UnitRequest,
     array_kernel,
     build_frame_from_arrow,
     canonical_frame_schema,
     map_units,
+    unit_cell_array,
+    unit_cell_from_json,
     unit_codes,
 )
 from dfo_frame_grammar.grammar import validate_unit_request
@@ -57,6 +68,8 @@ from data_mcp.settings import Settings
 from data_mcp.tool_errors import ToolRefusal
 
 __all__ = [
+    "DEFAULT_MINT_OPTIONS",
+    "PLACE_TYPE_COLUMNS",
     "DegradedReason",
     "MaterialisationOutcome",
     "frame_ref_for",
@@ -90,6 +103,20 @@ _MIN_FETCH_BUDGET_S = 5.0
 # Seconds of a caller's deadline the store write leaves unspent, for the caller's
 # rendering of its result.
 _AFTER_WRITE_RESERVE_S = 3.0
+
+# The `options` of a mint that sums nothing and selects no columns. `layout: "frame"`
+# asks for the bare columns `_frame_from_parquet_bytes` reads, and dfo-apis stores it
+# in the artifact's `rendering`, so the selection by equal rendering
+# (`_select_requested_artifact`) keeps the frame file apart from long-layout files
+# minted under the same pair.
+DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
+    {"format": "parquet", "bundle": False, "layout": "frame"}
+)
+
+# What `get_data(place_types=True)` asks dfo-apis for in `options.columns`. A list that names
+# only enrichment columns adds them to every default column, so the decoded
+# `stat_var_<code system>` columns stay beside `observationAbout_type`.
+PLACE_TYPE_COLUMNS: tuple[str, ...] = (type_column(PLACE_ROLE),)
 
 # Every reserved column name `build_frame_from_arrow` recognises -- everything else in a
 # fetched artifact's own schema is a role key. Imported from `dfo_frame_grammar.grammar`'s
@@ -143,6 +170,7 @@ async def materialise_and_register(
     settings: Settings,
     writer: str,
     options: Mapping[str, Any],
+    scope: Mapping[str, Any] | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> MaterialisationOutcome:
@@ -152,6 +180,14 @@ async def materialise_and_register(
     reference `frame_ref_for` gives the manifest's pair and `options.columns`, and
     its bytes are the artifact whose `rendering` equals `options`
     (`_select_requested_artifact`).
+
+    `scope` is the mint request's `scope`, `None` for a mint that sent none. Every
+    outcome that read or parsed the frame also writes its mint record
+    (`_write_mint_record`), whether this call registered the frame or found it held,
+    so a frame stored without a record gains one the next time it is minted. A refusal writes none, and neither does a degraded outcome that saw no
+    frame: the record states the frame's StatVar count, the store keeps the first
+    record written under a pair, and one written without the count would stand for
+    good.
 
     Called once per successful `get_data` mint, after the manifest itself has already
     validated. Checks the store first: a pair already held, read back under a row claim
@@ -193,7 +229,43 @@ async def materialise_and_register(
         transport=transport,
         deadline=deadline,
     )
-    return outcome if outcome.status == "refused" else replace(outcome, frame_ref=ref)
+    if outcome.status == "refused":
+        return outcome
+    if outcome.stat_var_count is not None:
+        await _write_mint_record(
+            MintRecord(
+                frame=ref,
+                # The pair `_ref_or_refusal` has already checked against `FrameRef`'s shape.
+                dataset=FrameRef(
+                    spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+                ),
+                options=dict(options),
+                scope=dict(scope or {}),
+                stat_var_count=outcome.stat_var_count,
+            ),
+            deadline=deadline,
+        )
+    return replace(outcome, frame_ref=ref)
+
+
+async def _write_mint_record(record: MintRecord, *, deadline: CallDeadline | None) -> None:
+    """Write `record` to the store while `_AFTER_WRITE_RESERVE_S` of `deadline` remains.
+
+    The store keeps the first record written under a pair, so this is safe on every
+    mint. A write that runs out of deadline is logged and left, since the frame is
+    registered either way, the next mint of the pair writes the record again, and
+    `data_mcp.mint_recovery.recover_mint_record` covers a root that has none.
+    """
+    write_deadline = deadline.reserving(_AFTER_WRITE_RESERVE_S) if deadline is not None else None
+    try:
+        async with asyncio.timeout(_seconds_left(write_deadline)):
+            await get_store().put_mint_record(record)
+    except TimeoutError:
+        logger.warning(
+            "materialise_and_register: the mint record write for %s/%s ran out of deadline",
+            record.frame.spec_id,
+            record.frame.content_version,
+        )
 
 
 async def _register(
@@ -854,8 +926,8 @@ def _check_unit_requests(column: pa.ChunkedArray) -> None:
     A struct column carries `{currency, prices, base_year}` with every field on every
     row, so a current-price unit arrives with a null `base_year`; its null fields are
     dropped before the check, as `build_frame_from_arrow` drops them, so it passes. A struct
-    in the frame's own tagged `ref`/`request` form, a current-price unit with a base
-    year, or one with no currency is refused `invalid_unit`. Each distinct value is
+    in the frame's own tagged form (`ref`, `request`, `composed`), a current-price unit
+    with a base year, or one with no currency is refused `invalid_unit`. Each distinct value is
     checked once. A text or null column passes.
     """
     if not pa.types.is_struct(column.type):
@@ -871,29 +943,34 @@ def _check_unit_requests(column: pa.ChunkedArray) -> None:
 _UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,)).field(UNIT_COLUMN).type
 
 
-def _tagged_unit_from_text(text: object) -> dict[str, object] | None:
-    """One text `unit` cell as the frame's tagged `{ref, request}` unit value.
+def _tagged_unit_from_text(text: object) -> object:
+    """One text `unit` cell as the value of the frame's tagged unit struct.
 
     dfo-apis writes a text `unit` column (`materialise.formats._cell_text`): a unit ref
     as its own text, and a converted unit as the JCS text of its
     `{currency, prices, base_year}` object. A unit ref never starts with `{`, so a cell
     that does is a converted unit. It must parse as JSON, which makes it an object, and
-    pass `validate_unit_request`, checked here so Arrow never drops an unknown member or
-    fails on a mistyped one while building the struct.
+    the grammar's `unit_cell_from_json` must read it as a unit request, so Arrow never
+    drops an unknown member or fails on a mistyped one while building the struct. A
+    composed unit is refused `invalid_unit`: an artifact dfo-apis mints holds none.
     """
     if text is None:
         return None
     cell = cast(str, text)
-    if not cell.startswith("{"):
-        return {"ref": cell, "request": None}
-    try:
-        request: dict[str, object] = json.loads(cell)
-    except json.JSONDecodeError as exc:
-        raise FrameError(
-            "schema_violation", f"unit text {cell[:80]!r} is not a converted-unit object"
-        ) from exc
-    validate_unit_request(request)
-    return {"ref": None, "request": request}
+    if cell.startswith("{"):
+        try:
+            unit = unit_cell_from_json(json.loads(cell))
+        except json.JSONDecodeError as exc:
+            raise FrameError(
+                "schema_violation", f"unit text {cell[:80]!r} is not a converted-unit object"
+            ) from exc
+        if not isinstance(unit, UnitRequest):
+            raise FrameError(
+                "invalid_unit", f"unit text {cell[:80]!r} is not a converted-unit object"
+            )
+    else:
+        unit = unit_cell_from_json(cell)
+    return unit_cell_array(unit, 1)[0].as_py()
 
 
 def _with_text_units_decoded(table: pa.Table) -> pa.Table:

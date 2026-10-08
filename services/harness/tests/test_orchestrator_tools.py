@@ -207,6 +207,39 @@ def test_the_chart_descriptions_state_both_series_caps():
     assert f"at most {MAX_SERIES_PER_COMPONENT} series" in properties["select_json"]["description"]
 
 
+def test_a_chart_title_carries_its_period_unless_the_period_moves():
+    properties = Chart.model_json_schema()["properties"]
+    title = properties["title"]["description"]
+
+    assert "the period it shows" in title
+    assert "a stat card's title carries the period" in title
+    assert "rolling: true" in title
+    assert "latest_periods" in title
+    assert "its title leaves out the years it shows" in title
+    assert "counted back from the latest data" in properties["latest_periods"]["description"]
+
+
+async def test_make_charts_writes_latest_periods_as_a_relative_window():
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    chart = {
+        "frame": frame_id_for(REF),
+        "type": "line_chart",
+        "title": "Over the last three years",
+        "select_json": json.dumps({"observationAbout": "country/NGA"}),
+    }
+
+    await tools["make_charts"]([{**chart, "latest_periods": 3}, chart], ctx)
+
+    moving, whole = [args["intent"] for tool, args in executor.calls if tool == "write_component"]
+    assert moving["window"] == {
+        "start": {"anchor": "latest", "offset": -2},
+        "end": {"anchor": "latest", "offset": 0},
+    }
+    assert "window" not in whole
+
+
 # --- search ---------------------------------------------------------------
 
 
@@ -238,7 +271,7 @@ async def test_search_sends_every_part_in_one_call_and_returns_every_reading():
         "life expectancy and GDP in Nigeria",
         [
             {"variable": "life expectancy", "entities": [{"text": "Nigeria"}]},
-            {"variable": "GDP", "entities": [{"text": "Nigeria"}]},
+            {"variable": "GDP", "entities": [{"text": "Africa", "members": True}]},
         ],
         ctx,
     )
@@ -247,7 +280,7 @@ async def test_search_sends_every_part_in_one_call_and_returns_every_reading():
     assert resolver.calls[0]["question"] == "life expectancy and GDP in Nigeria"
     assert resolver.calls[0]["parts"] == [
         {"variable": "life expectancy", "entities": [{"text": "Nigeria"}]},
-        {"variable": "GDP", "entities": [{"text": "Nigeria"}]},
+        {"variable": "GDP", "entities": [{"text": "Africa", "members": True}]},
     ]
     assert found["kind"] == "resolution"
     assert [part["status"] for part in found["parts"]] == ["definite", "candidates"]
@@ -1057,3 +1090,106 @@ async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation
 
     ctx.state["orchestrator:calls"] = {"recall": BUDGETS["recall"]}
     assert "limit" in (await tools["recall"]("plan", ctx))["error"]
+
+
+class EmptyExecutor(FakeExecutor):
+    """get_data's outcome for dfo-apis' real zero-row mint (Kenya health spending,
+    1960-1970, on dev 2026-10-07): 200, `coverage.rows` 0 and an `empty_result` warning."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data":
+            self.calls.append((tool, args))
+            return {
+                "outcome": "ok",
+                "frame_refs": [REF],
+                "summary": None,
+                "rows": 0,
+                "warnings": [
+                    {
+                        "code": "empty_result",
+                        "severity": "warn",
+                        "message": "The materialised frame holds zero observations.",
+                    }
+                ],
+            }
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+async def test_fetch_of_data_with_no_observations_is_refused_and_registers_no_frame():
+    executor = EmptyExecutor()
+    tools, ctx = _tools(executor=executor)
+
+    result = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert result["code"] == "empty_result"
+    assert "no observations" in result["refusal"]
+    assert "frames" not in result
+    assert [tool for tool, _ in executor.calls] == ["get_data"]
+    assert not ctx.state.get("orchestrator:frames")
+
+
+async def test_fetch_of_empty_data_again_unchanged_answers_without_a_call():
+    executor = EmptyExecutor()
+    tools, ctx = _tools(executor=executor)
+
+    await tools["fetch"](SPEC_LIFE, ctx)
+    again = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert [tool for tool, _ in executor.calls] == ["get_data"]
+    assert again["code"] == "empty_result"
+    assert again["same_data_as"] == SPEC_LIFE
+
+
+async def test_fetch_of_empty_data_through_an_equivalent_spec_records_it_under_its_own_id():
+    executor = EmptyExecutor()
+    tools, ctx = _tools(executor=executor)
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _role_open_block(SPEC_AID),
+        SPEC_LIFE: _role_open_block(SPEC_LIFE),
+    }
+
+    await tools["fetch"](SPEC_AID, ctx)
+    again = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert [tool for tool, _ in executor.calls] == ["get_data"]
+    assert again["spec_id"] == SPEC_LIFE
+    assert again["same_data_as"] == SPEC_AID
+
+
+class FacetRefusingExecutor(FakeExecutor):
+    """get_data's outcome for dfo-apis' real refusal of a Euro unit on Kenya and Ghana
+    health spending (dev, 2026-10-07)."""
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        self.calls.append((tool, args))
+        return {
+            "outcome": "refusal",
+            "refusal": {
+                "code": "default_facet_undefined",
+                "retry_mode": "correct_and_retry",
+                "message": "The platform refused the requested data for Kenya, Ghana.",
+                "fix": {
+                    "issues": [
+                        {
+                            "axis": "unit",
+                            "alternatives": [{"ref": "USDollar", "label": "USDollar"}],
+                            "truncated": False,
+                            "code": None,
+                            "detail": None,
+                        }
+                    ],
+                    "detail": "one or more facet axes could not be resolved",
+                    "retryable": False,
+                },
+            },
+        }
+
+
+async def test_fetch_refusal_carries_the_platforms_details_and_retry_mode():
+    tools, ctx = _tools(executor=FacetRefusingExecutor())
+
+    result = await tools["fetch"](SPEC_LIFE, ctx)
+
+    assert result["code"] == "default_facet_undefined"
+    assert result["retry_mode"] == "correct_and_retry"
+    assert result["fix"]["issues"][0]["alternatives"] == [{"ref": "USDollar", "label": "USDollar"}]

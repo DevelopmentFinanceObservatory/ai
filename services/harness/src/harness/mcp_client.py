@@ -87,7 +87,7 @@ import random
 import re
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -112,15 +112,25 @@ from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from harness.conversation import current_conversation_caller, current_conversation_id
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
+    BOTH_SIDES_VERBS,
     Lineage,
+    OwnStatVars,
     ProvenanceInput,
     ProvenanceStore,
-    SumOfSides,
+    SidePart,
     data_artifact,
     manifest_with_stat_vars,
     merged_manifest,
     retrieval_frame_ref,
     summed_stat_var_count,
+)
+from harness.rolling_cards import (
+    AdmittedWrite,
+    CardReplay,
+    CardWithheld,
+    RollingCards,
+    resolved_basis,
+    written_title_refusal,
 )
 from harness.settings import Settings
 from harness.tool_contracts import (
@@ -364,6 +374,39 @@ class McpResolver:
         return resolver_digest(envelope)
 
 
+def _held_to_its_resolved_periods(
+    intent: Mapping[str, Any], outcome: dict[str, Any]
+) -> dict[str, Any]:
+    """`outcome`, a stored card whose intent states a relative period, or the
+    refusal of its title when it names a period the platform resolved for it
+    (`harness.rolling_cards.written_title_refusal`). `intent` is the card as
+    stored (`AdmittedWrite.stored_card`): for a revise, the stored intent with
+    the patch merged in, or the patch alone when the stored intent could not be
+    read, judged against the title the new revision drew when it names none.
+
+    The periods exist only once the platform has stored the card, so a refused
+    card stays stored there as a revision no canvas shows, as a card withheld
+    for its provenance does.
+    """
+    component = outcome["component"]
+    drawn = (component.get("payload") or {}).get("component") or {}
+    refusal = written_title_refusal(
+        intent,
+        title=intent.get("title") or (drawn.get("title") or {}).get("text"),
+        window=(component.get("fact_summary") or {}).get("window"),
+        basis=resolved_basis(component.get("payload")),
+    )
+    if refusal is None:
+        return outcome
+    logger.warning(
+        "write_component withheld for component_id=%r: its title names %s, a period "
+        "resolved from the latest data",
+        component.get("component_id"),
+        refusal["fix"]["period"],
+    )
+    return {"outcome": "refusal", "refusal": refusal}
+
+
 class McpExecutor:
     """Plan steps against data-mcp and presentation-mcp, in the graph's outcome grammar.
 
@@ -373,6 +416,15 @@ class McpExecutor:
     store is shared with `harness.studio_translate._RecordingSurface`, the
     approved-plan path's own writer -- `_assemble_component` below reads
     from it regardless of which path retrieved the frame.
+
+    Every `write_component` passes `harness.rolling_cards.RollingCards.admit`
+    before it is sent (`_admitted_write`), whoever asked for it. A card whose
+    period follows the latest data is written on the frame of the series it
+    draws, replayed through `card_replay` when that is another frame than the
+    one the intent names, and is refused with a harness refusal when its title
+    names a year or no such frame can be had. A `describe_frame` view of a
+    frame that rolls carries `rolling: true`, so whoever reads the view to
+    title a card knows.
 
     `sleep` waits between retries, `jitter` draws each wait and `clock` times
     a call's attempts against its deadline (see the module docstring's
@@ -385,6 +437,7 @@ class McpExecutor:
         *,
         settings: Settings,
         provenance: ProvenanceStore | None = None,
+        card_replay: CardReplay | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Jitter = random.uniform,
         clock: Callable[[], float] = time.monotonic,
@@ -403,6 +456,9 @@ class McpExecutor:
         # path to share it with (a test, `McpResolver`'s doubles) gets a
         # private one.
         self._provenance = provenance if provenance is not None else ProvenanceStore()
+        # The rules for a card whose period follows the latest data, with the
+        # frames and replays they have found, shared by every conversation.
+        self._rolling_cards = RollingCards(replay=card_replay, clock=clock)
         # Indicator metadata (label/definition) from data-mcp `describe`,
         # cached per dcid for the process life -- definitions do not move.
         self._indicator_cache: dict[str, dict[str, str]] = {}
@@ -465,6 +521,21 @@ class McpExecutor:
         earlier refusal no longer says what happened. Any other outcome, and
         the refusal no retry follows, comes back as it is.
         """
+        if tool == "write_component":
+            try:
+                admitted = await self._admitted_write(args)
+            except CardWithheld as withheld:
+                return {"outcome": "refusal", "refusal": withheld.refusal}
+            outcome = await self._retried(tool, admitted.args, on_progress=on_progress)
+            if admitted.stored_card is not None and outcome.get("outcome") == "ok":
+                return _held_to_its_resolved_periods(admitted.stored_card, outcome)
+            return outcome
+        return await self._retried(tool, args, on_progress=on_progress)
+
+    async def _retried(
+        self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None
+    ) -> dict[str, Any]:
+        """One call of `tool` and the retries `__call__` describes."""
         deadline_s = self._policy.call_timeout_s(tool)
         started = self._clock()
         outcome = await self._attempt(tool, args, on_progress=on_progress)
@@ -516,6 +587,77 @@ class McpExecutor:
                 return outcome
         return outcome
 
+    async def _admitted_write(self, args: dict[str, Any]) -> AdmittedWrite:
+        """The arguments to send for a `write_component` call, under the rules
+        for a card whose period follows the latest data
+        (`harness.rolling_cards.RollingCards.admit`).
+
+        A write moved to a frame replayed for the card's own series gives that
+        frame the lineage of the frame the intent named, because the replay
+        computes the same recipe and so rests on the same retrievals, carries
+        the same StatVars and names the same `sum_of` sides.
+
+        Raises:
+            CardWithheld: A rule refuses the write.
+        """
+        admitted = await self._rolling_cards.admit(
+            args,
+            read_view=self._frame_view,
+            read_stored=self._stored_component,
+            read_window=self._requested_window,
+        )
+        if admitted.replayed_from is not None:
+            conversation = current_conversation_id.get()
+            source = (
+                admitted.replayed_from.get("spec_id"),
+                admitted.replayed_from.get("content_version"),
+            )
+            target = admitted.args["intent"]["frame_ref"]
+            self._provenance.alias(
+                conversation=conversation,
+                spec_id=target["spec_id"],
+                content_version=target["content_version"],
+                sources=[source],
+                stat_var_count=self._provenance.stat_var_count(
+                    conversation=conversation, spec_id=source[0], content_version=source[1]
+                ),
+                own_stat_vars=self._provenance.own_stat_vars(
+                    conversation=conversation, spec_id=source[0], content_version=source[1]
+                ),
+            )
+        return admitted
+
+    def _requested_window(self, frame_ref: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        """The `requested_window` of the definition `frame_ref` was retrieved
+        for, from the retrieval's manifest in the provenance store. `None` for
+        a frame with no manifest there, a frame resting on several retrievals,
+        and a manifest that states no window."""
+        lineage = self._provenance.get(
+            conversation=current_conversation_id.get(),
+            spec_id=frame_ref.get("spec_id"),
+            content_version=frame_ref.get("content_version"),
+        )
+        if lineage is None or len(lineage) != 1:
+            return None
+        definition = lineage[0].manifest.get("definition") or {}
+        window = (definition.get("identity") or {}).get("requested_window")
+        return window if isinstance(window, Mapping) else None
+
+    async def _frame_view(self, frame_ref: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The view of `frame_ref`, or `None` when presentation-mcp refuses it."""
+        described = await self._presentation("describe_frame", {"frame_ref": dict(frame_ref)})
+        return described.get("view") if described.get("outcome") == "ok" else None
+
+    async def _stored_component(self, component_id: str) -> dict[str, Any] | None:
+        """`component_id`'s head revision as `describe_component` gives it, with
+        the revision's resolved payload under `resolved_payload` when the read
+        carried one, or `None` when presentation-mcp refuses the read."""
+        described = await self._presentation("describe_component", {"component_id": component_id})
+        body = described.get("component_body")
+        if described.get("outcome") != "ok" or not isinstance(body, dict):
+            return None
+        return {**body, "resolved_payload": described.get("resolved_payload")}
+
     async def _attempt(
         self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None
     ) -> dict[str, Any]:
@@ -552,7 +694,13 @@ class McpExecutor:
             content_version=ref["content_version"],
             manifest=manifest,
         )
-        return {"outcome": "ok", "frame_refs": [ref], "summary": _manifest_summary(manifest)}
+        return {
+            "outcome": "ok",
+            "frame_refs": [ref],
+            "summary": _manifest_summary(manifest),
+            "rows": (manifest.get("coverage") or {}).get("rows"),
+            "warnings": manifest.get("warnings") or [],
+        }
 
     async def _presentation(
         self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
@@ -581,10 +729,20 @@ class McpExecutor:
             # contract); a transport-level error still arrives as is_error.
             return _refusal_outcome(body, fallback_text=_result_text(result))
         if tool == "describe_frame":
+            frame_ref = args.get("frame_ref")
+            if isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref):
+                body = {**body, "rolling": True}
             return {"outcome": "ok", "frame_refs": [], "view": body}
-        if tool == "describe_component":
-            return {"outcome": "ok", "frame_refs": [], "component_body": body}
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
+        if tool == "describe_component":
+            # The body is the model vocabulary. The resolved payload holds the
+            # labels the platform drew for the revision's relative periods.
+            return {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component_body": body,
+                "resolved_payload": envelope if isinstance(envelope, dict) else None,
+            }
         if not isinstance(envelope, dict) or not isinstance(envelope.get("component"), dict):
             logger.warning(
                 "write_component withheld for component_id=%r: the result carries no "
@@ -650,44 +808,104 @@ class McpExecutor:
             for ref in refs
         ]
 
-    async def _sum_of_indicators(
+    async def _own_stat_var_indicators(
         self,
         refs: list[str],
         *,
         lineage: Lineage,
         family: Mapping[str, dict[str, str]],
-        sides: SumOfSides,
+        written: OwnStatVars,
     ) -> dict[str, dict[str, str]]:
-        """The indicator row for each `sum_of` ref among `refs`, named by what it adds.
+        """The indicator row for each ref among `refs` that a verb wrote for
+        its own result, named by its two sides in the verb's words
+        (`BOTH_SIDES_VERBS`): "X plus Y" for a sum, "X per Y" for a quotient
+        and "X as a share of Y" for a share. Two sides holding the same
+        StatVars read "X", "Ratio of X" and "Share of X".
 
-        A side's name is its retrievals' indicator names: a summed family's
-        from `family`, any other StatVar's from `describe`. A sum whose side
-        rests on a retrieval missing from `lineage` gets no row.
+        A side's name is its parts' names joined by " and ": a summed
+        family's from `family`, an earlier verb's own ref by that verb's
+        sides in turn, as dfo-apis labels a published frame, and any other
+        StatVar's from `describe`. A share of Debt per Population over GDP per
+        Population reads "Debt per Population as a share of GDP per
+        Population". A ref whose sides rest on a retrieval missing from
+        `lineage` gets no row.
         """
         members = {(member.spec_id, member.content_version): member for member in lineage}
-        rows: dict[str, dict[str, str]] = {}
+        named: dict[str, dict[str, str] | None] = {}
         for ref in refs:
-            if ref not in sides:
-                continue
-            names: list[str] = []
-            for side in sides[ref]:
-                side_members = [members.get(key) for key in side]
-                if not side_members or None in side_members:
-                    break
-                side_refs = [
-                    stat_var
-                    for member in side_members
-                    if member is not None
-                    for stat_var in _member_stat_vars(member)
-                ]
-                side_rows = await self._indicators_for(side_refs, named=family)
-                names.append(" and ".join(dict.fromkeys(row["name"] for row in side_rows)))
+            if ref in written:
+                await self._name_own_stat_var(
+                    ref, members=members, family=family, written=written, named=named
+                )
+        return {ref: row for ref in refs if (row := named.get(ref)) is not None}
+
+    async def _name_own_stat_var(
+        self,
+        ref: str,
+        *,
+        members: Mapping[tuple[str | None, str | None], ProvenanceInput],
+        family: Mapping[str, dict[str, str]],
+        written: OwnStatVars,
+        named: dict[str, dict[str, str] | None],
+    ) -> dict[str, str] | None:
+        """`ref`'s row for `_own_stat_var_indicators`, memoised in `named`,
+        or `None` when a side cannot be named."""
+        if ref in named:
+            return named[ref]
+        named[ref] = None
+        tool, *sides = written[ref]
+        wording = BOTH_SIDES_VERBS[tool].own_stat_var
+        if wording is None:
+            return None
+        named_sides: list[tuple[str, list[str]]] = []
+        for side in sides:
+            named_side = await self._name_side(
+                side, members=members, family=family, written=written, named=named
+            )
+            if named_side is None:
+                return None
+            named_sides.append(named_side)
+        (first, first_refs), (second, second_refs) = named_sides
+        named[ref] = {
+            "name": f"{wording.equal_sides}{first}"
+            if first_refs == second_refs
+            else wording.joiner.join((first, second)),
+            "description": wording.description,
+        }
+        return named[ref]
+
+    async def _name_side(
+        self,
+        side: Sequence[SidePart],
+        *,
+        members: Mapping[tuple[str | None, str | None], ProvenanceInput],
+        family: Mapping[str, dict[str, str]],
+        written: OwnStatVars,
+        named: dict[str, dict[str, str] | None],
+    ) -> tuple[str, list[str]] | None:
+        """One side's name for `_name_own_stat_var`, with the StatVar refs it
+        names, or `None` when a part cannot be named or the side is empty."""
+        refs: list[str] = []
+        own_rows: dict[str, dict[str, str]] = {}
+        for part in side:
+            if isinstance(part, str):
+                if part not in written:
+                    return None
+                row = await self._name_own_stat_var(
+                    part, members=members, family=family, written=written, named=named
+                )
+                if row is None:
+                    return None
+                own_rows[part] = row
+                refs.append(part)
+            elif (member := members.get(part)) is not None:
+                refs.extend(_member_stat_vars(member))
             else:
-                rows[ref] = {
-                    "name": " plus ".join(names),
-                    "description": "The two added together for each year both report.",
-                }
-        return rows
+                return None
+        if not refs:
+            return None
+        rows = await self._indicators_for(refs, named={**family, **own_rows})
+        return " and ".join(dict.fromkeys(row["name"] for row in rows)), refs
 
     async def _describe_into_cache(self, refs: list[str]) -> None:
         """Describe `refs` in concurrent batches, filling `_indicator_cache`
@@ -792,10 +1010,11 @@ class McpExecutor:
 
         The indicators listed are the StatVars the chart draws
         (`_drawn_stat_vars`), a summed family's ref named as dfo-apis names
-        it (`_family_indicators`) and a `sum_of` result's ref by the two
-        sides it adds (`_sum_of_indicators`). `indicator_count` counts the
-        StatVars of the frame the card draws from: the count the step that produced the
-        frame declared (`ProvenanceStore.stat_var_count`), or, for a
+        it (`_family_indicators`) and a `sum_of`, `quotient_of` or `share_of`
+        result's ref by its two sides (`_own_stat_var_indicators`).
+        `indicator_count` counts the StatVars of the frame the card draws
+        from, which is the count the step that produced the frame declared
+        (`ProvenanceStore.stat_var_count`), or, for a
         retrieval's frame held without one, the StatVars its manifest
         summed or, for an unsummed one, resolved.
 
@@ -837,17 +1056,17 @@ class McpExecutor:
         manifest = merged_manifest(lineage)
         drawn = _drawn_stat_vars(platform_facts)
         family = _family_indicators(lineage)
-        sums = await self._sum_of_indicators(
+        written = await self._own_stat_var_indicators(
             drawn,
             lineage=lineage,
             family=family,
-            sides=self._provenance.sum_of_sides(
+            written=self._provenance.own_stat_vars(
                 conversation=current_conversation_id.get(),
                 spec_id=frame_ref.get("spec_id"),
                 content_version=frame_ref.get("content_version"),
             ),
         )
-        indicators = await self._indicators_for(drawn, named={**family, **sums})
+        indicators = await self._indicators_for(drawn, named={**family, **written})
         return {
             "component_id": component_id,
             "revision": revision,
@@ -990,7 +1209,8 @@ def _wire_fact_summary(
     which the label states. `indicators` lists the StatVars the chart draws,
     so a list shorter than the count is a partial one. Each series carries
     the periods of its first and last values, read from the drawn points:
-    a series with gaps starts or ends inside the window."""
+    a series with gaps starts or ends inside the window. `unit` is the
+    platform's, forwarded as it is: the unit slot of the card's payload."""
     platform_ids = Counter(entry.get("id") for entry in platform_facts.get("series") or [])
     periods = {
         series_id: dated
@@ -1030,6 +1250,8 @@ def _wire_fact_summary(
     window = platform_facts.get("window") or _drawn_window(component)
     if window.get("start") and window.get("end"):
         summary["window"] = {"start": str(window["start"]), "end": str(window["end"])}
+    if (unit := platform_facts.get("unit")) is not None:
+        summary["unit"] = unit
     if defaults := platform_facts.get("defaults"):
         summary["defaults"] = [
             {"pointer": str(entry["pointer"]), "detail": str(entry["detail"])} for entry in defaults
