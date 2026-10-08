@@ -49,10 +49,34 @@ def test_write_component_schema_has_six_anyof_branches() -> None:
     assert {branch["properties"]["type"]["const"] for branch in branches} == set(MEMBERS)
 
 
-def test_write_component_schema_defs_are_exactly_the_reachable_three() -> None:
+def test_write_component_schema_defs_are_exactly_the_reachable_four() -> None:
     schema = write_component_schema(release=RELEASE)
 
-    assert set(schema["$defs"]) == {"frame_ref", "title", "window"}
+    assert set(schema["$defs"]) == {"frame_ref", "relative_period", "title", "window"}
+
+
+def test_write_component_schema_offers_a_relative_period_wherever_a_period_is_stated() -> None:
+    """A model reads the relative form only from this schema, so each period
+    field must offer it beside the label."""
+    schema = write_component_schema(release=RELEASE)
+    (stat_card,) = [
+        branch
+        for branch in schema["properties"]["intent"]["anyOf"]
+        if branch["properties"]["type"]["const"] == "stat_card"
+    ]
+    change, _ = stat_card["properties"]["change"]["anyOf"]
+    window = schema["$defs"]["window"]["properties"]
+
+    for forms in (
+        window["start"]["oneOf"],
+        window["end"]["oneOf"],
+        change["properties"]["basis"]["items"]["oneOf"],
+    ):
+        assert {"$ref": "#/$defs/relative_period"} in forms
+    assert schema["$defs"]["relative_period"]["properties"] == {
+        "anchor": {"const": "latest"},
+        "offset": {"type": "integer", "maximum": 0},
+    }
 
 
 def test_write_component_schema_refs_all_resolve_within_the_document() -> None:
@@ -91,7 +115,9 @@ def test_write_component_schema_refs_resolve_from_the_document_root() -> None:
 def test_write_component_schema_size_is_bounded() -> None:
     schema = write_component_schema(release=RELEASE)
 
-    assert len(json.dumps(schema)) < 6_500
+    # 9,682 characters at catalogue release 2026.10.0, which added the relative
+    # period, the stat card's change, and their descriptions.
+    assert len(json.dumps(schema)) < 10_000
 
 
 def test_write_component_schema_top_level_shape() -> None:

@@ -11,8 +11,8 @@ the same graph, and replaces only what a model or an upstream would answer:
   either submits the canned plan `harness.scripted_plan` builds, so the seam
   renders its real first message and the graph's approval, execution and
   hand-back nodes run as served, or, when the case scripts it (`planner`),
-  answers from that script and drives the real `propose_plan` and
-  `translate`, which discovers through the case's canned `translator_search`
+  answers from that script and drives the real `propose_plan`, whose
+  translation discovers through the case's canned `translator_search`
   results and compiles against the real servers' tool schemas;
 - search answers from the case's canned envelopes, run through the digest the
   served resolver builds (`harness.tool_contracts.resolver_digest`);
@@ -133,8 +133,8 @@ class OrchestratorLlm(BaseLlm):
 class PlannerLlm(BaseLlm):
     """The planner's model: it submits the plan it was handed, once per entry.
 
-    The plan is written into the session's planner state the way `propose_plan`
-    and `translate` leave a compiled plan there, then `submit_plan` declares
+    The plan is written into the session's planner state the way a translated
+    `propose_plan` leaves a compiled plan there, then `submit_plan` declares
     it ready. Every other generation closes the run.
     """
 

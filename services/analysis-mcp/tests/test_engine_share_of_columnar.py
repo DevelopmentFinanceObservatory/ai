@@ -36,7 +36,12 @@ def test_first_overflow_is_found_key_by_key_in_first_row_order() -> None:
 
     with pytest.raises(ShareOfNonFiniteResultError) as exc_info:
         run_share_of(
-            frame, frame, numerator_entity={}, denominator_entity={}, numerator_by=["sector"]
+            frame,
+            frame,
+            stat_var="dcid:ops_" + "c" * 32,
+            numerator_entity={},
+            denominator_entity={},
+            numerator_by=["sector"],
         )
 
     assert exc_info.value.time_period == "2011"

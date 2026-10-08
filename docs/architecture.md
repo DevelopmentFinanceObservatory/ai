@@ -42,10 +42,11 @@ requirement (an aggregate, a growth, a comparison, and so on), alongside the
 dataset requirements that feed them, and the planner's tools answer with a
 typed result carrying a stable code, rather than an unstructured error string,
 so a caller can branch on what stopped a call without parsing its message.
-`harness.agents` gives the planner the translator as one function tool,
-`translate`, so the planner calls it inside its own turn, the plan passes
-through session state, and the answer is the compiled outcome or the referral
-translation stopped on.
+`harness.agents` attaches the translator to the planner's `propose_plan`: an
+accepted proposal runs translation on the plan it recorded, the plan passes
+through session state, and the proposal's answer carries a `translation`
+verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
+stopped on.
 Nothing runs until the user approves. The planner's own tool is `submit_plan`:
 it approves nothing and executes nothing, and declares a compiled plan ready
 for the user's answer. The gate is the graph's own approval interrupt, raised
@@ -75,7 +76,7 @@ duplicating that logic.
 computation over data the harness has already retrieved. Rather than asking
 the model to compute a number directly, the model emits an op-spec against a
 closed verb set (`aggregate`, `compare`, `growth`, `rank`, `share_of`,
-`join`, `filter`). Deterministic code executes that spec and returns a
+`quotient_of`, `sum_of`, `join`, `filter`). Deterministic code executes that spec and returns a
 frame reference, a summary, and a trace (instead of raw bulk data back into the model's
 context).
 

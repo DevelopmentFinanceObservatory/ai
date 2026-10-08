@@ -11,7 +11,7 @@ that checks them.
 This module closes that gap. For every case in `harness-translator-v1.
 evalset.json`, it loads the seeded plan and drives the real `discover_source`
 and `propose_operations`/`return_to_planner` functions
-(`translator.tool.build_translator_core`, the same three `translate` drives
+(`translator.tool.build_translator_core`, the same three translation drives
 directly, in Python) against `harness_translator_v1.discovery_stub.EvalSurface` on a fake
 `ToolContext`, and asserts the result against the case's own expected
 `tool_responses` entry with `matches_subset` -- the same subset matcher
@@ -38,9 +38,9 @@ the referral kind and target the case expects, then calls `return_to_planner`
 with exactly that action to reach the outcome and check it the same way as a
 mapping case.
 
-`harness-pair-v1.evalset.json` states what `translate` answers the planner,
-so its cases run through the `translate` tool itself (`build_translate_tool`)
-on the seeded plan, or, for the one case with none, on the plan its rubric
+`harness-pair-v1.evalset.json` states the `translation` a `propose_plan`
+answers the planner with, so its cases run the translation itself
+(`build_translate`) on the seeded plan, or, for the one case with none, on the plan its rubric
 describes.
 
 `harness-planner-v2.evalset.json` seeds no plan -- the live planner drafts
@@ -74,6 +74,7 @@ from planner.operations import (  # noqa: E402
     CompareOperation,
     GrowthOperation,
     Operation,
+    QuotientOfOperation,
     RetrieveOperation,
     ShareOfOperation,
     Side,
@@ -88,12 +89,14 @@ from planner.plan import (  # noqa: E402
     GrowthRequirement,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     ShareOfRequirement,
     inputs_of,
 )
+from planner.workflow import ArtifactKind, Binding, WorkflowStep  # noqa: E402
 from translator.mechanical import TranslatorCore  # noqa: E402
 from translator.referral import ReferralKind  # noqa: E402
-from translator.tool import build_translate_tool, build_translator_core  # noqa: E402
+from translator.tool import build_translate, build_translator_core  # noqa: E402
 
 from .decision_drafts import drafts  # noqa: E402
 
@@ -144,8 +147,8 @@ def _core() -> TranslatorCore:
 
 
 async def _translate(context: FakeToolContext) -> dict[str, Any]:
-    """What the planner's `translate` tool answers on `context`'s plan."""
-    return await build_translate_tool(surface=EvalSurface()).func(tool_context=context)
+    """The `translation` a `propose_plan` answers the planner with on `context`'s plan."""
+    return await build_translate(surface=EvalSurface())(context)  # ty: ignore[invalid-argument-type] -- the fake carries the state and session the translation reads
 
 
 def mirror(plan: Plan, spec_ids: dict[str, str]) -> Translation:
@@ -164,7 +167,7 @@ def mirror(plan: Plan, spec_ids: dict[str, str]) -> Translation:
     Args:
         plan: The plan to mirror. Every requirement kind it states has to be
             one this function handles (dataset, aggregate, growth, comparison,
-            share_of); anything else raises `NotImplementedError`, since no
+            share_of, quotient_of); anything else raises `NotImplementedError`, since no
             eval case here needs it.
         spec_ids: The spec_id discovery found for each dataset requirement,
             keyed by requirement id.
@@ -240,6 +243,17 @@ def _build_operation(
             requirement_id=requirement.id,
             numerator=side(requirement.numerator),
             denominator=side(requirement.denominator),
+            axis=requirement.axis,
+            denominator_scope=requirement.denominator_scope,
+        )
+    if isinstance(requirement, QuotientRequirement):
+        return QuotientOfOperation(
+            id=op_id,
+            requirement_id=requirement.id,
+            numerator=side(requirement.numerator),
+            denominator=side(requirement.denominator),
+            axis=requirement.axis,
+            denominator_axis=requirement.denominator_axis,
         )
     raise NotImplementedError(f"mirror does not handle {type(requirement).__name__}")
 
@@ -259,7 +273,11 @@ async def _discover_definite(
     return source["spec_id"]
 
 
-async def _propose_mapping_case(case_id: str) -> None:
+async def _propose_mapping_case(case_id: str) -> FakeToolContext:
+    """Propose the mirror of `case_id`'s plan and check it against the case's expectation.
+
+    Returns the context, whose plan state now holds the compiled workflow.
+    """
     case = _TRANSLATOR_CASES[case_id]
     plan = _plan_from(case)
     context = _context_holding(plan)
@@ -276,6 +294,14 @@ async def _propose_mapping_case(case_id: str) -> None:
 
     assert result["outcome"] == "ok", result
     assert matches_subset(_expected_response(case)["response"], result)
+    return context
+
+
+def _last_step(context: FakeToolContext) -> WorkflowStep:
+    """The final step of the workflow `propose_operations` compiled into `context`."""
+    workflow = Plan.model_validate_json(context.state[PLAN_STATE_KEY]).workflow
+    assert workflow is not None
+    return workflow.steps[-1]
 
 
 @pytest.mark.parametrize(
@@ -284,6 +310,9 @@ async def _propose_mapping_case(case_id: str) -> None:
         "maps-an-annual-total-onto-aggregate",
         "maps-a-window-onto-growth",
         "compares-two-entities",
+        "maps-a-per-head-figure-with-a-unit-less-denominator",
+        "maps-a-keyed-per-head-figure-onto-quotient_of",
+        "maps-a-keyed-share-onto-share_of",
     ],
 )
 async def test_a_mapping_cases_expected_outcome_is_reachable(case_id: str) -> None:
@@ -318,9 +347,63 @@ async def test_the_constant_price_referral_is_reachable() -> None:
     assert matches_subset(_expected_response(case)["response"], referred)
 
 
-async def test_the_unit_less_denominator_referral_is_reachable() -> None:
-    case = _TRANSLATOR_CASES["refers-a-per-head-figure-with-a-unit-less-denominator"]
+async def test_a_per_head_figure_compiles_to_one_quotient_of_pinning_the_numerators_unit() -> None:
+    context = await _propose_mapping_case("maps-a-per-head-figure-with-a-unit-less-denominator")
+
+    step = _last_step(context)
+
+    # The population side declares no unit, so only the numerator is pinned.
+    assert step.tool.name == "quotient_of"
+    assert step.args == {"numerator_unit": "USD"}
+    assert step.bindings == {
+        "frame_ref": Binding(from_step="op_annual_debt_service", output=ArtifactKind.FRAME_REF),
+        "denominator_frame_ref": Binding(from_step="op_population", output=ArtifactKind.FRAME_REF),
+    }
+
+
+async def test_a_keyed_per_head_figure_divides_each_recipient_by_its_own_population() -> None:
+    context = await _propose_mapping_case("maps-a-keyed-per-head-figure-onto-quotient_of")
+
+    step = _last_step(context)
+
+    assert step.tool.name == "quotient_of"
+    assert step.args == {
+        "numerator_by": ["recipient"],
+        "denominator_by": {"recipient": "observationAbout"},
+        "numerator_unit": "USD",
+    }
+
+
+async def test_a_keyed_share_divides_each_debtors_service_by_its_own_exports() -> None:
+    context = await _propose_mapping_case("maps-a-keyed-share-onto-share_of")
+
+    step = _last_step(context)
+
+    assert step.tool.name == "share_of"
+    assert step.args == {"numerator_by": ["debtor"], "denominator_by": {"debtor": "debtor"}}
+
+
+async def test_the_share_of_form_of_a_per_head_figure_is_referred_for_repair() -> None:
+    # A share_of divides a part by its whole in one unit. The per-head plan's
+    # sides hold US dollars and a unit-less count, so the compiler sends it
+    # back to the planner with the verb that does divide them.
+    case = _TRANSLATOR_CASES["maps-a-per-head-figure-with-a-unit-less-denominator"]
     plan = _plan_from(case)
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                ShareOfRequirement(
+                    id=requirement.id,
+                    decision_ids=requirement.decision_ids,
+                    numerator=requirement.numerator,
+                    denominator=requirement.denominator,
+                )
+                if isinstance(requirement, QuotientRequirement)
+                else requirement
+                for requirement in plan.evidence_requirements
+            )
+        }
+    )
     context = _context_holding(plan)
     core = _core()
 
@@ -334,18 +417,25 @@ async def test_the_unit_less_denominator_referral_is_reachable() -> None:
     )
 
     assert proposed["outcome"] == "invalid_input", proposed
-    assert [issue["code"] for issue in proposed["detail"]["issues"]] == ["frame_unit_unbound"]
+    assert [issue["code"] for issue in proposed["detail"]["issues"]] == ["share_units_differ"]
     action = proposed["action"]
     assert action["call"] == "return_to_planner"
 
     referred = core.return_to_planner(
         kind=ReferralKind(action["arguments"]["kind"]),
-        reason="no operation divides a unit-less count into a value in US dollars",
+        reason="the share's sides hold different units",
         requirement_id=action["arguments"]["requirement_id"],
+        constraint=action["arguments"]["constraint"],
+        repair=action["arguments"]["repair"],
         tool_context=context,
     )
 
-    assert matches_subset(_expected_response(case)["response"], referred)
+    assert referred["outcome"] == "referred", referred
+    referral = referred["referral"]
+    assert referral["kind"] == "requirement_needs_repair"
+    assert referral["requirement_id"] == "debt_service_per_head"
+    assert referral["constraint"] == "share_units_differ"
+    assert "quotient_of" in referral["repair"]
 
 
 async def test_the_several_sources_referral_is_reachable() -> None:
@@ -435,6 +525,29 @@ def test_the_planner_sets_expected_outcomes_are_reachable() -> None:
     assert matches_subset(expected("rejected-plan-blocks-execution", 0), first)
     assert matches_subset(expected("rejected-plan-blocks-execution", 1), rejected)
     assert matches_subset(expected("adversarial-execute-before-approval", 0), first)
+
+
+@pytest.mark.parametrize("case_id", sorted(_TRANSLATOR_CASES))
+def test_a_seeded_plan_is_one_propose_plan_records(case_id: str) -> None:
+    # A seeded plan reaches the translator without passing `propose_plan`,
+    # which holds a draft to rules `Plan` alone does not, such as the words
+    # an entity's `role` takes. Each case's plan is proposed as the model
+    # would state it, so a case rests on no plan the planner could not write.
+    plan = _plan_from(_TRANSLATOR_CASES[case_id])
+    tools = {tool.name: tool for tool in build_planner_tools()}
+
+    proposed = tools["propose_plan"].func(
+        question=plan.question,
+        answer_mode=plan.answer_mode,
+        decisions=drafts(plan.decisions),
+        evidence_requirements=[
+            requirement.model_dump(mode="json") for requirement in plan.evidence_requirements
+        ],
+        declined=list(plan.declined),
+        tool_context=FakeToolContext(),
+    )
+
+    assert proposed["outcome"] == "ok", proposed
 
 
 def test_plan_status_is_draft_for_every_seeded_case() -> None:

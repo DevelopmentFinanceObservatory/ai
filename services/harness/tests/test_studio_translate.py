@@ -36,7 +36,6 @@ from harness.studio_state import ConversationState, StudioStore, _next_manifest
 from harness.studio_translate import (
     _PLANNER_FAILED_DETAIL,
     _STEP_DETAIL_CAP,
-    _checking_label,
     _ExecutorRecord,
     _RecordingExecutor,
     _RecordingSurface,
@@ -45,7 +44,13 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.wire import CompositionActor, CompositionBlock, PlanAsk, StepProduced, StepStatus
-from planner.plan import PLAN_STATE_KEY, DatasetRequirement, UnsupportedOperation, plan_revision
+from planner.plan import (
+    PLAN_STATE_KEY,
+    DatasetRequirement,
+    Plan,
+    UnsupportedOperation,
+    plan_revision,
+)
 from planner.workflow import ToolId
 
 from .resolved_revision import resolved_revision
@@ -1050,56 +1055,97 @@ def _status_lines(frames: list[Any]) -> list[tuple[str, str, StepStatus]]:
 
 
 def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
-    """The planner's function-call events arrive while it drafts, so each
-    one opens its line then, and completes the line before it."""
+    """The planner's function-call events arrive as the model finishes a
+    call, so each one opens its line then, and completes the line before it.
+    `propose_plan` translates the plan before it answers, so its call opens
+    the checking line and its response completes that line: the duration
+    covers the translation. The completing frame's `detail` names the data of
+    the plan the proposal recorded."""
     translator = _translator()
+    scripted = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    dataset = next(r for r in scripted.evidence_requirements if isinstance(r, DatasetRequirement))
+    second = dataset.model_copy(update={"id": "second", "measure": "health spending"})
+    plan = Plan(
+        question="q",
+        decisions=scripted.decisions,
+        evidence_requirements=(dataset, second),
+    )
 
     working = translator.translate(_node_event("planner", planner_started={"revising": False}))
-    drafting = translator.translate(_planner_call("propose_plan", question="q"))
-    checking = translator.translate(_planner_call("translate"))
+    checking = translator.translate(_planner_call("propose_plan", question="q"))
+    checked = translator.translate(
+        _planner_answer(
+            "propose_plan",
+            {"outcome": "ok", "translation": {"outcome": "ok"}},
+            **{PLAN_STATE_KEY: plan.model_dump_json()},
+        )
+    )
     ready = translator.translate(_planner_call("submit_plan", version=1))
     done = translator.translate(_node_event("planner", route="ok", output={"version": 1}))
 
     assert _status_lines(working) == [("s0", "Working on a plan", StepStatus.RUNNING)]
-    assert _status_lines(drafting) == [
-        ("s0", "Working on a plan", StepStatus.COMPLETE),
-        ("s2", "Drafting a plan", StepStatus.RUNNING),
-    ]
     assert _status_lines(checking) == [
-        ("s2", "Drafting a plan", StepStatus.COMPLETE),
-        ("s4", "Checking the plan against the data", StepStatus.RUNNING),
+        ("s0", "Working on a plan", StepStatus.COMPLETE),
+        ("s2", "Checking the plan against the data", StepStatus.RUNNING),
     ]
-    assert _status_lines(ready) == [
-        ("s4", "Checking the plan against the data", StepStatus.COMPLETE),
-        ("s6", "Getting the plan ready for you", StepStatus.RUNNING),
+    assert _status_lines(checked) == [
+        ("s2", "Checking the plan against the data", StepStatus.COMPLETE)
     ]
-    assert _status_lines(done) == [("s6", "Getting the plan ready for you", StepStatus.COMPLETE)]
+    assert _status_lines(ready) == [("s4", "Getting the plan ready for you", StepStatus.RUNNING)]
+    assert _status_lines(done) == [("s4", "Getting the plan ready for you", StepStatus.COMPLETE)]
+    assert [f.detail for f in checked] == ["life expectancy at birth for Kenya and 1 more"]
     # Studio shows a line as done only once a frame carries `duration_ms`.
-    completed = [f for f in drafting + checking + ready + done if f.status is StepStatus.COMPLETE]
+    completed = [f for f in checking + checked + ready + done if f.status is StepStatus.COMPLETE]
     assert all(f.duration_ms is not None for f in completed)
-    assert all(f.duration_ms is None for f in working + drafting if f.status is StepStatus.RUNNING)
+    assert all(f.duration_ms is None for f in working + checking if f.status is StepStatus.RUNNING)
+
+
+def test_the_checking_line_is_open_before_the_proposal_is_answered() -> None:
+    """Translation runs inside the `propose_plan` call, so the line has to be
+    on the wire when the call event arrives, not when the response does; a
+    line opened on the response would cover none of the translation."""
+    translator = _translator()
+
+    opened = translator.translate(_planner_call("propose_plan", question="q"))
+
+    assert _status_lines(opened) == [
+        ("s0", "Checking the plan against the data", StepStatus.RUNNING)
+    ]
+    assert translator.translate(_planner_call("propose_plan", amends_version=1)) == []
+
+
+@pytest.mark.parametrize("recorded", ["none", "no_datasets"])
+def test_an_accepted_proposal_without_a_translation_still_closes_its_line(recorded: str) -> None:
+    """The standalone planner (no translator) answers an accepted proposal
+    with no `translation`; the response opens nothing and ends the call's
+    line. A response that carries no plan, or a plan with no dataset, leaves
+    the closing frame without a `detail`."""
+    state = (
+        {PLAN_STATE_KEY: Plan(question="q").model_dump_json()} if recorded == "no_datasets" else {}
+    )
+    translator = _translator()
+    translator.translate(_planner_call("propose_plan", question="q"))
+
+    frames = translator.translate(_planner_answer("propose_plan", {"outcome": "ok"}, **state))
+
+    assert _status_lines(frames) == [
+        ("s0", "Checking the plan against the data", StepStatus.COMPLETE)
+    ]
+    assert frames[0].detail is None
 
 
 def test_a_repeated_planner_call_keeps_its_line_and_other_calls_add_none() -> None:
     translator = _translator()
-    opened = translator.translate(_planner_call("propose_plan", question="q"))
+    opened = translator.translate(_planner_call("submit_plan", version=1))
 
-    assert _status_lines(opened) == [("s0", "Drafting a plan", StepStatus.RUNNING)]
-    assert translator.translate(_planner_call("propose_plan", question="q")) == []
+    assert _status_lines(opened) == [("s0", "Getting the plan ready for you", StepStatus.RUNNING)]
+    assert translator.translate(_planner_call("submit_plan", version=1)) == []
     assert translator.translate(_planner_call("get_skill", skill_id="oda-measures")) == []
 
 
-@pytest.mark.parametrize(
-    "event",
-    [
-        _planner_call("propose_plan", amends_version=1),
-        _node_event("planner", planner_started={"revising": True}),
-    ],
-)
-def test_an_amendment_or_a_replan_shows_revising_the_plan(event: Event) -> None:
-    """The planner node starts a revising draft on an amendment or a
-    replan, and the planner's own call names the version it amends."""
-    frames = _translator().translate(event)
+def test_a_replan_shows_revising_the_plan() -> None:
+    """The planner node starts a revising draft on an amendment or a replan."""
+    frames = _translator().translate(_node_event("planner", planner_started={"revising": True}))
 
     assert _status_lines(frames) == [("s0", "Revising the plan", StepStatus.RUNNING)]
 
@@ -1215,8 +1261,9 @@ def test_the_segment_end_completes_a_line_still_running() -> None:
 async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running() -> None:
     """A real `PlannerSeam`, driven through `ctx.run_node` the way the
     graph's planner node drives it, with its model held after its first
-    call. The runner hands the translator that call while the draft is
-    still waiting, so its line reaches the wire before the draft ends."""
+    call. The runner hands the translator the call and its response while
+    the draft is still waiting, so their lines reach the wire before the
+    draft ends."""
     seam = _seam()
     paused = asyncio.Event()
     release = asyncio.Event()
@@ -1255,7 +1302,12 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
     release.set()
     await task
 
-    assert mid_draft == [("s0", "Drafting a plan", StepStatus.RUNNING)]
+    # The question-only proposal is refused, so its response swaps the line.
+    assert mid_draft == [
+        ("s0", "Checking the plan against the data", StepStatus.RUNNING),
+        ("s0", "Checking the plan against the data", StepStatus.COMPLETE),
+        ("s2", "Reworking the draft", StepStatus.RUNNING),
+    ]
 
 
 def test_a_planner_seam_error_reaches_the_user_without_its_model_facing_text() -> None:
@@ -1263,14 +1315,14 @@ def test_a_planner_seam_error_reaches_the_user_without_its_model_facing_text() -
     conversation.begin_turn()
     exc = PlannerSeamError(
         "This plan still needs translating and compiling into a workflow before it can "
-        "execute. Call `translate` first."
+        "execute. Propose it again to have it translated."
     )
 
     frame = _stream_fatal(conversation, exc)
 
     assert frame.error.error.value == "capability_unavailable"
     assert frame.error.retry.value == "do_not_retry"
-    assert "`translate`" not in frame.error.detail
+    assert "Propose it again" not in frame.error.detail
     assert frame.error.detail == _PLANNER_FAILED_DETAIL.format(trace_id=conversation.trace_id)
 
 
@@ -1295,71 +1347,44 @@ _REFUSED_DRAFT = {
 }
 
 
-def test_a_draft_after_a_refused_one_reads_reworking_the_draft() -> None:
-    """A refused `propose_plan` makes the planner's next draft a separate
-    line, so a long retry is not one "Drafting a plan"; the refusal's code
-    shows in plain words and its message, which names plan fields, never
-    reaches the wire."""
+def test_a_refused_proposal_reads_reworking_the_draft_until_the_next_call() -> None:
+    """A refused `propose_plan` ran no translation, so its response swaps the
+    checking line for "Reworking the draft", which runs while the planner
+    redrafts. The refusal's code shows in plain words and its message, which
+    names plan fields, never reaches the wire."""
     translator = _translator()
     translator.translate(_planner_call("propose_plan", question="q"))
 
     refused = translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
     retry = translator.translate(_planner_call("propose_plan", question="q"))
-    accepted = translator.translate(_planner_answer("propose_plan", {"outcome": "ok"}))
-    another = translator.translate(_planner_call("propose_plan", question="q"))
+    accepted = translator.translate(
+        _planner_answer("propose_plan", {"outcome": "ok", "translation": {"outcome": "ok"}})
+    )
 
-    assert refused == []
-    assert _status_lines(retry) == [
-        ("s0", "Drafting a plan", StepStatus.COMPLETE),
+    assert _status_lines(refused) == [
+        ("s0", "Checking the plan against the data", StepStatus.COMPLETE),
         ("s2", "Reworking the draft", StepStatus.RUNNING),
     ]
-    assert retry[1].detail == "a step didn't fit the plan's rules"
-    assert accepted == []
-    assert _status_lines(another) == [
+    assert refused[1].detail == "a step didn't fit the plan's rules"
+    assert _status_lines(retry) == [
         ("s2", "Reworking the draft", StepStatus.COMPLETE),
-        ("s4", "Drafting a plan", StepStatus.RUNNING),
+        ("s4", "Checking the plan against the data", StepStatus.RUNNING),
     ]
-    assert not any("evidence_requirements" in (f.detail or "") for f in retry + another)
+    assert _status_lines(accepted) == [
+        ("s4", "Checking the plan against the data", StepStatus.COMPLETE)
+    ]
+    assert not any("evidence_requirements" in (f.detail or "") for f in refused + retry)
 
 
 def test_a_refusal_with_an_unlisted_code_reworks_the_draft_without_a_reason() -> None:
     translator = _translator()
-    translator.translate(_planner_answer("propose_plan", {"outcome": "refused", "code": "x"}))
 
-    frames = translator.translate(_planner_call("propose_plan", question="q"))
+    frames = translator.translate(
+        _planner_answer("propose_plan", {"outcome": "refused", "code": "x"})
+    )
 
     assert _status_lines(frames) == [("s0", "Reworking the draft", StepStatus.RUNNING)]
     assert frames[0].detail is None
-
-
-def test_the_check_line_names_the_data_of_the_plan_the_planner_recorded() -> None:
-    """The recorded plan rides on the accepted tool's state delta, a refused
-    draft carries none, so the check line names what is actually held."""
-    translator = _translator()
-    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
-    translator.translate(
-        _planner_answer(
-            "propose_plan", {"outcome": "ok"}, **{PLAN_STATE_KEY: plan.model_dump_json()}
-        )
-    )
-    translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
-
-    frames = translator.translate(_planner_call("translate"))
-
-    assert _status_lines(frames) == [
-        ("s0", "Checking life expectancy at birth for Kenya", StepStatus.RUNNING)
-    ]
-
-
-def test_the_check_line_counts_the_plans_other_datasets() -> None:
-    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
-    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
-    second = dataset.model_copy(update={"id": "second", "measure": "health spending"})
-    both = plan.model_copy(update={"evidence_requirements": (dataset, second)})
-    none = plan.model_copy(update={"evidence_requirements": ()})
-
-    assert _checking_label(both) == "Checking life expectancy at birth for Kenya and 1 more"
-    assert _checking_label(none) is None
 
 
 def test_an_approved_plan_shows_starting_the_plan_until_its_first_step() -> None:
@@ -1397,16 +1422,15 @@ def test_an_amendment_does_not_start_the_plan() -> None:
     assert frames == []
 
 
-def test_a_new_planner_run_after_a_refused_one_drafts_afresh() -> None:
-    """A planner run that ended on a refusal leaves nothing to rework in the
-    next run of the same segment: its first draft is the replan's own."""
+def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> None:
+    """A planner run that ended on a refusal leaves "Reworking the draft"
+    to the next run of the same segment, whose start opens its own line."""
     translator = _translator()
     translator.translate(_planner_answer("propose_plan", _REFUSED_DRAFT))
-    translator.translate(_node_event("planner", planner_started={"revising": False}))
 
-    frames = translator.translate(_planner_call("propose_plan", question="q"))
+    frames = translator.translate(_node_event("planner", planner_started={"revising": False}))
 
     assert [(f.label, f.status) for f in frames] == [
-        ("Working on a plan", StepStatus.COMPLETE),
-        ("Drafting a plan", StepStatus.RUNNING),
+        ("Reworking the draft", StepStatus.COMPLETE),
+        ("Working on a plan", StepStatus.RUNNING),
     ]

@@ -26,6 +26,7 @@ from planner.shapes import (
     filtered,
     grown,
     joined,
+    quotiented,
     ranked,
     rejects,
     retrieved,
@@ -59,6 +60,7 @@ def _shape(
     limited: bool = False,
     roots: tuple[str, ...] = ("req_a",),
     unsummable_axes: tuple[str, ...] | None = None,
+    composed_unit: bool = False,
 ) -> FrameShape:
     return FrameShape(
         roles=roles,
@@ -71,6 +73,7 @@ def _shape(
         limited=limited,
         roots=roots,
         unsummable_axes=unsummable_axes,
+        composed_unit=composed_unit,
     )
 
 
@@ -323,6 +326,52 @@ def test_shared_period_is_unbounded_when_either_side_is():
     assert out.period is None
 
 
+# --- quotiented ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("axis", "denominator_axis", "keyed"),
+    [
+        pytest.param("recipient", "country", True, id="each-key-over-its-counterpart"),
+        pytest.param("recipient", None, True, id="every-key-over-one-total"),
+        pytest.param(None, None, False, id="un-keyed"),
+    ],
+)
+def test_quotiented_keys_the_output_on_the_numerators_own_axis_role_alone(
+    axis: str | None, denominator_axis: str | None, keyed: bool
+):
+    # run_quotient_of writes one row per numerator key per period both sides
+    # report, under the numerator's column; the denominator's phrase names
+    # no column of the result.
+    numerator = _shape(
+        roles=(_role(role="recipient", requirement_id="req_num"),),
+        period=Period(start=2015, end=2020),
+        roots=("req_num",),
+    )
+    denominator = _shape(
+        roles=(_role(role="country", requirement_id="req_den"),),
+        period=Period(start=2016, end=2022),
+        roots=("req_den",),
+    )
+    out = quotiented(numerator, denominator, axis=axis, denominator_axis=denominator_axis)
+    assert out.roles == ((_role(role="recipient", requirement_id="req_num"),) if keyed else ())
+    assert out.measures == 1
+    assert out.value is ValueKind.MEASURED
+    assert out.composed_unit is True
+    assert out.time is TimeLabel.OBSERVATION
+    assert out.period == Period(start=2016, end=2020)
+    assert out.one_row_per_entity is False
+    assert out.limited is False
+    assert out.roots == ("req_den", "req_num")
+
+
+def test_quotiented_holds_one_row_per_entity_when_either_side_does():
+    series = _shape(roles=(_role(),))
+    totals = _shape(roles=(_role(),), one_row_per_entity=True)
+    assert quotiented(totals, series, axis="donor", denominator_axis="donor").one_row_per_entity
+    assert quotiented(series, totals, axis="donor", denominator_axis="donor").one_row_per_entity
+
+
 # --- compared ------------------------------------------------------------------
 
 
@@ -364,6 +413,9 @@ def test_summed_sides_is_one_series_with_no_role_over_the_years_both_cover():
             id="two-absolute-changes",
         ),
         pytest.param(_shape(value=ValueKind.RATIO), _shape(), True, id="a-ratio"),
+        pytest.param(
+            _shape(composed_unit=True), _shape(composed_unit=True), True, id="two-quotients"
+        ),
         pytest.param(_shape(value=ValueKind.ORDINAL), _shape(), True, id="a-rank-position"),
         pytest.param(
             _shape(value=ValueKind.DIFFERENCE), _shape(), True, id="a-change-beside-a-level"
@@ -424,6 +476,9 @@ def test_every_non_terminal_transforms_output_roles_name_one_requirement():
     grow = grown(rank, change=GrowthChange.ABSOLUTE, window=Period(start=2019, end=2020))
     assert {role.requirement_id for role in grow.roles} == {"req_num"}
 
+    quotient = quotiented(numerator, denominator, axis="donor", denominator_axis="donor")
+    assert {role.requirement_id for role in quotient.roles} == {"req_num"}
+
 
 # --- rejects: base rules -------------------------------------------------------
 
@@ -457,11 +512,19 @@ def test_rejects_rank_with_no_roles():
             _shape(roles=(_role(),), time=TimeLabel.SPAN),
             id="share-of-over-a-span",
         ),
+        pytest.param(
+            ShapeVerb.QUOTIENT_OF,
+            _shape(roles=(_role(),), time=TimeLabel.SPAN),
+            id="quotient-of-over-a-span",
+        ),
     ],
 )
-def test_rank_and_share_of_read_a_span_as_one_period(verb: ShapeVerb, shape: FrameShape):
+def test_rank_share_of_and_quotient_of_read_a_span_as_one_period(
+    verb: ShapeVerb, shape: FrameShape
+):
     # analysis-mcp labels a collapsed frame with one interval, which a rank
-    # orders entities within and a share matches on its other side's label.
+    # orders entities within and a share or a quotient matches on its other
+    # side's label.
     assert rejects(verb, shape, axis="donor") is None
 
 
@@ -606,6 +669,180 @@ def test_share_of_per_axis_when_both_sides_carry_the_role_is_not_refused():
     )
 
 
+@pytest.mark.parametrize(
+    ("axis", "denominator_axis", "named"),
+    [
+        pytest.param("creditor", None, "axis 'creditor'", id="an-axis-the-numerator-lacks"),
+        pytest.param(
+            "recipient",
+            "recipient",
+            "denominator_axis 'recipient'",
+            id="a-denominator-axis-the-denominator-lacks",
+        ),
+        pytest.param("recipient", "country", None, id="a-phrase-of-its-own-on-each-side"),
+        pytest.param("recipient", None, None, id="axis-alone-reads-no-denominator-role"),
+        pytest.param(None, None, None, id="un-keyed"),
+    ],
+)
+def test_a_quotient_of_looks_each_side_up_under_its_own_axis(
+    axis: str | None, denominator_axis: str | None, named: str | None
+):
+    numerator = _shape(roles=(_role(role="recipient"),))
+    denominator = _shape(roles=(_role(role="country", requirement_id="req_b"),))
+    reason = rejects(
+        ShapeVerb.QUOTIENT_OF,
+        numerator,
+        axis=axis,
+        denominator_axis=denominator_axis,
+        other=denominator,
+    )
+    if named is None:
+        assert reason is None
+    else:
+        assert reason is not None
+        assert reason.startswith(named)
+
+
+@pytest.mark.parametrize("as_numerator", [True, False], ids=["numerator", "denominator"])
+@pytest.mark.parametrize(
+    ("value", "composed", "refused"),
+    [
+        pytest.param(ValueKind.MEASURED, False, False, id="measured"),
+        pytest.param(ValueKind.DIFFERENCE, False, False, id="difference"),
+        pytest.param(ValueKind.RATIO, False, True, id="ratio"),
+        pytest.param(ValueKind.MEASURED, True, True, id="quotient"),
+        pytest.param(ValueKind.DIFFERENCE, True, True, id="change-in-a-quotient"),
+        pytest.param(ValueKind.ORDINAL, False, True, id="ordinal"),
+    ],
+)
+def test_a_quotient_of_divides_only_a_side_with_a_unit_of_its_own(
+    value: ValueKind, composed: bool, refused: bool, as_numerator: bool
+):
+    # analysis-mcp refuses quotient_of_side_unit_unsupported for a
+    # dimensionless or composed side and derived_input_ordinal for a rank
+    # position, on either side.
+    side = _shape(roles=(_role(role="recipient"),), value=value, composed_unit=composed)
+    options = (
+        {"axis": "recipient", "other": _shape(roles=(_role(role="recipient"),))}
+        if as_numerator
+        else {}
+    )
+    assert (rejects(ShapeVerb.QUOTIENT_OF, side, **options) is not None) is refused
+
+
+@pytest.mark.parametrize(
+    ("verb", "options"),
+    [
+        pytest.param(ShapeVerb.RANK, {"axis": "donor"}, id="rank"),
+        pytest.param(ShapeVerb.GROWTH, {"change": GrowthChange.RELATIVE}, id="relative-growth"),
+        pytest.param(ShapeVerb.GROWTH, {"change": GrowthChange.ABSOLUTE}, id="absolute-growth"),
+        pytest.param(
+            ShapeVerb.COMPARE,
+            {"other": _shape(roles=(_role(),), composed_unit=True)},
+            id="compare-with-another-quotient",
+        ),
+        pytest.param(ShapeVerb.SHARE_OF, {"axis": "donor"}, id="share_of"),
+    ],
+)
+def test_a_quotient_reads_as_a_measured_value_wherever_it_is_not_added_or_divided(
+    verb: ShapeVerb, options: dict
+):
+    quotient = _shape(roles=(_role(),), composed_unit=True)
+    assert rejects(verb, quotient, **options) is None
+
+
+_NAMED = RoleDimension(role="recipient", requirement_id="req_a")
+_OPEN = RoleDimension(role="recipient", requirement_id="req_a", open=True)
+_SECTORS = RoleDimension(role="sector", requirement_id="req_a", breakdown=True)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "axis", "scope", "refused"),
+    [
+        pytest.param((_OPEN,), (), None, None, True, id="open-numerator-un-keyed"),
+        pytest.param((_SECTORS,), (), None, None, True, id="breakdown-numerator-un-keyed"),
+        pytest.param(
+            (_OPEN,), (_OPEN,), "recipient", DenominatorScope.POOLED, True, id="pooled-denominator"
+        ),
+        pytest.param(
+            (_SECTORS,),
+            (_SECTORS,),
+            "sector",
+            DenominatorScope.POOLED,
+            True,
+            id="pooled-breakdown-denominator",
+        ),
+        pytest.param(
+            (_OPEN,), (_OPEN,), "recipient", DenominatorScope.PER_AXIS, False, id="per-axis"
+        ),
+        pytest.param(
+            (_OPEN,), (), "recipient", DenominatorScope.POOLED, False, id="one-series-denominator"
+        ),
+        pytest.param((), (), None, None, False, id="two-single-series"),
+        pytest.param((_NAMED,), (_NAMED,), None, None, False, id="named-entities-un-keyed"),
+    ],
+)
+@pytest.mark.parametrize("composed", [True, False], ids=["quotients", "measured"])
+def test_share_of_refuses_a_side_summing_per_unit_figures(
+    numerator: tuple[RoleDimension, ...],
+    denominator: tuple[RoleDimension, ...],
+    axis: str | None,
+    scope: DenominatorScope | None,
+    refused: bool,
+    composed: bool,
+):
+    # analysis-mcp refuses composed_unit_sum_unsupported for a share_of side
+    # in a composed unit whose (key, period) cell holds several rows. Sides
+    # in a source's own unit sum, and the compiler counts named entities.
+    reason = rejects(
+        ShapeVerb.SHARE_OF,
+        _shape(roles=numerator, composed_unit=composed),
+        axis=axis,
+        scope=scope,
+        other=_shape(roles=denominator, composed_unit=composed),
+    )
+    assert (reason is not None) is (refused and composed)
+
+
+def test_a_growth_of_a_quotient_is_a_ratio_or_a_difference_in_its_unit():
+    quotient = _shape(roles=(_role(),), composed_unit=True)
+    relative = grown(quotient, change=GrowthChange.RELATIVE, window=_PERIOD)
+    absolute = grown(quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD)
+    assert (relative.value, relative.composed_unit) == (ValueKind.RATIO, False)
+    assert (absolute.value, absolute.composed_unit) == (ValueKind.DIFFERENCE, True)
+
+
+def test_every_transform_keeps_a_composed_unit_exactly_where_it_keeps_the_unit():
+    # A step computing in its input's unit keeps the composed unit; a share,
+    # a relative growth and a rank position have no unit to keep.
+    quotient = _shape(roles=(_role(),), composed_unit=True)
+    plain = _shape(roles=(_role(),))
+    kept = {
+        "aggregate": aggregated(
+            quotient, reduction=Reduction.MEAN, by_entity=True, by_period=False
+        ),
+        "absolute growth": grown(quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD),
+        "collapsing rank": ranked(quotient, axis=None, window=None, per_period=False, limit=None),
+        "limited per-period rank": ranked(
+            quotient, axis=None, window=None, per_period=True, limit=3
+        ),
+        "filter": filtered(quotient, narrowed_roles=(), period=_PERIOD, pins_one_year=False),
+        "quotient_of": quotiented(plain, plain, axis=None, denominator_axis=None),
+        "compare": compared(quotient, quotient),
+    }
+    cleared = {
+        "relative growth": grown(quotient, change=GrowthChange.RELATIVE, window=_PERIOD),
+        "per-period rank position": ranked(
+            quotient, axis=None, window=None, per_period=True, limit=None
+        ),
+        "share_of": shared(quotient, quotient, axis=None, scope=None),
+        "join": joined(quotient, quotient),
+        "compare of plain sides": compared(plain, plain),
+    }
+    assert {name for name, shape in kept.items() if not shape.composed_unit} == set()
+    assert {name for name, shape in cleared.items() if shape.composed_unit} == set()
+
+
 def test_retrieved_carries_the_measure_count_it_is_given():
     # A family read separately: counted from its source, several where the
     # source's list is empty or capped at one, or uncounted (`None`) where the plan has no
@@ -650,13 +887,22 @@ _POINTS = _shape(roles=(_role(),))
 _ONE_YEAR_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=Period(start=2020, end=2020))
 _UNKNOWN_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=None)
 _PICKED_TOTAL = aggregated(_PICKED, reduction=Reduction.SUM, by_entity=True, by_period=False)
-_ALL_PAIRED = frozenset({ShapeVerb.SHARE_OF, ShapeVerb.COMPARE, ShapeVerb.SUM_OF, ShapeVerb.JOIN})
+_ALL_PAIRED = frozenset(
+    {
+        ShapeVerb.SHARE_OF,
+        ShapeVerb.QUOTIENT_OF,
+        ShapeVerb.COMPARE,
+        ShapeVerb.SUM_OF,
+        ShapeVerb.JOIN,
+    }
+)
 
 
 @pytest.mark.parametrize(
     ("verb", "options"),
     [
         pytest.param(ShapeVerb.SHARE_OF, {"axis": None}, id="share_of"),
+        pytest.param(ShapeVerb.QUOTIENT_OF, {}, id="quotient_of"),
         pytest.param(ShapeVerb.COMPARE, {}, id="compare"),
         pytest.param(ShapeVerb.SUM_OF, {}, id="sum_of"),
         pytest.param(ShapeVerb.JOIN, {}, id="join"),
@@ -715,9 +961,9 @@ def test_a_two_sided_verb_refuses_sides_whose_period_labels_cannot_match(
     # analysis-mcp matches the two sides on the time_period string, so a span
     # matches only the same span: share_of refuses share_of_grain_mismatch,
     # compare comparison_periods_disjoint, and a join matches no row. A
-    # picked year matches a series on each entity's own year in compare and
-    # join, so the series has to cover every picked year; share_of needs each
-    # key's years equal on both sides. A total of picked years is labelled
+    # picked year matches a series on each entity's own year in compare,
+    # quotient_of and join, so the series has to cover every picked year;
+    # share_of needs each key's years equal on both sides. A total of picked years is labelled
     # with the years the data picked, which no stated span is known to match.
     reason = rejects(verb, shape, other=other, **options)
     assert (reason is not None) is (refused if isinstance(refused, bool) else verb in refused)
@@ -858,6 +1104,7 @@ _SINGLE_MEASURE_VERBS = pytest.mark.parametrize(
         (ShapeVerb.GROWTH, {"change": GrowthChange.RELATIVE}),
         (ShapeVerb.RANK, {"axis": "donor"}),
         (ShapeVerb.SHARE_OF, {"axis": None}),
+        (ShapeVerb.QUOTIENT_OF, {}),
         (ShapeVerb.COMPARE, {}),
         (ShapeVerb.JOIN, {}),
     ],
@@ -912,6 +1159,7 @@ _MINIMAL_OPTIONS: dict[ShapeVerb, dict[str, object]] = {
     ShapeVerb.RANK: {"axis": "donor"},
     ShapeVerb.FILTER: {},
     ShapeVerb.SHARE_OF: {"axis": None},
+    ShapeVerb.QUOTIENT_OF: {},
     ShapeVerb.COMPARE: {},
     ShapeVerb.SUM_OF: {},
     ShapeVerb.JOIN: {},
@@ -1101,6 +1349,16 @@ def test_every_other_transform_clears_the_cut():
     assert joined(cut, whole).cut_per_period is False
 
 
+def test_a_quotient_keeps_the_gaps_a_cut_side_leaves():
+    # run_quotient_of divides at the periods both sides report, so an entity
+    # a per-period limit kept in some years has a quotient in those alone.
+    cut = _top_five_each_year()
+    whole = _shape(roles=(_role(role="donor"),))
+    assert quotiented(cut, whole, axis="donor", denominator_axis="donor").cut_per_period
+    assert quotiented(whole, cut, axis="donor", denominator_axis="donor").cut_per_period
+    assert not quotiented(whole, whole, axis="donor", denominator_axis="donor").cut_per_period
+
+
 def test_growth_over_a_limited_per_period_rank_is_refused_even_when_narrowed():
     """`run_growth` refuses an entity missing a year of its window, and the
     limit removes the years an entity missed the cut, so no narrowing makes
@@ -1208,6 +1466,11 @@ def test_every_transform_that_keeps_the_kept_entities_carries_limited():
     # A share keeps every numerator entity, so a limited denominator does not
     # limit it.
     assert not shared(whole, limited, axis="donor", scope=DenominatorScope.POOLED).limited
+    assert quotiented(limited, whole, axis="donor", denominator_axis=None).limited
+    # A quotient over one total keeps every numerator entity; one keyed on
+    # both sides drops each entity the limit left out of its denominator.
+    assert not quotiented(whole, limited, axis="donor", denominator_axis=None).limited
+    assert quotiented(whole, limited, axis="donor", denominator_axis="donor").limited
 
 
 def test_a_per_axis_share_of_over_a_limited_denominator_is_refused():
@@ -1453,7 +1716,7 @@ def test_a_retrieval_naming_no_place_mixes_levels_and_one_naming_places_does_not
     assert (named.mixed_levels, named.place_typed) == (False, False)
 
 
-def test_a_rank_a_total_and_a_share_over_mixed_levels_are_refused():
+def test_a_rank_a_total_a_share_and_a_quotient_over_mixed_levels_are_refused():
     shape = _every_place()
     every_level = "holds every place with data at every level"
 
@@ -1461,6 +1724,7 @@ def test_a_rank_a_total_and_a_share_over_mixed_levels_are_refused():
         rejects(ShapeVerb.RANK, shape, axis="country"),
         rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True),
         rejects(ShapeVerb.SHARE_OF, shape, axis="country", scope=DenominatorScope.POOLED),
+        rejects(ShapeVerb.QUOTIENT_OF, shape, axis="country"),
     ):
         assert reason is not None
         assert every_level in reason

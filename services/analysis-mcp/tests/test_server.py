@@ -15,6 +15,7 @@ from analysis_mcp import (
     filter_tool,
     growth_tool,
     join_tool,
+    quotient_of_tool,
     rank_tool,
     share_of_tool,
 )
@@ -23,6 +24,7 @@ from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.compare_tool import compare
 from analysis_mcp.fixtures import seed_fixture_store
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
+from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
 from analysis_mcp.server import _build_store, _lifespan, _with_internal_error_backstop, mcp
 from analysis_mcp.settings import Settings
 from common.materialisation import InMemoryMaterialisationStore, get_store, set_store
@@ -78,6 +80,8 @@ async def test_server_exposes_one_tool_per_verb() -> None:
         "join",
         "filter",
         "sum_of",
+        "quotient_of",
+        "resolve_anchor",
     }
 
 
@@ -87,10 +91,14 @@ async def test_every_verb_declares_its_implementation_version_and_output_schema(
     `list_tools()` dereferences `$ref`/`$defs` at serve time -- the
     registered schema itself is what must equal `VERB_OUTPUT_SCHEMA`.
     """
-    tools = await mcp.list_tools(run_middleware=False)
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    # The one tool that is no verb states its own result and version.
+    anchor_tool = tools.pop("resolve_anchor")
 
-    assert {tool.name for tool in tools} == set(IMPLEMENTATION_VERSIONS)
-    for tool in tools:
+    assert anchor_tool.version == RESOLVE_ANCHOR_VERSION
+    assert anchor_tool.output_schema == RESOLVE_ANCHOR_OUTPUT_SCHEMA
+    assert set(tools) == set(IMPLEMENTATION_VERSIONS)
+    for tool in tools.values():
         assert tool.version == IMPLEMENTATION_VERSIONS[tool.name]
         assert tool.output_schema == VERB_OUTPUT_SCHEMA
 
@@ -408,6 +416,14 @@ def _share_of_args(handles):
     }
 
 
+def _quotient_of_args(handles):
+    return {
+        "frame_ref": handles.plain_single_unit,
+        "numerator_entity": {"reporter": "dcid:USA"},
+        "denominator_entity": {"reporter": "dcid:GBR"},
+    }
+
+
 def _join_args(handles):
     return {"frame_ref": handles.join_pair[0], "right_frame_ref": handles.join_pair[1]}
 
@@ -427,6 +443,7 @@ _BACKSTOP_CASES = [
     (growth_tool, "run_growth", "growth", _growth_args),
     (rank_tool, "run_rank", "rank", _rank_args),
     (share_of_tool, "run_share_of", "share_of", _share_of_args),
+    (quotient_of_tool, "run_quotient_of", "quotient_of", _quotient_of_args),
     (join_tool, "run_join", "join", _join_args),
     (filter_tool, "run_filter", "filter", _filter_args),
 ]
@@ -512,7 +529,17 @@ async def test_backstop_leaves_protocol_failures_to_report_themselves(
     )
 
 
-_VERBS = {"aggregate", "compare", "growth", "rank", "share_of", "join", "filter", "sum_of"}
+_VERBS = {
+    "aggregate",
+    "compare",
+    "growth",
+    "rank",
+    "share_of",
+    "join",
+    "filter",
+    "sum_of",
+    "quotient_of",
+}
 
 
 @pytest.mark.parametrize(
@@ -524,7 +551,7 @@ async def test_unknown_tool_name_names_the_registered_verbs(
     tool_name: str, args: dict[str, object]
 ) -> None:
     """An unknown tool name -- whether made up or belonging to another
-    server, such as data-mcp's `get_data` -- names all eight registered
+    server, such as data-mcp's `get_data` -- names all nine registered
     verbs and points the caller at `tools/list`. FastMCP's own default
     response is the bare `Unknown tool: {name!r}`.
     """

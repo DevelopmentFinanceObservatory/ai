@@ -15,25 +15,35 @@ mismatch, which always is.
 
 Every exception raised here is caught only at its own verb's tool boundary
 (`aggregate_tool`, `compare_tool`, `growth_tool`, `join_tool`, `rank_tool`,
-`share_of_tool`, `sum_of_tool`), never inside the engine itself.
+`share_of_tool`, `sum_of_tool`, `quotient_of_tool`), never inside the engine
+itself.
 
-Partial-overlap policy: `compare`, `sum_of`, `share_of` and `join` each combine two
-independently-sourced inputs and eventually meet a period or key where the
-two sides differ; `growth` takes one input but meets the analogous gap
-inside its own single series. One framework produces the answer for all
-five:
+Partial-overlap policy: `compare`, `sum_of`, `share_of`, `quotient_of` and
+`join` each combine two independently-sourced inputs and eventually meet a
+period or key where the two sides differ; `growth` takes one input but meets
+the analogous gap inside its own single series. One framework produces the
+answer for all six:
 
-    Proceed when each output row is independently complete and the
-    denominator concept is not a claimed total. Refuse otherwise.
+    Proceed when each output row is independently complete. Refuse when
+    nothing is left to return, or, for `share_of`, when a key or a period
+    the result would carry has no share.
 
 `compare` intersects periods and proceeds, reporting both sides' coverage:
 one output row is one period's delta, complete from the two values actually
 present, and `delta` claims no total. `sum_of` proceeds the same way: one
 output row is one period's sum of two values both present, a total over
 exactly two series for that period, and a period one side lacks is left
-out rather than summed with a zero. `share_of` refuses on any period-set
-difference: its denominator is a claimed total, and a missing period
-silently changes what "total" means. `growth` proceeds for every entity
+out rather than summed with a zero. `share_of` and `quotient_of` intersect
+periods per key and proceed, recording every period they leave out: one
+output row is one key's sum over its denominator's sum for one period,
+complete from the two sums present. A period one side lacks leaves the
+other side's sums for the remaining periods unchanged, so dropping it
+changes no total that is kept. When any key shares no period with its
+denominator group, `share_of` refuses the whole call, even if every other
+key has rows; `quotient_of` leaves such a key out, records it, and refuses
+only when no key shares a period. A matched cell whose denominator sums to
+exactly zero refuses the whole `share_of` call; `quotient_of` leaves it out
+and records it, and refuses only when every matched cell is one. `growth` proceeds for every entity
 holding both endpoint years. A growth row reads only `value_start` and
 `value_end`, so it is complete whatever interior years the entity lacks. An
 entity missing an endpoint has no complete row and is excluded, and the call
@@ -60,7 +70,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
     cell_sort_key,
 )
 
@@ -74,9 +84,11 @@ from analysis_mcp.engine.columnar import count_distinct, distinct, repeated
 # under a relative change (`zero_or_sign_crossing_base`), or overflowing to a
 # non-finite value (`non_finite`), `engine.filter`'s predicate loop
 # (`predicate`), `engine.join`'s unmatched-key sets (`unmatched_key`),
-# `engine.compare`'s unintersected periods (`period_unmatched`), and
-# `engine.rank`'s limit (`beyond_limit`). A heterogeneous facet always refuses
-# with `FacetHeterogeneousError`, so this set carries no facet reason.
+# `engine.compare`'s unintersected periods (`period_unmatched`),
+# `engine.rank`'s limit (`beyond_limit`), and `engine.quotient_of`'s matched
+# cells whose denominator sums to zero (`zero_denominator`). A heterogeneous
+# facet always refuses with `FacetHeterogeneousError`, so this set carries no
+# facet reason.
 ExclusionReason = Literal[
     "unit_unbound",
     "unit_not_selected",
@@ -89,13 +101,15 @@ ExclusionReason = Literal[
     "unmatched_key",
     "period_unmatched",
     "beyond_limit",
+    "zero_denominator",
 ]
 
 # Which of a two-input verb's two sides a dropped row came from. `None` for
 # a single-input verb (`aggregate`, `growth`, `rank`, `filter`). `compare`/
-# `join` tag `left`/`right`; `share_of` tags `numerator`/`denominator` for
-# the identical two-slice shape. For `share_of`, knowing the side tells a
-# reader whether the reported share is inflated or deflated.
+# `join` tag `left`/`right`; `share_of` and `quotient_of` tag
+# `numerator`/`denominator` for the identical two-slice shape. For `share_of`,
+# knowing the side tells a reader whether the reported share is inflated or
+# deflated.
 ExclusionSide = Literal["numerator", "denominator", "left", "right"]
 
 # Per-role-column cap `smallest_distinct` applies, mirroring
@@ -217,7 +231,7 @@ class FacetSelection:
 class ResolvedUnitAndFacets:
     """What `narrow_and_resolve` decided, before any reduction runs."""
 
-    unit: str | UnitRequest | None
+    unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
 
@@ -231,7 +245,7 @@ class UnitHeterogeneousError(Exception):
     set a `unit_heterogeneous` refusal's disambiguation payload offers.
     """
 
-    def __init__(self, units: Sequence[str | UnitRequest]) -> None:
+    def __init__(self, units: Sequence[UnitCell]) -> None:
         self.units = tuple(units)
         super().__init__(f"heterogeneous units: {self.units!r}")
 
@@ -249,7 +263,7 @@ class UnitNotPresentError(Exception):
     candidates. A check after that narrowing would always see an empty list.
     """
 
-    def __init__(self, pinned_unit: str | UnitRequest, units: Sequence[str | UnitRequest]) -> None:
+    def __init__(self, pinned_unit: UnitCell, units: Sequence[UnitCell]) -> None:
         self.pinned_unit = pinned_unit
         self.units = tuple(units)
         super().__init__(f"unit {pinned_unit!r} not present; frame declares {self.units!r}")
@@ -343,7 +357,7 @@ class Units:
     """A table's `unit` column as one code per row and one cell per code."""
 
     codes: pa.Array
-    cells: list[str | UnitRequest | None]
+    cells: list[UnitCell | None]
 
     @classmethod
     def of(cls, table: pa.Table) -> Units:
@@ -351,19 +365,19 @@ class Units:
         codes = unit_codes(column)
         return cls(codes=codes.codes, cells=unit_cells(column, codes))
 
-    def declared(self) -> list[str | UnitRequest]:
+    def declared(self) -> list[UnitCell]:
         """Every distinct non-null unit in grammar collation order. The order
-        is total, so it sorts a ref and a `UnitRequest` together where Python's
-        own `sorted` raises `TypeError`."""
+        is total, so it sorts a ref, a `UnitRequest` and a `ComposedUnit`
+        together where Python's own `sorted` raises `TypeError`."""
         return sorted((cell for cell in self.cells if cell is not None), key=cell_sort_key)
 
-    def mask(self, *units: str | UnitRequest | None) -> pa.Array:
+    def mask(self, *units: UnitCell | None) -> pa.Array:
         """Whether each row's unit is one of `units`."""
         wanted = [code for code, cell in enumerate(self.cells) if cell in units]
         return array_kernel("is_in", self.codes, value_set=pa.array(wanted, type=pa.int64()))
 
 
-def _resolve_facets(table: pa.Table, *, unit: str | UnitRequest | None) -> ResolvedUnitAndFacets:
+def _resolve_facets(table: pa.Table, *, unit: UnitCell | None) -> ResolvedUnitAndFacets:
     """The facet resolution `narrow_and_resolve` describes, over `table`,
     whose unit is already resolved to `unit`."""
     warnings: list[str] = []
@@ -392,7 +406,7 @@ def narrow_and_resolve(
     frame: Frame,
     *,
     entity: Mapping[str, str] | None = None,
-    pinned_unit: str | UnitRequest | None = None,
+    pinned_unit: UnitCell | None = None,
     exclude_unitless: bool = False,
     side: ExclusionSide | None = None,
 ) -> tuple[pa.Table, ResolvedUnitAndFacets, Exclusions]:
@@ -417,8 +431,8 @@ def narrow_and_resolve(
 
     Unit: a row leaving `unit` unbound takes no part in the check. Units are
     read once per distinct value (`unit_codes`), and candidate units are
-    ordered by grammar collation, so a ref and a converted `UnitRequest`
-    order like any two refs. `pinned_unit` must be one of the
+    ordered by grammar collation, so a ref, a converted `UnitRequest` and a
+    `ComposedUnit` order like any two refs. `pinned_unit` must be one of the
     entity-narrowed slice's declared units, or this raises
     `UnitNotPresentError` listing them, and the slice narrows to its rows.
     With no pin, more than one declared unit raises
@@ -507,9 +521,7 @@ def narrow_and_resolve(
     return table, resolved, exclusions
 
 
-def table_before_unitless_exclusion(
-    frame: Frame, *, pinned_unit: str | UnitRequest | None
-) -> pa.Table:
+def table_before_unitless_exclusion(frame: Frame, *, pinned_unit: UnitCell | None) -> pa.Table:
     """`frame.table` narrowed by `pinned_unit` as `narrow_and_resolve`
     narrows it, except that a row leaving `unit` unbound is kept: the rows
     declaring `pinned_unit` or no unit, or every row when `pinned_unit` is
@@ -529,35 +541,89 @@ def facet_columns(facet_selections: Sequence[FacetSelection], *, count: int) -> 
     return {selection.axis: repeated(selection.ref, count) for selection in facet_selections}
 
 
-def first_cross_side_facet_mismatch(
-    left: Sequence[FacetSelection], right: Sequence[FacetSelection]
-) -> tuple[str, str, str] | None:
-    """The first facet axis, in `FACET_IDENTITY_COLUMNS`'s own fixed order,
-    where `left`'s and `right`'s own independently-resolved facet selections
-    disagree; `None` if every axis agrees. An axis one side left wholly
-    unbound is skipped (only an axis both sides declare, to different values,
-    refuses here). Skipped axes still deserve visibility via
-    `cross_side_one_sided_facet_axes` below, a separate non-refusing concern.
+def agreed_facets(
+    first: Sequence[FacetSelection],
+    second: Sequence[FacetSelection],
+    *,
+    sides: tuple[str, str],
+    result: str,
+) -> tuple[tuple[FacetSelection, ...], tuple[str, ...]]:
+    """The facet selections both sides declare with the same value, and a
+    warning for every axis the result leaves unbound because the sides
+    disagree on it or only one side declares it. `sides` names `first` and
+    `second` in those warnings, and `result` names what the verb computes
+    (`sum`, `quotient`)."""
+    first_side, second_side = sides
+    first_map = {selection.axis: selection.ref for selection in first}
+    second_map = {selection.axis: selection.ref for selection in second}
+    shared: list[FacetSelection] = []
+    warnings: list[str] = []
+    for axis in dict.fromkeys((*first_map, *second_map)):
+        first_ref, second_ref = first_map.get(axis), second_map.get(axis)
+        if first_ref == second_ref:
+            shared.append(FacetSelection(axis=axis, ref=cast("str", first_ref)))
+        elif first_ref is not None and second_ref is not None:
+            warnings.append(
+                f"facet {axis!r} differs between the sides ({first_side} {first_ref!r}, "
+                f"{second_side} {second_ref!r}); the {result} carries no value for this axis."
+            )
+        else:
+            side, ref = (
+                (first_side, first_ref) if first_ref is not None else (second_side, second_ref)
+            )
+            warnings.append(
+                f"facet {axis!r} is declared only on the {side} side ({ref!r}); the {result} "
+                "carries no value for this axis."
+            )
+    return tuple(shared), tuple(warnings)
 
-    `compare` and `share_of` each resolve their own two sides' facets
-    independently through `narrow_and_resolve`. `FacetHeterogeneousError`
-    fires only within one side's own slice; nothing else catches a left slice
-    resolved to `provenance=dcid:P1` paired against a right slice resolved to
-    `provenance=dcid:P2`, even though each side is internally uniform and
-    resolves cleanly on its own. This cross-side check applies the same shape
-    `CompareUnitMismatchError`/`ShareOfUnitMismatchError` already apply to
-    `unit`.
+
+def cross_side_differing_facet_axes(
+    left: Sequence[FacetSelection], right: Sequence[FacetSelection]
+) -> tuple[tuple[str, str, str], ...]:
+    """Every facet axis, in `FACET_IDENTITY_COLUMNS`'s own fixed order,
+    that both sides declare to different values, as `(axis, left_ref,
+    right_ref)`. An axis one side left wholly unbound is not here.
+    `cross_side_one_sided_facet_axes` below reports it.
     """
     left_map = {selection.axis: selection.ref for selection in left}
     right_map = {selection.axis: selection.ref for selection in right}
+    found: list[tuple[str, str, str]] = []
     for axis in FACET_IDENTITY_COLUMNS:
         left_ref = left_map.get(axis)
         right_ref = right_map.get(axis)
-        if left_ref is None or right_ref is None:
-            continue
-        if left_ref != right_ref:
-            return axis, left_ref, right_ref
-    return None
+        if left_ref is not None and right_ref is not None and left_ref != right_ref:
+            found.append((axis, left_ref, right_ref))
+    return tuple(found)
+
+
+def first_cross_side_facet_mismatch(
+    left: Sequence[FacetSelection],
+    right: Sequence[FacetSelection],
+    *,
+    left_stat_vars: Iterable[str],
+    right_stat_vars: Iterable[str],
+) -> tuple[str, str, str] | None:
+    """The first of `cross_side_differing_facet_axes` when the two sides
+    share a `stat_var`; `None` when they share none or agree on every axis.
+
+    `compare` and `share_of` each resolve their own two sides' facets
+    independently through `narrow_and_resolve`. `FacetHeterogeneousError`
+    fires only within one side's own slice. Nothing else catches one measure
+    resolved to `provenance=dcid:P1` on the left paired against the same
+    measure resolved to `provenance=dcid:P2` on the right, even though each
+    side is internally uniform and resolves cleanly on its own. Two
+    different measures, such as debt service over GDP, usually come from
+    different sources and methods, and each side's own selection is the
+    right one for its own measure, so a differing axis there refuses
+    nothing and each verb words it as a warning. One concept published
+    under two `stat_var` dcids passes that way too, with the warning naming
+    both selections.
+    """
+    if set(left_stat_vars).isdisjoint(right_stat_vars):
+        return None
+    differing = cross_side_differing_facet_axes(left, right)
+    return differing[0] if differing else None
 
 
 def cross_side_one_sided_facet_axes(

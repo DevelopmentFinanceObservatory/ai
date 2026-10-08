@@ -71,7 +71,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
 from analysis_mcp.engine.aggregate import (
@@ -79,6 +79,7 @@ from analysis_mcp.engine.aggregate import (
     NonFiniteAggregateResultError,
     UnsupportedAggregationError,
     _reduce,
+    refuse_sum_over_composed_unit,
 )
 from analysis_mcp.engine.columnar import (
     GroupMembers,
@@ -169,7 +170,7 @@ class RankResult:
     """
 
     frame: Frame
-    resolved_unit: str | UnitRequest | None
+    resolved_unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     aggregation: str | None
@@ -431,7 +432,7 @@ def run_rank(
     window_start: str | None,
     window_end: str | None,
     ascending: bool,
-    pinned_unit: str | UnitRequest | None = None,
+    pinned_unit: UnitCell | None = None,
     per_period: bool = False,
     limit: int | None = None,
 ) -> RankResult:
@@ -466,6 +467,7 @@ def run_rank(
     table, resolved, exclusions = narrow_and_resolve(
         frame, pinned_unit=pinned_unit, exclude_unitless=True
     )
+    refuse_sum_over_composed_unit(aggregation, resolved.unit)
     pre_exclusion_table = table_before_unitless_exclusion(frame, pinned_unit=pinned_unit)
 
     if window_start is not None and window_end is not None:

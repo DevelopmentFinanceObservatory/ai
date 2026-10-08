@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from common.unit_refs import PERCENT_UNIT
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
 from compiler.sources import member_digest, source_from_spec_block
@@ -45,6 +46,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     RankOperation,
     Reduction,
     RetrieveOperation,
@@ -68,6 +70,7 @@ from planner.plan import (
     JoinRequirement,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
@@ -1071,15 +1074,11 @@ def test_an_axis_less_share_of_a_pooled_multi_member_numerator_is_share_axis_req
 def test_a_keyed_share_of_the_same_multi_member_shape_is_not_share_axis_required(
     build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
 ) -> None:
-    # The exact shape `SHARE_AXIS_REQUIRED` refuses above, this time keyed:
-    # naming `axis="country"` says which of the three members the
-    # numerator answers for, so `_check_share_of_needs_axis` never runs at
-    # all. `_check_side`'s own `ENTITY_REQUIRED` reads none of this --
-    # it refuses any whole side of a requirement naming several entities
-    # whether or not an axis disambiguates them, so it still fires here
-    # and the plan does not fully compile; what this test pins is
-    # narrower and unaffected by it: this guard's own code never appears
-    # among the issues once axis says which member.
+    # The shape `SHARE_AXIS_REQUIRED` refuses above, keyed by country: the
+    # numerator answers for each of the three members its source resolves,
+    # so it raises nothing. The denominator is pooled, a whole side, and its
+    # source resolves three countries where its requirement names one, so it
+    # alone is refused.
     pop_num = DatasetRequirement(
         id="pop_num",
         decision_ids=["measure"],
@@ -1126,7 +1125,10 @@ def test_a_keyed_share_of_the_same_multi_member_shape_is_not_share_axis_required
         },
     )
 
-    assert Code.SHARE_AXIS_REQUIRED not in _codes(result)
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (Code.ENTITY_REQUIRED, "pop_denom"),
+        (Code.SOURCE_WIDER_THAN_REQUIREMENT, "pop_denom"),
+    ]
 
 
 def test_an_axis_less_share_of_single_member_sides_compiles_clean(
@@ -3014,55 +3016,167 @@ def test_a_sum_that_could_count_a_flow_twice_or_mix_units_is_refused(
 _NOMINAL = {"shape": {"kind": "statvar_schema", "measurement_qualifier": "Nominal"}}
 
 
+# The unit WHO's domestic health spending is served in: constant US dollars
+# whose base year neither the id nor the label states.
+_CONSTANT_UNSTATED_YEAR = {
+    "unit_ref": "undata/UNIT_MEASURE-CR_USD_K",
+    "unit_label": "United States dollars at constant prices",
+}
+# A requirement stating no unit, as a side read in its source's own unit is,
+# with or without its source pinned.
+_OWN_UNIT = {"unit": None}
+_OWN_UNIT_PINNED = {"unit": None, "source_spec_id": SPEC_KENYA, "decision_ids": ["measure", "pin"]}
+# A definition bound by request to current euros, whatever its source's own unit.
+_REQUEST_BOUND_EUR = {
+    "unit": {"state": "value", "request": {"currency": "EUR", "prices": "current"}}
+}
+# Two units naming no currency the reader recognises, one in each price basis.
+_CONSTANT_UNSTATED_YEAR_NO_CURRENCY = {
+    "unit_ref": "undata/UNIT_MEASURE-XDC",
+    "unit_label": "National currency at constant prices",
+}
+_CURRENT_NO_CURRENCY = {
+    "unit_ref": "undata/UNIT_MEASURE-XDC_CUR",
+    "unit_label": "National currency at current prices",
+}
+
+
 @pytest.mark.parametrize(
-    ("left_source", "code"),
+    ("left_source", "left_requirement", "right_source", "code", "about", "named"),
     [
         pytest.param(
             {"unit_ref": "CurrencyUSD", "identity": _NOMINAL},
+            {},
+            _BOUND_BY_REQUEST,
             Code.FRAME_UNIT_FORMS_DIFFER,
+            "annual_debt_service",
+            ["annual_debt_service"],
             id="current-usd-as-a-ref-against-a-request",
         ),
         pytest.param(
+            {"unit_ref": "CurrencyUSD", "identity": _NOMINAL},
+            {},
+            {"unit_ref": "SDG_CU_USD"},
+            Code.FRAME_UNIT_FORMS_DIFFER,
+            "annual_debt_service",
+            ["annual_debt_service", "multilateral"],
+            id="current-usd-spelled-two-ways-as-refs-on-both-sides",
+        ),
+        pytest.param(
             {"unit_ref": "CurrencyEUR", "identity": _NOMINAL},
+            {},
+            _BOUND_BY_REQUEST,
             Code.FRAME_UNITS_DIFFER,
+            None,
+            [],
             id="another-currency-as-a-ref",
         ),
         pytest.param(
             {"unit_ref": "CurrencyUSD", "identity": {"shape": {"kind": "statvar_schema"}}},
+            {},
+            _BOUND_BY_REQUEST,
             Code.FRAME_UNITS_DIFFER,
+            None,
+            [],
             id="a-ref-stating-no-price-basis",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyUSD", "identity": {"shape": {"kind": "statvar_schema"}}},
+            _OWN_UNIT_PINNED,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_UNITS_DIFFER,
+            None,
+            [],
+            id="a-pinned-ref-stating-no-price-basis",
+        ),
+        pytest.param(
+            _CONSTANT_UNSTATED_YEAR,
+            _OWN_UNIT_PINNED,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "annual_debt_service",
+            [],
+            id="a-pinned-source-in-constant-prices",
+        ),
+        pytest.param(
+            _CONSTANT_UNSTATED_YEAR,
+            _OWN_UNIT,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_PRICE_BASES_DIFFER,
+            None,
+            [],
+            id="an-unpinned-source-in-constant-prices",
+        ),
+        pytest.param(
+            _CONSTANT_UNSTATED_YEAR | {"identity": {"facets": _REQUEST_BOUND_EUR}},
+            _OWN_UNIT_PINNED,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_UNITS_DIFFER,
+            None,
+            [],
+            id="a-pinned-source-bound-by-request-to-current-prices",
+        ),
+        pytest.param(
+            _CONSTANT_UNSTATED_YEAR_NO_CURRENCY,
+            _OWN_UNIT_PINNED,
+            _CURRENT_NO_CURRENCY,
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "annual_debt_service",
+            [],
+            id="a-pinned-source-in-constant-prices-neither-currency-read",
         ),
     ],
 )
 def test_two_sides_whose_frames_state_their_units_differently_are_refused_before_running(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
     requirement: RequirementFactory,
     source: SourceFactory,
     left_source: dict[str, Any],
+    left_requirement: dict[str, Any],
+    right_source: dict[str, Any],
     code: CompileIssueCode,
+    about: str | None,
+    named: list[str],
 ) -> None:
     # analysis-mcp pairs two frames only when their unit cells are equal. A
     # ref and a request denoting one currency and price basis differ in form
-    # alone, and the refusal names the side to retrieve by request.
+    # alone, and the refusal names every side to retrieve by request, so the
+    # planner repairs both in one round when both are refs. No requirement
+    # may ask for constant prices, so a pinned source in them never pairs
+    # with a side in current prices, and the refusal names the pinned side
+    # for the user to decide; an unpinned one is repaired to current prices
+    # on both sides.
     requirements, translation = _summed(requirement)
+    requirements[0] = requirement(**left_requirement)
+    pin = left_requirement.get("source_spec_id")
+    pins = [pinning_decision(pin, slot="pin")] if pin else []
 
     result = build(
-        _draft([decision()], requirements),
+        _draft([decision(), *pins], requirements),
         translation,
         discovered={
             "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
             "multilateral": source(
                 spec_id=SPEC_OTHER,
-                **_pinned("MultilateralDebtService", _BOUND_BY_REQUEST),
+                **_pinned("MultilateralDebtService", right_source),
             ),
         },
     )
 
-    unit_codes = {Code.FRAME_UNIT_FORMS_DIFFER, Code.FRAME_UNITS_DIFFER}
-    assert [found for found in _codes(result) if found in unit_codes] == [code]
+    unit_codes = {
+        Code.FRAME_UNIT_FORMS_DIFFER,
+        Code.FRAME_UNITS_DIFFER,
+        Code.FRAME_PRICE_BASES_DIFFER,
+        Code.FRAME_UNITS_IRRECONCILABLE,
+    }
+    found = [issue for issue in result.issues if issue.code in unit_codes]
+    assert [(issue.code, issue.requirement_id) for issue in found] == [(code, about)]
     if code is Code.FRAME_UNIT_FORMS_DIFFER:
-        assert result.issues[0].requirement_id == "annual_debt_service"
+        assert [
+            r for r in ("annual_debt_service", "multilateral") if repr(r) in found[0].reason
+        ] == named
 
 
 def _two_sided(
@@ -3146,7 +3260,9 @@ def test_a_side_declaring_no_unit_against_one_in_a_unit_is_refused_before_runnin
     unbound: str | None,
 ) -> None:
     # compare, share_of and sum_of each refuse exactly one unit-less side
-    # (`cross_frame_unit_unbound`), and pair two unit-less sides.
+    # (`cross_frame_unit_unbound`), and pair two unit-less sides. quotient_of
+    # divides the pair a share refuses, so the share's issue is its own code,
+    # about the operation.
     requirements, translation = _two_sided(verb, requirement)
 
     result = build(
@@ -3164,9 +3280,42 @@ def test_a_side_declaring_no_unit_against_one_in_a_unit_is_refused_before_runnin
     if unbound is None:
         assert result.ok, result.issues
         return
-    assert [(i.code, i.operation_id, i.requirement_id) for i in result.issues] == [
-        (Code.FRAME_UNIT_UNBOUND, "two", unbound)
-    ]
+    expected = (
+        (Code.SHARE_UNITS_DIFFER, "two", None)
+        if verb == "share_of"
+        else (Code.FRAME_UNIT_UNBOUND, "two", unbound)
+    )
+    assert [(i.code, i.operation_id, i.requirement_id) for i in result.issues] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("verb", "code"),
+    [
+        ("share_of", Code.SHARE_UNITS_DIFFER),
+        ("compare", Code.FRAME_UNITS_DIFFER),
+        ("sum_of", Code.FRAME_UNITS_DIFFER),
+    ],
+)
+def test_two_sides_in_different_units_report_the_code_of_the_verb_that_pairs_them(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    verb: str,
+    code: CompileIssueCode,
+) -> None:
+    requirements, translation = _two_sided(verb, requirement)
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid", {"unit_ref": "USDollar"})),
+            "annual_gdp": source(spec_id=SPEC_OTHER, **_pinned("Gdp", {"unit_ref": "Euro"})),
+        },
+    )
+
+    assert [(i.code, i.operation_id) for i in result.issues] == [(code, "two")]
 
 
 def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_then_the_years(
@@ -4828,14 +4977,14 @@ def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_entity_required
     assert "covers every 'donor' and names none of them" in issue.reason
 
 
-def test_a_keyed_share_over_an_open_axis_is_entity_required(
+def test_a_keyed_share_over_an_open_axis_divides_member_by_member(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     source: SourceFactory,
 ) -> None:
     # Each donor's education aid to Kenya over its total aid to Kenya, keyed
-    # by donor: a keyed share divides member by member and pools nothing, and
-    # each side still names none of the donors it reads.
+    # by donor on both sides: each side reads every donor as its own series,
+    # so neither has to name one.
     kenya_destination = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
     total = _kenya_from_every_donor().model_copy(update={"id": "total", "measure": "total aid"})
     share = ShareOfRequirement(
@@ -4874,10 +5023,12 @@ def test_a_keyed_share_over_an_open_axis_is_entity_required(
         },
     )
 
-    assert _codes(result) == [Code.ENTITY_REQUIRED, Code.ENTITY_REQUIRED]
-    for issue in result.issues:
-        assert "covers every 'donor' and names none of them" in issue.reason
-        assert "so the side cannot say which it reads" in issue.reason
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    share_step = result.workflow.steps[-1]
+    assert share_step.tool.name == "share_of"
+    assert share_step.args == {"numerator_by": ["origin"], "denominator_by": {"origin": "origin"}}
+    assert share_step.expected_role_keys == _frame_role_columns(["origin"])
 
 
 # --- An aggregate over an open axis -------------------------------------------------
@@ -5064,3 +5215,1907 @@ def test_grouping_by_entity_writes_the_named_party_and_sums_the_open_one(
     total_step = result.workflow.steps[-1]
     assert total_step.args == {"aggregation": "sum", "group_by": ["time_period", kept.role]}
     assert total_step.expected_role_keys == _frame_role_columns([kept.role])
+
+
+# --- A keyed side of a dividing verb, and quotient_of ------------------------------
+
+_EAST_AFRICA = {"Kenya": "country/KEN", "Uganda": "country/UGA", "Tanzania": "country/TZA"}
+
+
+def _east_africa(column: str) -> tuple[ResolvedEntity, ...]:
+    """Kenya, Uganda and Tanzania as a source resolves them under `column`."""
+    return tuple(
+        ResolvedEntity(role=column, ref=ref, label=label) for label, ref in _EAST_AFRICA.items()
+    )
+
+
+def _named(names: Sequence[str], role: str) -> list[Entity]:
+    return [Entity(name=name, role=role) for name in names]
+
+
+def _per_recipient(
+    verb: str,
+    source: SourceFactory,
+    *,
+    named: Sequence[str] = ("Kenya",),
+    whole_named: Sequence[str] | None = None,
+    keyed: bool = True,
+    whole_keyed: bool = True,
+) -> tuple[list[EvidenceRequirement], Translation, dict[str, SelectedSource]]:
+    """Aid received set over a second series by `verb`, each source resolving three countries.
+
+    The aid source holds its recipients on `destination`. A `quotient_of`
+    divides by population, a unit-less count whose requirement names the
+    same countries with no role, held on `observationAbout` and keyed by the
+    place word "country". A `share_of` divides by total aid in the aid's own
+    unit, held on `recipient`.
+
+    `named` and `whole_named` are the entities each side's requirement
+    states. `keyed` keys the numerator by recipient, and `whole_keyed` the
+    second side by its own phrase for them.
+    """
+    whole_named = named if whole_named is None else whole_named
+    sides = (RequirementSide(input_id="aid"), RequirementSide(input_id="whole"))
+    numerator, denominator = Side(input="fetch_aid"), Side(input="fetch_whole")
+    axis = "recipient" if keyed else None
+    derived: EvidenceRequirement
+    operation: Operation
+    if verb == "quotient_of":
+        phrase, column, measure, unit_ref = "country", "observationAbout", "population", None
+        fields: dict[str, Any] = {
+            "axis": axis,
+            "denominator_axis": phrase if keyed and whole_keyed else None,
+        }
+        derived = QuotientRequirement(
+            id="divided",
+            decision_ids=["measure"],
+            numerator=sides[0],
+            denominator=sides[1],
+            **fields,
+        )
+        operation = QuotientOfOperation(
+            id="divided",
+            requirement_id="divided",
+            numerator=numerator,
+            denominator=denominator,
+            **fields,
+        )
+    else:
+        phrase, column, measure, unit_ref = "recipient", "recipient", "total aid", "USDollar"
+        fields = {"axis": axis, "denominator_scope": DenominatorScope.PER_AXIS if keyed else None}
+        derived = ShareOfRequirement(
+            id="divided",
+            decision_ids=["measure"],
+            numerator=sides[0],
+            denominator=sides[1],
+            **fields,
+        )
+        operation = ShareOfOperation(
+            id="divided",
+            requirement_id="divided",
+            numerator=numerator,
+            denominator=denominator,
+            **fields,
+        )
+    period = Period(start=2015, end=2024)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="aid received",
+        entities=_named(named, "recipient"),
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure=measure,
+        entities=[Entity(name=name) for name in whole_named]
+        if verb == "quotient_of"
+        else _named(whole_named, phrase),
+        period=period,
+    )
+    translation = _translation(
+        RetrieveOperation(id="fetch_aid", requirement_id="aid", spec_id=SPEC_KENYA),
+        RetrieveOperation(id="fetch_whole", requirement_id="whole", spec_id=SPEC_OTHER),
+        operation,
+        terminal=["divided"],
+    )
+    discovered = {
+        "aid": source(
+            **_pinned(
+                "AidReceived", {"entities": _east_africa("destination"), "unit_ref": "USDollar"}
+            )
+        ),
+        "whole": source(
+            spec_id=SPEC_OTHER,
+            **_pinned("Whole", {"entities": _east_africa(column), "unit_ref": unit_ref}),
+        ),
+    }
+    return [aid, whole, derived], translation, discovered
+
+
+@pytest.mark.parametrize(
+    ("verb", "keys"),
+    [
+        (
+            "share_of",
+            {"numerator_by": ["destination"], "denominator_by": {"destination": "recipient"}},
+        ),
+        (
+            "quotient_of",
+            {
+                "numerator_by": ["destination"],
+                "denominator_by": {"destination": "observationAbout"},
+                "numerator_unit": "USDollar",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "named",
+    [("Kenya",), ("Kenya", "Uganda", "Tanzania")],
+    ids=["one-named-beside-surplus-members", "several-named"],
+)
+def test_a_side_keyed_by_its_axis_reads_every_member_of_it(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: str,
+    keys: dict[str, Any],
+    named: tuple[str, ...],
+) -> None:
+    # Each recipient's aid over its own counterpart. A keyed side holds one
+    # series per member of its key column, so naming several entities there,
+    # or one beside others the source resolves, pools nothing.
+    requirements, translation, discovered = _per_recipient(verb, source, named=named)
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.tool.name == verb
+    assert step.args == keys
+    assert step.bindings == {
+        "frame_ref": Binding(from_step="fetch_aid", output=ArtifactKind.FRAME_REF),
+        "denominator_frame_ref": Binding(from_step="fetch_whole", output=ArtifactKind.FRAME_REF),
+    }
+    assert step.expected_role_keys == _frame_role_columns(["destination"])
+
+
+def test_a_keyed_side_names_an_entity_on_a_column_it_is_not_keyed_by(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # The key exempts its own column alone. The aid source also resolves two
+    # donors on `origin`, and the numerator, keyed by recipient, still has to
+    # say which donor it reads.
+    requirements, translation, discovered = _per_recipient("quotient_of", source)
+    donors = (
+        ResolvedEntity(role="origin", ref="country/USA", label="United States"),
+        ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
+    )
+    aid = requirements[0]
+    assert isinstance(aid, DatasetRequirement)
+    requirements[0] = aid.model_copy(
+        update={"entities": (*aid.entities, *_named(["United States", "Germany"], "donor"))}
+    )
+    discovered["aid"] = discovered["aid"].model_copy(
+        update={"entities": (*discovered["aid"].entities, *donors)}
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (Code.ENTITY_REQUIRED, "aid")
+    ]
+
+
+def test_a_keyed_quotient_over_an_open_axis_on_both_sides_divides_member_by_member(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    place_scope_block: dict[str, Any],
+    source: SourceFactory,
+) -> None:
+    # United States aid to every recipient over every country's population:
+    # neither side names a member of its key, and the two sides hold them
+    # under different columns. The population keeps its countries first, as
+    # any reader of an open place axis does.
+    open_place = source_from_spec_block(place_scope_block)
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="aid given",
+        entities=[Entity(name="United States", role="donor")],
+        across="recipient",
+        period=Period(start=2015, end=2024),
+    )
+    population = _every_country(id="population", measure="population")
+    peoples_req, peoples = _countries_of(
+        "population", reads="fetch_population", filter_id="peoples"
+    )
+    fields: dict[str, Any] = {"axis": "recipient", "denominator_axis": "country"}
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="peoples"),
+        **fields,
+    )
+
+    result = build(
+        _draft([decision()], [aid, population, peoples_req, per_head]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
+            RetrieveOperation(
+                id="fetch_population", requirement_id="population", spec_id=SPEC_OTHER
+            ),
+            peoples,
+            QuotientOfOperation(
+                id="per_head",
+                requirement_id="per_head",
+                numerator=Side(input="fetch"),
+                denominator=Side(input="peoples"),
+                **fields,
+            ),
+            terminal=["per_head"],
+        ),
+        discovered={
+            "aid": source(
+                entities=(UNITED_STATES,),
+                open_entity_axes=(OpenEntityAxis(column="destination", member_count=140),),
+                unit_ref="USDollar",
+            ),
+            "population": source(
+                spec_id=SPEC_OTHER,
+                entities=(),
+                open_entity_axes=open_place.open_entity_axes,
+                unit_ref=None,
+            ),
+        },
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.tool.name == "quotient_of"
+    assert step.args == {
+        "numerator_by": ["destination"],
+        "denominator_by": {"destination": "observationAbout"},
+        "numerator_unit": "USDollar",
+    }
+    assert step.expected_role_keys == _frame_role_columns(["destination"])
+
+
+def test_a_quotient_keyed_on_its_numerator_alone_needs_one_series_to_divide_by(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Each recipient's aid over a population naming three countries, with no
+    # `denominator_axis`: every key would divide by one total, and the three
+    # series are not summed into one nobody asked for.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya", "Uganda", "Tanzania"), whole_keyed=False
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (Code.ENTITY_REQUIRED, "whole")
+    ]
+    assert result.workflow is None
+
+
+def test_a_quotient_keyed_on_its_numerator_alone_divides_every_key_by_one_total(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Each recipient's aid over Kenya's population, one series: the call
+    # carries no `denominator_by`.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of",
+        source,
+        named=("Kenya", "Uganda", "Tanzania"),
+        whole_named=("Kenya",),
+        whole_keyed=False,
+    )
+    discovered["whole"] = discovered["whole"].model_copy(
+        update={"entities": _east_africa("observationAbout")[:1]}
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args == {
+        "numerator_by": ["destination"],
+        "numerator_unit": "USDollar",
+    }
+
+
+def test_an_axis_less_quotient_of_a_multi_member_numerator_is_quotient_axis_required(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Three recipients' aid over Kenya's population with no axis: the
+    # numerator would sum the three into a figure for nobody in particular.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya", "Uganda", "Tanzania"), keyed=False
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert (Code.QUOTIENT_AXIS_REQUIRED, "divided") in [
+        (issue.code, issue.operation_id) for issue in result.issues
+    ]
+    assert result.workflow is None
+
+
+def _per_head(
+    requirement: RequirementFactory,
+) -> tuple[list[EvidenceRequirement], Translation]:
+    """Kenya's debt service divided by its population, each read by its own retrieval."""
+    population = requirement(id="population", measure="total population", unit=None)
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="annual_debt_service"),
+        denominator=RequirementSide(input_id="population"),
+    )
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="people", requirement_id="population", spec_id=SPEC_OTHER),
+        QuotientOfOperation(
+            id="per_head",
+            requirement_id="per_head",
+            numerator=Side(input="debt"),
+            denominator=Side(input="people"),
+        ),
+        terminal=["per_head"],
+    )
+    return [requirement(), population, per_head], translation
+
+
+@pytest.mark.parametrize(
+    ("numerator_source", "denominator_source", "pins"),
+    [
+        pytest.param(
+            {"unit_ref": "USDollar"},
+            {"unit_ref": None},
+            {"numerator_unit": "USDollar"},
+            id="a-unit-over-a-unit-less-count",
+        ),
+        pytest.param(
+            _BOUND_BY_REQUEST,
+            {"unit_ref": None},
+            {"numerator_unit": {"currency": "USD", "prices": "current"}},
+            id="a-converted-unit-pins-the-request-object",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyUSD"},
+            {"unit_ref": "InternationalDollar"},
+            {"numerator_unit": "CurrencyUSD", "denominator_unit": "InternationalDollar"},
+            id="two-different-units",
+        ),
+        pytest.param(
+            {"unit_ref": None},
+            {"unit_ref": "SquareKilometer"},
+            {"denominator_unit": "SquareKilometer"},
+            id="a-unit-less-count-over-a-unit",
+        ),
+        pytest.param(_PER_ROW_UNIT, {"unit_ref": None}, {}, id="a-currency-per-row-is-unpinned"),
+    ],
+)
+def test_a_quotient_takes_any_pair_of_units_and_pins_each_sides_own(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    numerator_source: dict[str, Any],
+    denominator_source: dict[str, Any],
+    pins: dict[str, Any],
+) -> None:
+    # Every pair `share_of`, `compare` and `sum_of` refuse before running
+    # compiles as a quotient, each side pinned to the unit its frame declares.
+    requirements, translation = _per_head(requirement)
+
+    result = build(
+        _draft([decision()], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid", numerator_source)),
+            "population": source(spec_id=SPEC_OTHER, **_pinned("Count_Person", denominator_source)),
+        },
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.tool.name == "quotient_of"
+    assert step.args == pins
+    assert step.bindings == {
+        "frame_ref": Binding(from_step="debt", output=ArtifactKind.FRAME_REF),
+        "denominator_frame_ref": Binding(from_step="people", output=ArtifactKind.FRAME_REF),
+    }
+    assert step.expected_role_keys == ()
+
+
+def _unit_less_producer(
+    kind: str,
+) -> tuple[EvidenceRequirement, Operation]:
+    """A calculation over Kenya's and Uganda's debt service whose value has no unit of its own."""
+    if kind == "share_of":
+        fields: dict[str, Any] = {"axis": "debtor", "denominator_scope": DenominatorScope.PER_AXIS}
+        return (
+            ShareOfRequirement(
+                id="made",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="annual_debt_service"),
+                denominator=RequirementSide(input_id="exports"),
+                **fields,
+            ),
+            ShareOfOperation(
+                id="made",
+                requirement_id="made",
+                numerator=Side(input="debt"),
+                denominator=Side(input="sold"),
+                **fields,
+            ),
+        )
+    if kind == "quotient_of":
+        fields = {"axis": "debtor", "denominator_axis": "debtor"}
+        return (
+            QuotientRequirement(
+                id="made",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="annual_debt_service"),
+                denominator=RequirementSide(input_id="exports"),
+                **fields,
+            ),
+            QuotientOfOperation(
+                id="made",
+                requirement_id="made",
+                numerator=Side(input="debt"),
+                denominator=Side(input="sold"),
+                **fields,
+            ),
+        )
+    fields = {
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "per_period": True,
+    }
+    return (
+        RankRequirement(
+            id="made",
+            decision_ids=["measure", "population"],
+            input_id="annual_debt_service",
+            **fields,
+        ),
+        RankOperation(id="made", requirement_id="made", input="debt", **fields),
+    )
+
+
+@pytest.mark.parametrize("kind", ["share_of", "quotient_of", "rank"])
+def test_a_quotient_side_holding_a_ratio_a_rate_or_a_rank_position_is_refused(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    kind: str,
+) -> None:
+    # A share, a quotient and a rank position have no unit to be one part of
+    # a composed unit, and analysis-mcp refuses each as a side. The plan's
+    # own quotient reads the measured series, since `Plan` refuses the same
+    # sides; the operation alone reads the calculation.
+    two_debtors = _named(["Kenya", "Uganda"], "debtor")
+    debt = requirement(entities=two_debtors)
+    exports = requirement(
+        id="exports", measure="exports of goods and services", entities=two_debtors
+    )
+    made_req, made = _unit_less_producer(kind)
+    fields: dict[str, Any] = {"axis": "debtor", "denominator_axis": "debtor"}
+    over = QuotientRequirement(
+        id="over",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="exports"),
+        denominator=RequirementSide(input_id="annual_debt_service"),
+        **fields,
+    )
+    decisions = [decision()]
+    if kind == "rank":
+        decisions.append(_population_decision(decision))
+    plan = _draft(decisions, [debt, exports, made_req, over])
+    debtors = tuple(
+        ResolvedEntity(role="debtor", ref=_EAST_AFRICA[name], label=name)
+        for name in ("Kenya", "Uganda")
+    )
+    discovered = {
+        "annual_debt_service": source(**_pinned("DebtServicePaid", {"entities": debtors})),
+        "exports": source(spec_id=SPEC_OTHER, **_pinned("Exports", {"entities": debtors})),
+    }
+    retrievals = (
+        _retrieve(),
+        _retrieve(id="sold", requirement_id="exports", spec_id=SPEC_OTHER),
+        made,
+    )
+
+    def over_reading(numerator: str) -> QuotientOfOperation:
+        return QuotientOfOperation(
+            id="over",
+            requirement_id="over",
+            numerator=Side(input=numerator),
+            denominator=Side(input="debt"),
+            **fields,
+        )
+
+    measured = build(
+        plan,
+        _translation(*retrievals, over_reading("sold"), terminal=["made", "over"]),
+        discovered=discovered,
+    )
+    derived = build(
+        plan,
+        _translation(*retrievals, over_reading("made"), terminal=["over"]),
+        discovered=discovered,
+    )
+
+    assert measured.ok, measured.issues
+    assert (Code.INPUT_SHAPE_UNSUPPORTED, "over") in [
+        (issue.code, issue.operation_id) for issue in derived.issues
+    ]
+    assert derived.workflow is None
+
+
+@pytest.mark.parametrize(
+    ("unit_ref", "refused"),
+    [(None, True), ("USDollar", False)],
+    ids=["a-sum-of-unit-less-counts", "a-sum-in-a-unit"],
+)
+def test_a_quotient_over_a_sum_of_unit_less_sources_is_refused_before_running(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    unit_ref: str | None,
+    refused: bool,
+) -> None:
+    # A sum writes its result under a StatVar of its own, which no reader
+    # could name. A side with no unit takes its StatVar as its part of the
+    # composed unit, so a sum of unit-less sources has none
+    # (`quotient_of_side_unit_unsupported`). A sum in a unit has its unit.
+    first = requirement(id="first", measure="urban population", unit=None)
+    second = requirement(id="second", measure="rural population", unit=None)
+    people = SumOfRequirement(
+        id="people",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="first"),
+        right=RequirementSide(input_id="second"),
+    )
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="annual_debt_service"),
+        denominator=RequirementSide(input_id="people"),
+    )
+    translation = _translation(
+        _retrieve(),
+        _retrieve(id="fetch_first", requirement_id="first", spec_id=SPEC_OTHER),
+        _retrieve(id="fetch_second", requirement_id="second", spec_id=_SPEC_THIRD),
+        SumOfOperation(
+            id="people",
+            requirement_id="people",
+            left=Side(input="fetch_first"),
+            right=Side(input="fetch_second"),
+        ),
+        QuotientOfOperation(
+            id="per_head",
+            requirement_id="per_head",
+            numerator=Side(input="debt"),
+            denominator=Side(input="people"),
+        ),
+        terminal=["per_head"],
+    )
+
+    result = build(
+        _draft([decision()], [requirement(), first, second, people, per_head]),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid")),
+            "first": source(spec_id=SPEC_OTHER, **_pinned("Urban", {"unit_ref": unit_ref})),
+            "second": source(spec_id=_SPEC_THIRD, **_pinned("Rural", {"unit_ref": unit_ref})),
+        },
+    )
+
+    if not refused:
+        assert result.ok, result.issues
+        return
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (Code.FRAME_UNIT_UNBOUND, "per_head")
+    ]
+
+
+# --- An entity named on a keyed share_of or quotient_of result ---------------------
+
+_KENYA_ON_KEY = {"destination": "country/KEN"}
+_UGANDA_ON_KEY = {"destination": "country/UGA"}
+
+
+def _reading_the_division(kind: str) -> tuple[EvidenceRequirement, Operation]:
+    """A calculation that picks Kenya, and for a two-sided one Uganda, out of `divided`."""
+    if kind == "filter":
+        predicates = (EntityIn(names=("Kenya",), role="recipient"),)
+        return (
+            FilterRequirement(
+                id="picked", decision_ids=["measure"], input_id="divided", predicates=predicates
+            ),
+            FilterOperation(
+                id="picked", requirement_id="picked", input="divided", predicates=predicates
+            ),
+        )
+    sides = (
+        RequirementSide(input_id="divided", entity="Kenya"),
+        RequirementSide(input_id="divided", entity="Uganda"),
+    )
+    kenya, uganda = Side(input="divided", entity="Kenya"), Side(input="divided", entity="Uganda")
+    if kind == "compare":
+        return (
+            ComparisonRequirement(
+                id="picked", decision_ids=["measure"], left=sides[0], right=sides[1]
+            ),
+            CompareOperation(id="picked", requirement_id="picked", left=kenya, right=uganda),
+        )
+    return (
+        ShareOfRequirement(
+            id="picked", decision_ids=["measure"], numerator=sides[0], denominator=sides[1]
+        ),
+        ShareOfOperation(id="picked", requirement_id="picked", numerator=kenya, denominator=uganda),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "args"),
+    [
+        ("compare", {"left_entity": _KENYA_ON_KEY, "right_entity": _UGANDA_ON_KEY}),
+        ("share_of", {"numerator_entity": _KENYA_ON_KEY, "denominator_entity": _UGANDA_ON_KEY}),
+        (
+            "filter",
+            {
+                "predicates": [
+                    {"kind": "category_match", "column": "destination", "values": ["country/KEN"]}
+                ]
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize("verb", ["quotient_of", "share_of"])
+def test_an_entity_named_on_a_keyed_division_binds_on_its_key_column(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: str,
+    kind: str,
+    args: dict[str, Any],
+) -> None:
+    # A keyed division rests on two retrievals and holds one series per
+    # recipient under its numerator's key column, so a reader naming a
+    # recipient resolves it through the numerator's requirement and source.
+    requirements, translation, discovered = _per_recipient(
+        verb, source, named=("Kenya", "Uganda", "Tanzania")
+    )
+    picked_req, picked = _reading_the_division(kind)
+
+    result = build(
+        _draft([decision()], [*requirements, picked_req]),
+        _translation(*translation.operations, picked, terminal=["picked"]),
+        discovered=discovered,
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.id == "picked"
+    assert step.args == args
+    assert step.bindings == {
+        "frame_ref": Binding(from_step="divided", output=ArtifactKind.FRAME_REF)
+    }
+
+
+def test_an_entity_a_keyed_division_dropped_the_column_of_is_referred(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # United States aid per head, keyed by recipient: the result holds one
+    # series per recipient and none per donor, so a side cannot pick the
+    # donor out of it.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya", "Uganda", "Tanzania")
+    )
+    aid = requirements[0]
+    assert isinstance(aid, DatasetRequirement)
+    requirements[0] = aid.model_copy(
+        update={"entities": (*aid.entities, Entity(name="United States", role="donor"))}
+    )
+    discovered["aid"] = discovered["aid"].model_copy(
+        update={
+            "entities": (
+                *discovered["aid"].entities,
+                ResolvedEntity(role="origin", ref="country/USA", label="United States"),
+            )
+        }
+    )
+    compared = ComparisonRequirement(
+        id="picked",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="divided", entity="United States"),
+        right=RequirementSide(input_id="divided", entity="Kenya"),
+    )
+    compare = CompareOperation(
+        id="picked",
+        requirement_id="picked",
+        left=Side(input="divided", entity="United States"),
+        right=Side(input="divided", entity="Kenya"),
+    )
+
+    result = build(
+        _draft([decision()], [*requirements, compared]),
+        _translation(*translation.operations, compare, terminal=["picked"]),
+        discovered=discovered,
+    )
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (Code.ENTITY_NOT_ON_FRAME, "picked")
+    ]
+    assert result.workflow is None
+
+
+def test_whole_sides_of_two_keyed_quotients_are_entity_required(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Aid per head and people per aid dollar, each keyed over three
+    # countries: a comparison naming no entity would read three series a
+    # side, and the two are in different composed units besides.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya", "Uganda", "Tanzania")
+    )
+    fields: dict[str, Any] = {"axis": "country", "denominator_axis": "recipient"}
+    inverse_req = QuotientRequirement(
+        id="inverse",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="whole"),
+        denominator=RequirementSide(input_id="aid"),
+        **fields,
+    )
+    inverse = QuotientOfOperation(
+        id="inverse",
+        requirement_id="inverse",
+        numerator=Side(input="fetch_whole"),
+        denominator=Side(input="fetch_aid"),
+        **fields,
+    )
+    compared = ComparisonRequirement(
+        id="picked",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="divided"),
+        right=RequirementSide(input_id="inverse"),
+    )
+    compare = CompareOperation(
+        id="picked",
+        requirement_id="picked",
+        left=Side(input="divided"),
+        right=Side(input="inverse"),
+    )
+
+    result = build(
+        _draft([decision()], [*requirements, inverse_req, compared]),
+        _translation(*translation.operations, inverse, compare, terminal=["picked"]),
+        discovered=discovered,
+    )
+
+    assert [(issue.code, issue.operation_id, issue.requirement_id) for issue in result.issues] == [
+        (Code.ENTITY_REQUIRED, "picked", "aid"),
+        (Code.ENTITY_REQUIRED, "picked", "whole"),
+        (Code.FRAME_UNITS_DIFFER, "picked", None),
+    ]
+    assert result.workflow is None
+
+
+def test_an_un_keyed_quotient_binds_the_entity_each_side_names(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Kenya's aid over Kenya's population, each source also resolving Uganda
+    # and Tanzania: each side's entity is bound on its own source's column.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya",), keyed=False
+    )
+    per_head = QuotientRequirement(
+        id="divided",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="aid", entity="Kenya"),
+        denominator=RequirementSide(input_id="whole", entity="Kenya"),
+    )
+    divide = QuotientOfOperation(
+        id="divided",
+        requirement_id="divided",
+        numerator=Side(input="fetch_aid", entity="Kenya"),
+        denominator=Side(input="fetch_whole", entity="Kenya"),
+    )
+
+    result = build(
+        _draft([decision()], [*requirements[:2], per_head]),
+        _translation(*translation.operations[:2], divide, terminal=["divided"]),
+        discovered=discovered,
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args == {
+        "numerator_entity": {"destination": "country/KEN"},
+        "denominator_entity": {"observationAbout": "country/KEN"},
+        "numerator_unit": "USDollar",
+    }
+
+
+# --- A place word keying a side, and what may read a quotient ----------------------
+
+
+def _over_places(
+    verb: str,
+    source: SourceFactory,
+    *,
+    numerator_role: str | None,
+    keys: dict[str, Any],
+    names: Sequence[str] = ("Kenya", "Uganda", "Tanzania"),
+) -> tuple[list[EvidenceRequirement], Translation, dict[str, SelectedSource]]:
+    """A measure of `names` divided by `verb` by a second measure of the same places.
+
+    The numerator names its places under `numerator_role`, held on
+    `destination`, or with no role, held on `observationAbout`. The
+    denominator names them with no role on `observationAbout`: population
+    for a `quotient_of`, a total in the numerator's unit for a `share_of`.
+    """
+    quotient = verb == "quotient_of"
+    period = Period(start=2015, end=2024)
+    measured = DatasetRequirement(
+        id="measured",
+        decision_ids=["measure"],
+        measure="aid received",
+        entities=[Entity(name=name, role=numerator_role) for name in names],
+        period=period,
+    )
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=["measure"],
+        measure="population" if quotient else "national income",
+        entities=[Entity(name=name) for name in names],
+        period=period,
+    )
+    fields: dict[str, Any] = {"id": "divided", **keys}
+    sides = (RequirementSide(input_id="measured"), RequirementSide(input_id="whole"))
+    op_sides = (Side(input="fetch_measured"), Side(input="fetch_whole"))
+    derived: EvidenceRequirement
+    operation: Operation
+    if quotient:
+        derived = QuotientRequirement(
+            decision_ids=["measure"], numerator=sides[0], denominator=sides[1], **fields
+        )
+        operation = QuotientOfOperation(
+            requirement_id="divided", numerator=op_sides[0], denominator=op_sides[1], **fields
+        )
+    else:
+        derived = ShareOfRequirement(
+            decision_ids=["measure"], numerator=sides[0], denominator=sides[1], **fields
+        )
+        operation = ShareOfOperation(
+            requirement_id="divided", numerator=op_sides[0], denominator=op_sides[1], **fields
+        )
+    translation = _translation(
+        RetrieveOperation(id="fetch_measured", requirement_id="measured", spec_id=SPEC_KENYA),
+        RetrieveOperation(id="fetch_whole", requirement_id="whole", spec_id=SPEC_OTHER),
+        operation,
+        terminal=["divided"],
+    )
+    column = "observationAbout" if numerator_role is None else "destination"
+    discovered = {
+        "measured": source(
+            **_pinned("Measured", {"entities": _east_africa(column), "unit_ref": "USDollar"})
+        ),
+        "whole": source(
+            spec_id=SPEC_OTHER,
+            **_pinned(
+                "Whole",
+                {
+                    "entities": _east_africa("observationAbout"),
+                    "unit_ref": None if quotient else "USDollar",
+                },
+            ),
+        ),
+    }
+    return [measured, whole, derived], translation, discovered
+
+
+@pytest.mark.parametrize(
+    ("verb", "numerator_role", "names", "keys", "args"),
+    [
+        pytest.param(
+            "quotient_of",
+            "recipient",
+            ("Kenya", "Uganda", "Tanzania"),
+            {"axis": "recipient", "denominator_axis": "country"},
+            {
+                "numerator_by": ["destination"],
+                "denominator_by": {"destination": "observationAbout"},
+                "numerator_unit": "USDollar",
+            },
+            id="quotient-of-a-role-over-places",
+        ),
+        pytest.param(
+            "quotient_of",
+            None,
+            ("Kenya", "Uganda"),
+            {"axis": "country", "denominator_axis": "country"},
+            {
+                "numerator_by": ["observationAbout"],
+                "denominator_by": {"observationAbout": "observationAbout"},
+                "numerator_unit": "USDollar",
+            },
+            id="quotient-of-places-over-places",
+        ),
+        pytest.param(
+            "share_of",
+            None,
+            ("Kenya", "Uganda"),
+            {"axis": "country", "denominator_scope": DenominatorScope.PER_AXIS},
+            {
+                "numerator_by": ["observationAbout"],
+                "denominator_by": {"observationAbout": "observationAbout"},
+            },
+            id="share-of-places-over-places",
+        ),
+    ],
+)
+def test_a_place_word_keys_a_side_by_the_column_its_role_less_places_sit_in(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: str,
+    numerator_role: str | None,
+    names: tuple[str, ...],
+    keys: dict[str, Any],
+    args: dict[str, Any],
+) -> None:
+    # A place the measure is about states no role, so its column goes by no
+    # role phrase. A place word names it on either side.
+    requirements, translation, discovered = _over_places(
+        verb, source, numerator_role=numerator_role, keys=keys, names=names
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.tool.name == verb
+    assert step.args == args
+
+
+def test_a_rank_names_the_column_of_role_less_places_by_a_place_word(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    requirements, translation, discovered = _over_places(
+        "quotient_of",
+        source,
+        numerator_role=None,
+        keys={"axis": "country", "denominator_axis": "country"},
+    )
+    ranked = RankRequirement(
+        id="ranked",
+        decision_ids=["measure", "population"],
+        input_id="divided",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="place",
+        reduction=Reduction.MEAN,
+    )
+    rank = RankOperation(
+        id="ranked",
+        requirement_id="ranked",
+        input="divided",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        axis="place",
+        reduction=Reduction.MEAN,
+    )
+
+    result = build(
+        _draft([decision(), _population_decision(decision)], [*requirements, ranked]),
+        _translation(*translation.operations, rank, terminal=["ranked"]),
+        discovered=discovered,
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args == {
+        "rank_by": ["observationAbout"],
+        "ascending": False,
+        "aggregation": "mean",
+    }
+
+
+@pytest.mark.parametrize("group_by", [(GroupBy.PERIOD,), (GroupBy.ENTITY,)])
+def test_a_sum_over_a_quotient_is_refused_and_a_mean_compiles(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    group_by: tuple[GroupBy, ...],
+) -> None:
+    # Dollars per person for three countries add up to no per-person figure.
+    # The plan's own sum reads the measured series, since `Plan` refuses one
+    # over the quotient; the operation alone reads the quotient.
+    requirements, translation, discovered = _over_places(
+        "quotient_of",
+        source,
+        numerator_role="recipient",
+        keys={"axis": "recipient", "denominator_axis": "country"},
+    )
+
+    def reduced(reduction: Reduction, *, plan_reads: str) -> CompileResult:
+        fields: dict[str, Any] = {"id": "reduced", "reduction": reduction, "group_by": group_by}
+        requirement = AggregateRequirement(decision_ids=["measure"], input_id=plan_reads, **fields)
+        operation = AggregateOperation(requirement_id="reduced", input="divided", **fields)
+        return build(
+            _draft([decision()], [*requirements, requirement]),
+            _translation(*translation.operations, operation, terminal=["reduced"]),
+            discovered=discovered,
+        )
+
+    summed = reduced(Reduction.SUM, plan_reads="measured")
+    mean = reduced(Reduction.MEAN, plan_reads="divided")
+
+    assert (Code.INPUT_SHAPE_UNSUPPORTED, "reduced") in [
+        (issue.code, issue.operation_id) for issue in summed.issues
+    ]
+    assert summed.workflow is None
+    assert mean.ok, mean.issues
+    assert mean.workflow is not None
+    assert mean.workflow.steps[-1].args["aggregation"] == "mean"
+
+
+@pytest.mark.parametrize("verb", ["compare", "share_of"])
+@pytest.mark.parametrize("rates", ["one", "both"])
+def test_a_quotient_pairs_with_another_quotient_and_no_measured_side(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    verb: str,
+    rates: str,
+) -> None:
+    # Kenya's debt service per head beside its exports, measured or per head.
+    # A composed unit equals no source's own, so the measured pairing is
+    # refused on its shape, and never as a share whose units differ, whose
+    # repair is the quotient one side already is. The plan's own pairing
+    # reads the two measured series, since `Plan` refuses the same sides.
+    requirements, translation = _per_head(requirement)
+    exports = requirement(id="exports", measure="exports of goods and services")
+    exports_per_head = QuotientRequirement(
+        id="exports_per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="exports"),
+        denominator=RequirementSide(input_id="population"),
+    )
+    divide_exports = QuotientOfOperation(
+        id="exports_per_head",
+        requirement_id="exports_per_head",
+        numerator=Side(input="sold"),
+        denominator=Side(input="people"),
+    )
+    plan_sides = (
+        ("per_head", "exports_per_head") if rates == "both" else ("annual_debt_service", "exports")
+    )
+    second = "exports_per_head" if rates == "both" else "sold"
+    paired: EvidenceRequirement
+    pairing: Operation
+    if verb == "compare":
+        paired = ComparisonRequirement(
+            id="paired",
+            decision_ids=["measure"],
+            left=RequirementSide(input_id=plan_sides[0]),
+            right=RequirementSide(input_id=plan_sides[1]),
+        )
+        pairing = CompareOperation(
+            id="paired",
+            requirement_id="paired",
+            left=Side(input="per_head"),
+            right=Side(input=second),
+        )
+    else:
+        paired = ShareOfRequirement(
+            id="paired",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=plan_sides[0]),
+            denominator=RequirementSide(input_id=plan_sides[1]),
+        )
+        pairing = ShareOfOperation(
+            id="paired",
+            requirement_id="paired",
+            numerator=Side(input="per_head"),
+            denominator=Side(input=second),
+        )
+
+    result = build(
+        _draft([decision()], [*requirements, exports, exports_per_head, paired]),
+        _translation(
+            *translation.operations,
+            _retrieve(id="sold", requirement_id="exports", spec_id=_SPEC_THIRD),
+            divide_exports,
+            pairing,
+            terminal=["paired"] if rates == "both" else ["paired", "exports_per_head"],
+        ),
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid")),
+            "population": source(spec_id=SPEC_OTHER, **_pinned("Count_Person", {"unit_ref": None})),
+            "exports": source(spec_id=_SPEC_THIRD, **_pinned("Exports")),
+        },
+    )
+
+    if rates == "both":
+        assert result.ok, result.issues
+    else:
+        # The operation also reads other inputs than its requirement states.
+        # The unit check reports the pair as two different units for a share
+        # as for a comparison.
+        assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+            (Code.OPERATION_MISMATCH, "paired"),
+            (Code.INPUT_SHAPE_UNSUPPORTED, "paired"),
+            (Code.FRAME_UNITS_DIFFER, "paired"),
+        ]
+        assert result.workflow is None
+
+
+# --- Two keyed sides and the entities they hold in common --------------------------
+
+
+def _keyed_over(
+    verb: str, source: SourceFactory, *, numerator: Sequence[str], denominator: Sequence[str]
+) -> tuple[list[EvidenceRequirement], Translation, dict[str, SelectedSource]]:
+    """`_per_recipient`, keyed on both sides, each source resolving only the countries its side names."""
+    requirements, translation, discovered = _per_recipient(
+        verb, source, named=numerator, whole_named=denominator
+    )
+    for requirement_id, names in (("aid", numerator), ("whole", denominator)):
+        held = discovered[requirement_id]
+        discovered[requirement_id] = held.model_copy(
+            update={"entities": tuple(e for e in held.entities if e.label in names)}
+        )
+    return requirements, translation, discovered
+
+
+@pytest.mark.parametrize("verb", ["quotient_of", "share_of"])
+def test_two_keyed_sides_holding_no_entity_in_common_are_keys_disjoint(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: str,
+) -> None:
+    # Kenya's aid keyed against Uganda's counterpart: no key has an entry on
+    # the other side, so the division would pair nothing.
+    requirements, translation, discovered = _keyed_over(
+        verb, source, numerator=("Kenya",), denominator=("Uganda",)
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (Code.KEYS_DISJOINT, "divided")
+    ]
+    assert result.workflow is None
+
+
+@pytest.mark.parametrize("verb", ["quotient_of", "share_of"])
+def test_two_keyed_sides_holding_one_entity_in_common_compile(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: str,
+) -> None:
+    requirements, translation, discovered = _keyed_over(
+        verb, source, numerator=("Kenya", "Uganda", "Tanzania"), denominator=("Kenya",)
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert result.ok, result.issues
+
+
+@pytest.mark.parametrize(
+    ("reader", "compiles"),
+    [
+        pytest.param("sum", False, id="summed"),
+        pytest.param("mean", True, id="averaged"),
+        pytest.param("quotient_of", False, id="divided-again"),
+        pytest.param("compare", False, id="beside-a-measures-change"),
+        pytest.param("share_of", False, id="over-a-measures-change"),
+        pytest.param("compare_two", True, id="beside-anothers-change"),
+    ],
+)
+def test_an_absolute_change_in_a_quotient_reads_as_the_quotient_does(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    reader: str,
+    compiles: bool,
+) -> None:
+    # The change in aid per head from 2015 to 2024 is still in dollars per
+    # person, so it sums, divides and pairs as the quotient itself does. Where
+    # `Plan` refuses the reading, the plan's own requirement reads the change
+    # in the plain measure, and the operation alone reads the quotient's.
+    requirements, translation, discovered = _over_places(
+        "quotient_of",
+        source,
+        numerator_role="recipient",
+        keys={"axis": "recipient", "denominator_axis": "country"},
+    )
+
+    def growth(name: str, requirement_input: str, operation_input: str) -> tuple[Any, Any]:
+        fields: dict[str, Any] = {
+            "id": name,
+            "change": GrowthChange.ABSOLUTE,
+            "window_start": 2015,
+            "window_end": 2024,
+        }
+        return (
+            GrowthRequirement(decision_ids=["measure"], input_id=requirement_input, **fields),
+            GrowthOperation(requirement_id=name, input=operation_input, **fields),
+        )
+
+    grew_req, grew = growth("grew", "divided", "divided")
+    plain_req, plain = growth("plain", "measured", "fetch_measured")
+    whole_req, whole = growth("whole_grew", "whole", "fetch_whole")
+    plan_reads = "grew" if compiles else "plain"
+    kenya, uganda = "Kenya", "Uganda"
+    reading_req: EvidenceRequirement
+    reading: Operation
+    if reader in ("sum", "mean"):
+        fields: dict[str, Any] = {
+            "id": "reading",
+            "reduction": Reduction(reader),
+            "group_by": (GroupBy.PERIOD,),
+        }
+        reading_req = AggregateRequirement(decision_ids=["measure"], input_id=plan_reads, **fields)
+        reading = AggregateOperation(requirement_id="reading", input="grew", **fields)
+    elif reader == "quotient_of":
+        reading_req = QuotientRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=plan_reads, entity=kenya),
+            denominator=RequirementSide(input_id="whole_grew", entity=kenya),
+        )
+        reading = QuotientOfOperation(
+            id="reading",
+            requirement_id="reading",
+            numerator=Side(input="grew", entity=kenya),
+            denominator=Side(input="whole_grew", entity=kenya),
+        )
+    elif reader == "share_of":
+        reading_req = ShareOfRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=plan_reads, entity=kenya),
+            denominator=RequirementSide(input_id="plain", entity=uganda),
+        )
+        reading = ShareOfOperation(
+            id="reading",
+            requirement_id="reading",
+            numerator=Side(input="grew", entity=kenya),
+            denominator=Side(input="plain", entity=uganda),
+        )
+    else:
+        other = "grew" if reader == "compare_two" else "plain"
+        reading_req = ComparisonRequirement(
+            id="reading",
+            decision_ids=["measure"],
+            left=RequirementSide(input_id=plan_reads, entity=kenya),
+            right=RequirementSide(input_id=other, entity=uganda),
+        )
+        reading = CompareOperation(
+            id="reading",
+            requirement_id="reading",
+            left=Side(input="grew", entity=kenya),
+            right=Side(input=other, entity=uganda),
+        )
+
+    result = build(
+        _draft(
+            [decision()],
+            [*requirements, grew_req, plain_req, whole_req, reading_req],
+            answer_mode=AnswerMode.SERIES,
+        ),
+        _translation(
+            *translation.operations,
+            grew,
+            plain,
+            whole,
+            reading,
+            terminal=["reading", "grew", "plain", "whole_grew"],
+        ),
+        discovered=discovered,
+    )
+
+    if compiles:
+        assert result.ok, result.issues
+    else:
+        assert (Code.INPUT_SHAPE_UNSUPPORTED, "reading") in [
+            (issue.code, issue.operation_id) for issue in result.issues
+        ]
+        assert Code.SHARE_UNITS_DIFFER not in _codes(result)
+        assert result.workflow is None
+
+
+def test_keys_named_apart_still_pair_when_both_sources_hold_every_member(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # The numerator's requirement names Kenya and the denominator's Uganda,
+    # and each source resolves all three countries: a retrieval writes no
+    # scope, so both frames hold all three and every key pairs.
+    requirements, translation, discovered = _per_recipient(
+        "quotient_of", source, named=("Kenya",), whole_named=("Uganda",)
+    )
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert result.ok, result.issues
+
+
+def test_a_wider_source_on_one_side_still_shares_no_key_with_the_other(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # The aid source resolves Tanzania beside the Kenya its requirement
+    # names, and the population source Uganda alone: neither of the
+    # numerator's two keys has an entry on the other side.
+    requirements, translation, discovered = _keyed_over(
+        "quotient_of", source, numerator=("Kenya", "Tanzania"), denominator=("Uganda",)
+    )
+    aid = requirements[0]
+    assert isinstance(aid, DatasetRequirement)
+    requirements[0] = aid.model_copy(update={"entities": aid.entities[:1]})
+
+    result = build(_draft([decision()], requirements), translation, discovered=discovered)
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (Code.KEYS_DISJOINT, "divided")
+    ]
+
+
+# --- Two sides in composed units ---------------------------------------------------
+
+
+def _two_per_head_figures(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    *,
+    verb: str,
+    second: tuple[str, str],
+    gdp_unit: str,
+    grown: bool = False,
+) -> tuple[Plan, Translation, dict[str, SelectedSource]]:
+    """Kenya's debt service per head paired by `verb` with a second quotient.
+
+    `second` is the numerator and denominator requirement of the second
+    quotient, among debt service in `usd`, GDP in `gdp_unit` and a unit-less
+    population. `grown` reads each quotient through an absolute growth.
+    """
+    requirements, translation = _per_head(requirement)
+    gdp = requirement(id="gdp", measure="gross domestic product", unit=None)
+    reads = {"annual_debt_service": "debt", "population": "people", "gdp": "output"}
+    other_req = QuotientRequirement(
+        id="other",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=second[0]),
+        denominator=RequirementSide(input_id=second[1]),
+    )
+    other = QuotientOfOperation(
+        id="other",
+        requirement_id="other",
+        numerator=Side(input=reads[second[0]]),
+        denominator=Side(input=reads[second[1]]),
+    )
+    derived: list[EvidenceRequirement] = [other_req]
+    operations: list[Operation] = [
+        _retrieve(id="output", requirement_id="gdp", spec_id=_SPEC_THIRD),
+        other,
+    ]
+    sides = ["per_head", "other"]
+    if grown:
+        change: dict[str, Any] = {
+            "window_start": 2015,
+            "window_end": 2024,
+            "change": GrowthChange.ABSOLUTE,
+        }
+        for side in sides:
+            derived.append(
+                GrowthRequirement(
+                    id=f"{side}_change", decision_ids=["measure"], input_id=side, **change
+                )
+            )
+            operations.append(
+                GrowthOperation(
+                    id=f"{side}_change", requirement_id=f"{side}_change", input=side, **change
+                )
+            )
+        sides = [f"{side}_change" for side in sides]
+    if verb == "compare":
+        derived.append(
+            ComparisonRequirement(
+                id="paired",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id=sides[0]),
+                right=RequirementSide(input_id=sides[1]),
+            )
+        )
+        operations.append(
+            CompareOperation(
+                id="paired",
+                requirement_id="paired",
+                left=Side(input=sides[0]),
+                right=Side(input=sides[1]),
+            )
+        )
+    else:
+        derived.append(
+            ShareOfRequirement(
+                id="paired",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id=sides[0]),
+                denominator=RequirementSide(input_id=sides[1]),
+            )
+        )
+        operations.append(
+            ShareOfOperation(
+                id="paired",
+                requirement_id="paired",
+                numerator=Side(input=sides[0]),
+                denominator=Side(input=sides[1]),
+            )
+        )
+    discovered = {
+        "annual_debt_service": source(**_pinned("DebtServicePaid")),
+        "population": source(spec_id=SPEC_OTHER, **_pinned("Count_Person", {"unit_ref": None})),
+        "gdp": source(spec_id=_SPEC_THIRD, **_pinned("GDP", {"unit_ref": gdp_unit})),
+    }
+    return (
+        _draft([decision()], [*requirements, gdp, *derived]),
+        _translation(*translation.operations, *operations, terminal=["paired"]),
+        discovered,
+    )
+
+
+@pytest.mark.parametrize(
+    ("second", "gdp_unit"),
+    [
+        pytest.param(("gdp", "population"), "Euro", id="another-currency-per-head"),
+        pytest.param(("annual_debt_service", "gdp"), "usd", id="another-denominator"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("verb", "grown"),
+    [("compare", False), ("share_of", False), ("compare", True)],
+    ids=["compare", "share_of", "compare-absolute-growths"],
+)
+def test_two_sides_in_different_composed_units_are_frame_units_differ(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    second: tuple[str, str],
+    gdp_unit: str,
+    verb: str,
+    grown: bool,
+) -> None:
+    # Dollars per person against euros per person, or against dollars per
+    # dollar: analysis-mcp pairs two slices only in one unit. A share over a
+    # quotient is never referred to `quotient_of`, which takes no quotient.
+    plan, translation, discovered = _two_per_head_figures(
+        decision, requirement, source, verb=verb, second=second, gdp_unit=gdp_unit, grown=grown
+    )
+
+    result = build(plan, translation, discovered=discovered)
+
+    assert [(issue.code, issue.operation_id) for issue in result.issues] == [
+        (Code.FRAME_UNITS_DIFFER, "paired")
+    ]
+    assert result.workflow is None
+
+
+@pytest.mark.parametrize("grown", [False, True], ids=["quotients", "absolute-growths"])
+def test_two_sides_in_one_composed_unit_compare(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    grown: bool,
+) -> None:
+    # Debt service per head beside GDP per head, both in dollars per person.
+    plan, translation, discovered = _two_per_head_figures(
+        decision,
+        requirement,
+        source,
+        verb="compare",
+        second=("gdp", "population"),
+        gdp_unit="usd",
+        grown=grown,
+    )
+
+    result = build(plan, translation, discovered=discovered)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert (step.id, step.tool.name, step.args) == ("paired", "compare", {})
+
+
+# --- A place dimension whose entities state no role --------------------------------
+
+
+def _two_places(source: SourceFactory) -> tuple[DatasetRequirement, SelectedSource]:
+    """Kenya's and Uganda's population, the two named with no role and held on `observationAbout`."""
+    population = DatasetRequirement(
+        id="population",
+        decision_ids=["measure"],
+        measure="population",
+        entities=[Entity(name="Kenya"), Entity(name="Uganda")],
+        period=Period(start=2015, end=2024),
+    )
+    held = source(
+        **_pinned(
+            "Count_Person",
+            {"entities": _east_africa("observationAbout")[:2], "unit_ref": None},
+        )
+    )
+    return population, held
+
+
+def test_an_axis_referral_names_a_role_less_place_column_by_the_place_phrase(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # The planner keys on what the referral names, and `Plan` takes
+    # "country" for a place dimension and refuses the literal column.
+    population, held = _two_places(source)
+    gdp = population.model_copy(update={"id": "gdp", "measure": "gross domestic product"})
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="gdp"),
+        denominator=RequirementSide(input_id="population"),
+    )
+
+    result = build(
+        _draft([decision()], [gdp, population, per_head]),
+        _translation(
+            RetrieveOperation(id="output", requirement_id="gdp", spec_id=SPEC_OTHER),
+            RetrieveOperation(id="people", requirement_id="population", spec_id=SPEC_KENYA),
+            QuotientOfOperation(
+                id="per_head",
+                requirement_id="per_head",
+                numerator=Side(input="output"),
+                denominator=Side(input="people"),
+            ),
+            terminal=["per_head"],
+        ),
+        discovered={
+            "population": held,
+            "gdp": held.model_copy(
+                update={"spec_id": SPEC_OTHER, "unit_ref": "usd"} | _pinned("GDP", {})
+            ),
+        },
+    )
+
+    (reason,) = [
+        issue.reason for issue in result.issues if issue.code is Code.QUOTIENT_AXIS_REQUIRED
+    ]
+    assert "['country']" in reason
+    assert "observationAbout" not in reason
+
+
+def test_a_filter_names_role_less_places_by_a_place_word(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    population, held = _two_places(source)
+    predicates = (EntityIn(names=("Kenya",), role="country"),)
+
+    result = build(
+        _draft(
+            [decision()],
+            [
+                population,
+                FilterRequirement(
+                    id="kenya",
+                    decision_ids=["measure"],
+                    input_id="population",
+                    predicates=predicates,
+                ),
+            ],
+        ),
+        _translation(
+            RetrieveOperation(id="people", requirement_id="population", spec_id=SPEC_KENYA),
+            FilterOperation(
+                id="kenya", requirement_id="kenya", input="people", predicates=predicates
+            ),
+            terminal=["kenya"],
+        ),
+        discovered={"population": held},
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args == {
+        "predicates": [
+            {"kind": "category_match", "column": "observationAbout", "values": ["country/KEN"]}
+        ]
+    }
+
+
+def test_a_filter_naming_role_less_places_by_a_place_word_narrows_their_column(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # Kenya and Uganda of a source that also resolves Tanzania. The filter
+    # names the place column by a place word, and the total over what it
+    # kept pools no place the plan left unnamed.
+    places = DatasetRequirement(
+        id="places",
+        decision_ids=["measure"],
+        measure="aid received",
+        entities=[Entity(name="Kenya"), Entity(name="Uganda")],
+        period=Period(start=2015, end=2024),
+    )
+    predicates = (EntityIn(names=("Kenya", "Uganda"), role="country"),)
+    kept_req = FilterRequirement(
+        id="kept", decision_ids=["measure"], input_id="places", predicates=predicates
+    )
+    total_fields: dict[str, Any] = {
+        "id": "total",
+        "reduction": Reduction.SUM,
+        "group_by": (GroupBy.PERIOD,),
+    }
+    total_req = AggregateRequirement(decision_ids=["measure"], input_id="kept", **total_fields)
+
+    result = build(
+        _draft([decision()], [places, kept_req, total_req]),
+        _translation(
+            RetrieveOperation(id="fetch", requirement_id="places", spec_id=SPEC_KENYA),
+            FilterOperation(id="kept", requirement_id="kept", input="fetch", predicates=predicates),
+            AggregateOperation(requirement_id="total", input="kept", **total_fields),
+            terminal=["total"],
+        ),
+        discovered={
+            "places": source(**_pinned("Measured", {"entities": _east_africa("observationAbout")}))
+        },
+    )
+
+    assert result.ok, result.issues
+
+
+# --- A share of a share --------------------------------------------------------------
+
+_SPEC_FOURTH = "spec_" + "d" * 32
+
+
+@pytest.mark.parametrize(
+    ("verb", "left", "right", "published_unit", "issues"),
+    [
+        pytest.param(
+            "share_of",
+            "of_gdp",
+            "output",
+            None,
+            [(Code.FRAME_UNIT_UNBOUND, "again", "gdp")],
+            id="share-over-a-side-in-dollars",
+        ),
+        pytest.param("share_of", "of_gdp", "other_share", None, [], id="share-over-another-share"),
+        pytest.param(
+            "share_of", "of_gdp", "published", PERCENT_UNIT, [], id="share-over-a-published-share"
+        ),
+        pytest.param(
+            "share_of",
+            "of_gdp",
+            "published",
+            None,
+            [(Code.FRAME_UNIT_UNBOUND, "again", "published")],
+            id="share-over-a-unitless-side",
+        ),
+        pytest.param(
+            "compare",
+            "of_gdp",
+            "output",
+            None,
+            [(Code.FRAME_UNIT_UNBOUND, "again", "gdp")],
+            id="compared-with-a-side-in-dollars",
+        ),
+        pytest.param(
+            "compare",
+            "of_gdp",
+            "published",
+            PERCENT_UNIT,
+            [],
+            id="compared-with-a-published-share",
+        ),
+        pytest.param(
+            "compare",
+            "share_change",
+            "gdp_growth",
+            None,
+            [(Code.FRAME_UNIT_UNBOUND, "again", None)],
+            id="change-in-a-share-compared-with-a-relative-growth",
+        ),
+        pytest.param(
+            "compare", "gdp_growth", "exports_growth", None, [], id="two-relative-growths"
+        ),
+        pytest.param(
+            "compare",
+            "exports_growth",
+            "gdp_change",
+            None,
+            [(Code.FRAME_UNIT_UNBOUND, "again", "gdp")],
+            id="relative-growth-compared-with-a-change-in-dollars",
+        ),
+    ],
+)
+def test_a_share_pairs_only_with_another_side_in_percent(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    verb: str,
+    left: str,
+    right: str,
+    published_unit: str | None,
+    issues: list[tuple[Code, str, str | None]],
+) -> None:
+    # Kenya's debt service as a share of its GDP is in per cent, and so is
+    # its change in percentage points. It divides by, or compares with,
+    # another share or a published series in per cent as it stands. Against
+    # GDP in dollars, a unit-less count or a relative growth analysis-mcp
+    # refuses the units, and `quotient_of` takes no ratio, so no operation
+    # computes the pair; the issue names the side a source in per cent
+    # would clear. A relative growth has no unit: it pairs with another and
+    # not with a change in dollars.
+    requirement_of = {"output": "gdp"}
+    gdp = requirement(id="gdp", measure="gross domestic product")
+    exports = requirement(id="exports", measure="exports of goods and services")
+    published = requirement(id="published", measure="debt service as a share of exports")
+    window = {"window_start": 2015, "window_end": 2023}
+    growths = {
+        "share_change": ("of_gdp", "of_gdp", GrowthChange.ABSOLUTE),
+        "gdp_growth": ("gdp", "output", GrowthChange.RELATIVE),
+        "gdp_change": ("gdp", "output", GrowthChange.ABSOLUTE),
+        "exports_growth": ("exports", "sold", GrowthChange.RELATIVE),
+    }
+    used = {left, right}
+
+    def share(share_id: str, numerator: str, denominator: str) -> EvidenceRequirement:
+        return ShareOfRequirement(
+            id=share_id,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=numerator),
+            denominator=RequirementSide(input_id=denominator),
+        )
+
+    def divide(share_id: str, numerator: str, denominator: str) -> Operation:
+        return ShareOfOperation(
+            id=share_id,
+            requirement_id=share_id,
+            numerator=Side(input=numerator),
+            denominator=Side(input=denominator),
+        )
+
+    left_req, right_req = (requirement_of.get(side, side) for side in (left, right))
+    result = build(
+        _draft(
+            [decision()],
+            [
+                requirement(),
+                gdp,
+                exports,
+                *([published] if "published" in used else []),
+                share("of_gdp", "annual_debt_service", "gdp"),
+                share("other_share", "exports", "gdp"),
+                *(
+                    GrowthRequirement(
+                        id=growth_id,
+                        decision_ids=["measure"],
+                        input_id=input_req,
+                        change=change,
+                        **window,
+                    )
+                    for growth_id, (input_req, _, change) in growths.items()
+                    if growth_id in used
+                ),
+                (
+                    share("again", left_req, right_req)
+                    if verb == "share_of"
+                    else ComparisonRequirement(
+                        id="again",
+                        decision_ids=["measure"],
+                        left=RequirementSide(input_id=left_req),
+                        right=RequirementSide(input_id=right_req),
+                    )
+                ),
+            ],
+        ),
+        _translation(
+            _retrieve(),
+            _retrieve(id="output", requirement_id="gdp", spec_id=SPEC_OTHER),
+            _retrieve(id="sold", requirement_id="exports", spec_id=_SPEC_THIRD),
+            *(
+                [_retrieve(id="published", requirement_id="published", spec_id=_SPEC_FOURTH)]
+                if "published" in used
+                else []
+            ),
+            divide("of_gdp", "debt", "output"),
+            divide("other_share", "sold", "output"),
+            *(
+                GrowthOperation(
+                    id=growth_id,
+                    requirement_id=growth_id,
+                    input=input_op,
+                    change=change,
+                    **window,
+                )
+                for growth_id, (_, input_op, change) in growths.items()
+                if growth_id in used
+            ),
+            (
+                divide("again", left, right)
+                if verb == "share_of"
+                else CompareOperation(
+                    id="again",
+                    requirement_id="again",
+                    left=Side(input=left),
+                    right=Side(input=right),
+                )
+            ),
+            terminal=["again", "other_share", "of_gdp"],
+        ),
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid")),
+            "gdp": source(spec_id=SPEC_OTHER, **_pinned("GDP")),
+            "exports": source(spec_id=_SPEC_THIRD, **_pinned("Exports")),
+            **(
+                {
+                    "published": source(
+                        spec_id=_SPEC_FOURTH,
+                        **_pinned("DebtServiceShareOfExports", {"unit_ref": published_unit}),
+                    )
+                }
+                if "published" in used
+                else {}
+            ),
+        },
+    )
+
+    assert [
+        (issue.code, issue.operation_id, issue.requirement_id) for issue in result.issues
+    ] == issues
+    assert result.ok == (not issues)

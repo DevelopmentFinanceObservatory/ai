@@ -518,6 +518,102 @@ async def test_the_resolve_step_names_every_search_part() -> None:
     )
 
 
+class _PerHeadConverse:
+    async def __call__(self, *, question: str, **_digests: Any) -> dict[str, Any]:
+        return {
+            "text": "on it",
+            "search_parts": [{"variable": "debt service per head"}],
+            "about": "data",
+        }
+
+
+class _MeasureAndPopulation:
+    async def __call__(
+        self, *, question: str, part: dict[str, Any], message: str
+    ) -> dict[str, Any]:
+        return {"measure": "debt service", "denominator": "population", "denominator_entities": []}
+
+
+@pytest.mark.parametrize(
+    ("population", "detail"),
+    [
+        pytest.param(
+            {"variable": "population", "status": "definite", "candidates": []},
+            "resolved: definite — 2 parts: debt service: definite; population: definite"
+            ' — searched again as 2 parts in place of "debt service per head"',
+            id="kept",
+        ),
+        pytest.param(
+            {"variable": "population", "status": "unsupported", "candidates": []},
+            'resolved: unsupported — searched again as 2 parts in place of "debt service per head"'
+            ": debt service: definite; population: unsupported — denominator_not_available",
+            id="not-kept",
+        ),
+    ],
+)
+async def test_the_resolve_step_says_a_part_was_searched_again_as_two(
+    population: dict[str, Any], detail: str
+) -> None:
+    refused = _envelope(
+        status="unsupported",
+        spec_id=None,
+        warnings=[{"severity": "warn", "message": "denominator_not_available"}],
+        part_digests=[
+            {
+                "variable": "debt service per head",
+                "status": "unsupported",
+                "reason": "denominator_not_available",
+            }
+        ],
+    )
+    again = _envelope(
+        parts=2,
+        part_digests=[{"variable": "debt service", "status": "definite"}, population],
+    )
+    generative = GenerativeNodes(
+        converse=_PerHeadConverse(),
+        planner=ScriptedPlannerModel(),
+        denominator_split=_MeasureAndPopulation(),
+    )
+    app = _app(ScriptedResolver([refused, again]), ScriptedExecutor(), generative=generative)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("debt service per head"))
+
+    steps = [f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve"]
+    assert [(step["tool"], step["detail"]) for step in steps] == [("search", detail)]
+
+
+class _UnitConverse:
+    async def __call__(self, *, question: str, **_digests: Any) -> dict[str, Any]:
+        return {
+            "text": "on it",
+            "search_parts": [{"variable": "debt service", "unit": "per head"}],
+            "about": "data",
+        }
+
+
+async def test_the_resolve_step_says_a_unit_was_searched_as_part_of_the_measure() -> None:
+    unread = _envelope(
+        status="no_data",
+        spec_id=None,
+        part_digests=[
+            {"variable": "debt service", "status": "no_data", "reason": "unit_not_resolved"}
+        ],
+    )
+    resolved = _envelope(part_digests=[{"variable": "debt service per head", "status": "definite"}])
+    generative = GenerativeNodes(
+        converse=_UnitConverse(), denominator_split=_MeasureAndPopulation()
+    )
+    app = _app(ScriptedResolver([unread, resolved]), ScriptedExecutor(), generative=generative)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("debt service per head"))
+
+    step = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve")
+    assert step["detail"] == (
+        'resolved: no_data — searched again with the unit in the measure: "debt service per head"'
+    )
+
+
 async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     executor = ScriptedExecutor([{"outcome": "ok", "frame_refs": [REF_A]}], strict=True)
     async with _client(_app(ScriptedResolver([_envelope()]), executor)) as client:
@@ -629,7 +725,7 @@ async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_repo
         async def __call__(self, *, on_progress: Any = None, **kwargs: Any) -> dict[str, Any]:
             if on_progress is not None:
                 on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-                on_progress({"agent": "dfo_planner", "tools": ["translate"]})
+                on_progress({"agent": "dfo_planner", "tools": ["submit_plan"]})
             return await super().__call__(**kwargs)
 
     resolver = ScriptedResolver([_envelope(choice_points=2)])
@@ -2244,6 +2340,41 @@ async def test_an_unknown_conversation_is_a_404_on_turn_with_a_component_ref() -
     payload = response.json()
     assert payload["error"] == "not_found"
     assert payload["pointer"] == "/conversation_id"
+
+
+async def test_a_follow_up_on_a_card_the_conversation_never_held_is_a_404() -> None:
+    """A `follow_up` naming a card this conversation never stored would run as
+    a plain turn with no card in view; refused, so the client sees it."""
+    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+        body = _turn_body("tell me more about this")
+        body["component_ref"] = {"intent": "follow_up", "component_id": "cmp_ghost", "revision": 1}
+        response = await client.post("/api/studio/turn", json=body, headers=AUTH)
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"] == "not_found"
+    assert payload["pointer"] == "/component_ref/component_id"
+
+
+async def test_a_follow_up_on_a_stored_card_runs_the_turn() -> None:
+    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
+    executor = ScriptedExecutor(
+        [
+            {"outcome": "ok", "frame_refs": [REF_A]},
+            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+        ]
+    )
+    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        body = _turn_body("tell me more about this")
+        body["component_ref"] = {
+            "intent": "follow_up",
+            "component_id": COMPONENT["component_id"],
+            "revision": 1,
+        }
+        frames = await _stream(client, "/api/studio/turn", body)
+    assert _events(frames)[-1] == "done"
 
 
 async def test_a_wire_interrupt_id_is_single_use() -> None:
@@ -3884,6 +4015,125 @@ async def test_component_ref_edit_refusal_is_an_honest_message() -> None:
     failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
     assert failed, "the refused write should surface as a failed step"
     assert executor.calls[-1]["tool"] == "write_component"  # the write was what refused
+
+
+async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its_slot() -> None:
+    """The executor refuses a revise whose select counts other series than the
+    card's rolling frame did. The edit is then written as a create of the stored
+    intent with the patch merged in, which the executor moves to the right frame."""
+    patch = {"select": {"stat_var": "dcid:Aid", "donor": "country/FRA"}}
+    recreated = {**COMPONENT, "component_id": "cmp_01test0002"}
+    executor = ScriptedExecutor(
+        [
+            {"outcome": "ok", "frame_refs": [REF_A]},
+            {
+                "outcome": "ok",
+                "frame_refs": [REF_A],
+                "component": COMPONENT,
+                "write_token": WRITE_TOKEN,
+            },
+            _described(),
+            _VIEW,
+            {
+                "outcome": "refusal",
+                "refusal": {
+                    "code": "rolling_select_needs_new_frame",
+                    "origin": "harness",
+                    "retry_mode": "do_not_retry",
+                    "message": "The card cannot be changed in place.",
+                },
+            },
+            {"outcome": "ok", "frame_refs": [], "component": recreated},
+        ],
+        strict=True,
+    )
+    app = _app(
+        ScriptedResolver([_envelope(choice_points=2)]),
+        executor,
+        edit_model=ScriptedEditModel({"text": "Now France.", "patch": patch, "recreate": None}),
+        generative=_plan_generative(),
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("only France"))
+
+    revise, create = executor.calls[-2:]
+    assert revise["args"] == {
+        "intent": patch,
+        "component_id": "cmp_01test0001",
+        "write_token": WRITE_TOKEN,
+    }
+    assert create == {
+        "tool": "write_component",
+        "args": {"intent": {**STORED_INTENT, **patch}},
+    }
+    assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
+    assert _frame(frames, "message.complete")["text"] == "Now France."
+    manifest = _frame(frames, "done")["composition"]
+    assert [block["component_id"] for block in manifest["blocks"]] == ["cmp_01test0002"]
+
+
+@pytest.mark.parametrize(
+    "period",
+    [
+        pytest.param(
+            {
+                "window": {
+                    "start": {"anchor": "latest", "offset": -2},
+                    "end": {"anchor": "latest", "offset": 0},
+                }
+            },
+            id="relative-window",
+        ),
+        pytest.param({"window": {"start": "2015", "end": "2020"}}, id="fixed-window"),
+        pytest.param(
+            {
+                "change": {
+                    "basis": [
+                        {"anchor": "latest", "offset": -1},
+                        {"anchor": "latest", "offset": 0},
+                    ]
+                }
+            },
+            id="relative-change",
+        ),
+    ],
+)
+async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[str, Any]) -> None:
+    """A person may ask for a period counted from the latest data or for named
+    years; the route sends either form to the write untouched."""
+    recreate = {
+        "type": "stat_card",
+        "title": "Aid to Kenya",
+        "select": STORED_INTENT["select"],
+        **period,
+    }
+    executor = ScriptedExecutor(
+        [
+            {"outcome": "ok", "frame_refs": [REF_A]},
+            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            _described(),
+            _VIEW,
+            {"outcome": "ok", "frame_refs": [], "component": COMPONENT},
+        ],
+        strict=True,
+    )
+    app = _app(
+        ScriptedResolver([_envelope(choice_points=2)]),
+        executor,
+        edit_model=ScriptedEditModel({"text": "Done.", "patch": None, "recreate": recreate}),
+        generative=_plan_generative(),
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        await _stream(client, "/api/studio/turn", _edit_body("change the period"))
+
+    assert executor.calls[-1] == {
+        "tool": "write_component",
+        "args": {"intent": {**recreate, "frame_ref": REF_A}},
+    }
 
 
 # --- canvas digest and canvas questions (WS-C) -----------------------------------

@@ -25,7 +25,12 @@ from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.frame_materialisation import observed_shape
 from dfo_frame_grammar import Frame
-from executor.outcomes import Accepted, MethodChoiceNeeded, RefusalKind, Refused
+from executor.outcomes import (
+    Accepted,
+    MethodChoiceNeeded,
+    RefusalKind,
+    Refused,
+)
 from executor.run import execute_approved_plan
 from planner.operations import (
     AggregateOperation,
@@ -70,6 +75,8 @@ from planner.records import (
     PeriodThreshold,
     RankAmong,
     RankDirection,
+    RelativePeriod,
+    RollingWindow,
     StatVarReading,
 )
 from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
@@ -172,8 +179,10 @@ def _family_frame(
     providers: Sequence[ResolvedEntity] = (GERMANY, FRANCE),
     provider_column: str = PROVIDER,
     unit: str = "usd",
+    last_year: int = 2023,
 ) -> Frame:
-    """A CRS family frame: each of `stat_vars` for each provider to Kenya, yearly from 2000.
+    """A CRS family frame: each of `stat_vars` for each provider to Kenya, yearly from 2000
+    through `last_year`.
 
     Two declared role columns and the four `stat_var_*` slot columns, whose
     purpose slot tells the family's members apart.
@@ -195,7 +204,7 @@ def _family_frame(
             }
             for member, stat_var in enumerate(stat_vars)
             for provider in providers
-            for year in range(2000, _LAST_YEAR.get(stat_var, 2023) + 1)
+            for year in range(2000, _LAST_YEAR.get(stat_var, last_year) + 1)
         ],
     )
 
@@ -515,6 +524,28 @@ def _growth_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Pl
     return plan_for(
         [
             _requirement(),
+            GrowthRequirement(id="growth", decision_ids=["measure"], input_id="oda", **window),
+        ],
+        [
+            _RETRIEVE,
+            GrowthOperation(id="growth_op", requirement_id="growth", input="crs", **window),
+        ],
+        terminal="growth_op",
+    )
+
+
+def _rolling_growth_plan(plan_for: PlanFactory) -> Plan:
+    """Growth over the last five years, planned against 2023."""
+    window: dict[str, Any] = {
+        "window_start": 2018,
+        "window_end": 2023,
+        "rolling": RollingWindow(
+            window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+        ),
+    }
+    return plan_for(
+        [
+            _requirement().model_copy(update={"period_end_open": True}),
             GrowthRequirement(id="growth", decision_ids=["measure"], input_id="oda", **window),
         ],
         [
@@ -903,6 +934,70 @@ async def test_a_growth_keys_each_series_by_the_frames_role_columns(
         "window_end": "2020",
         "entity_by": [PROVIDER, RECIPIENT],
     }
+
+
+async def test_a_rolling_growth_is_resolved_and_run_over_the_frames_own_columns(
+    plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> None:
+    # Planned against 2023, over a frame whose newest year is 2022. The plan's
+    # population names `origin` and `destination`; the frame's columns are the
+    # declared properties, and analysis-mcp checks each rolling call's
+    # population against the one the newest period was resolved over.
+    plan = _rolling_growth_plan(plan_for)
+    assert plan.workflow is not None
+    assert plan.workflow.steps[-1].args["rolling"]["population"] == [
+        {
+            "spec_id": SPEC_CRS,
+            "bindings": {
+                "destination": [KENYA.ref],
+                "origin": [GERMANY.ref, FRANCE.ref],
+            },
+        }
+    ]
+    surface = surface_for(
+        get_data=[ok(await retrieved(_source(), frame=_family_frame(last_year=2022)))]
+    )
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor", "growth"]
+    population = [
+        {
+            "spec_id": SPEC_CRS,
+            "bindings": {PROVIDER: [GERMANY.ref, FRANCE.ref], RECIPIENT: [KENYA.ref]},
+        }
+    ]
+    assert _analysis_call(surface, "resolve_anchor") == {
+        "populations": population,
+        "roots": [{"spec_id": SPEC_CRS, "content_version": CONTENT_VERSION}],
+    }
+    (anchor,) = outcome.anchors
+    assert (anchor.period, anchor.left_out) == ("2022", ())
+    sent = _analysis_call(surface, "growth")
+    assert sent == {
+        "window_start": "2017",
+        "window_end": "2022",
+        "entity_by": [PROVIDER, RECIPIENT],
+        "rolling": {**sent["rolling"], "population": population},
+        "anchor_key": anchor.anchor_key,
+    }
+
+
+async def test_a_rolling_population_the_frame_cannot_spell_refuses_before_it_is_resolved(
+    plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> None:
+    # With no axis reported, nothing says which frame column carries `origin`.
+    surface = surface_for(
+        get_data=[ok(await retrieved(_source(), dimensions=DIMENSIONS_WITHOUT_AXES))]
+    )
+
+    outcome = await _run(_rolling_growth_plan(plan_for), surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.COLUMN_UNBOUND
+    assert outcome.step_id == "growth_op"
+    assert [name for name, _ in surface.calls] == ["get_data"]
 
 
 async def test_a_share_of_keys_each_side_by_its_own_frames_provider_column(

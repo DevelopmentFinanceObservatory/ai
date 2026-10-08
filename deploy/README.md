@@ -52,6 +52,24 @@ is the shared secret the frontend's proxy presents on studio requests. A
 service without it accepts any non-empty bearer token and logs
 `STUDIO AUTH IS OPEN` at startup.
 
+The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (dfo-infra
+generates it in the apis stack and mounts one value on dfo-apis, this service,
+and the website). It is the bearer of `POST /api/studio/refresh`, which the
+website calls to redraw a live share's derived card, and the principal this
+service presents to dfo-apis' frame refresh and render routes. A service
+without it refuses every refresh with 401 and logs `LIVE REFRESH IS CLOSED` at
+startup. Startup fails when it equals `STUDIO_API_TOKEN`. The route also reads
+`DFO_APIS_URL` and `DATASETS_FIRST_PARTY_PRINCIPAL`, which the service already
+holds.
+
+A refresh answers within 53 seconds, the deadline `LIVE_REFRESH_DEADLINE_S`
+(default 45) plus an 8 second hard stop. The website gives the call 60 seconds, so startup
+fails for a deadline above 52 or below 30, and the Cloud Run request timeout,
+set in dfo-infra, must be above the deadline plus 8. The other
+refresh settings (`LIVE_REFRESH_REQUESTS_PER_S`, `LIVE_REFRESH_BURST`,
+`LIVE_REFRESH_MAX_IN_FLIGHT`, `LIVE_REFRESH_ROWS_IN_FLIGHT_MAX`) have defaults
+sized for one instance and are described in `services/harness/README.md`.
+
 `MCP_API_TOKEN` needs no secret on this one-Cloud-Run-service deployment.
 Left unset, the harness mints a token at startup and hands it to its own
 `data-mcp` / `analysis-mcp` / `presentation-mcp` MCP clients (`common.auth`),
@@ -164,3 +182,61 @@ The triggers for actually doing this: external MCP traffic (through the
 website proxy) interfering with chat-session latency on the shared
 instance, or the search/analysis and harness workloads needing to scale
 independently of each other.
+
+## Recipe backfill
+
+`python -m harness.recipe_backfill` stores in dfo-apis the recipe of every derived frame in the materialisation bucket. A derived frame published without its recipe can only be replayed from the traces in that bucket, so run this job to completion before the bucket's 30-day age rule is restored.
+
+The module ships in the image (`services/harness/src/harness/recipe_backfill.py`) and starts no service, no model, and no MCP server. It reads three settings from the environment or `.env`, under the names the services use, and exits 2 naming any that is unset:
+
+| Setting                          | Use                                                           |
+| -------------------------------- | ------------------------------------------------------------- |
+| `DFO_APIS_URL`                   | dfo-apis' origin                                              |
+| `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe and versions routes |
+| `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
+
+The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v1/` objects, so it needs object create.
+
+```
+uv run --package harness python -m harness.recipe_backfill               # dry run, the default
+uv run --package harness python -m harness.recipe_backfill --write
+uv run --package harness python -m harness.recipe_backfill --write --since 2026-09-14 --until 2026-09-21
+uv run --package harness python -m harness.recipe_backfill --limit 50
+```
+
+A dry run builds every recipe and compares it with what dfo-apis holds. It sends no `PUT` and writes nothing to the bucket. `--write` puts each recipe to `PUT /api/datasets/frames/{spec_id}/{content_version}/recipe` and writes each recovered mint record to the bucket. `--since` and `--until` bound the frames by the time their object was written, and `--limit` takes the oldest N in range, so the job can run in parts. A run can be repeated: dfo-apis keeps a pair's first recipe, and a second `--write` run reports `already_stored` for each.
+
+The job walks the frames oldest first and works on four at a time. For each derived frame it downloads the frame's object once (at most 64 MiB), checks its digest, and reads the trace from the Parquet footer. It decodes no rows, writes no frame object, and deletes nothing.
+
+The report lists every derived frame with one reason:
+
+| Reason               | Meaning                                                                                 | Detail                                                     |
+| -------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `stored`             | this run stored the recipe                                                              |                                                            |
+| `already_stored`     | dfo-apis holds the recipe, with the same two hashes when it could be rebuilt            | `not rebuilt: <reason> ...` when it could not              |
+| `would_store`        | dry run only: the recipe was built and dfo-apis holds none                              |                                                            |
+| `not_published`      | dfo-apis has no version of the frame (404 `snapshot_not_found`), so no card draws on it |                                                            |
+| `missing_ancestor`   | a frame it was computed from is gone from the bucket                                    | the missing pair                                           |
+| `root_unrecoverable` | a root dataset frame has no mint record and none could be rebuilt                       | the root pair and the reason, such as `no_version_matches` |
+| `trace_unusable`     | a stored trace on the way yields no op-spec                                             | the pair and why                                           |
+| `anchor_unresolved`  | a rolling frame's latest period cannot be stated from what the bucket holds             | the pair and the reason, such as `no_anchor_record`        |
+| `conflict`           | dfo-apis refused the recipe (409 `publish_conflict`)                                    | the `constraint_id`                                        |
+| `apis_failure`       | a dfo-apis call failed after the client's retries                                       | `status=` and `code=`                                      |
+| `unexpected_error`   | reading the frame raised; the traceback is logged                                       | the exception type                                         |
+
+Exit status is 0 when every frame ended on a settled reason, and 1 when any ended `apis_failure` or `unexpected_error`, which a rerun may clear.
+
+The report closes with the numbers to read before the age rule returns:
+
+```
+Derived frames with a recipe stored in dfo-apis: 3 (stored 3, already stored 0)
+Derived frames without a stored recipe: 3
+  missing_ancestor   1
+  root_unrecoverable 1
+  conflict           1
+  (2 of these had no recipe to send, so dfo-apis was not asked whether they are published)
+Not published in dfo-apis, so no card draws on them: 1
+Oldest frame object: 23.0 days (written 2026-09-14T00:01:00Z)
+```
+
+The first number is the frames whose cards can be refreshed after the bucket's objects are deleted. Every frame under the second is listed above with its reason, and a card drawn from one of them cannot be refreshed. A `conflict` whose detail is `recipe_requires_matching_normal_form_hash` or `recipe_requires_matching_replay_key` means dfo-apis holds another recipe for the pair. The last line is the age of the oldest object the walk saw: a restored 30-day rule deletes every object older than 30 days on its next pass.

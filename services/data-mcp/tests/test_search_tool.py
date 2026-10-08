@@ -9,21 +9,25 @@ from typing import Any
 
 import httpx2
 import pytest
-from data_mcp import client_holder, search_tool
+from data_mcp import client_holder, search_tool, server
 from data_mcp.deadline import CallDeadline
 from data_mcp.digest import render_answer, render_digest
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import (
     TIME_FORMS,
+    DeclaredDataset,
     SearchEntity,
     SearchPart,
+    declared_datasets,
+    describe_search,
+    fetch_declared_datasets,
     search,
     to_wire_request,
 )
 from data_mcp.server import mcp
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from .conftest import (
     _reset_client,  # noqa: F401 (re-exported for test_search_tool_definition_store.py)
@@ -70,6 +74,7 @@ def test_to_wire_request_renames_fields_and_nests_correctly() -> None:
             time="2015 to 2024",
             unit="US dollars",
             source="OECD",
+            dataset="dataset/grants",
         )
     ]
 
@@ -89,6 +94,7 @@ def test_to_wire_request_renames_fields_and_nests_correctly() -> None:
                     "time_text": "2015 to 2024",
                     "unit_text": "US dollars",
                     "source_text": "OECD",
+                    "provenance": "dataset/grants",
                 }
             ],
             "raw_query": "malaria grants from France to Togo",
@@ -139,6 +145,31 @@ def test_to_wire_request_entity_with_no_role_omits_role_text() -> None:
     assert wire["input"]["parts"][0]["entities"] == [{"text": "Togo"}]
 
 
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [
+        (None, {"text": "Africa"}),
+        (False, {"text": "Africa"}),
+        (True, {"text": "Africa", "members": True}),
+    ],
+)
+def test_to_wire_request_sends_members_only_when_set(
+    members: bool | None, expected: dict[str, object]
+) -> None:
+    parts = [SearchPart(variable="x", entities=[SearchEntity(text="Africa", members=members)])]
+
+    wire = to_wire_request(parts, raw_query=None)
+
+    assert wire["input"]["parts"][0]["entities"] == [expected]
+
+
+def test_an_entity_with_an_unknown_field_is_refused() -> None:
+    with pytest.raises(ValidationError) as refused:
+        SearchEntity.model_validate({"text": "Africa", "each_member": True})
+
+    assert [error["type"] for error in refused.value.errors()] == ["extra_forbidden"]
+
+
 def test_to_wire_request_asks_for_skills_and_leaves_include_observations_unset() -> None:
     wire = to_wire_request([SearchPart(variable="x")], raw_query=None)
 
@@ -146,6 +177,134 @@ def test_to_wire_request_asks_for_skills_and_leaves_include_observations_unset()
 
 
 # The docstring's worked example
+
+
+# The served `/api/search/schema` document, cut to the path the dataset list sits on.
+# `provenance` is `ParsedPart`'s field as pydantic emits it, with the `oneOf` dfo-apis'
+# `_with_declared_datasets` adds to its string branch, in rank order.
+_SERVED_SCHEMA: dict[str, Any] = {
+    "schema_version": 1,
+    "request": {
+        "$defs": {
+            "ParsedPart": {
+                "properties": {
+                    "provenance": {
+                        "anyOf": [
+                            {
+                                "maxLength": 200,
+                                "minLength": 1,
+                                "type": "string",
+                                "oneOf": [
+                                    {
+                                        "const": "dataset/flows",
+                                        "title": "Flows",
+                                        "description": "Flows by donor and recipient.",
+                                        "x-opt-in": False,
+                                    },
+                                    {
+                                        "const": "dataset/stocks",
+                                        "title": "Stocks",
+                                        "description": "Stocks by debtor.",
+                                        "x-opt-in": True,
+                                    },
+                                ],
+                            },
+                            {"type": "null"},
+                        ],
+                        "default": None,
+                        "title": "Provenance",
+                    }
+                }
+            }
+        }
+    },
+    "response": {},
+    "capabilities": "/api/search/capabilities",
+}
+
+_LISTED_DESCRIPTION = (
+    "Base.\n\nSet a part's `dataset` to one of these dcids only when the user asks for "
+    "that table:\n"
+    "- `dataset/flows`: Flows. Flows by donor and recipient.\n"
+    "- `dataset/stocks`: Stocks. Stocks by debtor. Served only when a part names it."
+)
+
+
+def test_describe_search_lists_the_served_datasets_in_rank_order() -> None:
+    assert describe_search("Base.", declared_datasets(_SERVED_SCHEMA)) == _LISTED_DESCRIPTION
+
+
+@pytest.mark.parametrize("datasets", [None, []])
+def test_describe_search_without_datasets_says_to_leave_dataset_out(
+    datasets: list[DeclaredDataset] | None,
+) -> None:
+    assert describe_search("Base.", datasets) == (
+        "Base.\n\nNo datasets are listed, so leave `dataset` out."
+    )
+
+
+async def test_fetch_declared_datasets_reads_the_served_schema() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        paths.append(request.url.path)
+        return httpx2.Response(200, json=_SERVED_SCHEMA)
+
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        datasets = await fetch_declared_datasets()
+
+    assert paths == ["/api/search/schema"]
+    assert datasets == declared_datasets(_SERVED_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(
+            503,
+            content=_problem_body(code="upstream_unavailable", retryable=True),
+            headers={"content-type": "application/problem+json"},
+        ),
+        httpx2.Response(200, content=b"not json"),
+        httpx2.Response(200, json={"request": {"$defs": {}}}),
+        httpx2.Response(
+            200,
+            json={
+                "request": {
+                    "$defs": {
+                        "ParsedPart": {"properties": {"provenance": {"anyOf": [{"type": "null"}]}}}
+                    }
+                }
+            },
+        ),
+    ],
+    ids=["refused", "not-json", "no-parsed-part", "no-string-branch"],
+)
+async def test_fetch_declared_datasets_returns_none_when_the_schema_cannot_be_read(
+    response: httpx2.Response,
+) -> None:
+    async with _client(lambda _request: response) as upstream:
+        client_holder.set_client(upstream)
+        assert await fetch_declared_datasets() is None
+
+
+async def test_the_lifespan_lists_the_fetched_datasets_in_the_search_tool_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fetched() -> list[DeclaredDataset]:
+        return declared_datasets(_SERVED_SCHEMA)
+
+    monkeypatch.setattr(server._search, "description", server._search.description)
+    monkeypatch.setattr(search_tool, "fetch_declared_datasets", fetched)
+
+    async with Client(mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    assert tools["search"].description == describe_search(
+        server._SEARCH_DESCRIPTION, declared_datasets(_SERVED_SCHEMA)
+    )
+    assert tools["search"].description.endswith(_LISTED_DESCRIPTION.removeprefix("Base."))
 
 
 def test_docstring_worked_example_validates_against_search_part() -> None:

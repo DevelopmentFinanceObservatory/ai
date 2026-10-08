@@ -343,15 +343,31 @@ def test_mistyped_predicate_against_an_empty_frame_still_refuses() -> None:
         )
 
 
-def test_category_match_on_unit_over_a_unit_request_cell_refuses() -> None:
-    """A converted frame's `unit` cell can carry a `grammar.UnitRequest`
-    object rather than a plain string (`Frame.build` normalises a dict
-    `unit` this way). `unit`'s own declared type admits this, so a
-    `category_match` predicate on `unit` passes the schema-level check --
-    but `UnitRequest in (...)` against a closed set of plain strings is
-    always `False`, so before this refusal existed, every row would be
-    silently dropped rather than matched or refused. Refuses with
-    `FilterUnitConversionUnsupportedError`, not
+_USD_REQUEST = {"currency": "USD", "prices": "current"}
+_USD_PER_PERSON = {"numerator": "USD", "denominator": {"stat_var": "dcid:Count_Person"}}
+
+
+@pytest.mark.parametrize(
+    ("units", "actual_type"),
+    [
+        ([_USD_REQUEST], "UnitRequest"),
+        ([_USD_PER_PERSON], "ComposedUnit"),
+        (["USD", _USD_PER_PERSON, None], "ComposedUnit"),
+        ([_USD_REQUEST, "USD", _USD_PER_PERSON], "UnitRequest | ComposedUnit"),
+    ],
+    ids=["converted", "composed", "ref_composed_and_none", "converted_ref_and_composed"],
+)
+def test_category_match_on_unit_over_a_unit_object_cell_refuses(
+    units: list[object], actual_type: str
+) -> None:
+    """A `unit` cell can carry a `grammar.UnitRequest` or
+    `grammar.ComposedUnit` object rather than a plain string (`Frame.build`
+    normalises a dict `unit` this way). `unit`'s own declared type admits
+    this, so a `category_match` predicate on `unit` passes the schema-level
+    check -- but an object against a closed set of plain strings never
+    matches, so without this refusal every row carrying one would be
+    silently dropped rather than matched or refused, whatever the other
+    rows hold. Refuses with `FilterUnitConversionUnsupportedError`, not
     `FilterPredicateTypeMismatchError`: the predicate kind and column are
     legal (see that exception's own docstring)."""
     frame = Frame.build(
@@ -360,16 +376,17 @@ def test_category_match_on_unit_over_a_unit_request_cell_refuses() -> None:
             {
                 "stat_var": "dcid:oda_disbursed",
                 "reporter": "dcid:USA",
-                "time_period": "2022",
+                "time_period": str(2020 + index),
                 "value": 1.0,
-                "unit": {"currency": "USD", "prices": "current"},
-            },
+                "unit": unit,
+            }
+            for index, unit in enumerate(units)
         ],
     )
     with pytest.raises(FilterUnitConversionUnsupportedError) as exc_info:
         run_filter(frame, predicates=(CategoryMatchPredicate(column="unit", values=("USD",)),))
     assert exc_info.value.column == "unit"
-    assert exc_info.value.actual_type == "UnitRequest"
+    assert exc_info.value.actual_type == actual_type
 
 
 def test_predicate_against_status_always_refuses() -> None:

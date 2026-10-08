@@ -41,6 +41,7 @@ from analysis_mcp.growth_tool import growth
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.join_tool import join
 from analysis_mcp.op_spec import AggregateOpSpec, CategoryMatchPredicate, OrderedThresholdPredicate
+from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.server import mcp
 from analysis_mcp.share_of_tool import share_of
@@ -116,6 +117,7 @@ def test_every_verb_in_the_closed_set_answers_at_least_one_question() -> None:
         "join",
         "filter",
         "sum_of",
+        "quotient_of",
     }
 
 
@@ -645,9 +647,9 @@ async def _run_donors_share_of_health_oda(store: InMemoryMaterialisationStore) -
 async def _run_africa_share_of_chinese_lending_since_2010(
     store: InMemoryMaterialisationStore,
 ) -> ToolResult:
-    """Un-keyed share_of feeding an absolute growth: the share itself is
-    dimensionless, so the change reads in percentage points, not in a
-    percentage of a percentage."""
+    """Un-keyed share_of feeding an absolute growth: the share is in per
+    cent, so the change reads in percentage points, not in a percentage of a
+    percentage."""
     africa = _frame(
         [
             _row(reporter="dcid:AFRICA_AGGREGATE", year=year, value=v)
@@ -767,6 +769,76 @@ async def _run_france_guatemala_total_aid(store: InMemoryMaterialisationStore) -
     left = await _seed(store, bilateral)
     right = await _seed(store, imputed)
     return await sum_of(frame_ref=left, right_frame_ref=right)
+
+
+async def _run_kenya_aid_per_person(store: InMemoryMaterialisationStore) -> ToolResult:
+    aid = _frame(
+        [
+            _row(
+                stat_var="dcid:OdaDisbursement",
+                reporter="dcid:KEN",
+                year=year,
+                value=value,
+                unit="dcid:USDollar",
+            )
+            for year, value in (("2020", 100.0), ("2021", 120.0), ("2022", 150.0))
+        ]
+    )
+    population = _frame(
+        [
+            _row(stat_var="dcid:Count_Person", reporter="dcid:KEN", year=year, value=50.0)
+            for year in ("2020", "2021", "2022", "2023")
+        ]
+    )
+    return await quotient_of(
+        frame_ref=await _seed(store, aid),
+        denominator_frame_ref=await _seed(store, population),
+    )
+
+
+async def _run_top_recipient_aid_per_person_2022(
+    store: InMemoryMaterialisationStore,
+) -> ToolResult:
+    """Keyed quotient feeding a rank: the composed unit rides through, and a
+    recipient the population frame lacks is dropped, not refused."""
+    aid = _frame(
+        [
+            _row(
+                stat_var="dcid:OdaDisbursement",
+                reporter=reporter,
+                year="2022",
+                value=value,
+                unit="dcid:USDollar",
+            )
+            for reporter, value in (
+                ("dcid:KEN", 150.0),
+                ("dcid:GTM", 60.0),
+                ("dcid:RWA", 90.0),
+                ("dcid:XXK", 10.0),
+            )
+        ]
+    )
+    population = _frame(
+        [
+            _row(stat_var="dcid:Count_Person", reporter=reporter, year="2022", value=value)
+            for reporter, value in (("dcid:KEN", 50.0), ("dcid:GTM", 20.0), ("dcid:RWA", 10.0))
+        ]
+    )
+    per_person_ref = _pair(
+        await quotient_of(
+            frame_ref=await _seed(store, aid),
+            denominator_frame_ref=await _seed(store, population),
+            numerator_by=("reporter",),
+            denominator_by={"reporter": "reporter"},
+        )
+    )
+    return await rank(
+        frame_ref=per_person_ref,
+        rank_by=("reporter",),
+        window_start="2021",
+        window_end="2022",
+        ascending=False,
+    )
 
 
 _ENTRY_PLANS: tuple[_Entry, ...] = (
@@ -896,14 +968,16 @@ _ENTRY_PLANS: tuple[_Entry, ...] = (
         "Rank donors by their share of official development assistance to health.",
         _run_donors_share_of_health_oda,
         check=lambda r: (
-            _assert_all_in(_digest(r), "#1 reporter=dcid:FRA", "0.75"),
+            _assert_all_in(_digest(r), "#1 reporter=dcid:FRA: 75", "unit: Percent"),
             _assert_none_in(_digest(r), "#1 reporter=dcid:USA", "#1 reporter=dcid:GBR"),
         ),
     ),
     _Entry(
         "How has Africa's share of Chinese lending changed since 2010, in percentage points?",
         _run_africa_share_of_chinese_lending_since_2010,
-        check=lambda r: _assert_all_in(_digest(r), "+0.25", "percentage points", "0.2 -> 0.45"),
+        check=lambda r: _assert_all_in(
+            _digest(r), "+25 (20 -> 45)", "unit: absolute change (percentage points)"
+        ),
     ),
     _Entry(
         "How has Kenya's rank among aid recipients changed since 2010?",
@@ -920,6 +994,26 @@ _ENTRY_PLANS: tuple[_Entry, ...] = (
             "2011: 4250000 + 1500000 = 5750000",
             "6100000",
             "2010: not in the sum; only the left side",
+        ),
+    ),
+    _Entry(
+        "How much aid did Kenya receive per person from 2020 to 2022?",
+        _run_kenya_aid_per_person,
+        # 2023 is population only, so the quotient covers 2020-2022 and names it.
+        check=lambda r: _assert_all_in(
+            _digest(r),
+            "3 matched period(s)",
+            "dcid:USDollar per Count_Person",
+            "only the denominator reports 2023",
+            "2022: 150 / 50 = 3",
+        ),
+    ),
+    _Entry(
+        "Which aid recipient received the most per person in 2022?",
+        _run_top_recipient_aid_per_person_2022,
+        check=lambda r: (
+            _assert_all_in(_digest(r), "#1 reporter=dcid:RWA", "#2 reporter=dcid:KEN"),
+            _assert_none_in(_digest(r), "dcid:XXK"),
         ),
     ),
 )

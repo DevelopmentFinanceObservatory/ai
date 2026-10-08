@@ -26,7 +26,7 @@
     "unit": {
       "currency": "USD",
       "magnitude": "billions",
-      "price_basis": "constant",
+      "prices": "constant",
       "base_year": 2023
     },
     "series": [

@@ -331,10 +331,24 @@ def test_citation_line_renders_text_and_source_labels() -> None:
     assert "OECD DAC table 2a" in digest
 
 
-def test_citation_line_with_no_sources_omits_the_parens() -> None:
-    digest = _digest(citation_text="OECD DAC2a", citation_sources=[])
+@pytest.mark.parametrize(
+    ("text", "sources", "line"),
+    [
+        ("OECD DAC2a", [], "Source: OECD DAC2a."),
+        ("", [{"ref": "OECD_DAC2A", "label": "OECD DAC table 2a"}], "Source: OECD DAC table 2a."),
+        ("", [], None),
+    ],
+    ids=["no-sources", "no-text", "empty-citation"],
+)
+def test_citation_line_omits_what_the_citation_lacks(
+    text: str, sources: list[dict[str, Any]], line: str | None
+) -> None:
+    digest = _digest(citation_text=text, citation_sources=sources)
 
-    assert "Source: OECD DAC2a." in digest
+    if line is None:
+        assert "Source:" not in digest
+    else:
+        assert line in digest
 
 
 # Dropped-role notes

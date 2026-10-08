@@ -21,17 +21,18 @@ import asyncio
 import inspect
 import json
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from compiler.compile import CompileIssueCode
 from compiler.sources import source_from_spec_block
-from compiler.surface import FixtureSurface
+from compiler.surface import FixtureSurface, ToolCallResult, ToolSurface
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.events import Event, EventActions, RequestInput
 from google.adk.features import FeatureName
@@ -50,6 +51,7 @@ from harness.prefix_cache import PrefixCache
 from harness.turn_records import RecordedIdentity
 from planner import agent as planner_agent
 from planner.agent import (
+    _identity_on_record,
     _resolve_intent,
     build_planner_tools,
     create_planner_agent,
@@ -84,6 +86,7 @@ from planner.plan import (
     Decline,
     Entity,
     EvidenceRequirement,
+    GrowthRequirement,
     JoinRequirement,
     Period,
     PinSource,
@@ -103,6 +106,7 @@ from planner.plan import (
     names_dropped_seed,
     pin_sources,
     plan_revision,
+    record_optional_decline,
     record_unsupported,
     save_dropped_seeds,
     save_pin_sources,
@@ -120,13 +124,15 @@ from planner.records import (
     GroupBy,
     Identifier,
     Reduction,
+    RelativePeriod,
+    RollingWindow,
     Severity,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import TypeAdapter
 from translator.referral import OUTCOME_OF, Referral, ReferralKind, load_referral, save_referral
-from translator.tool import build_translate_tool
+from translator.tool import Translate, build_translate
 
 from ..context_probe import plan_record
 from ..decision_drafts import drafts
@@ -231,7 +237,7 @@ def _response_event(name: str, response: dict[str, Any]) -> Any:
     """A fake session event for the `FunctionResponse` a tool `name` answered with.
 
     The shape `planner.agent._answered_since_referral` reads: the planner's own
-    tool responses (`translate`, `propose_plan`) and the user's answers
+    tool responses (`propose_plan`, whose `translation` carries a referral) and the user's answers
     (`adk_request_input`) are all `FunctionResponse` parts on session events.
     """
     part = SimpleNamespace(
@@ -242,15 +248,20 @@ def _response_event(name: str, response: dict[str, Any]) -> Any:
 
 
 def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
-    """The event carrying what `translate` answers the planner when it hands a plan back."""
+    """The event carrying the `propose_plan` answer whose translation hands the plan back."""
     return _response_event(
-        "translate",
+        "propose_plan",
         {
-            "kind": kind.value,
-            "outcome": OUTCOME_OF[kind].value,
-            "reason": "r",
-            "requirement_id": requirement_id,
-            "candidates": [],
+            "outcome": Outcome.OK.value,
+            "status": "draft",
+            "version": 1,
+            "translation": {
+                "kind": kind.value,
+                "outcome": OUTCOME_OF[kind].value,
+                "reason": "r",
+                "requirement_id": requirement_id,
+                "candidates": [],
+            },
         },
     )
 
@@ -305,14 +316,25 @@ def _show(
 
 
 def _tools_by_name(
-    *, has_translator: bool = True, question_fixed: bool = False
+    *, translate: Translate | None = None, question_fixed: bool = False
 ) -> dict[str, FunctionTool]:
     return {
         tool.name: tool
-        for tool in build_planner_tools(
-            has_translator=has_translator, question_fixed=question_fixed
-        )
+        for tool in build_planner_tools(translate=translate, question_fixed=question_fixed)
     }
+
+
+async def _propose_translated(
+    tools: dict[str, FunctionTool],
+    ctx: object,
+    decision: Decision,
+    requirements: Sequence[EvidenceRequirement],
+    **intent: Any,
+) -> dict[str, object]:
+    """`_propose` against tools built with a translator, whose `propose_plan` is a coroutine."""
+    return await cast(
+        "Awaitable[dict[str, object]]", _propose(tools, ctx, decision, requirements, **intent)
+    )
 
 
 def _propose(
@@ -636,15 +658,21 @@ async def test_submit_plan_refuses_an_untranslated_draft(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
     # A draft states the methodology; nothing has been compiled to run, so
-    # submitting it would put nothing real in front of the user.
-    tools = _tools_by_name()
+    # submitting it would put nothing real in front of the user. Translation
+    # that answered a problem saves no referral, and proposing again is what
+    # translates the plan.
+    async def unavailable(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {"outcome": "refused", "code": "surface_unavailable", "message": "m"}
+
+    tools = _tools_by_name(translate=unavailable)
     ctx = _FakeToolContext()
-    _propose(tools, ctx, decision(), requirements)
+    await _propose_translated(tools, ctx, decision(), requirements)
 
     result = await tools["submit_plan"].run_async(args={"version": 1}, tool_context=ctx)
 
     assert result["code"] == ProblemCode.WORKFLOW_MISSING.value
-    assert result["action"]["call"] == "translate"
+    assert result["action"]["call"] == "propose_plan"
     assert "summary" not in result
     stored = load_plan(ctx.state)
     assert stored is not None
@@ -865,7 +893,7 @@ def test_propose_plan_answers_with_no_echo_of_the_plan(
     """The response carries no copy of what the model just sent or what state holds.
 
     The plan's `decisions` and `evidence_requirements` are the model's own call
-    arguments and are recorded in session state, where `translate` reads
+    arguments and are recorded in session state, where translation reads
     them. Returning them here is a second copy that can disagree with the
     first, and a model that reads the function response instead of its own
     call is reading the copy. `status` crosses into a genai FunctionResponse,
@@ -2097,22 +2125,6 @@ def test_a_real_answer_to_an_ask_raised_after_the_referral_settles_it(
     assert amended["outcome"] == Outcome.OK.value, amended
 
 
-def test_the_translator_repeating_a_referral_does_not_discard_the_answer(
-    decision: DecisionFactory, requirements: RequirementPair
-) -> None:
-    """A translator called again on a plan whose referral is still pending answers with
-    that same referral, so the answer the user gave in between still counts."""
-    tools, ctx, requirement_id = _recorded_after_a_handed_back_plan(
-        decision, requirements, ReferralKind.REQUIREMENT_UNMEETABLE
-    )
-    ctx.session.events.extend(_ask_answered_events())
-    ctx.session.events.append(_referred_event(ReferralKind.REQUIREMENT_UNMEETABLE, requirement_id))
-
-    amended = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
-
-    assert amended["outcome"] == Outcome.OK.value, amended
-
-
 def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -3018,6 +3030,96 @@ def test_propose_plan_accepts_a_user_election_ask_user_actually_chose(
 
     assert result["outcome"] == Outcome.OK.value
     assert PLAN_STATE_KEY in ctx.state
+
+
+@pytest.mark.parametrize(
+    ("source_mismatch", "picked_before", "answer", "pin", "resolved_by", "stated_after"),
+    [
+        (True, False, SPEC, SPEC, ResolvedBy.USER, None),
+        (
+            True,
+            False,
+            SPEC,
+            POPULATION_SPEC,
+            ResolvedBy.PLANNER_DEFAULT,
+            "World Development Indicators",
+        ),
+        (True, False, None, SPEC, ResolvedBy.PLANNER_DEFAULT, "World Development Indicators"),
+        (True, True, None, SPEC, ResolvedBy.PLANNER_DEFAULT, "World Development Indicators"),
+        (False, False, SPEC, SPEC, ResolvedBy.USER, "World Development Indicators"),
+    ],
+    ids=[
+        "user-picks-the-pin",
+        "user-picks-another",
+        "free-text-answer",
+        "picked-before-the-referral",
+        "other-unmeetable-cause",
+    ],
+)
+def test_a_pin_the_user_elects_over_a_stated_source_not_found_replaces_it(
+    decision: DecisionFactory,
+    requirement: Callable[..., DatasetRequirement],
+    derived_requirement: Callable[..., EvidenceRequirement],
+    source_mismatch: bool,
+    picked_before: bool,
+    answer: str | None,
+    pin: str,
+    resolved_by: ResolvedBy,
+    stated_after: str | None,
+) -> None:
+    """The source the requirement states names none of the sources discovery found,
+    so the referral offers those, and the one the user picks replaces the stated
+    source; left in place, the stated source would refuse the pick on the next
+    translate. A pin the user did not pick, after a pick of another or a free-text
+    answer, keeps the stated source, so the next translate refuses it again; so
+    does a pick the user made answering an ask raised before the referral. A
+    referral for any other cause offers nothing, so nothing gives way."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    stated = requirement(source="World Development Indicators")
+    _propose(tools, ctx, decision(), (stated, derived_requirement()))
+    if picked_before:
+        ctx.session.events[:0] = [
+            _ask_event([{"spec_id": SPEC, "label": "earlier"}], call_id="earlier"),
+            _answer_event(SPEC, call_id="earlier"),
+        ]
+    found = tuple(
+        SelectedSource(spec_id=spec_id, sentence=f"debt service {spec_id}", has_data=True)
+        for spec_id in (SPEC, POPULATION_SPEC)
+    )
+    save_referral(
+        ctx.state,
+        Referral(
+            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+            reason="r",
+            requirement_id=stated.id,
+            candidates=found if source_mismatch else (),
+            source_mismatch=source_mismatch,
+        ),
+    )
+    ctx.session.events.append(_referred_event(ReferralKind.REQUIREMENT_UNMEETABLE, stated.id))
+    ctx.session.events.extend(
+        [
+            _ask_event([{"spec_id": s.spec_id, "label": s.sentence} for s in found]),
+            _answer_event(answer),
+        ]
+        if answer is not None
+        else _ask_answered_events("why can't you use WDI?")
+    )
+    elected = decision(
+        chosen="total debt stock",
+        resolved_by=resolved_by,
+        fixes=DecisionFixes(source_spec_id=pin),
+    )
+
+    result = _propose(tools, ctx, elected, (stated.model_copy(update={"source_spec_id": pin}),))
+
+    assert result["outcome"] == Outcome.OK.value, result
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    pinned = stored.requirement(stated.id)
+    assert isinstance(pinned, DatasetRequirement)
+    assert (pinned.source_spec_id, pinned.source) == (pin, stated_after)
 
 
 _SEED_IDENTITY: dict[str, Any] = {
@@ -4372,6 +4474,7 @@ def test_propose_plans_declaration_describes_every_requirement_kind() -> None:
         "SumOfRequirement",
         "RankRequirement",
         "ShareOfRequirement",
+        "QuotientRequirement",
         "JoinRequirement",
         "FilterRequirement",
     }
@@ -4475,7 +4578,7 @@ def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() ->
     assert patterned == [defs["Identifier"]]
     assert defs["Identifier"] == identifier
     assert defs["DecisionIds"]["items"] == {"$ref": "#/$defs/Identifier"}
-    assert len(decision_ids) == 9
+    assert len(decision_ids) == 10
     assert all(field == {"$ref": "#/$defs/DecisionIds"} for field in decision_ids)
 
 
@@ -4711,6 +4814,12 @@ def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable
         "stated: tell the user what cannot be done and ask, through `adk_request_input`, "
         "before proposing anything"
     ) in instruction
+    # The options an ask offers are ones discovery found, never ones the model
+    # writes into the message itself, on the instruction and on the tool alike.
+    grounded = "come only from the referral's `candidates`; with none, the ask says what cannot be done and asks what to change"
+    assert grounded in instruction
+    ask = _tools_by_name()["adk_request_input"].description
+    assert "The options offered come from the referral's candidates" in ask
 
 
 def test_across_states_a_party_nobody_named() -> None:
@@ -4751,7 +4860,7 @@ def test_the_summary_carries_nothing_the_plan_record_already_states(
     """`submit_plan`'s summary is what a caller cannot read off the record.
 
     `harness.studio_translate` builds the user's plan card from the plan record
-    through `harness.plan_display`, and `translate` reads the record out
+    through `harness.plan_display`, and translation reads the record out
     of session state, so a copy of the decisions, requirements, sources or
     steps here is a second description of one plan that can disagree with the
     first. Nothing on the served path reads a restated copy of the plan back
@@ -4775,22 +4884,6 @@ def test_the_instruction_asks_for_no_closing_text_after_submitting() -> None:
     assert "none left out" not in instruction
     assert "each decision by its slot" not in instruction
     assert "approval in one" not in instruction
-
-
-def test_the_instruction_has_the_planner_call_translate_with_no_arguments() -> None:
-    """`translate` reads the plan from session state, so the planner passes nothing.
-
-    `run_translate` reaches the draft through `current_draft(tool_context)` ->
-    `load_plan(tool_context.state)`, and the tool declares no parameters
-    (`tests/translator/test_tool.py`).
-    """
-    instruction = planner_instruction(has_translator=True)
-    translate = build_translate_tool(surface=FixtureSurface(schemas=[]))._get_declaration()
-
-    assert "call `translate`" in instruction
-    assert "`request`" not in instruction
-    assert translate is not None
-    assert "Takes no arguments" in (translate.description or "")
 
 
 # --- Construction -------------------------------------------------------------------------
@@ -4868,23 +4961,24 @@ def test_the_planner_thinks_at_low_and_carries_thought_summaries() -> None:
     assert agent.planner.thinking_config.include_thoughts is True
 
 
-def test_a_planner_with_no_translator_is_not_told_to_call_one() -> None:
-    # The standalone planner is what this package's own eval set scores. ADK
-    # raises `Tool 'translate' not found` rather than answering the model, so
-    # an instruction naming a tool that is not attached kills the run mid-turn.
+def test_only_a_planner_with_a_translator_is_told_to_read_a_translation() -> None:
+    # The standalone planner is what this package's own eval set scores, and
+    # its `propose_plan` answers with no `translation`. Neither instruction
+    # names a `translate` tool: translation is no tool of its own.
     standalone = create_planner_agent(model_name="m")
     paired = create_planner_agent(
-        model_name="m", translate=build_translate_tool(surface=FixtureSurface(schemas=[]))
+        model_name="m", translate=build_translate(surface=FixtureSurface(schemas=[]))
     )
 
-    assert "`translate`" not in str(standalone.instruction)
-    assert "`translate`" in str(paired.instruction)
+    assert "`translation`" not in str(standalone.instruction)
+    assert "`translation`" in str(paired.instruction)
+    assert "`translate`" not in str(standalone.instruction) + str(paired.instruction)
 
 
 def test_a_planner_with_no_translator_refuses_submission_without_naming_one(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    tools = _tools_by_name(has_translator=False)
+    tools = _tools_by_name()
     ctx = _FakeToolContext()
     _propose(tools, ctx, decision(), requirements)
 
@@ -4895,13 +4989,114 @@ def test_a_planner_with_no_translator_refuses_submission_without_naming_one(
     assert "action" not in result
 
 
-def test_create_planner_agent_attaches_translate_as_its_own_tool() -> None:
-    translate = build_translate_tool(surface=FixtureSurface(schemas=[]))
+async def test_an_accepted_proposal_answers_with_the_translation_and_no_translate_tool_is_declared(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A planner built with a translator declares no tool for it: `propose_plan`
+    translates each plan it records, once, and answers with the verdict under
+    `translation`. A proposal that records nothing translates nothing."""
+    translated: list[int] = []
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        stored = load_plan(tool_context.state)
+        assert stored is not None
+        translated.append(stored.version)
+        return {"outcome": Outcome.OK.value}
 
     agent = create_planner_agent(model_name="gemini-flash-latest", translate=translate)
+    tools = {tool.name: tool for tool in agent.tools if isinstance(tool, FunctionTool)}
+    ctx = _FakeToolContext()
 
-    assert translate in agent.tools
-    assert agent.sub_agents == []
+    accepted = await _propose_translated(tools, ctx, decision(), requirements)
+    refused = await _propose_translated(tools, ctx, decision(), requirements, amends_version=7)
+
+    assert set(tools) == {"adk_request_input", "propose_plan", "reject_plan", "submit_plan"}
+    assert accepted["outcome"] == Outcome.OK.value
+    assert accepted["translation"] == {"outcome": Outcome.OK.value}
+    assert refused["outcome"] != Outcome.OK.value
+    assert "translation" not in refused
+    assert translated == [1]
+
+
+async def test_a_referred_translation_leaves_the_proposed_version_recorded(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A referral is the translation's verdict, not a refused proposal: the version
+    is recorded and stays a draft, and the referral is pending on it."""
+    dataset, _derived = requirements
+    referral = _referral_of(ReferralKind.NO_DATA, dataset.id)
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        save_referral(tool_context.state, referral)
+        return {"kind": referral.kind.value, "outcome": referral.outcome.value}
+
+    tools = _tools_by_name(translate=translate)
+    ctx = _FakeToolContext()
+
+    result = await _propose_translated(tools, ctx, decision(), requirements)
+
+    assert (result["outcome"], result["version"]) == (Outcome.OK.value, 1)
+    assert result["translation"] == {"kind": "no_data", "outcome": "invalid_input"}
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    assert (stored.version, stored.status) == (1, PlanStatus.DRAFT)
+    assert load_referral(ctx.state) == referral
+
+
+@pytest.mark.parametrize(
+    ("kind", "restated", "version"),
+    [
+        pytest.param(ReferralKind.SURFACE_UNAVAILABLE, {}, 1, id="transient-retried"),
+        pytest.param(
+            ReferralKind.DISCOVERY_UNAVAILABLE,
+            {"question": "q", "answer_mode": AnswerMode.COMPUTED},
+            1,
+            id="transient-retried-restating-the-question",
+        ),
+        pytest.param(ReferralKind.NO_DATA, {}, 2, id="not-transient"),
+        pytest.param(
+            ReferralKind.SURFACE_UNAVAILABLE, {"question": "q2"}, 2, id="transient-with-a-change"
+        ),
+    ],
+)
+async def test_a_bare_reproposal_after_a_transient_verdict_spends_no_round(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    kind: ReferralKind,
+    restated: dict[str, Any],
+    version: int,
+) -> None:
+    """After a transient verdict, `propose_plan` with `amends_version` and no change
+    translates the recorded version again: no new version, no plan round. After any
+    other verdict, or with a change, the same call is an amendment like any other."""
+    dataset, _derived = requirements
+    verdicts = [_referral_of(kind, dataset.id), None]
+    translated: list[int] = []
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        stored = load_plan(tool_context.state)
+        assert stored is not None
+        translated.append(stored.version)
+        referral = verdicts.pop(0)
+        if referral is None:
+            return {"outcome": Outcome.OK.value}
+        save_referral(tool_context.state, referral)
+        return {"kind": referral.kind.value, "outcome": referral.outcome.value}
+
+    tools = _tools_by_name(translate=translate)
+    ctx = _FakeToolContext()
+    await _propose_translated(tools, ctx, decision(), requirements)
+
+    retried = await cast(
+        "Awaitable[dict[str, object]]",
+        tools["propose_plan"].func(amends_version=1, tool_context=ctx, **restated),
+    )
+
+    assert (retried["outcome"], retried["version"]) == (Outcome.OK.value, version)
+    assert retried["translation"] == {"outcome": Outcome.OK.value}
+    assert translated == [1, version]
+    assert load_plan_rounds(ctx.state) == version
+    assert load_referral(ctx.state) is None
 
 
 def test_an_amendment_past_the_plan_size_limit_is_an_invalid_plan_that_costs_no_round() -> None:
@@ -5177,7 +5372,7 @@ def test_a_translate_unsupported_answer_has_to_be_declined_too(
     operation: UnsupportedOperation,
     declines: str | None,
 ) -> None:
-    """`translate`'s `unsupported` referral kinds bind the next plan as `propose_plan`'s
+    """A translation's `unsupported` referral kinds bind the next plan as `propose_plan`'s
     own `unsupported` answer does, and a `Decline` with the kind as its code settles it,
     whether or not it names an ask."""
     tools = _tools_by_name()
@@ -5211,6 +5406,60 @@ def test_a_translate_unsupported_answer_has_to_be_declined_too(
     else:
         assert result["code"] == ProblemCode.DECLINE_MISSING.value
         assert result["detail"] == {"operations": [operation.value]}
+
+
+@pytest.mark.parametrize(
+    ("declines", "after", "code"),
+    [
+        pytest.param(True, None, None, id="declined"),
+        pytest.param(False, None, None, id="pin-changed"),
+        pytest.param(True, "resume", None, id="declined-after-a-resume"),
+        pytest.param(True, "new-entry", ProblemCode.DECLINE_UNEARNED, id="unearned-next-entry"),
+        pytest.param(True, "declined-alone", ProblemCode.INVALID_PLAN, id="declined-alone"),
+    ],
+)
+def test_an_optional_decline_may_be_made_and_need_not_be(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    declines: bool,
+    after: str | None,
+    code: ProblemCode | None,
+) -> None:
+    """After a translation refers an irreconcilable pinned pair back, the next plan may
+    decline `no_operation_covers` (the user wants the pair side by side) or leave it out
+    (the user chose another source, so the pin changed); a plan declining only that, with
+    no requirements, gets a refusal the planner can correct, because the pair it declines
+    can still be shown; a new entry starts with nothing earned."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    record_optional_decline(ctx.state, UnsupportedOperation.NO_OPERATION_COVERS)
+    if after == "resume":
+        ctx.invocation_id = "turn-1-resumed"
+    elif after == "new-entry":
+        clear_unsupported(ctx.state)
+    declined = (
+        [Decline(ask="the comparison", code=UnsupportedOperation.NO_OPERATION_COVERS)]
+        if declines
+        else []
+    )
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]) if after != "declined-alone" else [],
+        evidence_requirements=list(requirements) if after != "declined-alone" else [],
+        declined=declined,
+        tool_context=ctx,
+    )
+
+    if code is None:
+        assert result["outcome"] == Outcome.OK.value, result
+    else:
+        assert result["code"] == code.value
+    if code is ProblemCode.DECLINE_UNEARNED:
+        assert result["detail"] == {"operations": [UnsupportedOperation.NO_OPERATION_COVERS.value]}
+    if code is ProblemCode.INVALID_PLAN:
+        assert result["outcome"] == Outcome.INVALID_INPUT.value
 
 
 _COMBINED_DECLINE = Decline(
@@ -5480,3 +5729,374 @@ def test_an_amendment_under_other_asks_accounts_for_them_from_scratch(
     assert recorded.asks == tuple(asks)
     assert recorded.answered == tuple(answered)
     assert recorded.declined == ()
+
+
+# --- a pin retrieved with no end year, for a period that follows the newest data ------
+
+_ROLLS_AT_ITS_END = {"window_end": {"anchor": "latest", "offset": 0}}
+_ROLLS_AT_BOTH_ENDS = {"window_start": {"anchor": "latest", "offset": -5}, **_ROLLS_AT_ITS_END}
+_LAST_FOUR_BACK = {"window_start": {"anchor": "latest", "offset": -4}, **_ROLLS_AT_ITS_END}
+_LAST_THREE_BACK = {"window_start": {"anchor": "latest", "offset": -3}, **_ROLLS_AT_ITS_END}
+
+
+def _growth_as_written(
+    dataset: DatasetRequirement, *, start: int, rolling: dict[str, Any] | None
+) -> dict[str, Any]:
+    """A growth over `dataset` to 2024, as the JSON a model writes for `propose_plan`."""
+    growth: dict[str, Any] = {
+        "kind": "growth",
+        "id": "growth",
+        "input_id": dataset.id,
+        "window_start": start,
+        "window_end": 2024,
+    }
+    return growth if rolling is None else {**growth, "rolling": rolling}
+
+
+def _every_year_block(
+    identity: dict[str, Any], *, first_year: int, rows: int | None
+) -> dict[str, Any]:
+    """Search's answer for `identity`, over no window: the first year it holds and its rows."""
+    return {
+        "spec_id": spec_id_for(canonicalize(identity)),
+        "definition": {"identity": identity},
+        "resolved": {
+            "download": {"rows": rows, "window": {"start_year": first_year, "end_year": 2024}}
+        },
+    }
+
+
+def _show_block(ctx: _FakeToolContext, block: dict[str, Any]) -> None:
+    """Record `block` as a settled answer the planner was shown this entry."""
+    save_pin_sources(ctx.state, {block["spec_id"]: PinSource(block=block, settled=True)})
+
+
+def _rolling_issue(result: dict[str, Any]) -> tuple[str, str | None, list[str]]:
+    """The issue, fault and requirements a refusal of a rolling period names."""
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    detail = result["detail"]
+    return detail["issue"], detail.get("fault"), detail["requirement_ids"]
+
+
+def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_year(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """ "Since 2015": the plan keeps the years it read, and the pin moves to the
+    seed over a range from 2015 with no end year, stored and read back as that."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    save_seeded_sources(ctx.state, [_seeded()])
+    dataset = requirement(source_spec_id=_SEED_SPEC, period_end_open=True)
+
+    result = _propose_seeded(
+        tools,
+        ctx,
+        pinning_decision(_SEED_SPEC),
+        [
+            dataset.model_dump(mode="json"),
+            _growth_as_written(dataset, start=2015, rolling=_ROLLS_AT_ITS_END),
+        ],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    window = {"kind": "range", "start_year": 2015}
+    opened, identity = windowed_identity(_SEED_IDENTITY, window)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    pinned, growth = plan.evidence_requirements
+    assert isinstance(pinned, DatasetRequirement)
+    assert (pinned.source_spec_id, pinned.period) == (opened, Period(start=2015, end=2024))
+    assert isinstance(growth, GrowthRequirement)
+    assert growth.rolling == RollingWindow(window_end=RelativePeriod(offset=0))
+    assert json.loads(ctx.state[SEEDED_SOURCES_STATE_KEY])["copies"] == [
+        {"windowed_from": _SEED_SPEC, "window": window}
+    ]
+    (_, copy) = seeded_sources(ctx.state)
+    assert (copy.source.spec_id, copy.source.identity) == (opened, identity)
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_dataset_holds(
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """ "The last five years": the newest year the data holds can sit behind the
+    one the plan read, so the retrieval starts where the dataset does, 1960, and
+    not at the plan's 2019. The copy survives the state round trip."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    pin = _GDP_ALL["spec_id"]
+    _show_block(ctx, _every_year_block(_GDP_ALL["identity"], first_year=1960, rows=65))
+    dataset = requirement(
+        decision_ids=[],
+        source_spec_id=pin,
+        period=Period(start=2019, end=2024),
+        period_end_open=True,
+    )
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[
+            dataset.model_dump(mode="json"),
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    opened, identity = windowed_identity(
+        _GDP_ALL["identity"], {"kind": "range", "start_year": 1960}
+    )
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.evidence_requirements[0].source_spec_id == opened  # type: ignore[union-attr]
+    held = WindowedPin(spec_id=opened, identity=identity, windowed_from=pin)
+    assert windowed_pins(ctx.state) == {opened: held}
+    assert "end_year" not in ctx.state[WINDOWED_PINS_STATE_KEY][0]["identity"]["requested_window"]
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+@pytest.mark.parametrize(
+    ("shown", "issue", "fault"),
+    [
+        # No answer over every year is on record, so the first year is unknown.
+        (None, "rolling_needs_open_period", "first_year_unknown"),
+        # 250,000 rows is the most one retrieval returns (`max_frame_rows`).
+        ({"first_year": 1960, "rows": 250_001}, "rolling_frame_too_large", None),
+    ],
+)
+def test_a_start_that_follows_the_newest_data_is_refused_without_a_whole_history_to_retrieve(
+    requirement: Callable[..., DatasetRequirement],
+    shown: dict[str, Any] | None,
+    issue: str,
+    fault: str | None,
+) -> None:
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    pin = _GDP_ALL["spec_id"]
+    if shown is None:
+        _show(ctx, pin)
+    else:
+        _show_block(ctx, _every_year_block(_GDP_ALL["identity"], **shown))
+    dataset = requirement(
+        decision_ids=[],
+        source_spec_id=pin,
+        period=Period(start=2019, end=2024),
+        period_end_open=True,
+    )
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS),
+        ],
+        tool_context=ctx,
+    )
+
+    assert _rolling_issue(result) == (issue, fault, [dataset.id])
+    assert load_plan(ctx.state) is None
+    assert windowed_pins(ctx.state) == {}
+
+
+@pytest.mark.parametrize(
+    ("end_open", "pin", "rolling", "fault"),
+    [
+        # Unpinned, the dataset is searched for, and no search states its first year.
+        (True, None, _ROLLS_AT_BOTH_ENDS, "no_source_on_record"),
+        (False, _SEED_SPEC, _ROLLS_AT_ITS_END, "dataset_closed"),
+    ],
+)
+def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_open(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    end_open: bool,
+    pin: str | None,
+    rolling: dict[str, Any],
+    fault: str,
+) -> None:
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    save_seeded_sources(ctx.state, [_seeded()])
+    dataset = requirement(
+        decision_ids=["measure"] if pin else [], source_spec_id=pin, period_end_open=end_open
+    )
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([pinning_decision(pin)]) if pin else [],
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2019, rolling=rolling),
+        ],
+        tool_context=ctx,
+    )
+
+    assert _rolling_issue(result) == ("rolling_needs_open_period", fault, [dataset.id])
+    assert load_plan(ctx.state) is None
+
+
+def test_an_unpinned_period_rolling_at_its_end_is_recorded_for_the_translator_to_search(
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """ "Since 2015" with no dataset to pin: the start is fixed, so the translator's
+    search from 2015 on finds a definition with no end year."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset = requirement(decision_ids=[], period_end_open=True)
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2015, rolling=_ROLLS_AT_ITS_END),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    recorded = plan.evidence_requirements[0]
+    assert isinstance(recorded, DatasetRequirement)
+    assert (recorded.source_spec_id, recorded.period_end_open) == (None, True)
+
+
+@pytest.mark.usefixtures("gdp_on_record")
+def test_one_decision_cannot_fix_an_open_pin_and_another_period(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """Two periods of one pin retrieve two spec_ids, and one decision names one.
+    A closed requirement left with the pin as written is searched for; an open
+    one would be found over its stated years, so the plan is refused instead."""
+    tools = _tools_by_name()
+    pin = _GDP_ALL["spec_id"]
+    chosen = pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT)
+    opened = requirement(id="recent", source_spec_id=pin, period_end_open=True)
+    earlier = requirement(id="earlier", source_spec_id=pin, period=Period(start=2000, end=2010))
+    alone, both = _FakeToolContext(), _FakeToolContext()
+    for ctx in (alone, both):
+        _show(ctx, pin)
+
+    recorded = _propose_seeded(tools, alone, chosen, [opened])
+    result = _propose_seeded(tools, both, chosen, [opened, earlier])
+
+    assert recorded["outcome"] == Outcome.OK.value, recorded
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert load_plan(both.state) is None
+
+
+# --- reading a pinned dataset's first year, for a start that follows the newest data ---
+
+# The seed's dataset as Search found it for "the last five years": a closed range.
+_SEED_2020_2024 = {
+    **_SEED_IDENTITY,
+    "requested_window": {"kind": "range", "start_year": 2020, "end_year": 2024},
+}
+_SEED_EVERY_YEAR_ID, _SEED_EVERY_YEAR = windowed_identity(_SEED_2020_2024, {"kind": "all"})
+
+
+class _DefinitionReads:
+    """A tool surface whose `resolve_definition` answers the seed over no window, held from 1995."""
+
+    def __init__(self) -> None:
+        self.calls: list[Mapping[str, object]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        assert tool.name == "resolve_definition", tool
+        self.calls.append(arguments)
+        block = {
+            "spec_id": _SEED_EVERY_YEAR_ID,
+            "definition": {"identity": _SEED_EVERY_YEAR},
+            "resolved": {"download": {"rows": 870, "window": {"start_year": 1995}}},
+        }
+        part = {"status": "definite", "spec": block}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+def _tools_reading(surface: ToolSurface) -> dict[str, FunctionTool]:
+    return {tool.name: tool for tool in build_planner_tools(surface=surface)}
+
+
+async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """The first proposal reads the seed over no window once; an amendment of
+    the turn that still rolls from its start is pinned from the year held."""
+    reads = _DefinitionReads()
+    propose = _tools_reading(reads)["propose_plan"].func
+    ctx = _FakeToolContext()
+    seed = _seeded(_SEED_2020_2024)
+    save_seeded_sources(ctx.state, [seed])
+    dataset = requirement(
+        source_spec_id=seed.source.spec_id,
+        period=Period(start=2020, end=2024),
+        period_end_open=True,
+    )
+    arguments: dict[str, Any] = {
+        "question": "q",
+        "answer_mode": AnswerMode.SERIES,
+        "decisions": drafts([pinning_decision(seed.source.spec_id)]),
+    }
+
+    first = await propose(
+        **arguments,
+        evidence_requirements=[
+            dataset,
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS)
+            | {"window_start": 2020, "rolling": _LAST_FOUR_BACK},
+        ],
+        tool_context=ctx,
+    )
+    second = await propose(
+        evidence_requirements=[
+            _growth_as_written(dataset, start=2019, rolling=_ROLLS_AT_BOTH_ENDS)
+            | {"window_start": 2021, "rolling": _LAST_THREE_BACK},
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert first["outcome"] == second["outcome"] == Outcome.OK.value, (first, second)
+    assert reads.calls == [{"spec_id": _SEED_EVERY_YEAR_ID, "identity": _SEED_EVERY_YEAR}]
+    opened, _ = windowed_identity(_SEED_2020_2024, {"kind": "range", "start_year": 1995})
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.evidence_requirements[0].source_spec_id == opened  # type: ignore[union-attr]
+
+
+def test_propose_plan_declares_the_same_arguments_with_and_without_a_surface() -> None:
+    declared = [
+        tools["propose_plan"]._get_declaration().model_dump(mode="json")
+        for tools in (_tools_by_name(), _tools_reading(_DefinitionReads()))
+    ]
+
+    assert declared[0] == declared[1]
+
+
+def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None:
+    # A requirement with no end year pins a dataset over Africa's countries from
+    # the block it was shown; the copy over its window posts Africa again.
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    spec_id = block["spec_id"]
+
+    _, recorded, identity = _identity_on_record(
+        spec_id, {}, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
+    )
+
+    assert identity == block["definition"]["identity"]
+    assert recorded is not None
+    assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]

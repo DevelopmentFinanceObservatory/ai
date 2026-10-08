@@ -1,7 +1,7 @@
 # translator
 
 The translator turns a plan the planner has drafted into the workflow the user
-approves, as code behind the planner's `translate` tool. It finds the data
+approves, as code that `propose_plan` runs on every plan it records. It finds the data
 each evidence requirement needs, proposes the operations that carry the plan's
 decisions out, and has the compiler build and check the result. What cannot be
 carried out goes back to the planner as a typed referral rather than being
@@ -13,18 +13,19 @@ Its tests live in `services/harness/tests/translator/`.
 
 ## What it does
 
-One function tool on the planner, `translate`, built by
-`translator.tool.build_translate_tool()` and attached by
-`harness.agents.create_planner_with_translator`. The planner writes the plan to
-session state (`planner.plan.save_plan`, keyed on `PLAN_STATE_KEY`), and
-`translate` reads it back itself (`translator.discovery.current_draft`,
-`planner.plan.load_plan`), so the call takes no arguments.
+One function, built by `translator.tool.build_translate()` and attached by
+`harness.agents.create_planner_with_translator`, which the planner's
+`propose_plan` calls on every plan it records. `propose_plan` writes the plan
+to session state (`planner.plan.save_plan`, keyed on `PLAN_STATE_KEY`), and
+translation reads it back itself (`translator.discovery.current_draft`,
+`planner.plan.load_plan`). The planner's model never calls it, so it spends
+no generation on it.
 
-`translate` runs the whole discover-then-compile loop as code
+Translation runs the whole discover-then-compile loop as code
 (`translator.mechanical.run_translate`): `discover_source` for every dataset
 requirement, then `propose_operations`, following each step's own next
-action. None of that costs a model call. Calling it answers one outcome from a
-closed set:
+action. None of that costs a model call. It answers one verdict from a
+closed set, which `propose_plan` returns under `translation`:
 
 | Outcome           | Meaning                                                                        |
 | ----------------- | ------------------------------------------------------------------------------ |
@@ -32,7 +33,7 @@ closed set:
 | `choice_required` | Several sources answer a requirement; the referral carries the candidates.     |
 | `invalid_input`   | A requirement the planner repairs or the user amends; the referral says which. |
 | `unsupported`     | No operation or search serves what the requirement asks.                       |
-| `transient`       | A data service did not answer just now; the same plan is worth another try.    |
+| `transient`       | A data service did not answer just now; proposing the same plan again retries. |
 | `internal`        | A fault no plan change repairs, logged under the referral's `reference`.       |
 
 Every outcome but `ok` is the typed `Referral` itself, its fields at the top
@@ -40,7 +41,7 @@ of the answer. A plan that is not a translatable draft answers with the
 `ToolProblem` that says so.
 
 When `discover_source` finds more than one source for a requirement and none
-is pinned, `translate` closes on a `source_ambiguous` referral (outcome
+is pinned, translation closes on a `source_ambiguous` referral (outcome
 `choice_required`) carrying the candidates as the discovery log recorded
 them. The planner records the choice as a source decision naming one of them,
 or puts the candidates to the user, and the pin settles the requirement on
@@ -61,7 +62,7 @@ planner's entry on an internal failure. A translation that fails with the
 same issues it failed with before in the session is referred again marked
 `repeated`, and the seam stops the planner's run on it.
 
-`describe` is not a tool of its own: `translate` calls it from code
+`describe` is not a tool of its own: translation calls it from code
 (`translator.discovery.fetch_definitions`), immediately before compiling, to
 fetch a genuinely `definite` source's own definition and carry it into the
 approval readback (`planner.workflow.SelectedSource.definition`, rendered by
@@ -76,7 +77,7 @@ None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
 stays in the harness graph.
 
-`translate` reads the tool surface through a `ToolSurface` (`compiler.surface`),
+Translation reads the tool surface through a `ToolSurface` (`compiler.surface`),
 the same object the compiler checks against, so what it discovers on and what a
 workflow is compiled against are one surface.
 
@@ -146,7 +147,7 @@ whenever its record was written. An unpinned requirement left without a source
 is searched again, and an answer naming the dropped dataset is refused as
 `seed_dropped`. A dataset the turn still holds as a seed is never read as
 dropped, so a second seed over the same dataset and other years stays
-usable. `translate` answers with each dataset described once
+usable. `propose_operations` answers with each dataset described once
 (`translator.discovery.described_sources`): a dataset several requirements
 retrieve, under one spec_id or under a copy over each period, lists its other
 retrievals as `also_retrieved_as`, each a spec_id, the phrase it was
@@ -165,7 +166,11 @@ name.
 **A referral's candidates come from the log.** `return_to_planner` attaches the
 candidate sources discovery recorded for the requirement in this revision; it
 refuses a `source_ambiguous` referral for a requirement discovery never
-answered with candidates. A referral names the requirement or decision it is
+answered with candidates. A `requirement_unmeetable` referral carries candidates
+only when it is marked `source_mismatch`, meaning the source the requirement
+states names none of the sources discovery found. Those sources are offered for
+the user to take one in its place. A period or price basis the source cannot meet
+offers none. A referral names the requirement or decision it is
 about, and both have to exist in the plan. Saved to session state under
 `translator.referral.REFERRAL_STATE_KEY` rather than returned inline, so the
 planner reads it on its own turn.
@@ -180,7 +185,7 @@ when the issues mean the plan rather than the proposal has to change.
 that states no evidence requirements.
 
 **Every core function returns a typed result.** Nothing answers `{"error": "..."}`.
-Success is `{"outcome": "ok", ...}`; a referral saved is `{"outcome": "referred", "referral": {...}}`, which `translate` answers the planner with as the referral alone; anything else is a `ToolProblem`
+Success is `{"outcome": "ok", ...}`; a referral saved is `{"outcome": "referred", "referral": {...}}`, which translation answers the planner with as the referral alone; anything else is a `ToolProblem`
 (`planner.tool_results`): a stable `outcome` (`invalid_input`, `state_missing`
 or `refused`), a `code` from one shared vocabulary naming what went wrong, a
 `message`, and, where the next step is known, an `action` (which tool to

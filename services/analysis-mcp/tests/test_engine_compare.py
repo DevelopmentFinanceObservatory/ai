@@ -5,6 +5,7 @@ perturbation), and every refusal condition.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -213,21 +214,86 @@ def test_a_reporter_narrowed_out_of_a_heterogeneous_frame_succeeds() -> None:
 # Cross-side facet and unit-unbound checks -----------------------------------
 
 
-def test_cross_side_facet_mismatch_refuses_even_though_each_side_resolves_cleanly() -> None:
+def _sourced_frame(reporter: str, provenance: str, stat_vars: Sequence[str]) -> Frame:
+    """One reporter in USD under `provenance`, one row per StatVar, the
+    StatVars on consecutive years from 2020."""
+    return _frame(
+        [
+            _row(
+                reporter=reporter,
+                year=str(2020 + index),
+                stat_var=stat_var,
+                unit="dcid:USDollar",
+                provenance=provenance,
+            )
+            for index, stat_var in enumerate(stat_vars)
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("frames", "stat_vars"),
+    [
+        pytest.param(
+            lambda: (facet_disjoint_by_reporter_frame(),) * 2,
+            ("dcid:OfficialDevelopmentAssistanceNet_Disbursement",),
+            id="one-frame",
+        ),
+        pytest.param(
+            lambda: (
+                _sourced_frame("dcid:USA", "dcid:P1", ["dcid:X", "dcid:X"]),
+                _sourced_frame("dcid:GBR", "dcid:P2", ["dcid:X", "dcid:X"]),
+            ),
+            ("dcid:X",),
+            id="two-frames-one-stat-var",
+        ),
+        pytest.param(
+            lambda: (
+                _sourced_frame("dcid:USA", "dcid:P1", ["dcid:A", "dcid:B"]),
+                _sourced_frame("dcid:GBR", "dcid:P2", ["dcid:B", "dcid:C"]),
+            ),
+            ("dcid:B",),
+            id="two-frames-overlapping-stat-vars",
+        ),
+    ],
+)
+def test_cross_side_facet_mismatch_refuses_even_though_each_side_resolves_cleanly(
+    frames: Callable[[], tuple[Frame, Frame]], stat_vars: tuple[str, ...]
+) -> None:
     """Each side (USA in `provenance=dcid:P1`, GBR in `dcid:P2`) resolves
     cleanly on its own -- nothing about resolving either side alone ever
-    sees the other's own facet. The pairing itself must still refuse."""
-    frame = facet_disjoint_by_reporter_frame()
+    sees the other's own facet. Where the sides share a StatVar the pairing
+    itself must still refuse, naming the StatVars both hold."""
+    left, right = frames()
     with pytest.raises(CompareFacetMismatchError) as exc_info:
         run_compare(
-            frame,
-            frame,
+            left,
+            right,
             left_entity={"reporter": "dcid:USA"},
             right_entity={"reporter": "dcid:GBR"},
         )
     assert exc_info.value.axis == "provenance"
     assert exc_info.value.left_ref == "dcid:P1"
     assert exc_info.value.right_ref == "dcid:P2"
+    assert exc_info.value.stat_vars == stat_vars
+
+
+def test_cross_side_facet_difference_between_disjoint_stat_vars_warns_and_compares() -> None:
+    """Two slices sharing no StatVar each keep their own provenance; the
+    comparison runs, the result leaves provenance unbound, and the warning
+    names both selections."""
+    left = _sourced_frame("dcid:USA", "dcid:P1", ["dcid:A", "dcid:B"])
+    right = _sourced_frame("dcid:GBR", "dcid:P2", ["dcid:C", "dcid:D"])
+
+    result = run_compare(left, right, left_entity={}, right_entity={})
+
+    assert result.intersected_periods == ("2020", "2021")
+    assert result.frame.table.column("provenance").to_pylist() == [None, None]
+    assert result.left_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P1"),)
+    assert result.right_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P2"),)
+    assert len(result.warnings) == 1
+    assert "'dcid:P1'" in result.warnings[0]
+    assert "'dcid:P2'" in result.warnings[0]
 
 
 def test_facet_left_wholly_unbound_on_one_side_succeeds_rather_than_refusing() -> None:

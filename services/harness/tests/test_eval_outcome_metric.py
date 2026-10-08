@@ -57,8 +57,9 @@ def _invocation(*responses: genai_types.FunctionResponse) -> Invocation:
 def _ok_proposal(
     steps: list[dict[str, str]], sources: list[dict[str, str]]
 ) -> genai_types.FunctionResponse:
+    """The `translation` a case expects, or one the planner's proposal came back with."""
     return genai_types.FunctionResponse(
-        name="translate",
+        name="translation",
         response={"outcome": "ok", "steps": steps, "sources": sources},
     )
 
@@ -66,8 +67,25 @@ def _ok_proposal(
 def _referral(kind: str, requirement_id: str) -> genai_types.FunctionResponse:
     outcome = "choice_required" if kind == "source_ambiguous" else "invalid_input"
     return genai_types.FunctionResponse(
-        name="translate",
+        name="translation",
         response={"outcome": outcome, "kind": kind, "requirement_id": requirement_id},
+    )
+
+
+def _carried(translation: genai_types.FunctionResponse) -> genai_types.FunctionResponse:
+    """The accepted `propose_plan` response a run records, carrying `translation`'s verdict.
+
+    A case states its expectation as a `translation` response; a run has no
+    such response, only the verdict under an accepted proposal's own key.
+    """
+    return genai_types.FunctionResponse(
+        name="propose_plan",
+        response={
+            "outcome": "ok",
+            "status": "draft",
+            "version": 1,
+            "translation": translation.response,
+        },
     )
 
 
@@ -81,6 +99,9 @@ def _submit_plan(response: dict[str, object]) -> genai_types.FunctionResponse:
     return genai_types.FunctionResponse(name="submit_plan", response=response)
 
 
+_COMPILE_FAILED = genai_types.FunctionResponse(
+    name="translation", response={"outcome": "invalid_input", "code": "compile_failed"}
+)
 _EXPECTED_STEPS = [{"tool": "data-mcp.get_data"}, {"tool": "analysis-mcp.aggregate"}]
 _EXPECTED_SOURCES = [{"spec_id": DEBT_SPEC}]
 _REFUSED_SUBMISSION = {"outcome": "refused", "code": "workflow_missing"}
@@ -150,7 +171,7 @@ def test_a_matching_proposal_scores_one() -> None:
         _invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)),
     ]
     actual = [
-        _invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)),
+        _invocation(_carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))),
     ]
 
     result = workflow_outcome(_metric(), actual, expected, None)
@@ -163,7 +184,7 @@ def test_a_matching_proposal_scores_one() -> None:
 def test_a_mismatched_proposal_scores_zero() -> None:
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
     wrong_steps = [{"tool": "data-mcp.get_data"}, {"tool": "analysis-mcp.growth"}]
-    actual = [_invocation(_ok_proposal(wrong_steps, _EXPECTED_SOURCES))]
+    actual = [_invocation(_carried(_ok_proposal(wrong_steps, _EXPECTED_SOURCES)))]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
@@ -183,7 +204,7 @@ def test_a_missing_response_scores_zero() -> None:
 
 def test_a_referral_where_a_proposal_was_expected_scores_zero() -> None:
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
-    actual = [_invocation(_referral("source_ambiguous", "annual_debt_service"))]
+    actual = [_invocation(_carried(_referral("source_ambiguous", "annual_debt_service")))]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
@@ -191,16 +212,14 @@ def test_a_referral_where_a_proposal_was_expected_scores_zero() -> None:
 
 
 def test_a_written_referral_alongside_the_expected_proposal_scores_zero() -> None:
-    # The mapping case's exclusivity check: an accepted proposal and a
-    # referral that was written on the same turn is hedging. Both are
-    # `translate` responses distinguished only by `outcome` -- before
-    # `_hedged` read `expected`'s outcome, `translate` fell to its `case _:
-    # return False` and this scored 1.0.
+    # The mapping case's exclusivity check: a translation that compiled and
+    # another that referred, on the same turn, is hedging. Both are
+    # `translation` verdicts distinguished only by `outcome`.
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
     actual = [
         _invocation(
-            _ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES),
-            _referral("source_ambiguous", "annual_debt_service"),
+            _carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)),
+            _carried(_referral("source_ambiguous", "annual_debt_service")),
         )
     ]
 
@@ -210,14 +229,16 @@ def test_a_written_referral_alongside_the_expected_proposal_scores_zero() -> Non
 
 
 def test_a_refused_referral_alongside_the_expected_proposal_does_not_hedge() -> None:
-    # A `translate` call the tool refused wrote no referral, so the plan
-    # is exactly as the accepted proposal left it: there is nothing to hedge
+    # A translation that answered a problem wrote no referral, so the plan
+    # is exactly as the compiled one left it: there is nothing to hedge
     # with. Only a referral, the one answer naming a `kind`, counts.
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
-    refused = genai_types.FunctionResponse(
-        name="translate", response={"outcome": "invalid_input", "code": "referral_unearned"}
+    problem = genai_types.FunctionResponse(
+        name="translation", response={"outcome": "invalid_input", "code": "referral_unearned"}
     )
-    actual = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES), refused)]
+    actual = [
+        _invocation(_carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)), _carried(problem))
+    ]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
@@ -225,15 +246,14 @@ def test_a_refused_referral_alongside_the_expected_proposal_does_not_hedge() -> 
 
 
 def test_an_accepted_proposal_alongside_the_expected_referral_scores_zero() -> None:
-    # The referral case's exclusivity check: a translator that refers and
-    # also has an accepted proposal on the same turn is hedging, not
-    # answering the referral case's question. Both are `translate`
-    # responses, the same dead branch as the mapping case above.
+    # The referral case's exclusivity check: a translation that refers and
+    # another that compiled on the same turn is hedging, not answering the
+    # referral case's question.
     expected = [_invocation(_referral("source_ambiguous", "annual_aid"))]
     actual = [
         _invocation(
-            _referral("source_ambiguous", "annual_aid"),
-            _ok_proposal(_EXPECTED_STEPS, [{"spec_id": OTHER_SPEC}]),
+            _carried(_referral("source_ambiguous", "annual_aid")),
+            _carried(_ok_proposal(_EXPECTED_STEPS, [{"spec_id": OTHER_SPEC}])),
         )
     ]
 
@@ -246,7 +266,7 @@ def test_a_matching_referral_scores_one() -> None:
     expected = [_invocation(_referral("requirement_unmeetable", "annual_debt_service"))]
     actual = [
         _invocation(
-            _referral("requirement_unmeetable", "annual_debt_service"),
+            _carried(_referral("requirement_unmeetable", "annual_debt_service")),
         )
     ]
 
@@ -257,34 +277,55 @@ def test_a_matching_referral_scores_one() -> None:
 
 
 def test_the_last_matching_actual_response_is_the_one_compared() -> None:
-    # A first attempt that failed, then a second that succeeded: the metric
-    # reads the retry, not the failed first try.
+    # A first proposal whose translation failed, then a second that compiled:
+    # the metric reads the retry, not the failed first try.
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
-    failed = genai_types.FunctionResponse(
-        name="translate", response={"outcome": "invalid_input", "code": "compile_failed"}
-    )
-    actual = [_invocation(failed, _ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
+    actual = [
+        _invocation(
+            _carried(_COMPILE_FAILED),
+            _carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)),
+        )
+    ]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
     assert result.per_invocation_results[0].score == 1.0
 
 
-def test_a_refused_call_after_the_accepted_proposal_does_not_hide_it() -> None:
-    # The accepted proposal, then one more `translate` call the compiler
-    # refused: the plan keeps the accepted workflow, so that is the turn's
+def test_a_failed_translation_after_the_compiled_one_does_not_hide_it() -> None:
+    # The compiled translation, then one more proposal whose translation
+    # failed: the plan keeps the compiled workflow, so that is the turn's
     # outcome. Grading the last response by name alone scored this zero;
     # preferring the last response with the stated outcome grades the
-    # accepted one -- and the hedge checks above still read every response.
+    # compiled one -- and the hedge checks above still read every response.
     expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
-    refused = genai_types.FunctionResponse(
-        name="translate", response={"outcome": "invalid_input", "code": "compile_failed"}
-    )
-    actual = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES), refused)]
+    actual = [
+        _invocation(
+            _carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES)),
+            _carried(_COMPILE_FAILED),
+        )
+    ]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
     assert result.per_invocation_results[0].score == 1.0
+
+
+def test_a_proposal_the_planner_refused_carries_no_translation_to_grade() -> None:
+    # A refused proposal ran no translation, so it neither stands in for the
+    # compiled verdict nor hides it; one that never reached translation
+    # leaves the case with nothing to match.
+    expected = [_invocation(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))]
+    refused = genai_types.FunctionResponse(
+        name="propose_plan", response={"outcome": "invalid_input", "code": "invalid_plan"}
+    )
+    compiled = _carried(_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES))
+
+    after = workflow_outcome(_metric(), [_invocation(refused, compiled)], expected, None)
+    alone = workflow_outcome(_metric(), [_invocation(refused)], expected, None)
+
+    assert after.per_invocation_results[0].score == 1.0
+    assert alone.per_invocation_results[0].score == 0.0
 
 
 def test_a_matching_plan_proposal_scores_one() -> None:

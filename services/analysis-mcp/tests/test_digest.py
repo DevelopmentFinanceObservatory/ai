@@ -7,6 +7,7 @@ import dataclasses
 import random
 
 import pyarrow as pa
+import pytest
 from analysis_mcp.artifact import Exclusion, Interval
 from analysis_mcp.digest import (
     _absent_clause,
@@ -18,6 +19,7 @@ from analysis_mcp.digest import (
     render_filter_digest,
     render_growth_digest,
     render_join_digest,
+    render_quotient_of_digest,
     render_rank_digest,
     render_share_of_digest,
 )
@@ -27,11 +29,12 @@ from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
 from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey
+from analysis_mcp.engine.quotient_of import PeriodQuotient, run_quotient_of
 from analysis_mcp.engine.rank import EntityRank, RankResult, run_rank
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
-from digest_corpus import matched_keys_of
+from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
 
 
 def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
@@ -348,7 +351,9 @@ def test_growth_digest_carries_the_identity_block() -> None:
     )
 
 
-def _growth_result(*, change: str, resolved_unit: str | None, growth_rate: float) -> GrowthResult:
+def _growth_result(
+    *, change: str, resolved_unit: str | None, growth_rate: float, value_end: float | None = None
+) -> GrowthResult:
     return GrowthResult(
         frame=None,  # type: ignore[arg-type]
         resolved_unit=resolved_unit,
@@ -361,7 +366,7 @@ def _growth_result(*, change: str, resolved_unit: str | None, growth_rate: float
             EntityGrowth(
                 entity_key=(("reporter", "dcid:USA"),),
                 value_start=100.0,
-                value_end=100.0 + growth_rate,
+                value_end=100.0 + growth_rate if value_end is None else value_end,
                 growth_rate=growth_rate,
                 realised_coverage_fraction=1.0,
             ),
@@ -385,18 +390,78 @@ def test_absolute_growth_digest_states_the_signed_difference_and_the_unit() -> N
     assert "%" not in digest.split("\n\n")[1]  # the entities block, not the identity block
 
 
-def test_absolute_growth_digest_over_a_dimensionless_input_says_percentage_points() -> None:
+@pytest.mark.parametrize(
+    ("change", "resolved_unit", "derived", "value_end", "entity_line", "unit_line"),
+    [
+        # Two years of a share_of result.
+        pytest.param(
+            "absolute",
+            "Percent",
+            {"dimensionless": True},
+            105.0,
+            "  reporter=dcid:USA: +5 (100 -> 105)",
+            "unit: absolute change (percentage points)",
+            id="share",
+        ),
+        # A published "% of GDP" series.
+        pytest.param(
+            "absolute",
+            "Percent",
+            None,
+            105.0,
+            "  reporter=dcid:USA: +5 (100 -> 105)",
+            "unit: absolute change (percentage points)",
+            id="published",
+        ),
+        # Two relative growth rates, each a unit-less fraction.
+        pytest.param(
+            "absolute",
+            None,
+            {"dimensionless": True},
+            105.0,
+            "  reporter=dcid:USA: +5 (100 -> 105)",
+            "unit: absolute change (a difference of rates stated as fractions: "
+            "0.02 is 2 percentage points)",
+            id="relative-growth",
+        ),
+        # USD 100 -> 110 is a rate of +10 per cent, which carries no unit.
+        pytest.param(
+            "relative",
+            "CurrencyUSD",
+            None,
+            110.0,
+            "  reporter=dcid:USA: +10.0% (100 -> 110)",
+            "unit: none (a relative change; input in CurrencyUSD)",
+            id="relative-growth-of-dollars",
+        ),
+    ],
+)
+def test_growth_digest_over_a_ratio_or_rate_states_how_the_change_reads(
+    change: str,
+    resolved_unit: str | None,
+    derived: dict[str, object] | None,
+    value_end: float,
+    entity_line: str,
+    unit_line: str,
+) -> None:
     digest = render_growth_digest(
         window_start="2020",
         window_end="2023",
         entity_by=("reporter",),
-        result=_growth_result(change="absolute", resolved_unit=None, growth_rate=5.0),
+        result=_growth_result(
+            change=change,
+            resolved_unit=resolved_unit,
+            growth_rate=(value_end - 100.0) / 100.0 if change == "relative" else value_end - 100.0,
+            value_end=value_end,
+        ),
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,
         execution_identity=_EI,
-        derived={"dimensionless": True},
+        derived=derived,
     )
-    assert "percentage points" in digest
+    sections = digest.split("\n\n")
+    assert sections[1].splitlines()[1:] == [entity_line]
+    assert unit_line in sections
 
 
 def test_absolute_growth_digest_over_an_ordinal_input_states_the_move_in_places() -> None:
@@ -636,28 +701,25 @@ def test_rank_digest_header_states_the_limit_and_the_kept_count() -> None:
     assert "2 row(s) [" not in digest
 
 
-def test_share_of_digest_carries_the_identity_block() -> None:
-    digest = render_share_of_digest(
-        result=ShareOfResult(
-            frame=None,  # type: ignore[arg-type]
-            numerator_resolved_unit="dcid:USDollar",
-            denominator_resolved_unit="dcid:USDollar",
-            numerator_facet_selections=(),
-            denominator_facet_selections=(),
-            warnings=(),
-            numerator_periods=("2021",),
-            denominator_periods=("2021",),
-            numerator_coverage_fraction=1.0,
-            denominator_coverage_fraction=1.0,
-            period_shares=(
-                PeriodShare(
-                    time_period="2021", numerator_value=10.0, denominator_value=100.0, share=0.1
-                ),
-            ),
-        ),
+def _share_of_digest(result: ShareOfResult, *, derived: dict[str, object] | None = None) -> str:
+    return render_share_of_digest(
+        result=result,
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,
         execution_identity=_EI,
+        derived=derived,
+    )
+
+
+def test_share_of_digest_carries_the_identity_block() -> None:
+    digest = _share_of_digest(
+        share_of_result(
+            (
+                PeriodShare(
+                    time_period="2021", numerator_value=10.0, denominator_value=100.0, percent=10.0
+                ),
+            )
+        )
     )
     assert "frame reference: spec_id=ops_" + "a" * 32 in digest
     assert "content_version=ocv_" + "b" * 32 in digest
@@ -666,73 +728,77 @@ def test_share_of_digest_carries_the_identity_block() -> None:
 
 def test_keyed_share_of_digest_renders_a_block_per_key() -> None:
     """A keyed call (any `PeriodShare.key` non-empty) renders one block per
-    key, not the flat unkeyed list."""
-    digest = render_share_of_digest(
-        result=ShareOfResult(
-            frame=None,  # type: ignore[arg-type]
-            numerator_resolved_unit="dcid:USDollar",
-            denominator_resolved_unit="dcid:USDollar",
-            numerator_facet_selections=(),
-            denominator_facet_selections=(),
-            warnings=(),
-            numerator_periods=("2021",),
-            denominator_periods=("2021",),
-            numerator_coverage_fraction=1.0,
-            denominator_coverage_fraction=1.0,
-            period_shares=(
+    key, not the flat unkeyed list, each block's heading stating that key's
+    first and latest share."""
+    usa, gbr = (("donor", "dcid:USA"),), (("donor", "dcid:GBR"),)
+    digest = _share_of_digest(
+        share_of_result(
+            (
                 PeriodShare(
-                    time_period="2021",
+                    time_period="2020",
                     numerator_value=10.0,
                     denominator_value=100.0,
-                    share=0.1,
-                    key=(("donor", "dcid:USA"),),
+                    percent=10.0,
+                    key=usa,
+                ),
+                PeriodShare(
+                    time_period="2021",
+                    numerator_value=12.0,
+                    denominator_value=100.0,
+                    percent=12.0,
+                    key=usa,
                 ),
                 PeriodShare(
                     time_period="2021",
                     numerator_value=20.0,
                     denominator_value=200.0,
-                    share=0.1,
-                    key=(("donor", "dcid:GBR"),),
+                    percent=10.0,
+                    key=gbr,
+                ),
+            )
+        )
+    )
+    assert digest.splitlines()[0] == (
+        "share_of: 2 key(s), 3 matched (key, period) pair(s), in per cent (Percent)"
+    )
+    assert "donor=dcid:USA [2 period(s)], first 2020: 10.000%; latest 2021: 12.000%:" in digest
+    assert "donor=dcid:GBR [1 period(s)], only 2021: 10.000%:" in digest
+
+
+def test_unkeyed_share_of_digest_leads_with_the_first_and_latest_share_in_per_cent() -> None:
+    """The flat digest names the per cent unit in its header, states the
+    first and latest share on the next line, then names what was divided,
+    each period's share printed as its output row holds it (no second
+    scaling). A share is dimensionless, but its unit is stated, so the
+    marker adds no derived note."""
+    digest = _share_of_digest(
+        share_of_result(
+            (
+                PeriodShare(
+                    time_period="2020", numerator_value=5.0, denominator_value=200.0, percent=2.5
+                ),
+                PeriodShare(
+                    time_period="2021",
+                    numerator_value=10.0,
+                    denominator_value=187.6,
+                    percent=10.0 / 187.6 * 100,
                 ),
             ),
-        ),
-        op_spec_hash="ops_" + "a" * 32,
-        content_version="ocv_" + "b" * 32,
-        execution_identity=_EI,
-    )
-    assert "2 key(s)" in digest
-    assert "donor=dcid:USA" in digest
-    assert "donor=dcid:GBR" in digest
-
-
-def test_unkeyed_share_of_digest_is_unaffected_by_the_keyed_section() -> None:
-    """`PeriodShare.key` defaulting to `()` must render exactly the flat,
-    unkeyed digest this function always produced -- no per-key header, no
-    `_key_text` prefix."""
-    digest = render_share_of_digest(
-        result=ShareOfResult(
-            frame=None,  # type: ignore[arg-type]
             numerator_resolved_unit="dcid:USDollar",
             denominator_resolved_unit="dcid:USDollar",
-            numerator_facet_selections=(),
-            denominator_facet_selections=(),
-            warnings=(),
-            numerator_periods=("2021",),
-            denominator_periods=("2021",),
-            numerator_coverage_fraction=1.0,
-            denominator_coverage_fraction=1.0,
-            period_shares=(
-                PeriodShare(
-                    time_period="2021", numerator_value=10.0, denominator_value=100.0, share=0.1
-                ),
-            ),
         ),
-        op_spec_hash="ops_" + "a" * 32,
-        content_version="ocv_" + "b" * 32,
-        execution_identity=_EI,
+        derived={"dimensionless": True},
     )
-    assert "share_of: 1 matched period(s)" in digest
+    sections = digest.split("\n\n")
+    assert sections[:3] == [
+        "share_of: 2 matched period(s), in per cent (Percent)",
+        "first 2020: 2.500%; latest 2021: 5.330%",
+        "stat_var dcid:ops_" + "a" * 32 + ": dcid:test_stat_var_numerator (unit: dcid:USDollar) "
+        "as a share of dcid:test_stat_var_denominator (unit: dcid:USDollar)",
+    ]
+    assert "  2021: 10 / 187.6 = 5.330%" in digest
     assert "key(s)" not in digest
+    assert "derived result" not in digest
 
 
 def test_capped_positions_keeps_the_entries_capped_keeps() -> None:
@@ -744,6 +810,207 @@ def test_capped_positions_keeps_the_entries_capped_keeps() -> None:
         magnitudes = [rng.choice((-3.0, -1.0, -0.0, 0.0, 1.0, 2.5, 3.0)) for _ in range(count)]
         expected = _capped(list(range(count)), magnitude=magnitudes.__getitem__)
         assert _capped_positions(pa.array(magnitudes, type=pa.float64())) == list(expected)
+
+
+def test_quotient_of_digest_carries_the_identity_block_and_the_composed_unit() -> None:
+    digest = render_quotient_of_digest(
+        result=quotient_of_result(
+            (
+                PeriodQuotient(
+                    time_period="2021", numerator_value=10.0, denominator_value=4.0, quotient=2.5
+                ),
+            )
+        ),
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    )
+    assert digest.splitlines()[0] == (
+        "quotient_of: 1 matched period(s), in dcid:USDollar per Count_Person"
+    )
+    assert "  2021: 10 / 4 = 2.5" in digest
+    assert "frame reference: spec_id=ops_" + "a" * 32 in digest
+    assert "content_version=ocv_" + "b" * 32 in digest
+    assert "execution_identity: 0.1.0|1.0.0|0.1.0" in digest
+
+
+def test_quotient_of_digest_names_the_keys_dropped_for_a_zero_denominator() -> None:
+    """Six keys have no row for a zero denominator: the left-out line names
+    five and the total, and the exclusions block keeps the record, which
+    holds every key."""
+    dropped = tuple((("recipient", f"dcid:R{i}"),) for i in range(6))
+    digest = render_quotient_of_digest(
+        result=quotient_of_result(
+            (
+                PeriodQuotient(
+                    time_period="2021",
+                    numerator_value=10.0,
+                    denominator_value=4.0,
+                    quotient=2.5,
+                    key=(("recipient", "dcid:KEN"),),
+                ),
+            ),
+            keys_with_zero_denominator=dropped,
+        ),
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+        exclusions=(
+            Exclusion(reason="unmatched_key", rows=2, entities={}, side="numerator"),
+            Exclusion(
+                reason="zero_denominator",
+                rows=6,
+                entities={"recipient": ("dcid:R0", "dcid:R5")},
+                side="numerator",
+            ),
+            Exclusion(reason="zero_denominator", rows=6, entities={}, side="denominator"),
+        ),
+    )
+    (left_out,) = [line for line in digest.splitlines() if line.startswith("numerator keys")]
+    assert left_out.startswith("numerator keys left out: 6 with a zero denominator")
+    assert [f"dcid:R{i}" in left_out for i in range(6)] == [True] * 5 + [False]
+    assert left_out.endswith("(6 total))")
+    # The record naming keys is shown, with the one key the line leaves out;
+    # the record naming none repeats the zero-denominator line and is not.
+    assert digest.count("zero_denominator, numerator") == 1
+    assert "dcid:R5" in digest
+    assert "zero_denominator, denominator" not in digest
+    assert "unmatched_key" not in digest
+
+
+def _quotient_digest(**overrides: object) -> str:
+    return render_quotient_of_digest(
+        result=quotient_of_result(
+            tuple(
+                PeriodQuotient(
+                    time_period=period,
+                    numerator_value=10.0,
+                    denominator_value=4.0,
+                    quotient=2.5,
+                    key=(("recipient", "dcid:KEN"),),
+                )
+                for period in ("2020", "2021")
+            ),
+            **overrides,
+        ),
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    )
+
+
+def test_quotient_of_digest_names_the_pairs_one_side_alone_reports_by_key() -> None:
+    """Each side's keys are named with their period range and count, five
+    then a total. 2019 is matched by no key, so the periods line names it
+    and the pairs line leaves it out, with any key holding nothing else."""
+    digest = _quotient_digest(
+        numerator_periods=("2019", "2020", "2021"),
+        matched_periods=("2020", "2021"),
+        numerator_only_periods=(
+            ((("recipient", "dcid:GTM"),), ("2019", "2020", "2021")),
+            ((("recipient", "dcid:HND"),), ("2019",)),
+        ),
+        denominator_only_periods=tuple(
+            ((("recipient", f"dcid:R{i}"),), ("2020",)) for i in range(6)
+        ),
+    )
+    lines = digest.splitlines()
+    assert "periods left out: only the numerator reports 2019" in lines
+    (pairs,) = [line for line in lines if line.startswith("pairs left out")]
+    numerator, denominator = pairs.removeprefix("pairs left out: ").split("; ")
+    assert numerator == "only the numerator reports recipient=dcid:GTM 2020 to 2021 (2)"
+    assert denominator.startswith("only the denominator reports recipient=dcid:R0 2020 (1), ")
+    assert "dcid:R4" in denominator
+    assert "dcid:R5" not in denominator
+    assert denominator.endswith("(6 total)")
+
+
+def _keyed_frame(stat_var: str, column: str, values: dict[str, dict[str, float]]) -> Frame:
+    return Frame.build(
+        role_keys=[column],
+        rows=[
+            {"stat_var": stat_var, column: key, "time_period": period, "value": value}
+            for key, by_period in values.items()
+            for period, value in by_period.items()
+        ],
+    )
+
+
+def test_every_cell_a_keyed_quotient_leaves_out_is_named_by_one_left_out_line() -> None:
+    """A and B cross: each holds 2021 on the side the other lacks it. A also
+    holds 2019, which no denominator key does, and B's group 2022, which no
+    numerator key does. C, D and E are dropped keys, one of each kind, and F
+    loses one cell of two to a zero denominator."""
+    numerator = {
+        "A": {"2019": 1.0, "2020": 1.0, "2021": 1.0},
+        "B": {"2020": 1.0},
+        "C": {"2020": 1.0},
+        "D": {"2018": 1.0},
+        "E": {"2020": 1.0},
+        "F": {"2020": 1.0, "2021": 1.0},
+    }
+    denominator = {
+        "A": {"2020": 2.0},
+        "B": {"2020": 2.0, "2021": 2.0, "2022": 2.0},
+        "D": {"2020": 2.0},
+        "E": {"2020": 0.0},
+        "F": {"2020": 2.0, "2021": 0.0},
+    }
+    result = run_quotient_of(
+        _keyed_frame("dcid:Aid", "recipient", numerator),
+        _keyed_frame("dcid:Count_Person", "observationAbout", denominator),
+        stat_var="dcid:ops_" + "a" * 32,
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=["recipient"],
+        denominator_by={"recipient": "observationAbout"},
+    )
+    lines = render_quotient_of_digest(
+        result=result,
+        op_spec_hash="ops_" + "a" * 32,
+        content_version="ocv_" + "b" * 32,
+        execution_identity=_EI,
+    ).splitlines()
+
+    assert (
+        "periods left out: only the numerator reports 2018, 2019; only the denominator reports 2022"
+    ) in lines
+    assert (
+        "pairs left out: only the numerator reports recipient=A 2021 (1); "
+        "only the denominator reports recipient=B 2021 (1)"
+    ) in lines
+
+    def cells(by_key: dict[str, dict[str, float]]) -> set[tuple[str, str]]:
+        return {(key, period) for key, by_period in by_key.items() for period in by_period}
+
+    def one_sided(by_key: tuple) -> set[tuple[str, str]]:
+        return {(key[0][1], period) for key, periods in by_key for period in periods}
+
+    in_a_quotient = {(entry.key[0][1], entry.time_period) for entry in result.period_quotients}
+    dropped_keys = {
+        key[0][1]
+        for key in (
+            *result.unmatched_keys,
+            *result.keys_without_shared_period,
+            *result.keys_with_zero_denominator,
+        )
+    }
+    assert dropped_keys == {"C", "D", "E"}
+    zero = {(cell.key[0][1], cell.time_period) for cell in result.zero_denominator_cells}
+    # Each side's left-out cells are those of the dropped keys, the zero
+    # cells and the one-sided cells the two lines above name, with no overlap.
+    for offered, by_key in (
+        (cells(numerator), result.numerator_only_periods),
+        (cells(denominator), result.denominator_only_periods),
+    ):
+        of_dropped_keys = {cell for cell in offered if cell[0] in dropped_keys}
+        accounted = [of_dropped_keys, zero - of_dropped_keys, one_sided(by_key)]
+        assert offered - in_a_quotient == set().union(*accounted)
+        assert len(offered - in_a_quotient) == sum(len(group) for group in accounted)
+
+
+def test_quotient_of_digest_has_no_pairs_line_when_no_key_holds_a_one_sided_period() -> None:
+    assert "pairs left out" not in _quotient_digest()
 
 
 def test_join_digest_carries_the_identity_block() -> None:

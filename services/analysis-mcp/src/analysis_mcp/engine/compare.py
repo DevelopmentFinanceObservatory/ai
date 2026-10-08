@@ -24,9 +24,12 @@ different units is silently wrong, so `run_compare` refuses
 (`CompareUnitMismatchError`) if the two sides' resolved units differ. One
 side's rows leaving `unit` unbound entirely is a separate case
 (`CompareUnitUnboundError`): there is no second unit to compare. Facets are
-checked the same way (`CompareFacetMismatchError`): nothing else catches a
-left slice scoped to `provenance=dcid:P1` paired against a right slice
-scoped to `dcid:P2`. Neither check runs when either side's slice is empty;
+checked across the sides too: when the two slices share a StatVar, a left
+slice scoped to `provenance=dcid:P1` paired against a right slice scoped to
+`dcid:P2` refuses (`CompareFacetMismatchError`), since that is one measure
+from two sources. Slices holding different StatVars compare with a warning
+naming both selections, and the result leaves that axis unbound. Neither check
+runs when either side's slice is empty.
 `ComparisonPeriodsDisjointError` names that problem once the period
 intersection is checked.
 
@@ -50,7 +53,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
 from analysis_mcp.engine.columnar import distinct, frame_from_columns, in_periods, keys_unique
@@ -59,6 +62,7 @@ from analysis_mcp.engine.common import (
     FacetSelection,
     available_entity_columns,
     combine_exclusions,
+    cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
     facet_columns,
     first_cross_side_facet_mismatch,
@@ -101,7 +105,7 @@ class CompareUnitMismatchError(Exception):
     is internally uniform, and it's the pairing across sides that's unsafe.
     """
 
-    def __init__(self, *, left_unit: str | UnitRequest, right_unit: str | UnitRequest) -> None:
+    def __init__(self, *, left_unit: UnitCell, right_unit: UnitCell) -> None:
         self.left_unit = left_unit
         self.right_unit = right_unit
         super().__init__(f"left resolved to unit {left_unit!r}, right to {right_unit!r}")
@@ -118,9 +122,7 @@ class CompareUnitUnboundError(Exception):
     declared.
     """
 
-    def __init__(
-        self, *, unbound_side: str, bound_side: str, bound_unit: str | UnitRequest
-    ) -> None:
+    def __init__(self, *, unbound_side: str, bound_side: str, bound_unit: UnitCell) -> None:
         self.unbound_side = unbound_side
         self.bound_side = bound_side
         self.bound_unit = bound_unit
@@ -131,7 +133,8 @@ class CompareUnitUnboundError(Exception):
 
 
 class CompareFacetMismatchError(Exception):
-    """Each side resolved its own facet selections independently, but they
+    """The two slices share at least one `stat_var` (`stat_vars`, sorted)
+    and resolved their own facet selections independently, but they
     disagree on at least one axis -- a `provenance=dcid:P1` left slice
     compared against a `provenance=dcid:P2` right slice, say. Distinct from
     `analysis_mcp.engine.common.FacetHeterogeneousError`, which fires when
@@ -142,11 +145,17 @@ class CompareFacetMismatchError(Exception):
     `CompareUnitMismatchError` already applies to `unit`.
     """
 
-    def __init__(self, *, axis: str, left_ref: str, right_ref: str) -> None:
+    def __init__(
+        self, *, axis: str, left_ref: str, right_ref: str, stat_vars: Sequence[str]
+    ) -> None:
         self.axis = axis
         self.left_ref = left_ref
         self.right_ref = right_ref
-        super().__init__(f"left resolved facet {axis!r} to {left_ref!r}, right to {right_ref!r}")
+        self.stat_vars = tuple(stat_vars)
+        super().__init__(
+            f"both sides hold {self.stat_vars!r}; left resolved facet {axis!r} to "
+            f"{left_ref!r}, right to {right_ref!r}"
+        )
 
 
 class CompareNonFiniteResultError(Exception):
@@ -187,8 +196,8 @@ class CompareResult:
     """
 
     frame: Frame
-    left_resolved_unit: str | UnitRequest | None
-    right_resolved_unit: str | UnitRequest | None
+    left_resolved_unit: UnitCell | None
+    right_resolved_unit: UnitCell | None
     left_facet_selections: tuple[FacetSelection, ...]
     right_facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
@@ -199,6 +208,21 @@ class CompareResult:
     right_coverage_fraction: float
     period_comparisons: tuple[PeriodComparison, ...]
     exclusions: Exclusions = field(default_factory=Exclusions)
+
+
+def _differing_facet_warning(axis: str, left_ref: str, right_ref: str) -> str:
+    """One `cross_side_differing_facet_axes` finding, worded for compare's
+    left/right vocabulary. It reaches a result only when the two slices
+    share no StatVar, each read under its own selection, and the result
+    leaves the axis unbound, as `analysis_mcp.engine.common.agreed_facets`
+    does for `sum_of` and `quotient_of`. Short enough to fit
+    `analysis_mcp.disambiguation.MAX_LABEL_CHARS` with refs of 45 characters
+    each, the digest's cap on one warning line.
+    """
+    return (
+        f"facet {axis!r} differs: left {left_ref!r}, right {right_ref!r}; two stat_vars, "
+        "each keeps its own, result has none"
+    )
 
 
 def _one_sided_facet_warning(axis: str, left_ref: str | None, right_ref: str | None) -> str:
@@ -225,7 +249,7 @@ class SideSlice:
     resolved over exactly that slice. `table` holds one row per period."""
 
     table: pa.Table
-    unit: str | UnitRequest | None
+    unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     exclusions: Exclusions
@@ -233,6 +257,10 @@ class SideSlice:
     def periods(self) -> tuple[str, ...]:
         """This side's periods, sorted."""
         return tuple(distinct(self.table, TIME_PERIOD_COLUMN))
+
+    def stat_vars(self) -> tuple[str, ...]:
+        """This side's StatVars, sorted."""
+        return tuple(distinct(self.table, STAT_VAR_COLUMN))
 
     def matched(self, periods: Sequence[str]) -> tuple[pa.Table, pa.Table]:
         """This side's rows at `periods`, sorted by period, and its other rows."""
@@ -253,7 +281,7 @@ def _slice(
     *,
     side: Literal["left", "right"],
     entity: Mapping[str, str],
-    pinned_unit: str | UnitRequest | None,
+    pinned_unit: UnitCell | None,
 ) -> SideSlice:
     """Narrow `frame` to `entity`'s own rows and resolve unit/facets over
     exactly that slice.
@@ -292,8 +320,8 @@ def slice_pair(
     *,
     left_entity: Mapping[str, str],
     right_entity: Mapping[str, str],
-    left_pinned_unit: str | UnitRequest | None,
-    right_pinned_unit: str | UnitRequest | None,
+    left_pinned_unit: UnitCell | None,
+    right_pinned_unit: UnitCell | None,
 ) -> tuple[SideSlice, SideSlice]:
     """Both sides' slices, refused (`CompareUnitUnboundError`,
     `CompareUnitMismatchError`) unless their resolved units agree.
@@ -391,8 +419,8 @@ def run_compare(
     *,
     left_entity: Mapping[str, str],
     right_entity: Mapping[str, str],
-    left_pinned_unit: str | UnitRequest | None = None,
-    right_pinned_unit: str | UnitRequest | None = None,
+    left_pinned_unit: UnitCell | None = None,
+    right_pinned_unit: UnitCell | None = None,
 ) -> CompareResult:
     """Compare `left_frame`'s (narrowed by `left_entity`) and `right_frame`'s
     (narrowed by `right_entity`) own single-entity time series over their
@@ -412,24 +440,49 @@ def run_compare(
     # Runs only when both sides have rows, for the reason `slice_pair`
     # gives for its unit check.
     cross_side_facet_warnings: tuple[str, ...] = ()
+    output_facets = left.facet_selections
     if left.populated and right.populated:
+        left_stat_vars, right_stat_vars = left.stat_vars(), right.stat_vars()
         facet_mismatch = first_cross_side_facet_mismatch(
-            left.facet_selections, right.facet_selections
+            left.facet_selections,
+            right.facet_selections,
+            left_stat_vars=left_stat_vars,
+            right_stat_vars=right_stat_vars,
         )
         if facet_mismatch is not None:
             axis, left_ref, right_ref = facet_mismatch
-            raise CompareFacetMismatchError(axis=axis, left_ref=left_ref, right_ref=right_ref)
+            raise CompareFacetMismatchError(
+                axis=axis,
+                left_ref=left_ref,
+                right_ref=right_ref,
+                stat_vars=sorted(set(left_stat_vars) & set(right_stat_vars)),
+            )
 
+        # An axis both sides declare to different values reaches here only
+        # when the slices share no StatVar (see
+        # `first_cross_side_facet_mismatch`). The delta belongs to neither
+        # side's selection, so the result leaves that axis unbound.
+        differing = cross_side_differing_facet_axes(left.facet_selections, right.facet_selections)
+        differing_axes = {axis for axis, _left_ref, _right_ref in differing}
+        output_facets = tuple(
+            selection for selection in left.facet_selections if selection.axis not in differing_axes
+        )
         # A one-sided axis (see `cross_side_one_sided_facet_axes`) doesn't
         # refuse, but still deserves the visibility a single slice's own
         # auto-selection gives -- worded here, not in the shared helper,
         # since only this verb knows its rule for which side's facets the
-        # result carries (the left side's, always).
-        cross_side_facet_warnings = tuple(
-            _one_sided_facet_warning(axis, left_ref, right_ref)
-            for axis, left_ref, right_ref in cross_side_one_sided_facet_axes(
-                left.facet_selections, right.facet_selections
-            )
+        # result carries (the left side's).
+        cross_side_facet_warnings = (
+            *(
+                _differing_facet_warning(axis, left_ref, right_ref)
+                for axis, left_ref, right_ref in differing
+            ),
+            *(
+                _one_sided_facet_warning(axis, left_ref, right_ref)
+                for axis, left_ref, right_ref in cross_side_one_sided_facet_axes(
+                    left.facet_selections, right.facet_selections
+                )
+            ),
         )
 
     alignment = align_periods(left, right, left_frame=left_frame, right_frame=right_frame)
@@ -466,8 +519,9 @@ def run_compare(
     period_comparisons = tuple(period_comparisons)
 
     # The output frame carries the left side's `stat_var`, unit, and facet
-    # selections -- the delta is labelled as a movement relative to the left
-    # side, the same asymmetric choice `delta`'s own sign already makes. The
+    # selections, less any axis the sides declare to different values. The
+    # delta is labelled as a movement relative to the left side, the same
+    # asymmetric choice `delta`'s own sign already makes. The
     # right side's unit/facets are still returned above, for the trace and
     # digest to record in full. Every row of the left slice carries its
     # resolved unit, so its `unit` column is the output's.
@@ -479,7 +533,7 @@ def run_compare(
                 [comparison.delta for comparison in period_comparisons], type=pa.float64()
             ),
             UNIT_COLUMN: left_matched.column(UNIT_COLUMN),
-            **facet_columns(left.facet_selections, count=len(period_comparisons)),
+            **facet_columns(output_facets, count=len(period_comparisons)),
         },
         role_keys=(),
     )

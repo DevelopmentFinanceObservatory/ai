@@ -13,6 +13,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     RankOperation,
     Reduction,
     RetrieveOperation,
@@ -29,6 +30,7 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Period,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
@@ -90,6 +92,15 @@ def test_operations_are_told_apart_by_kind() -> None:
                 "denominator": {"input": "gdp"},
             },
             {
+                "kind": "quotient_of",
+                "id": "per_head",
+                "requirement_id": "per_head",
+                "numerator": {"input": "debt"},
+                "denominator": {"input": "gdp"},
+                "axis": "debtor",
+                "denominator_axis": "country",
+            },
+            {
                 "kind": "join",
                 "id": "joined",
                 "requirement_id": "joined",
@@ -113,6 +124,7 @@ def test_operations_are_told_apart_by_kind() -> None:
         "CompareOperation",
         "RankOperation",
         "ShareOfOperation",
+        "QuotientOfOperation",
         "JoinOperation",
         "FilterOperation",
     ]
@@ -190,13 +202,27 @@ def test_a_rank_window_needs_both_years_or_neither() -> None:
         )
 
 
-def test_a_share_of_sides_must_differ() -> None:
+@pytest.mark.parametrize("operation", [ShareOfOperation, QuotientOfOperation])
+def test_a_share_of_or_quotient_of_sides_must_differ(
+    operation: type[ShareOfOperation | QuotientOfOperation],
+) -> None:
     with pytest.raises(ValidationError, match="numerator and denominator must differ"):
-        ShareOfOperation(
+        operation(
             id="share",
             requirement_id="share",
             numerator=Side(input="debt"),
             denominator=Side(input="debt"),
+        )
+
+
+def test_a_quotient_of_states_a_denominator_axis_only_with_an_axis() -> None:
+    with pytest.raises(ValidationError, match="stated only with axis"):
+        QuotientOfOperation(
+            id="per_head",
+            requirement_id="per_head",
+            numerator=Side(input="debt"),
+            denominator=Side(input="gdp"),
+            denominator_axis="country",
         )
 
 
@@ -229,6 +255,7 @@ def test_a_translation_names_at_least_one_operation_and_one_terminal() -> None:
         CompareOperation,
         RankOperation,
         ShareOfOperation,
+        QuotientOfOperation,
         JoinOperation,
         FilterOperation,
     ],
@@ -242,7 +269,7 @@ def test_the_json_schema_advertises_kind_as_required(tagged: type[TaggedModel]) 
 
 
 def test_the_translation_schema_advertises_kind_as_required_for_every_tagged_part() -> None:
-    # Nine operations, and the four predicates a filter carries.
+    # Ten operations, and the four predicates a filter carries.
     definitions = Translation.model_json_schema()["$defs"]
     tagged = {
         name: schema
@@ -250,7 +277,7 @@ def test_the_translation_schema_advertises_kind_as_required_for_every_tagged_par
         if "kind" in schema.get("properties", {})
     }
 
-    assert len(tagged) == 13
+    assert len(tagged) == 14
     assert all(schema["required"][0] == "kind" for schema in tagged.values())
 
 
@@ -462,6 +489,38 @@ def test_mismatches_checks_a_share_ofs_sides() -> None:
         update={"denominator": Side(input="debt", entity="Kenya")}
     )
     assert mismatches(requirement, wrong_denominator, SATISFIED_BY) == ["denominator"]
+
+
+@pytest.mark.parametrize(
+    ("field", "proposed"),
+    [
+        pytest.param("numerator", Side(input="debt"), id="numerator"),
+        pytest.param("denominator", Side(input="gdp", entity="Kenya"), id="denominator"),
+        pytest.param("axis", "country", id="axis"),
+        pytest.param("denominator_axis", None, id="denominator_axis-dropped"),
+    ],
+)
+def test_mismatches_checks_each_field_of_a_quotient_of(field: str, proposed: object) -> None:
+    requirement = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
+        denominator=RequirementSide(input_id="annual_gdp"),
+        axis="debtor",
+        denominator_axis="country",
+    )
+    matching = QuotientOfOperation(
+        id="per_head_op",
+        requirement_id="per_head",
+        numerator=Side(input="debt", entity="Kenya"),
+        denominator=Side(input="gdp"),
+        axis="debtor",
+        denominator_axis="country",
+    )
+    assert mismatches(requirement, matching, SATISFIED_BY) == []
+
+    wrong = matching.model_copy(update={field: proposed})
+    assert mismatches(requirement, wrong, SATISFIED_BY) == [field]
 
 
 def test_mismatches_checks_a_joins_left_and_right() -> None:

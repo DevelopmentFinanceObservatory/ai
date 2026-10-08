@@ -12,7 +12,9 @@ import pytest
 from data_mcp.deadline import DIRECT_CALL_BUDGET, CallDeadline
 from data_mcp.operations import (
     PollUpdate,
+    QueuedOperation,
     ResolvedOperation,
+    operation_without_waiting,
     resolve_operation_response,
 )
 from fastmcp.tools import ToolResult
@@ -315,7 +317,8 @@ async def test_failed_operation_over_a_stored_row_ceiling_names_its_kind() -> No
     [
         ("parquet_size_bound", "over_ceiling", "correct_and_retry"),
         ("facet_not_available", "facet_not_available", "correct_and_retry"),
-        ("default_facet_undefined", "default_facet_undefined", "correct_and_retry"),
+        # The poll's body says `retryable: false`, as dfo-apis' own bodies do.
+        ("default_facet_undefined", "default_facet_undefined", "do_not_retry"),
         ("definition_not_reproducible", "request_invalid", "correct_and_retry"),
         ("spec_not_exportable", "spec_not_exportable", "do_not_retry"),
         ("rollup_not_summable", "rollup_not_summable", "do_not_retry"),
@@ -997,3 +1000,88 @@ async def test_a_raising_on_poll_is_logged_and_ignored() -> None:
 
     assert isinstance(result, ResolvedOperation)
     assert result.manifest_payload == manifest_payload
+
+
+# `operation_without_waiting`
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_after_ms", "retry_after_s"),
+    [("pending", 1500, 1.5), ("running", None, 2.0)],
+)
+async def test_an_unfinished_operation_is_returned_queued_without_a_poll(
+    status: str, retry_after_ms: int | None, retry_after_s: float
+) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    async with _client(handler) as client:
+        result = await operation_without_waiting(
+            client=client,
+            submit_payload=_submitted(status=status, retry_after_ms=retry_after_ms),
+            deadline=_deadline(poll_budget_s=5.0),
+            poll_interval_s=2.0,
+        )
+
+    assert result == QueuedOperation(
+        operation_id=_OPERATION_ID, status=status, retry_after_s=retry_after_s
+    )
+
+
+async def test_an_operation_already_done_is_fetched_once_without_waiting() -> None:
+    manifest_payload = {"content_version": "cv_1"}
+    requests: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request.url.path)
+        return _poll_response(status="done", manifest=manifest_payload)
+
+    async with _client(handler) as client:
+        result = await operation_without_waiting(
+            client=client,
+            submit_payload=_submitted(status="done"),
+            deadline=_deadline(poll_budget_s=5.0),
+            poll_interval_s=2.0,
+        )
+
+    assert isinstance(result, ResolvedOperation)
+    assert result.manifest_payload == manifest_payload
+    assert requests == [_POLL_PATH]
+
+
+async def test_an_operation_already_failed_refuses_without_waiting() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, content=_problem_body(code="operation_failed", retryable=False))
+
+    async with _client(handler) as client:
+        result = await operation_without_waiting(
+            client=client,
+            submit_payload=_submitted(status="failed"),
+            deadline=_deadline(poll_budget_s=5.0),
+            poll_interval_s=2.0,
+        )
+
+    assert isinstance(result, ToolResult)
+    assert result.structured_content is not None
+    assert result.structured_content["upstream_code"] == "operation_failed"
+
+
+async def test_a_done_operation_whose_fetch_fails_retryably_stays_queued() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request.url.path)
+        return httpx2.Response(
+            503, content=_problem_body(code="service_unavailable", retryable=True)
+        )
+
+    async with _client(handler) as client:
+        result = await operation_without_waiting(
+            client=client,
+            submit_payload=_submitted(status="done"),
+            deadline=_deadline(poll_budget_s=5.0),
+            poll_interval_s=2.0,
+        )
+
+    assert result == QueuedOperation(operation_id=_OPERATION_ID, status="done", retry_after_s=2.0)
+    assert requests == [_POLL_PATH]

@@ -32,17 +32,23 @@ RESUBMIT_READ_TIMEOUT_S = 95.0
 RESUBMIT_CALL_BUDGET_S = 100.0
 
 
-def resubmit_request(*, spec_id: str, identity: dict[str, Any]) -> dict[str, Any]:
+def resubmit_request(
+    *, spec_id: str, identity: dict[str, Any], entity_groups: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """The resolve request that re-resolves `identity` unchanged.
 
     Search names a part by the shape it verifies, whatever `variable_text`
-    says, so the spec_id stands in as that echo.
+    says, so the spec_id stands in as that echo. `entity_groups`, the sets a
+    role's places were asked for as, rides beside the identity when given:
+    Search keeps one the graph confirms and names it again.
     """
     entry: dict[str, Any] = {
         "entry_kind": "identity",
         "variable_text": spec_id,
         "identity": identity,
     }
+    if entity_groups:
+        entry["entity_groups"] = entity_groups
     return {
         "schema_version": 1,
         "input": {"kind": "dataset_resubmit", "entries": [entry]},
@@ -60,6 +66,15 @@ async def resolve_definition(
     identity: Annotated[
         dict[str, Any], Field(description="The definition's `identity`, as Search serves it.")
     ],
+    entity_groups: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description=(
+                "The Spec's `resolved.entity_groups`, as Search serves it, when a role's "
+                "places were asked for as a set."
+            )
+        ),
+    ] = None,
 ) -> ToolResult:
     """Resolve a Spec block's identity again through Search, so the caller reads Search's own answer.
 
@@ -79,7 +94,7 @@ async def resolve_definition(
     except (IdentityMismatch, IdentityUnusable) as exc:
         return to_tool_result(ToolRefusal.request_invalid(pointer="/identity", detail=str(exc)))
     envelope = await resolve_and_register(
-        resubmit_request(spec_id=spec_id, identity=identity),
+        resubmit_request(spec_id=spec_id, identity=identity, entity_groups=entity_groups),
         budget_s=RESUBMIT_CALL_BUDGET_S,
         read_timeout_s=RESUBMIT_READ_TIMEOUT_S,
     )

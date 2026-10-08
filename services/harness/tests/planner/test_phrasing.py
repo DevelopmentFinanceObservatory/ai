@@ -24,6 +24,7 @@ from planner.plan import (
     FilterRequirement,
     Period,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
@@ -288,19 +289,28 @@ def test_datasets_of_walks_a_derived_requirement_back_to_its_dataset(
         direction=RankDirection.HIGHEST_FIRST,
         among=RankAmong.POPULATION,
     )
+    population = dataset.model_copy(update={"id": "population", "measure": "population"})
+    per_head = QuotientRequirement(
+        id="per_head",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="dataset_a"),
+        denominator=RequirementSide(input_id="population"),
+    )
     plan = Plan(
         question="q",
         decisions=[
             decision(),
             decision(slot="population_scope", fixes=DecisionFixes(among=RankAmong.POPULATION)),
         ],
-        evidence_requirements=[dataset, rank],
+        evidence_requirements=[dataset, rank, population, per_head],
     )
 
     assert phrasing.datasets_of(rank, plan) == (dataset,)
+    # A quotient's entities are its numerator's, as a share's are.
+    assert phrasing.datasets_of(per_head, plan) == (dataset,)
 
 
-def test_narrowing_step_walks_past_an_unlimited_rank_and_through_a_shares_numerator(
+def test_narrowing_step_walks_past_an_unlimited_rank_and_through_a_numerator(
     decision: DecisionFactory,
 ) -> None:
     dataset = DatasetRequirement(
@@ -343,6 +353,27 @@ def test_narrowing_step_walks_past_an_unlimited_rank_and_through_a_shares_numera
         input_id="dataset",
         predicates=(ValueThreshold(op="gt", value=1e9),),
     )
+    per_total = QuotientRequirement(
+        id="per_total",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="dataset"),
+        denominator=RequirementSide(input_id="totals"),
+        axis="recipient",
+    )
+    kenya_per_total = per_total.model_copy(
+        update={
+            "id": "kenya_per_total",
+            "numerator": RequirementSide(input_id="dataset", entity="Kenya"),
+            "axis": None,
+        }
+    )
+    per_counterpart = per_total.model_copy(
+        update={
+            "id": "per_counterpart",
+            "denominator": RequirementSide(input_id="big"),
+            "denominator_axis": "recipient",
+        }
+    )
     top_of_big = limited.model_copy(update={"id": "top_of_big", "input_id": "big"})
     top_totals = totals.model_copy(update={"id": "top_totals", "input_id": "top_of_big"})
     plan = Plan(
@@ -356,6 +387,9 @@ def test_narrowing_step_walks_past_an_unlimited_rank_and_through_a_shares_numera
             whole,
             kenya,
             big,
+            per_total,
+            kenya_per_total,
+            per_counterpart,
             top_of_big,
             top_totals,
         ],
@@ -366,6 +400,11 @@ def test_narrowing_step_walks_past_an_unlimited_rank_and_through_a_shares_numera
     assert phrasing.narrowing_step(limited, plan) is limited
     assert phrasing.narrowing_step(whole, plan) is None
     assert phrasing.narrowing_step(kenya, plan) is kenya
+    # A quotient over one total keeps its numerator's rows; one keyed on both
+    # sides drops each entity its denominator does not hold.
+    assert phrasing.narrowing_step(per_total, plan) is None
+    assert phrasing.narrowing_step(kenya_per_total, plan) is kenya_per_total
+    assert phrasing.narrowing_step(per_counterpart, plan) is per_counterpart
     # The filter and the rank both drop rows; the rank, nearest the total, is
     # the one whose output the total sums.
     assert phrasing.narrowing_step(top_totals, plan) is top_of_big

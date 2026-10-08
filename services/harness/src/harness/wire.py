@@ -129,6 +129,7 @@ class Magnitude(StrEnum):
     THOUSANDS = "thousands"
     MILLIONS = "millions"
     BILLIONS = "billions"
+    TRILLIONS = "trillions"
 
 
 class PriceBasis(StrEnum):
@@ -136,15 +137,50 @@ class PriceBasis(StrEnum):
     CONSTANT = "constant"
 
 
-class Unit(_WireModel):
-    """A structured unit; renderers derive display text from it. Every
-    member is required by the contract and each is individually
-    nullable."""
+# A unit, or one side of a composed unit, named in words: the unit's graph
+# name, or its ref where the graph has none.
+UnitName = Annotated[str, Field(min_length=1, max_length=200)]
 
-    currency: str | None
-    magnitude: Magnitude | None
-    price_basis: PriceBasis | None
-    base_year: int | None
+
+class StructuredUnit(_WireModel):
+    """A unit stated in parts, as a converted frame's unit is: the components
+    catalogue's `structured_unit`. Every member is optional and at least one
+    is present."""
+
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    magnitude: Magnitude | None = None
+    prices: PriceBasis | None = None
+    base_year: int | None = None
+
+    @model_validator(mode="after")
+    def _states_a_member(self) -> StructuredUnit:
+        if not self.model_fields_set:
+            raise ValueError("a structured unit states at least one member")
+        return self
+
+
+class CountedStatVar(_WireModel):
+    """One side of a composed unit whose measure declares no unit: the StatVar
+    it counts, with the name to print for it."""
+
+    stat_var: str = Field(pattern=r"^dcid:.", max_length=200)
+    label: UnitName
+
+
+type UnitPart = UnitName | StructuredUnit | CountedStatVar
+
+
+class ComposedUnit(_WireModel):
+    """The unit of a quotient of two measures, read `<numerator> per
+    <denominator>`. A side is never null and never itself a composed unit."""
+
+    numerator: UnitPart
+    denominator: UnitPart
+
+
+# The unit slot of a card's payload, as the platform's fact summary repeats
+# it: a name, a structured unit, or a composed unit.
+type Unit = UnitName | StructuredUnit | ComposedUnit
 
 
 class Indicator(_WireModel):
@@ -435,7 +471,8 @@ MAX_SEED_LIST_ITEMS = 64
 #
 # The description a model reads of a seeded source
 # (`translator.discovery.compact_source`: its sentence, measure label and
-# count, and entities), which `translate` returns once for each seed. It
+# count, and entities), which the translation `propose_plan` runs returns
+# once for each seed. It
 # lists `resolved.entities`, the entities the question named; a region's
 # members sit in `resolved.scope` and are not listed. An entity with a
 # 40-character label takes about 78 characters, so a block has room for
@@ -613,12 +650,30 @@ class SpecBlock(BaseModel):
         return self
 
 
-class SeedSpec(BaseModel):
-    """What a seed hands over of one definite part's Spec block: the spec_id
-    and the definition.
+# The most code points a set's name may span, as dfo-apis bounds `EntityGroup.label`.
+MAX_SEED_GROUP_LABEL_CHARS = 120
 
-    The website posts the block as Search served it. Every other member,
-    `resolved` whole among them, is dropped as the block is read, so nothing
+
+class SeedEntityGroup(BaseModel):
+    """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
+    dcid: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+
+
+class SeedSpec(BaseModel):
+    """What a seed hands over of one definite part's Spec block: the spec_id,
+    the definition, and the sets its places were asked for as.
+
+    The website posts the block as Search served it. `entity_groups` is read
+    from its `resolved.entity_groups`, so the seed's resubmit posts the sets
+    beside the identity and Search, which keeps only a set the graph
+    confirms, names them again. Only a set on a role the identity binds, with
+    a name Search would take, is kept; any other is dropped and the seed
+    stands without it, as `compiler.sources` drops a nameless one. Every other member, the rest of `resolved`
+    among them, is dropped as the block is read, so nothing
     in the harness reads it from the browser: `harness.graph`'s `seed` node
     takes it from Search's own answer for the identity (`SpecBlock`), and
     Search derives the population from the identity. A seed posted before
@@ -632,6 +687,32 @@ class SeedSpec(BaseModel):
 
     spec_id: str = Field(max_length=MAX_SEED_TEXT_CHARS)
     definition: SeedDefinition
+    entity_groups: dict[str, SeedEntityGroup] | None = Field(
+        default=None, exclude_if=lambda groups: groups is None
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _groups_from_resolved(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        resolved = data.get("resolved")
+        raw = data.get(
+            "entity_groups", resolved.get("entity_groups") if isinstance(resolved, dict) else None
+        )
+        definition = data.get("definition")
+        identity = definition.get("identity") if isinstance(definition, dict) else None
+        entities = identity.get("entities") if isinstance(identity, dict) else None
+        bound = set(entities) if isinstance(entities, dict) else set()
+        groups: dict[str, SeedEntityGroup] = {}
+        for role, group in (raw if isinstance(raw, dict) else {}).items():
+            if role not in bound or len(groups) >= MAX_SEED_ROLES:
+                continue
+            try:
+                groups[role] = SeedEntityGroup.model_validate(group)
+            except ValidationError:
+                continue
+        return {**data, "entity_groups": groups or None}
 
     @model_validator(mode="before")
     @classmethod

@@ -60,7 +60,9 @@ async def test_the_real_surface_covers_retrieval_and_the_analysis_verbs() -> Non
         "get_skill_file",
         "growth",
         "join",
+        "quotient_of",
         "rank",
+        "resolve_anchor",
         "resolve_definition",
         "search",
         "share_of",
@@ -92,8 +94,8 @@ async def test_the_real_surface_carries_usable_json_schemas() -> None:
 async def test_the_real_surface_declares_a_version_on_every_tool_and_output_schema_on_the_verbs() -> (
     None
 ):
-    # Every tool states its own implementation version. Only the seven
-    # analysis-mcp verbs also declare a typed output schema -- data-mcp's
+    # Every tool states its own implementation version. Only the
+    # analysis-mcp tools also declare a typed output schema -- data-mcp's
     # structured result is the full `Manifest`, which `server.py`'s own risk
     # note leaves undeclared: deriving and validating that on every call is
     # a risk left untaken.
@@ -107,7 +109,9 @@ async def test_the_real_surface_declares_a_version_on_every_tool_and_output_sche
         "filter",
         "growth",
         "join",
+        "quotient_of",
         "rank",
+        "resolve_anchor",
         "share_of",
         "sum_of",
     }

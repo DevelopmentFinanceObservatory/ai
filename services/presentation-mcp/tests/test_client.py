@@ -10,7 +10,9 @@ import asyncio
 import contextlib
 import dataclasses
 import gzip
+import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -20,16 +22,19 @@ from typing import Any
 import httpx2
 import pytest
 from common.materialisation import (
+    ComposedStatVar,
     FrameRef,
     GcsMaterialisationStore,
     HeldFrame,
     InMemoryMaterialisationStore,
+    MintRecord,
     StoredFrameTrace,
     gcs_store,
     get_store,
     register_trace_codec,
     set_store,
 )
+from common.recipe import build_recipe
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from dfo_frame_grammar import Frame
 from presentation_mcp import client as client_module
@@ -55,12 +60,33 @@ class _StubTrace:
     """A minimal stand-in for `analysis_mcp.trace.Trace`: satisfies
     `common.materialisation.trace.StoredFrameTrace` structurally, plus the
     `input_content_versions` field `frame_publish._input_content_versions`
-    reads duck-typed off the real thing.
+    reads duck-typed off the real thing and the `composed_stat_vars` field
+    `common.materialisation.composed_stat_vars_of` requires of it.
     """
 
     upstream_trace: dict[str, object]
     frame_content_version: str
     input_content_versions: tuple[str, ...]
+    composed_stat_vars: tuple[ComposedStatVar, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class _StubIdentity:
+    def canonical_string(self) -> str:
+        return "0.3.0|1.0.0|0.2.0"
+
+
+@dataclasses.dataclass(frozen=True)
+class _StubExecutionRecord:
+    content: str
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _DerivedTrace(_StubTrace):
+    """`_StubTrace` with what `common.recipe.build_recipe` reads off a real trace."""
+
+    execution_record: _StubExecutionRecord
+    execution_identity: _StubIdentity = _StubIdentity()
 
 
 @pytest.fixture
@@ -84,7 +110,11 @@ async def _put_ops_frame(
     spec_id: str = _OPS_SPEC_ID,
     content_version: str = _OCV_CONTENT_VERSION,
     input_content_versions: tuple[str, ...] = ("cv_" + "c" * 32,),
+    execution_record: _StubExecutionRecord | None = None,
+    composed_stat_vars: tuple[ComposedStatVar, ...] = (),
 ) -> None:
+    """Stores a one-row frame under an `ops_`/`ocv_` pair. With `execution_record`
+    its trace also carries what a recipe is built from."""
     frame = Frame.build(
         role_keys=["recipientCountry"],
         rows=[
@@ -96,11 +126,14 @@ async def _put_ops_frame(
             }
         ],
     )
-    trace = _StubTrace(
+    trace: _StubTrace = _StubTrace(
         upstream_trace={},
         frame_content_version=content_version,
         input_content_versions=input_content_versions,
+        composed_stat_vars=composed_stat_vars,
     )
+    if execution_record is not None:
+        trace = _DerivedTrace(**dataclasses.asdict(trace), execution_record=execution_record)
     await store.put(
         FrameRef(spec_id=spec_id, content_version=content_version),
         frame=frame,
@@ -455,12 +488,14 @@ def _publish_then_frame_handler(
 
 
 async def test_get_frame_view_publishes_an_ops_ref_before_reaching_the_platform(
-    materialisation_store: InMemoryMaterialisationStore,
+    materialisation_store: InMemoryMaterialisationStore, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An `ops_`/`ocv_` ref this process holds gets published to dfo-apis'
     `datasets_api` surface before the `presentation_api` call that reads it
-    -- the whole point of the publish hook.
+    -- the whole point of the publish hook. Its trace carries no op-spec, so
+    it is published without a recipe and the pair is logged.
     """
+    caplog.set_level(logging.WARNING, logger=frame_publish.__name__)
     await _put_ops_frame(materialisation_store)
     op_frame_ref = {"spec_id": _OPS_SPEC_ID, "content_version": _OCV_CONTENT_VERSION}
     requests, handler = _publish_then_frame_handler(
@@ -481,6 +516,219 @@ async def test_get_frame_view_publishes_an_ops_ref_before_reaching_the_platform(
     assert publish_body["content_version"] == _OCV_CONTENT_VERSION
     assert publish_body["role_keys"] == ["recipientCountry"]
     assert publish_body["input_content_versions"] == ["cv_" + "c" * 32]
+    assert "recipe" not in publish_body
+    assert "composed_stat_vars" not in publish_body
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert [record.args[:2] for record in warnings if isinstance(record.args, tuple)] == [
+        (_OPS_SPEC_ID, _OCV_CONTENT_VERSION)
+    ]
+
+
+_ROOT_REF = FrameRef(spec_id="spec_" + "1" * 32, content_version="cv_" + "c" * 32)
+
+
+async def _put_derived_frame(store: InMemoryMaterialisationStore) -> FrameRef:
+    """Stores a `rank` of `_ROOT_REF` with the trace a recipe is built from, and the
+    root's mint record, and returns the derived frame's pair."""
+    await store.put_mint_record(
+        MintRecord(frame=_ROOT_REF, dataset=_ROOT_REF, options={"layout": "frame"})
+    )
+    content = json.dumps(
+        {
+            "frame_ref": _ROOT_REF.model_dump(),
+            "identity_version": "ops1",
+            "parameters": {"rank_by": ["recipientCountry"]},
+            "verb": "rank",
+        },
+        separators=(",", ":"),
+    )
+    spec_id = f"ops_{hashlib.sha256(content.encode()).hexdigest()[:32]}"
+    await _put_ops_frame(
+        store,
+        spec_id=spec_id,
+        input_content_versions=(_ROOT_REF.content_version,),
+        execution_record=_StubExecutionRecord(content),
+    )
+    return FrameRef(spec_id=spec_id, content_version=_OCV_CONTENT_VERSION)
+
+
+async def test_a_derived_frame_is_published_with_its_recipe(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    ref = await _put_derived_frame(materialisation_store)
+    spec_id, root = ref.spec_id, _ROOT_REF
+    requests, handler = _publish_then_frame_handler(
+        httpx2.Response(200, json={"spec_id": spec_id, "dimensions": {}})
+    )
+
+    async with _assembler(handler) as assembler:
+        view = await assembler.get_frame_view(frame_ref=ref.model_dump())
+
+    assert not isinstance(view, Refusal)
+    publish_body = json.loads(gzip.decompress(requests[0].content))
+    assert publish_body["recipe"] == await build_recipe(ref, store=materialisation_store)
+    assert publish_body["recipe"]["tree"]["inputs"] == {
+        "frame_ref": {"frame": root.model_dump(), "root": 0}
+    }
+    assert publish_body["recipe"]["roots"][0]["dataset"] == root.model_dump()
+    assert set(publish_body) == {
+        "spec_id",
+        "content_version",
+        "role_keys",
+        "rows",
+        "input_content_versions",
+        "recipe",
+    }
+
+
+async def test_a_recipe_over_the_platforms_size_ceiling_is_left_out_of_the_body(
+    materialisation_store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = await _put_derived_frame(materialisation_store)
+    recipe = await build_recipe(ref, store=materialisation_store)
+    recipe_bytes = len(json.dumps(recipe, separators=(",", ":")))
+    bodies: list[dict[str, Any]] = []
+
+    for ceiling in (recipe_bytes, recipe_bytes - 1):
+        monkeypatch.setattr(frame_publish, "_RECIPE_CEILING_BYTES", ceiling)
+        async with client_module.publish_body_for(
+            spec_id=ref.spec_id, content_version=ref.content_version, max_frame_rows=10
+        ) as published:
+            bodies.append(json.loads(published.data))
+
+    assert bodies[0]["recipe"] == recipe
+    assert "recipe" not in bodies[1]
+
+
+async def test_publish_frame_sends_the_callers_recipe_and_says_whether_it_was_new(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    """A frame is published for no component, with the recipe the caller built, and
+    every call posts: an earlier publish in this process may have carried none."""
+    ref = await _put_derived_frame(materialisation_store)
+    recipe = await build_recipe(ref, store=materialisation_store) | {"anchor": {"period": "2023"}}
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets/frames/publish"
+        requests.append(request)
+        return httpx2.Response(
+            200, json={"schema_version": 1, "published": {"created": len(requests) == 1}}
+        )
+
+    async with _assembler(handler) as assembler:
+        answers = [
+            await assembler.publish_frame(
+                spec_id=ref.spec_id, content_version=ref.content_version, recipe=recipe
+            )
+            for _ in range(2)
+        ]
+
+    assert answers == [True, False]
+    bodies = [json.loads(gzip.decompress(request.content)) for request in requests]
+    assert [body["recipe"] for body in bodies] == [recipe, recipe]
+    assert requests[0].headers[PRINCIPAL_HEADER]
+
+
+async def test_publish_frame_refuses_a_frame_the_store_does_not_hold_and_sends_nothing(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    requests, handler = _counting_handler(httpx2.Response(200, json={}))
+
+    async with _assembler(handler) as assembler:
+        refused = await assembler.publish_frame(
+            spec_id="ops_" + "a" * 32, content_version="ocv_" + "b" * 32, recipe={}
+        )
+
+    assert isinstance(refused, Refusal)
+    assert refused.error == "request_invalid"
+    assert requests == []
+
+
+async def test_publish_frame_refuses_a_recipe_over_the_ceiling_and_sends_nothing(
+    materialisation_store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller's recipe is never dropped: a frame published without it would be
+    of no use to a caller that built one."""
+    ref = await _put_derived_frame(materialisation_store)
+    recipe = await build_recipe(ref, store=materialisation_store)
+    monkeypatch.setattr(
+        frame_publish, "_RECIPE_CEILING_BYTES", len(json.dumps(recipe, separators=(",", ":"))) - 1
+    )
+    requests, handler = _counting_handler(httpx2.Response(200, json={}))
+
+    async with _assembler(handler) as assembler:
+        refused = await assembler.publish_frame(
+            spec_id=ref.spec_id, content_version=ref.content_version, recipe=recipe
+        )
+
+    assert isinstance(refused, Refusal)
+    assert refused.error == "request_invalid"
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("constraint_id", "published"),
+    [
+        ("recipe_requires_matching_normal_form_hash", True),
+        ("recipe_requires_matching_replay_key", True),
+        ("replay_key_requires_one_frame", True),
+        ("lineage_requires_matching_inputs", False),
+        (None, False),
+    ],
+)
+async def test_a_recipe_conflict_leaves_the_frame_published_and_any_other_conflict_refuses(
+    materialisation_store: InMemoryMaterialisationStore,
+    constraint_id: str | None,
+    published: bool,
+) -> None:
+    """dfo-apis records the frame before it compares recipes, so a recipe conflict
+    means the pair is published under the recipe dfo-apis already held."""
+    ref = await _put_derived_frame(materialisation_store)
+    paths: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/datasets/frames/publish":
+            extra = {} if constraint_id is None else {"constraint_id": constraint_id}
+            return httpx2.Response(
+                409, content=_problem_body(code="publish_conflict", retryable=False, **extra)
+            )
+        return httpx2.Response(200, json={"spec_id": ref.spec_id, "dimensions": {}})
+
+    async with _assembler(handler) as assembler:
+        replies = [await assembler.get_frame_view(frame_ref=ref.model_dump()) for _ in range(2)]
+
+    frame_path = f"/api/presentation/frames/{ref.spec_id}/{ref.content_version}"
+    if published:
+        assert not any(isinstance(reply, Refusal) for reply in replies)
+        assert paths == ["/api/datasets/frames/publish", frame_path, frame_path]
+    else:
+        assert [getattr(reply, "error", None) for reply in replies] == ["publish_conflict"] * 2
+        assert paths == ["/api/datasets/frames/publish"] * 2
+
+
+async def test_publish_sends_the_composed_stat_vars_the_stored_trace_describes(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    per_head = ComposedStatVar(
+        stat_var="dcid:health_oda",
+        relation="quotient",
+        first=("dcid:OfficialDevelopmentAssistanceNet_Disbursement",),
+        second=("dcid:Count_Person",),
+    )
+    await _put_ops_frame(materialisation_store, composed_stat_vars=(per_head,))
+    requests, handler = _publish_then_frame_handler(
+        httpx2.Response(200, json={"spec_id": _OPS_SPEC_ID, "dimensions": {}})
+    )
+
+    async with _assembler(handler) as assembler:
+        await assembler.get_frame_view(
+            frame_ref={"spec_id": _OPS_SPEC_ID, "content_version": _OCV_CONTENT_VERSION}
+        )
+
+    publish_body = json.loads(gzip.decompress(requests[0].content))
+    assert publish_body["composed_stat_vars"] == [per_head.model_dump(mode="json")]
 
 
 async def test_publish_leaves_a_place_type_column_out_of_the_published_frame(

@@ -185,6 +185,21 @@
       "verb_chain": [
         "sum_of"
       ]
+    },
+    {
+      "question": "How much aid did Kenya receive per person from 2020 to 2022?",
+      "source": "invented",
+      "verb_chain": [
+        "quotient_of"
+      ]
+    },
+    {
+      "question": "Which aid recipient received the most per person in 2022?",
+      "source": "invented",
+      "verb_chain": [
+        "quotient_of",
+        "rank"
+      ]
     }
   ]
 }

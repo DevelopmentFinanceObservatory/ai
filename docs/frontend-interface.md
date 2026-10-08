@@ -123,8 +123,10 @@ list of one to six seeds, or `null`, or absent. A seed is
 `{spec, operations}`:
 
 - `spec` is the part's Spec block as the Search API returned it. The
-  harness keeps `spec_id` and `definition` (`{schema_version, spec_id, identity}`)
-  and ignores every other member, so a client may leave `resolved` out.
+  harness keeps `spec_id`, `definition` (`{schema_version, spec_id, identity}`)
+  and `resolved.entity_groups`, the sets the part's places were asked for
+  as ("African countries"), and ignores every other member, so a client
+  may leave `resolved` out.
   `definition.spec_id` must equal `spec_id`. The block may run to 1,048,576 bytes of compact
   JSON; a CRS block is about 400 KB.
 - `operations` lists what the question asked of that data that Search
@@ -227,7 +229,8 @@ usable seed shows a failed `seed-<n>` step with code
 `one_dataset_per_download`. When the retrieved seed carries operations,
 a failed `seed-<n>-operations` step with code
 `no_operations_on_download` names each one, and the data is still
-retrieved.
+retrieved. A question asking for a per-head figure that no series
+holds closes with a refusal, since the division is a computation.
 
 **A dropped seed.** The turn drops a seed when Search's answer for its
 identity is not the dataset the user handed over: Search refuses the
@@ -388,6 +391,15 @@ Notes on specific fields:
   withheld the card. Any other refusal reads "the card could not be added".
   An edit turn whose write is refused closes with "The edit was refused:
   <message>", quoting the refusal's own message.
+- The step with `tool: "search"` is the data search. Its `detail` reads
+  `resolved: <status>`, then `N parts: <variable>: <status>; ...` when
+  the question named several measures, then the search's own
+  diagnostics. A measure asked per head with no such series is searched
+  again as two, the measure and its denominator, and `detail` says so:
+  `searched again as N parts in place of "<variable>", ...`, two parts
+  for each measure named, followed by each
+  part's status when the second search did not resolve both and the
+  first result stands. `searched again with the unit in the measure: "<variable>"` precedes it when the per-head phrase was read as a unit.
 - An `activity.step` with no `tool` is a status line: what is happening
   now, in the present tense. It opens `running` and later gets a
   `complete` frame with `duration_ms` on the same `step_id`. One status
@@ -397,13 +409,19 @@ Notes on specific fields:
   `failed` frame updates the Activity record only. Fold status lines in
   the Activity record.
 - The planner's status lines name its work: "Working on a plan" (from the
-  hand-off to the planner until its first draft), "Drafting a plan",
-  "Reworking the draft" (a draft after a refused one; `detail` gives the
-  reason in plain words when there is one), "Revising the plan",
-  "Checking <measure> for <places>" (or "Checking the plan against the
-  data" before a plan is recorded), "Getting the plan ready for you",
-  and, once a plan is approved, "Starting the plan" until its first
-  step's frame.
+  hand-off to the planner until its first draft) or "Revising the plan"
+  (from the hand-off of an amendment), "Checking the plan against the
+  data" (from each proposal the planner makes until the proposal is
+  answered), "Reworking the draft" (a draft after a refused proposal;
+  `detail` gives the reason in plain words when there is one), "Getting
+  the plan ready for you", and, once a plan is approved, "Starting the
+  plan" until its first step's frame. The checking line's label is the
+  same for every plan. Its `complete` frame carries a `detail` naming the
+  data of the plan the proposal recorded, such as "health spending per
+  person for Kenya and Uganda and 1 more" (the first dataset, then the
+  count of the others), and no `detail` when that plan has no dataset.
+  The Activity feed keeps a line's first label and shows a later frame's
+  `detail` as its summary.
 - The orchestrator agent's status lines are "Reading your question",
   "Reading your answer", and, after each batch of tool results, a line
   naming what the model is reading: "Reading what the search found",
@@ -462,7 +480,7 @@ The frame is published to the platform, but
 it, so its raw frame is not served. The card's own points are in `payload.component` either way.
 
 - `fact_summary` holds `component_id`, `revision`, `series[]` (`{id, label, point_count, coordinates?, first?, first_period?, last?, last_period?, change?}`; `first_period` and `last_period` are the periods of the first and last drawn points that hold a value; each is absent when its point carries no period, and both are absent for a stat card or table, which draw no series), `indicators[]`
-  (`{id, name, description}`), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?`,
+  (`{id, name, description}`), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?` (the unit slot of the card's payload, repeated as the platform states it, with its shape below),
   `series_truncated?`, `countries?`, `defaults?` (`[{pointer, detail}]`: the choices the platform made where the card's intent left one open, each naming the intent field it filled by JSON Pointer; absent means it made none). By design, the numbers in the message
   text come from fact summaries; the models are constrained to them, and
   the recorded transcripts hold to it. A chart's `window` is the one the
@@ -470,6 +488,10 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
   entities at one period has that period as both `start` and `end`. A
   table's and a stat card's `window` is null, and `series[].change` is
   null on every card. A table draws without either field.
+- `fact_summary.unit` is the unit slot of the card's payload, in the payload's shape, so one reader serves both: a stat card's `unit`, a chart's first series' `unit`, and a table's row `unit` when every row has the same one. It is absent when the platform states none, as for a table whose rows differ in unit, a note, and a source card. Otherwise it is one of three shapes, and each object is closed:
+  - a string of 1 to 200 characters, the unit's name, or its reference where the graph names none: `"US Dollar"`.
+  - a structured unit, `{currency?, magnitude?, prices?, base_year?}` with at least one member: `{"currency": "USD", "prices": "constant", "base_year": 2023}`. `currency` is a three-letter ISO 4217 code, `magnitude` is `units`, `thousands`, `millions`, `billions`, or `trillions`, `prices` is `current` or `constant`, and `base_year` is the year of constant prices.
+  - a composed unit, `{numerator, denominator}`, the unit of one measure divided by another, read "numerator per denominator": `{"numerator": "US Dollar", "denominator": {"stat_var": "dcid:Count_Person", "label": "Total population"}}`. Each side is a string or a structured unit as above, or `{stat_var, label}` for a measure that declares no unit, where `stat_var` is the `dcid:`-prefixed StatVar the measure counts and `label` is the name to print for it. A side is never null and never a composed unit.
 - `provenance` holds `inputs[]`, `sources[]`, `freshness`, `warnings[]`,
   `generated_at`, `citation`, `execution_ref?`, `refreshed_from?`. It is
   complete on the frame; no second fetch is needed to show source
@@ -592,7 +614,11 @@ Edit Card panel's "Describe your edits" text):
   fixed message, for example "turn it into a bar chart".
 
 **Follow-up** (`intent: "follow_up"`): the agent gets the card's summary as
-context for a normal data turn.
+context for a normal data turn. On the orchestrator engine the agent is also
+told the question is about that card. The agent reads the card's latest
+revision. A `component_id` this conversation never held answers 404
+`not_found` with `pointer: "/component_ref/component_id"`; a card inherited
+by a copy of someone else's conversation is one of these.
 
 **Canvas questions**: a message like "what is on my canvas?" is answered
 from the canvas state without a data search. An empty canvas gets the

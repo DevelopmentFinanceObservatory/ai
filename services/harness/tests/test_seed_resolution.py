@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from compiler.evidence import RetrievalEvidence, check_evidence, errors
+from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import (
     InMemoryDefinitionStore,
     canonicalize,
@@ -33,6 +34,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from google.genai import types
 from harness.graph import PLANNER_STARTED_KEY, GenerativeNodes, create_root_workflow
 from harness.scripted import ScriptedPlannerModel, ScriptedResolver
+from harness.seeds import resolve_seed, take_seeds
 from planner.plan import (
     SEEDS_STATE_KEY,
     DatasetRequirement,
@@ -43,8 +45,9 @@ from planner.plan import (
 )
 from planner.records import Period
 from planner.workflow import ResolvedEntity
+from translator.discovery import resolved_spec
 
-from .data_mcp_definitions import DataMcpDefinitions, SearchStub
+from .data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -600,3 +603,20 @@ async def test_a_planner_that_fails_after_a_seed_is_dropped_fails_the_turn(
 
     with pytest.raises(RuntimeError, match="the planner seam timed out"):
         await _run([_KENYA, other], DataMcpDefinitions(search=search), planner=_Raises())
+
+
+async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:
+    # The browser hands over "African countries" as Search served it; the seed
+    # node's resubmit posts Africa beside the identity, so Search's answer, the
+    # one the turn reads, names Africa again.
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), search=GroupsSearchStub([block]))
+
+    part = await resolve_seed(resolving, taken)
+
+    source = source_from_spec_block(resolved_spec(part, spec_id=block["spec_id"]))
+    assert [(group.role, group.label, group.ref) for group in source.groups] == [
+        ("observationAbout", "Africa", "africa")
+    ]

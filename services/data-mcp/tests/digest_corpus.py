@@ -345,7 +345,7 @@ class SentencePair:
 # definite cases ------------------------------------------------------------------
 #
 # A multi-part case wraps one resolved spec per part of the conjunction that asked
-# for it, bounded by the tool's own `_MAX_PARTS = 6` (search_tool.py:26) — the sweep
+# for it, bounded by the tool's own `MAX_PARTS` (`data_mcp.search_tool`) — the sweep
 # below is a sweep over conjunction width, up to that ceiling.
 
 

@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
-from analysis_mcp.identity import op_spec_hash_for
+from analysis_mcp.identity import build_op_spec_preimage, op_spec_hash_for
 from analysis_mcp.op_spec import (
+    MIN_ROLLING_OFFSET,
     AggregateOpSpec,
     CategoryMatchPredicate,
     CompareOpSpec,
@@ -14,12 +17,16 @@ from analysis_mcp.op_spec import (
     JoinOpSpec,
     OpSpecAdapter,
     OrderedThresholdPredicate,
+    QuotientOfOpSpec,
     RankOpSpec,
+    RollingRef,
     ShareOfOpSpec,
     Verb,
+    with_anchor_key,
 )
 from common.materialisation import FrameRef
-from dfo_frame_grammar.grammar import UnitRequest
+from dfo_frame_grammar import ANCHOR_RULE
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart, UnitRequest
 from pydantic import ValidationError
 
 SNAPSHOT_REF = {
@@ -69,6 +76,11 @@ def test_aggregate_unit_defaults_to_none() -> None:
 
 
 CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+EUR_PER_PERSON = {"numerator": CONSTANT_EUR, "denominator": {"stat_var": "dcid:Count_Person"}}
+EUR_PER_PERSON_CELL = ComposedUnit(
+    numerator=UnitRequest(currency="EUR", prices="constant", base_year=2020),
+    denominator=StatVarPart(stat_var="dcid:Count_Person"),
+)
 
 
 @pytest.mark.parametrize(
@@ -81,12 +93,21 @@ CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
             UnitRequest(currency="USD", prices="current"),
             UnitRequest(currency="USD", prices="current"),
         ),
+        (EUR_PER_PERSON, EUR_PER_PERSON_CELL),
+        (
+            {"numerator": "dcid:USDollar", "denominator": "dcid:Euro"},
+            ComposedUnit(numerator="dcid:USDollar", denominator="dcid:Euro"),
+        ),
+        (EUR_PER_PERSON_CELL, EUR_PER_PERSON_CELL),
     ],
 )
-def test_a_unit_pin_is_a_ref_or_a_converted_unit(pin: object, parsed: object) -> None:
+def test_a_unit_pin_is_a_ref_a_converted_unit_or_a_composed_unit(
+    pin: object, parsed: object
+) -> None:
     """Every verb's unit pin parses a converted-unit object into the
-    `UnitRequest` a converted frame's `unit` cell holds, so the engine
-    compares the two by equality."""
+    `UnitRequest`, and a composed-unit object into the `ComposedUnit`, that
+    a frame's `unit` cell holds, so the engine compares the two by
+    equality."""
     specs = [
         AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit=pin),
         GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start="2020", window_end="2021", unit=pin),
@@ -119,6 +140,25 @@ def test_a_converted_pin_dumps_as_its_request_object() -> None:
     assert OpSpecAdapter.validate_python(constant.model_dump(mode="json")) == constant
 
 
+def test_a_composed_pin_dumps_as_its_object_whatever_order_its_members_came_in() -> None:
+    composed = AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit=EUR_PER_PERSON)
+    reordered = AggregateOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        aggregation="sum",
+        unit={
+            "denominator": {"stat_var": "dcid:Count_Person"},
+            "numerator": {"base_year": 2020, "prices": "constant", "currency": "EUR"},
+        },
+    )
+
+    assert composed.model_dump(mode="json")["unit"] == EUR_PER_PERSON
+    assert OpSpecAdapter.validate_python(composed.model_dump(mode="json")) == composed
+    assert op_spec_hash_for(composed) == op_spec_hash_for(reordered)
+    assert op_spec_hash_for(composed) != op_spec_hash_for(
+        AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit=CONSTANT_EUR)
+    )
+
+
 def test_a_converted_pin_and_a_ref_pin_mint_different_op_spec_hashes() -> None:
     ref = AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit="dcid:Euro")
     converted = AggregateOpSpec(frame_ref=SNAPSHOT_REF, aggregation="sum", unit=CONSTANT_EUR)
@@ -144,6 +184,14 @@ def test_a_converted_pin_and_a_ref_pin_mint_different_op_spec_hashes() -> None:
         {"currency": {"role": "observationAbout"}, "prices": "current"},
         "u" * 201,
         42,
+        {"numerator": "dcid:USDollar"},
+        {"numerator": "dcid:USDollar", "denominator": None},
+        {"numerator": "dcid:USDollar", "denominator": "dcid:Euro", "label": "rate"},
+        {"numerator": EUR_PER_PERSON, "denominator": "dcid:Euro"},
+        {"numerator": "dcid:USDollar", "denominator": {"stat_var": "Count_Person"}},
+        {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:X", "currency": "USD"}},
+        {"numerator": "u" * 201, "denominator": "dcid:Euro"},
+        {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:" + "u" * 200}},
     ],
 )
 def test_a_malformed_unit_pin_is_refused(pin: object) -> None:
@@ -345,6 +393,42 @@ def test_share_of_denominator_by_may_leave_a_numerator_by_column_out_at_the_op_s
     assert op_spec.denominator_by == {"donor": "provider"}
 
 
+def test_quotient_of_denominator_by_pairing_by_name_round_trips() -> None:
+    op_spec = QuotientOfOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        numerator_by=["donor", "sector"],
+        denominator_by={"donor": "provider", "sector": "area"},
+    )
+    assert op_spec.numerator_by == ("donor", "sector")
+    assert op_spec.denominator_by == {"donor": "provider", "sector": "area"}
+    assert OpSpecAdapter.validate_python(op_spec.model_dump(mode="json")) == op_spec
+
+
+def test_quotient_of_keyed_numerator_with_no_denominator_by_is_a_pooled_denominator() -> None:
+    op_spec = QuotientOfOpSpec(frame_ref=SNAPSHOT_REF, numerator_by=["donor"])
+    assert op_spec.denominator_by == {}
+
+
+@pytest.mark.parametrize(
+    ("denominator_by", "match"),
+    [
+        ({"sector": "area"}, "denominator_by names column"),
+        ({"donor": "provider"}, "denominator_by leaves out"),
+    ],
+    ids=["a-key-outside-numerator-by", "a-partial-mapping"],
+)
+def test_quotient_of_refuses_a_denominator_by_that_does_not_map_numerator_by_exactly(
+    denominator_by: dict[str, str], match: str
+) -> None:
+    """Unlike `share_of`, a partial mapping is refused here, so the engine
+    never sees one."""
+    numerator_by = ["donor"] if "sector" in denominator_by else ["donor", "sector"]
+    with pytest.raises(ValidationError, match=match):
+        QuotientOfOpSpec(
+            frame_ref=SNAPSHOT_REF, numerator_by=numerator_by, denominator_by=denominator_by
+        )
+
+
 def test_category_match_predicate_values_are_nfc_normalised() -> None:
     """An NFD-decomposed value (e.g. 'e' + combining acute) construction-time
     normalises to its NFC form -- the same normalisation `Frame.build`
@@ -380,3 +464,211 @@ def test_rank_limit_accepts_its_bounds(limit: int) -> None:
 def test_rank_limit_outside_its_bounds_refuses(limit: int) -> None:
     with pytest.raises(ValidationError):
         RankOpSpec(frame_ref=SNAPSHOT_REF, rank_by=["reporter"], limit=limit)
+
+
+# Rolling overlay ---------------------------------------------------------------
+
+LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
+ROOT = "spec_" + "c" * 32
+OTHER_ROOT = "spec_" + "d" * 32
+EVERY_SERIES = [{"spec_id": ROOT}]
+ANCHOR_KEY = "rak_" + "e" * 32
+
+
+def _back(offset: int) -> dict[str, object]:
+    return {**LATEST, "offset": offset}
+
+
+def _rolling(**bounds: object) -> dict[str, object]:
+    return {"population": EVERY_SERIES, **bounds}
+
+
+def _growth(**fields: object) -> GrowthOpSpec:
+    return GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start="2019", window_end="2024", **fields)
+
+
+def _rank(**fields: object) -> RankOpSpec:
+    return RankOpSpec(frame_ref=SNAPSHOT_REF, rank_by=("reporter",), **fields)
+
+
+def _threshold(**fields: object) -> dict[str, object]:
+    return {"kind": "ordered_threshold", "column": "time_period", "op": "gte", **fields}
+
+
+def _filter(*predicates: dict[str, object], **fields: object) -> FilterOpSpec:
+    return FilterOpSpec(frame_ref=SNAPSHOT_REF, predicates=predicates, **fields)
+
+
+def test_the_rolling_rule_is_the_frame_grammars() -> None:
+    assert get_args(RollingRef.model_fields["rule"].annotation) == (ANCHOR_RULE,)
+
+
+def test_a_rolling_window_keeps_its_literals_and_enters_the_preimage_without_unset_members() -> (
+    None
+):
+    op_spec = _growth(rolling=_rolling(window_end=LATEST))
+
+    assert (op_spec.window_start, op_spec.window_end) == ("2019", "2024")
+    assert build_op_spec_preimage(op_spec)["parameters"]["rolling"] == {
+        "window_end": LATEST,
+        "population": [{"spec_id": ROOT, "bindings": {}}],
+    }
+    assert "rolling" not in build_op_spec_preimage(_growth())["parameters"]
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"window_start": _back(-5), "window_end": LATEST},
+        {"window_start": _back(-6), "window_end": _back(-1)},
+        {"window_start": _back(-5)},
+    ],
+)
+def test_a_rolling_window_whose_literals_agree_with_its_offsets_is_accepted(
+    bounds: dict[str, object],
+) -> None:
+    assert _growth(rolling=_rolling(**bounds)).rolling is not None
+    assert _rank(window_start="2019", window_end="2024", rolling=_rolling(**bounds)).rolling
+
+
+@pytest.mark.parametrize(
+    "rolling",
+    [
+        pytest.param(_rolling(window_start=_back(-4), window_end=LATEST), id="literals-disagree"),
+        pytest.param(_rolling(window_end=_back(1)), id="offset-above-zero"),
+        pytest.param(_rolling(window_end=_back(MIN_ROLLING_OFFSET - 1)), id="offset-out-of-range"),
+        pytest.param(_rolling(window_end={**LATEST, "offset": -1.0}), id="offset-not-an-integer"),
+        pytest.param(_rolling(window_end={**LATEST, "rule": "third1"}), id="unknown-rule"),
+        pytest.param(_rolling(window_end={**LATEST, "anchor": "first"}), id="unknown-anchor"),
+        pytest.param(_rolling(), id="no-rolling-bound"),
+        pytest.param(_rolling(window_end=LATEST, window=LATEST), id="unknown-member"),
+        pytest.param({"window_end": LATEST}, id="no-population"),
+        pytest.param({"window_end": LATEST, "population": []}, id="empty-population"),
+        pytest.param(
+            {"window_end": LATEST, "population": [{"spec_id": "ops_" + "c" * 32}]},
+            id="population-of-a-derived-frame",
+        ),
+        pytest.param(
+            {
+                "window_end": LATEST,
+                "population": [{"spec_id": ROOT, "content_version": "cv_" + "c" * 32}],
+            },
+            id="population-with-a-content-version",
+        ),
+        pytest.param(
+            {"window_end": LATEST, "population": [{"spec_id": ROOT, "bindings": {"reporter": []}}]},
+            id="empty-binding",
+        ),
+    ],
+)
+def test_a_malformed_or_inconsistent_rolling_window_is_refused(rolling: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        _growth(rolling=rolling)
+    with pytest.raises(ValidationError):
+        _rank(window_start="2019", window_end="2024", rolling=rolling)
+
+
+def test_a_rolling_bound_on_a_rank_without_a_window_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        _rank(rolling=_rolling(window_end=LATEST))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"window_start": "2024", "window_end": "2019"},
+        {"window_start": "2024", "window_end": "2024"},
+    ],
+)
+def test_the_ordering_rule_still_reads_a_rolling_windows_literals(fields: dict[str, str]) -> None:
+    with pytest.raises(ValidationError):
+        GrowthOpSpec(frame_ref=SNAPSHOT_REF, rolling=_rolling(window_end=LATEST), **fields)
+    with pytest.raises(ValidationError):
+        _rank(rolling=_rolling(window_end=LATEST), **fields)
+
+
+def test_populations_have_one_spelling() -> None:
+    nfd, nfc = "Cote d'Ivoire\u0301", "Cote d'Ivoir\u00e9"
+    usa = {"spec_id": ROOT, "bindings": {"reporter": ["dcid:USA"]}}
+    listed = [
+        {"spec_id": OTHER_ROOT},
+        {"spec_id": ROOT, "bindings": {"reporter": ["dcid:USA", nfd, "dcid:USA"], "flow": ["oda"]}},
+        usa,
+        usa,
+    ]
+    respelled = [
+        usa,
+        {"spec_id": ROOT, "bindings": {"flow": ["oda"], "reporter": [nfc, "dcid:USA"]}},
+        {"spec_id": OTHER_ROOT, "bindings": {}},
+    ]
+
+    def growth_over(population: list[dict[str, object]]) -> GrowthOpSpec:
+        return _growth(rolling={"window_end": LATEST, "population": population})
+
+    assert build_op_spec_preimage(growth_over(listed))["parameters"]["rolling"]["population"] == [
+        {"spec_id": ROOT, "bindings": {"flow": ["oda"], "reporter": [nfc, "dcid:USA"]}},
+        {"spec_id": ROOT, "bindings": {"reporter": ["dcid:USA"]}},
+        {"spec_id": OTHER_ROOT, "bindings": {}},
+    ]
+    assert op_spec_hash_for(growth_over(listed)) == op_spec_hash_for(growth_over(respelled))
+    assert op_spec_hash_for(growth_over(listed)) != op_spec_hash_for(growth_over([usa]))
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        pytest.param(_threshold(column="value", value=1, rolling=LATEST), id="value-column"),
+        pytest.param(_threshold(column="reporter", value="2020", rolling=LATEST), id="role-column"),
+        pytest.param(_threshold(value=2020, rolling=LATEST), id="numeric-operand"),
+        pytest.param(_threshold(value="2019/2024", rolling=LATEST), id="span"),
+        pytest.param(_threshold(value="2024-03-01", rolling=_back(-1)), id="day-at-an-offset"),
+        pytest.param(_threshold(value="2020", rolling=_back(1)), id="offset-above-zero"),
+    ],
+)
+def test_a_rolling_predicate_off_a_period_threshold_is_refused(
+    predicate: dict[str, object],
+) -> None:
+    _filter(_threshold(value="2020", rolling=LATEST), rolling=_rolling())
+    with pytest.raises(ValidationError):
+        _filter(predicate, rolling=_rolling())
+
+
+@pytest.mark.parametrize("value", ["2024", "2024-03", "2024-03-01"])
+def test_a_rolling_predicate_at_the_latest_period_is_accepted_at_every_grain(value: str) -> None:
+    op_spec = _filter(_threshold(value=value, rolling=LATEST), rolling=_rolling())
+    assert op_spec.predicates[0].implied_anchor() == value
+
+
+def test_rolling_predicates_of_one_filter_stand_for_one_latest_period() -> None:
+    lower = _threshold(value="2020", rolling=_back(-4))
+    _filter(lower, _threshold(op="lte", value="2024", rolling=LATEST), rolling=_rolling())
+    with pytest.raises(ValidationError):
+        _filter(lower, _threshold(op="lte", value="2023", rolling=LATEST), rolling=_rolling())
+
+
+def test_a_filter_states_its_populations_exactly_when_a_predicate_is_rolling() -> None:
+    rolling_predicate = _threshold(value="2024", rolling=LATEST)
+
+    _filter(rolling_predicate, rolling=_rolling())
+    _filter(_threshold(value="2024"))
+    with pytest.raises(ValidationError):
+        _filter(_threshold(value="2024"), rolling=_rolling())
+    with pytest.raises(ValidationError):
+        _filter(rolling_predicate)
+    with pytest.raises(ValidationError):
+        _filter(rolling_predicate, rolling={"population": []})
+
+
+def test_an_anchor_key_accompanies_exactly_a_rolling_op_spec() -> None:
+    rolling = _growth(rolling=_rolling(window_end=LATEST))
+
+    assert with_anchor_key(rolling, ANCHOR_KEY) is rolling
+    assert with_anchor_key(_growth(), None).rolling is None
+    for op_spec, anchor_key in [
+        (rolling, None),
+        (_growth(), ANCHOR_KEY),
+        (rolling, "rak_" + "E" * 32),
+        (rolling, "ops_" + "e" * 32),
+    ]:
+        with pytest.raises(ValidationError):
+            with_anchor_key(op_spec, anchor_key)

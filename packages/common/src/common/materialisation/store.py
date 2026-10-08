@@ -20,16 +20,33 @@ process's frame row budget (`common.row_budget`) before it calls `HeldFrame.read
 the recorded count or, without one, its own row ceiling, and passes the claim as
 `read`'s `max_rows`, so the download, the checks and the decode all run under a
 claim no decode exceeds. `get` is `open` followed by `read` up to the store's own
-row ceiling, for a caller that claims nothing.
+row ceiling, for a caller that claims nothing. `get_trace` returns a held pair's
+trace and decodes none of its rows, for a caller walking a frame's lineage.
+
+A root frame's mint record (`common.materialisation.mint_record`) is a second kind
+of object under the same pair, written by `put_mint_record` and read by
+`get_mint_record`. It is held apart from the frame: a record can be written for a
+frame the store already holds, and it outlives an in-memory frame's eviction.
+
+An anchor record (`common.materialisation.anchor_record`) is a third kind of
+object, one resolution of a recipe's latest period, keyed by its own
+`anchor_key` and no frame's pair. `put_anchor_record` writes it and
+`get_anchor_record` reads it.
+
+`list_frames` names every frame held with the time its object was first written,
+oldest first, for a job that walks the whole store. It reads no frame.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
+from common.materialisation.anchor_record import AnchorRecord
 from common.materialisation.frame_ref import FrameRef
+from common.materialisation.mint_record import MintRecord
 from common.materialisation.trace import StoredFrameTrace
 
 if TYPE_CHECKING:
@@ -109,6 +126,15 @@ class HeldFrame:
     read: FrameReader
 
 
+@dataclass(frozen=True, kw_only=True)
+class FrameListing:
+    """One frame a store holds, as `list_frames` names it. `created_at` is when the
+    pair's object was first written, the instant its retention runs from."""
+
+    ref: FrameRef
+    created_at: datetime
+
+
 class MaterialisationStore(Protocol):
     """Persists and retrieves a `(Frame, StoredFrameTrace)` pair by `FrameRef`."""
 
@@ -142,6 +168,41 @@ class MaterialisationStore(Protocol):
         """`get` up to the first byte of the frame: the same `None` and `FrameExpired`,
         and `FrameTooLarge` or `FrameIntegrityError` only for what the store knows
         before it reads the object. Every other check runs in `HeldFrame.read`."""
+        ...
+
+    async def get_trace(self, ref: FrameRef) -> StoredFrameTrace | None:
+        """The trace `put` stored with `ref`'s frame, without decoding a row of it.
+        `None`, `FrameExpired`, `FrameTooLarge` and `FrameIntegrityError` mean what
+        they mean on `get`, for every check that needs no decoded column."""
+        ...
+
+    async def list_frames(self) -> list[FrameListing]:
+        """Every frame held, root and derived, oldest first by `created_at`. A frame
+        an op-spec was computed from was written before the result, so it comes
+        earlier. Reads no frame's bytes and no mint record."""
+        ...
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        """Keep `record` under `record.frame`. First writer wins: a record already
+        held under that pair stays as written. Independent of `put`, so it is safe
+        whether or not the pair's frame is held."""
+        ...
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        """The mint record held under `ref`, or `None` when none was written. Raises
+        `FrameIntegrityError` for a stored record that does not decode or that names
+        another pair."""
+        ...
+
+    async def put_anchor_record(self, record: AnchorRecord) -> None:
+        """Keep `record` under `record.anchor_key`. First writer wins: a record
+        already held under that key stays as written. It reads and writes no frame."""
+        ...
+
+    async def get_anchor_record(self, anchor_key: str) -> AnchorRecord | None:
+        """The anchor record held under `anchor_key`, or `None` when none was
+        written. Raises `AnchorRecordIntegrityError` for a stored record that does
+        not decode or that hashes to another key."""
         ...
 
     async def aclose(self) -> None:

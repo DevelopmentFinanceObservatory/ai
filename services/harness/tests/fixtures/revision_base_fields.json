@@ -37,6 +37,15 @@
     "left",
     "right"
   ],
+  "planner.operations.QuotientOfOperation": [
+    "kind",
+    "id",
+    "requirement_id",
+    "numerator",
+    "denominator",
+    "axis",
+    "denominator_axis"
+  ],
   "planner.operations.RankOperation": [
     "kind",
     "id",
@@ -187,6 +196,15 @@
     "status",
     "approved_revision"
   ],
+  "planner.plan.QuotientRequirement": [
+    "kind",
+    "id",
+    "decision_ids",
+    "numerator",
+    "denominator",
+    "axis",
+    "denominator_axis"
+  ],
   "planner.plan.RankRequirement": [
     "kind",
     "id",
@@ -255,6 +273,14 @@
     "kind",
     "level"
   ],
+  "planner.records.RelativePeriod": [
+    "anchor",
+    "offset"
+  ],
+  "planner.records.RollingWindow": [
+    "window_start",
+    "window_end"
+  ],
   "planner.records.ValueThreshold": [
     "kind",
     "op",
@@ -281,6 +307,11 @@
     "role",
     "ref",
     "label"
+  ],
+  "planner.workflow.ResolvedGroup": [
+    "label",
+    "ref",
+    "role"
   ],
   "planner.workflow.SelectedSource": [
     "spec_id",

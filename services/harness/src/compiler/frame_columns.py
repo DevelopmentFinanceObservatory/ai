@@ -27,6 +27,12 @@ column for raises `UnboundColumnError` before the call.
 into, per tool. `tests/executor/test_wide_frame.py` compiles and runs every
 verb over a flow frame and fails if a flow-axis name reaches a call, so a
 column-naming argument missing from the table shows there.
+
+A rolling step also names columns in `rolling.population`, and those are
+columns of the workflow's retrieved frames, whichever frame the step reads.
+`bound_populations` spells each entry the way the retrievals of its dataset
+spell it, and `bound_arguments` refuses a rolling step it is given no
+retrievals for.
 """
 
 from __future__ import annotations
@@ -35,15 +41,25 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
+from typing import Any
 
+from common.rolling import canonical_populations
 from dfo_frame_grammar.grammar import STAT_VAR_COLUMN, normalize_role_keys
 from planner.workflow import ToolId
 from pydantic import JsonValue
 
 # The frame parameter every analysis tool reads its first (or only) input
 # through. A two-sided tool that leaves its second frame parameter out reads
-# this one on both sides, as `compare`, `sum_of` and `share_of` document.
+# this one on both sides, as `compare`, `sum_of`, `share_of` and `quotient_of`
+# document.
 FRAME_PARAMETER = "frame_ref"
+
+# The argument that marks a `growth`, `rank` or `filter` call as rolling, and
+# the member of it listing the populations the newest period is taken over.
+ROLLING_PARAMETER = "rolling"
+_POPULATION = "population"
+# The members of one population that are keyed by column name.
+_POPULATION_COLUMN_MEMBERS = ("bindings", "levels")
 
 
 class UnboundColumnError(ValueError):
@@ -160,6 +176,17 @@ def _analysis(name: str) -> ToolId:
     return ToolId(server="analysis-mcp", name=name)
 
 
+# The arguments of a dividing verb, `share_of` or `quotient_of`: each side's
+# entity binding, the numerator's key columns, and `denominator_by`, whose keys
+# are the numerator's columns and whose values are the denominator's.
+_DIVIDING_SITES = (
+    _ColumnSite("numerator_entity", _Form.KEYS, (FRAME_PARAMETER,)),
+    _ColumnSite("denominator_entity", _Form.KEYS, ("denominator_frame_ref",)),
+    _ColumnSite("numerator_by", _Form.NAMES, (FRAME_PARAMETER,)),
+    _ColumnSite("denominator_by", _Form.KEYS, (FRAME_PARAMETER,)),
+    _ColumnSite("denominator_by", _Form.VALUES, ("denominator_frame_ref",)),
+)
+
 _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
     _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, (FRAME_PARAMETER,)),),
     _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, (FRAME_PARAMETER,)),),
@@ -176,13 +203,8 @@ _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
         _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
         _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
     ),
-    _analysis("share_of"): (
-        _ColumnSite("numerator_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("denominator_entity", _Form.KEYS, ("denominator_frame_ref",)),
-        _ColumnSite("numerator_by", _Form.NAMES, (FRAME_PARAMETER,)),
-        _ColumnSite("denominator_by", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("denominator_by", _Form.VALUES, ("denominator_frame_ref",)),
-    ),
+    _analysis("share_of"): _DIVIDING_SITES,
+    _analysis("quotient_of"): _DIVIDING_SITES,
 }
 
 # The verbs whose output keeps every role column of their input. Every other
@@ -195,6 +217,7 @@ def bound_arguments(
     arguments: Mapping[str, JsonValue],
     *,
     frames: Mapping[str, FrameColumns | None],
+    roots: Mapping[str, Sequence[FrameColumns | None]] | None = None,
 ) -> dict[str, JsonValue]:
     """`arguments` with every role column they name spelled the way the frame read spells it.
 
@@ -206,10 +229,15 @@ def bound_arguments(
             (a retrieval whose result carried no `role_keys`), whose names
             pass unchanged. A frame parameter the step leaves out reads
             `FRAME_PARAMETER`'s frame.
+        roots: The columns of each retrieved frame the step's newest period is
+            taken over (`compiler.rolling.AnchorGroup.roots`), by the
+            `spec_id` its retrieval was approved for. A rolling step's
+            population is spelled against these (`bound_populations`).
 
     Raises:
         UnboundColumnError: If an argument names a role its frame carries no
-            column for, or a join key the two frames spell differently.
+            column for, or a join key the two frames spell differently; or if
+            the step is rolling and `roots` is left out.
     """
     rewritten = dict(arguments)
     for site in _COLUMN_SITES.get(tool, ()):
@@ -221,7 +249,77 @@ def bound_arguments(
             for parameter in site.frames
         )
         rewritten[site.parameter] = _rewrite(value, site.form, partial(_spelling, sides=sides))
+    population = rolling_population(rewritten)
+    if population is not None:
+        if roots is None:
+            raise UnboundColumnError(
+                "the step is rolling, and its population names columns of the workflow's "
+                "retrieved frames, which it was given none of"
+            )
+        rolling = rewritten[ROLLING_PARAMETER]
+        assert isinstance(rolling, dict)
+        rewritten[ROLLING_PARAMETER] = {
+            **rolling,
+            _POPULATION: bound_populations(population, roots=roots),
+        }
     return rewritten
+
+
+def rolling_population(arguments: Mapping[str, JsonValue]) -> list[JsonValue] | None:
+    """The population a step's `arguments` carry, or `None` when they carry none."""
+    rolling = arguments.get(ROLLING_PARAMETER)
+    population = rolling.get(_POPULATION) if isinstance(rolling, dict) else None
+    return population if isinstance(population, list) else None
+
+
+def bound_populations(
+    populations: Sequence[JsonValue], *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> list[JsonValue]:
+    """`populations` with every column spelled the way the retrieved frames spell it.
+
+    An entry names columns of the retrievals of its own dataset, so it is read
+    against those frames, whichever frame the step carrying it is bound to.
+    The result is in the canonical spelling and order
+    (`common.rolling.canonical_populations`), which depend on the column
+    names.
+
+    Args:
+        populations: The compiled `rolling.population` of a step.
+        roots: The columns of each retrieved frame the newest period is taken
+            over, by the `spec_id` its retrieval was approved for. `None`
+            stands for a frame whose columns are unknown, whose names pass
+            unchanged.
+
+    Raises:
+        UnboundColumnError: If an entry names a dataset no retrieval fetched,
+            a role a retrieved frame carries no column for, a role two
+            retrievals of one dataset spell differently, or two roles one
+            frame column carries.
+    """
+    bound: list[dict[str, Any]] = []
+    for population in populations:
+        assert isinstance(population, dict)
+        spec_id = population["spec_id"]
+        sides = roots.get(spec_id) if isinstance(spec_id, str) else None
+        if not sides:
+            raise UnboundColumnError(
+                f"a population names {spec_id!r}, which none of the retrievals read fetched"
+            )
+        entry: dict[str, Any] = dict(population)
+        for member in _POPULATION_COLUMN_MEMBERS:
+            by_column = population.get(member)
+            if not isinstance(by_column, dict):
+                continue
+            respelled = {_spelling(name, sides=sides): kept for name, kept in by_column.items()}
+            if len(respelled) < len(by_column):
+                raise UnboundColumnError(
+                    f"the population of {spec_id} names {sorted(by_column)!r} in its {member}, "
+                    f"which its frame carries as {sorted(respelled)!r}; one column cannot "
+                    "stand for two roles"
+                )
+            entry[member] = respelled
+        bound.append(entry)
+    return list(canonical_populations(bound))
 
 
 def bound_role_keys(
@@ -290,8 +388,10 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
 #   dfo-apis collapses every member into one series under the family's own
 #   ref; otherwise the frame holds what the definition binds, unbounded here.
-# - `growth`, `rank` and `share_of` refuse an input holding several StatVars
+# - `growth` and `rank` refuse an input holding several StatVars
 #   (`require_single_stat_var`) and stamp the one they read on every row.
+# - `share_of` refuses a side holding several and writes every row under its
+#   own StatVar.
 # - `aggregate` does the same unless `group_by` names `stat_var`, which keeps
 #   one group per StatVar of its input.
 # - `join` refuses a side holding several and writes each side's rows under
@@ -300,6 +400,8 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # - `filter` keeps a subset of its input's rows.
 # - `compare` writes the rows of its left side's slice, one per period.
 # - `sum_of` writes one series under its own StatVar, one row per period.
+# - `quotient_of` refuses a side holding several and writes every row, one
+#   per key and period, under its own StatVar.
 _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None], int | None]] = {
     ToolId(server="data-mcp", name="get_data"): _one_when_summed,
     _analysis("aggregate"): _one_unless_grouped,
@@ -310,6 +412,7 @@ _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None],
     _analysis("filter"): _of_the_input,
     _analysis("compare"): _of_the_input,
     _analysis("sum_of"): _one_stat_var,
+    _analysis("quotient_of"): _one_stat_var,
 }
 
 

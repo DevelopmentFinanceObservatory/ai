@@ -80,6 +80,7 @@ from harness.graph import (
     _failed_step,
     _frame_unavailable_reason,
     _mark_masked_step_failed,
+    _measure_and_denominator,
     _refused_write_reason,
     _replan_refusal,
     _select_binding_ok,
@@ -104,8 +105,10 @@ from harness.seeds import (
     stale_reason,
     unplanned_seeds_text,
 )
-from harness.tool_contracts import graph_envelope
+from harness.tool_contracts import ResolverError, graph_envelope
 from harness.wire import Seed
+from mcp import MCPError
+from mcp.types import REQUEST_TIMEOUT
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -1089,6 +1092,649 @@ async def test_every_part_is_kept_apart_from_the_planners_envelope() -> None:
     )
     assert (first["wide"], first["candidates"]) == (True, [])
     assert second == _part("population", "definite", SPEC_A)
+
+
+# --- 5c. a part refused for its denominator is searched again as two ---------
+
+
+_PER_HEAD_PART = {
+    "variable": "debt service per head",
+    "entities": [{"text": "Kenya", "role": "to"}],
+    "time": "2022",
+}
+_PER_HEAD_DRAFT = {"text": "on it", "search_parts": [_PER_HEAD_PART], "about": "data"}
+_MEASURE_PART = {**_PER_HEAD_PART, "variable": "debt service"}
+_DENOMINATOR_PART = {"variable": "population", "entities": [{"text": "Kenya"}], "time": "2022"}
+_SEARCH_MESSAGE = "No per-capita data is available."
+
+
+def _refused_part(variable: str, reason: str) -> dict[str, Any]:
+    return {
+        **_part(variable, "unsupported"),
+        "candidates": [],
+        "reason": reason,
+        "message": _SEARCH_MESSAGE,
+    }
+
+
+def _refused_envelope(reason: str = "denominator_not_available") -> dict[str, Any]:
+    """The envelope of a one-part search whose part search answered `no_data`."""
+    return _envelope(
+        status="unsupported",
+        spec_id=None,
+        warnings=[{"code": "no_data", "severity": "warn", "message": reason}],
+        part_digests=[_refused_part("debt service per head", reason)],
+    )
+
+
+def _two_measures(second: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _envelope(
+        parts=2,
+        part_digests=[
+            _part("debt service", "definite", SPEC_A),
+            second or _part("population", "definite", SPEC_B),
+        ],
+    )
+
+
+_SPLIT_DRAFT = {
+    "measure": "debt service",
+    "denominator": "population",
+    "denominator_entities": [0],
+}
+
+
+class ScriptedSplit:
+    """A `DenominatorSplitModel` that answers every call with `draft`."""
+
+    def __init__(self, draft: dict[str, Any] | None = None) -> None:
+        self.draft = _SPLIT_DRAFT if draft is None else draft
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(
+        self, *, question: str, part: dict[str, Any], message: str
+    ) -> dict[str, Any]:
+        self.calls.append({"question": question, "part": part, "message": message})
+        return self.draft
+
+
+class _RecordingPlanner(ScriptedPlannerModel):
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return await super().__call__(**kwargs)
+
+
+def _per_head_workflow(
+    resolver: ScriptedResolver,
+    split: ScriptedSplit,
+    *,
+    planner: ScriptedPlannerModel | None = None,
+    converse: Any = None,
+    surface: str = "studio",
+) -> Any:
+    return create_root_workflow(
+        surface=surface,
+        resolver=resolver,
+        executor=ScriptedExecutor(),
+        generative=GenerativeNodes(
+            converse=converse or ScriptedConverse([_PER_HEAD_DRAFT]),
+            planner=planner or ScriptedPlannerModel(),
+            denominator_split=split,
+        ),
+        tool_surface=None,
+    )
+
+
+async def test_a_part_refused_for_its_denominator_reaches_the_planner_as_two_sources() -> None:
+    question = "What is Kenya's debt service per head in 2022?"
+    resolver = ScriptedResolver([_refused_envelope(), _two_measures()])
+    split = ScriptedSplit()
+    planner = _RecordingPlanner()
+    runner, session_id, events = await _start(
+        _per_head_workflow(resolver, split, planner=planner), question
+    )
+
+    assert split.calls == [
+        {"question": question, "part": _PER_HEAD_PART, "message": _SEARCH_MESSAGE}
+    ]
+    assert [call["parts"] for call in resolver.calls] == [
+        [_PER_HEAD_PART],
+        [_MEASURE_PART, _DENOMINATOR_PART],
+    ]
+    assert [call["question"] for call in resolver.calls] == [question, question]
+    assert _visited(events).count("probe") == 1
+    assert "deadend" not in _visited(events)
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    # The planner reads the question as asked and a two-part envelope that
+    # says nothing of the first search.
+    (drafted,) = planner.calls
+    assert drafted["question"] == question
+    assert drafted["envelope"]["parts"] == 2
+    assert "denominator_split" not in drafted["envelope"]
+    state = runner.session_service.sessions[runner.app_name]["u"][session_id].state
+    assert json.loads(state["search_parts"]) == [_MEASURE_PART, _DENOMINATOR_PART]
+    assert [(p["status"], p["spec_id"]) for p in json.loads(state["part_digests"])] == [
+        ("definite", SPEC_A),
+        ("definite", SPEC_B),
+    ]
+    assert _output_of(events, "probe")["denominator_split"] == {
+        "probed": [],
+        "replaced": ["debt service per head"],
+        "searched_as": 2,
+        "parts": [
+            {"variable": "debt service", "status": "definite"},
+            {"variable": "population", "status": "definite"},
+        ],
+        "kept": True,
+    }
+
+
+async def test_a_second_search_that_does_not_resolve_both_parts_keeps_the_refusal() -> None:
+    first = _refused_envelope()
+    unresolved = {**_part("population", "unsupported"), "candidates": []}
+    resolver = ScriptedResolver([first, _two_measures(unresolved)])
+    split = ScriptedSplit()
+    runner, session_id, events = await _start(
+        _per_head_workflow(resolver, split), "Kenya's debt service per head in 2022"
+    )
+
+    assert len(resolver.calls) == 2
+    assert len(split.calls) == 1
+    assert _visited(events)[-3:] == ["probe", "route_status", "deadend"]
+    assert "planner" not in _visited(events)
+    probed = _output_of(events, "probe")
+    assert (probed["status"], probed["warnings"]) == ("unsupported", first["warnings"])
+    assert probed["denominator_split"]["kept"] is False
+    state = runner.session_service.sessions[runner.app_name]["u"][session_id].state
+    assert json.loads(state["search_parts"]) == [_PER_HEAD_PART]
+    assert json.loads(state["resolve_envelope"])["status"] == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param(_refused_envelope("no_observations"), id="another-reason"),
+        pytest.param(
+            _envelope(part_digests=[_part("debt service per head", "definite", SPEC_A)]),
+            id="a-published-per-head-series",
+        ),
+    ],
+)
+async def test_only_the_denominator_reason_is_searched_again(envelope: dict[str, Any]) -> None:
+    resolver = ScriptedResolver([envelope])
+    split = ScriptedSplit()
+    _, _, events = await _start(_per_head_workflow(resolver, split), "debt service per head")
+
+    assert len(resolver.calls) == 1
+    assert split.calls == []
+    assert "denominator_split" not in _output_of(events, "probe")
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        pytest.param({}, id="nothing"),
+        pytest.param({**_SPLIT_DRAFT, "denominator": " "}, id="no-denominator"),
+        pytest.param({**_SPLIT_DRAFT, "measure": None}, id="no-measure"),
+        pytest.param({**_SPLIT_DRAFT, "denominator_entities": []}, id="no-entity"),
+        pytest.param({**_SPLIT_DRAFT, "denominator_entities": [1]}, id="out-of-range"),
+        pytest.param({**_SPLIT_DRAFT, "denominator_entities": [0, 0]}, id="repeated"),
+        pytest.param({**_SPLIT_DRAFT, "denominator_entities": [[0]]}, id="nested-position"),
+        pytest.param({**_SPLIT_DRAFT, "denominator_entities": [{"a": 1}]}, id="mapping-position"),
+    ],
+)
+async def test_a_draft_that_names_no_variable_for_a_side_makes_no_second_search(
+    draft: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    resolver = ScriptedResolver([_refused_envelope(), _two_measures()])
+    with caplog.at_level(logging.INFO, logger="harness.graph"):
+        _, _, events = await _start(
+            _per_head_workflow(resolver, ScriptedSplit(draft)), "debt service per head"
+        )
+
+    assert len(resolver.calls) == 1
+    assert _visited(events)[-1] == "deadend"
+    assert "denominator_split" not in _output_of(events, "probe")
+    assert any("so the refusal stands" in record.message for record in caplog.records)
+
+
+async def test_a_second_answer_that_does_not_line_up_keeps_the_refusal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    short = _envelope(part_digests=[_part("debt service", "definite", SPEC_A)])
+    resolver = ScriptedResolver([_refused_envelope(), short])
+    with caplog.at_level(logging.INFO, logger="harness.graph"):
+        _, _, events = await _start(
+            _per_head_workflow(resolver, ScriptedSplit()), "debt service per head"
+        )
+
+    assert len(resolver.calls) == 2
+    assert _visited(events)[-1] == "deadend"
+    probed = _output_of(events, "probe")["denominator_split"]
+    assert (probed["replaced"], probed["parts"], probed["kept"]) == (
+        ["debt service per head"],
+        [],
+        False,
+    )
+    assert any("answered 1 parts for the 2 asked" in r.message for r in caplog.records)
+
+
+async def test_a_download_keeps_the_refusal_and_searches_once() -> None:
+    """A download retrieves one dataset and computes nothing, so a kept split
+    would hand over the measure alone."""
+    resolver = ScriptedResolver([_refused_envelope(), _two_measures()])
+    split = ScriptedSplit()
+    workflow = _per_head_workflow(resolver, split, surface="download")
+    _, _, events = await _start(workflow, "debt service per head")
+
+    assert len(resolver.calls) == 1
+    assert split.calls == []
+    assert _visited(events)[-1] == "deadend"
+    assert "fetch" not in _visited(events)
+
+
+_THREE_TO = [{"text": name, "role": "to"} for name in ("Kenya", "Uganda", "Tanzania")]
+_AID_PART = {"variable": "aid per head", "entities": _THREE_TO, "time": "2022", "unit": "euros"}
+
+
+@pytest.mark.parametrize(
+    ("keeps_roles", "denominator_entities"),
+    [
+        (False, [{"text": name} for name in ("Kenya", "Uganda", "Tanzania")]),
+        (True, _THREE_TO),
+    ],
+)
+def test_the_split_parts_take_their_entities_and_time_from_the_refused_part(
+    keeps_roles: bool, denominator_entities: list[dict[str, Any]]
+) -> None:
+    """The draft names variables and units. An entity, a role or a time it
+    states is not read."""
+    draft = {
+        "measure": "aid",
+        "measure_unit": "euros",
+        "denominator": "population",
+        "denominator_unit": None,
+        "denominator_keeps_roles": keeps_roles,
+        "denominator_entities": [2, 0, 1],
+        "entities": [{"text": "Rwanda"}],
+        "time": "1999",
+        "measure_entities": [],
+    }
+
+    assert _measure_and_denominator(_AID_PART, draft) == [
+        {"variable": "aid", "entities": _THREE_TO, "time": "2022", "unit": "euros"},
+        {"variable": "population", "entities": denominator_entities, "time": "2022"},
+    ]
+
+
+def test_the_denominator_takes_only_the_entities_the_draft_selects() -> None:
+    donor, recipient = {"text": "United States", "role": "from"}, {"text": "Kenya", "role": "to"}
+    part = {"variable": "aid per head", "entities": [donor, recipient], "time": "2022"}
+    draft = {"measure": "aid", "denominator": "population", "denominator_entities": [1]}
+
+    assert _measure_and_denominator(part, draft) == [
+        {"variable": "aid", "entities": [donor, recipient], "time": "2022"},
+        {"variable": "population", "entities": [{"text": "Kenya"}], "time": "2022"},
+    ]
+
+
+async def test_two_parts_refused_in_one_search_are_each_split_in_place() -> None:
+    gdp = {"variable": "GDP", "entities": [{"text": "Kenya"}]}
+    drafted = {"text": "on it", "search_parts": [_PER_HEAD_PART, gdp, _UNIT_PART], "about": "data"}
+    first = _envelope(
+        status="unsupported",
+        spec_id=None,
+        parts=3,
+        part_digests=[
+            _refused_part("debt service per head", "denominator_not_available"),
+            _part("GDP", "definite", SPEC_A),
+            _refused_part("debt service", "unit_not_resolved"),
+        ],
+    )
+    moved = _envelope(
+        status="unsupported",
+        spec_id=None,
+        parts=3,
+        part_digests=[
+            _refused_part("debt service per head", "denominator_not_available"),
+            _part("GDP", "definite", SPEC_A),
+            _refused_part("debt service per head", "denominator_not_available"),
+        ],
+    )
+    answer = _envelope(parts=5, part_digests=[_part(str(n), "definite", SPEC_A) for n in range(5)])
+    resolver = ScriptedResolver([first, moved, answer])
+    split = ScriptedSplit()
+    workflow = _per_head_workflow(resolver, split, converse=ScriptedConverse([drafted]))
+    _, _, events = await _start(workflow, "debt service per head and GDP")
+
+    assert [call["part"] for call in split.calls] == [_PER_HEAD_PART, _UNIT_PART]
+    assert resolver.calls[2]["parts"] == [
+        _MEASURE_PART,
+        {**_DENOMINATOR_PART, "entities": [{"text": "Kenya"}]},
+        gdp,
+        {"variable": "debt service", "entities": [{"text": "Kenya"}]},
+        {"variable": "population", "entities": [{"text": "Kenya"}]},
+    ]
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+class _PerHeadSplit(ScriptedSplit):
+    """Drafts each part's measure as its variable without "per head"."""
+
+    async def __call__(
+        self, *, question: str, part: dict[str, Any], message: str
+    ) -> dict[str, Any]:
+        await super().__call__(question=question, part=part, message=message)
+        return {**_SPLIT_DRAFT, "measure": part["variable"].removesuffix(" per head")}
+
+
+def _per_head(measure: str, country: str = "Kenya") -> dict[str, Any]:
+    return {"variable": f"{measure} per head", "entities": [{"text": country}], "time": "2022"}
+
+
+def _all_refused(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    return _envelope(
+        status="unsupported",
+        spec_id=None,
+        parts=len(parts),
+        part_digests=[
+            _refused_part(part["variable"], "denominator_not_available") for part in parts
+        ],
+    )
+
+
+def _session_state(runner: InMemoryRunner, session_id: str) -> Any:
+    return runner.session_service.sessions[runner.app_name]["u"][session_id].state
+
+
+async def test_parts_that_share_a_denominator_are_searched_with_it_once() -> None:
+    measures = ["aid", "debt service", "health spending", "remittances"]
+    asked = [_per_head(measure) for measure in measures]
+    kenya = {"entities": [{"text": "Kenya"}], "time": "2022"}
+    searched = [
+        {"variable": "aid", **kenya},
+        {"variable": "population", **kenya},
+        *({"variable": measure, **kenya} for measure in measures[1:]),
+    ]
+    answer = _envelope(
+        parts=5, part_digests=[_part(part["variable"], "definite", SPEC_A) for part in searched]
+    )
+    resolver = ScriptedResolver([_all_refused(asked), answer])
+    planner = _RecordingPlanner()
+    converse = ScriptedConverse([{"text": "on it", "search_parts": asked, "about": "data"}])
+    workflow = _per_head_workflow(resolver, _PerHeadSplit(), planner=planner, converse=converse)
+    runner, session_id, events = await _start(workflow, "four measures per head in Kenya")
+
+    assert [call["parts"] for call in resolver.calls] == [asked, searched]
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert planner.calls[0]["envelope"]["parts"] == 5
+    assert json.loads(_session_state(runner, session_id)["search_parts"]) == searched
+    split = _output_of(events, "probe")["denominator_split"]
+    assert (split["searched_as"], split["kept"]) == (5, True)
+    assert [part["variable"] for part in split["parts"]] == [p["variable"] for p in searched]
+
+
+async def test_a_denominator_the_question_already_asks_for_is_not_searched_twice() -> None:
+    asked = [_PER_HEAD_PART, _DENOMINATOR_PART]
+    resolver = ScriptedResolver(
+        [
+            _envelope(
+                status="unsupported",
+                spec_id=None,
+                parts=2,
+                part_digests=[
+                    _refused_part("debt service per head", "denominator_not_available"),
+                    _part("population", "definite", SPEC_B),
+                ],
+            ),
+            _two_measures(),
+        ]
+    )
+    converse = ScriptedConverse([{"text": "on it", "search_parts": asked, "about": "data"}])
+    workflow = _per_head_workflow(resolver, ScriptedSplit(), converse=converse)
+    _, _, events = await _start(workflow, "debt service per head and population")
+
+    assert resolver.calls[1]["parts"] == [_MEASURE_PART, _DENOMINATOR_PART]
+    split = _output_of(events, "probe")["denominator_split"]
+    assert (split["searched_as"], split["kept"]) == (2, True)
+
+
+async def test_a_split_of_more_parts_than_search_takes_is_not_searched() -> None:
+    asked = [_per_head("aid", country) for country in ("Kenya", "Uganda", "Rwanda", "Ghana")]
+    resolver = ScriptedResolver([_all_refused(asked)])
+    converse = ScriptedConverse([{"text": "on it", "search_parts": asked, "about": "data"}])
+    workflow = _per_head_workflow(resolver, _PerHeadSplit(), converse=converse)
+    runner, session_id, events = await _start(workflow, "aid per head in four countries")
+
+    assert [call["parts"] for call in resolver.calls] == [asked]
+    assert _visited(events)[-1] == "deadend"
+    probed = _output_of(events, "probe")
+    assert probed["status"] == "unsupported"
+    assert "denominator_split" not in probed
+    assert json.loads(_session_state(runner, session_id)["search_parts"]) == asked
+
+
+_UNIT_PART = {"variable": "debt service", "entities": [{"text": "Kenya"}], "unit": "per head"}
+_UNIT_DRAFT = {"text": "on it", "search_parts": [_UNIT_PART], "about": "data"}
+_UNIT_MOVED = {"variable": "debt service per head", "entities": [{"text": "Kenya"}]}
+
+
+def _unit_unread(variable: str = "debt service") -> dict[str, Any]:
+    """The envelope of a one-part search whose unit search could not read."""
+    return _envelope(
+        status="no_data",
+        spec_id=None,
+        part_digests=[
+            {**_part(variable, "no_data"), "candidates": [], "reason": "unit_not_resolved"}
+        ],
+    )
+
+
+class _FailingResolver(ScriptedResolver):
+    """Raises `error` on every search after the scripted envelopes."""
+
+    def __init__(self, envelopes: list[dict[str, Any]], error: Exception) -> None:
+        super().__init__(envelopes)
+        self._error = error
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if len(self.calls) == len(self.envelopes):
+            self.calls.append(kwargs)
+            raise self._error
+        return await super().__call__(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(ResolverError("search refused", refusal={"code": "x"}), id="refused"),
+        pytest.param(MCPError(code=REQUEST_TIMEOUT, message="timed out"), id="timeout"),
+        pytest.param(httpx2.ConnectError("no route"), id="transport"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("first", "drafted", "split"),
+    [
+        pytest.param(
+            _refused_envelope(),
+            _PER_HEAD_DRAFT,
+            {"probed": [], "replaced": ["debt service per head"], "searched_as": 2},
+            id="split",
+        ),
+        pytest.param(
+            _unit_unread(),
+            _UNIT_DRAFT,
+            {"probed": ["debt service per head"], "replaced": [], "searched_as": 0},
+            id="unit",
+        ),
+    ],
+)
+async def test_a_failed_search_for_a_refused_part_leaves_the_first_answer_standing(
+    first: dict[str, Any],
+    drafted: dict[str, Any],
+    split: dict[str, Any],
+    error: Exception,
+) -> None:
+    resolver = _FailingResolver([first], error)
+    workflow = _per_head_workflow(resolver, ScriptedSplit(), converse=ScriptedConverse([drafted]))
+    runner, session_id, events = await _start(workflow, "Kenya's debt service per head")
+
+    assert len(resolver.calls) == 2
+    assert _visited(events)[-1] == "deadend"
+    probed = _output_of(events, "probe")
+    assert (probed["status"], probed["spec_id"]) == (first["status"], None)
+    assert probed["denominator_split"] == {**split, "parts": [], "kept": False}
+    state = _session_state(runner, session_id)
+    assert json.loads(state["search_parts"]) == drafted["search_parts"]
+    assert json.loads(state["resolve_envelope"])["status"] == first["status"]
+
+
+async def test_a_per_head_phrase_given_as_the_unit_reaches_the_planner_as_two_sources() -> None:
+    resolver = ScriptedResolver([_unit_unread(), _refused_envelope(), _two_measures()])
+    split = ScriptedSplit()
+    planner = _RecordingPlanner()
+    workflow = _per_head_workflow(
+        resolver, split, planner=planner, converse=ScriptedConverse([_UNIT_DRAFT])
+    )
+    _, _, events = await _start(workflow, "Kenya's debt service per head")
+
+    assert [call["parts"] for call in resolver.calls] == [
+        [_UNIT_PART],
+        [_UNIT_MOVED],
+        [
+            {"variable": "debt service", "entities": [{"text": "Kenya"}]},
+            {"variable": "population", "entities": [{"text": "Kenya"}]},
+        ],
+    ]
+    # The moved part is a question to search alone: the split is drafted
+    # from the part as converse wrote it.
+    assert [(call["part"], call["message"]) for call in split.calls] == [
+        (_UNIT_PART, _SEARCH_MESSAGE)
+    ]
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    assert planner.calls[0]["envelope"]["parts"] == 2
+    probed = _output_of(events, "probe")["denominator_split"]
+    assert (probed["probed"], probed["replaced"], probed["kept"]) == (
+        ["debt service per head"],
+        ["debt service"],
+        True,
+    )
+
+
+async def test_a_currency_stated_beside_a_per_head_unit_stays_the_measures_unit() -> None:
+    part = {"variable": "debt service", "entities": [{"text": "Kenya"}], "unit": "euros per head"}
+    resolver = ScriptedResolver([_unit_unread(), _refused_envelope(), _two_measures()])
+    split = ScriptedSplit({**_SPLIT_DRAFT, "measure_unit": "euros"})
+    converse = ScriptedConverse([{"text": "on it", "search_parts": [part], "about": "data"}])
+    await _start(_per_head_workflow(resolver, split, converse=converse), "debt per head in euros")
+
+    assert [call["parts"] for call in resolver.calls][1:] == [
+        [{"variable": "debt service euros per head", "entities": [{"text": "Kenya"}]}],
+        [
+            {"variable": "debt service", "entities": [{"text": "Kenya"}], "unit": "euros"},
+            {"variable": "population", "entities": [{"text": "Kenya"}]},
+        ],
+    ]
+    assert [call["part"] for call in split.calls] == [part]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(
+            _envelope(part_digests=[_part("debt service per head", "definite", SPEC_A)]),
+            id="resolves",
+        ),
+        pytest.param(_refused_envelope("no_observations"), id="another-reason"),
+    ],
+)
+async def test_a_unit_search_cannot_read_stays_refused_unless_it_is_a_denominator(
+    answer: dict[str, Any],
+) -> None:
+    first = _unit_unread()
+    resolver = ScriptedResolver([first, answer, _two_measures()])
+    split = ScriptedSplit()
+    workflow = _per_head_workflow(resolver, split, converse=ScriptedConverse([_UNIT_DRAFT]))
+    runner, session_id, events = await _start(workflow, "Kenya's debt service in shillings")
+
+    assert [call["parts"] for call in resolver.calls] == [[_UNIT_PART], [_UNIT_MOVED]]
+    assert split.calls == []
+    assert _visited(events)[-1] == "deadend"
+    assert "planner" not in _visited(events)
+    probed = _output_of(events, "probe")
+    assert (probed["status"], probed["spec_id"]) == ("no_data", None)
+    assert probed["denominator_split"] == {
+        "probed": ["debt service per head"],
+        "replaced": [],
+        "searched_as": 0,
+        "parts": [],
+        "kept": False,
+    }
+    state = runner.session_service.sessions[runner.app_name]["u"][session_id].state
+    assert json.loads(state["search_parts"]) == [_UNIT_PART]
+    assert json.loads(state["resolve_envelope"])["status"] == "no_data"
+
+
+async def test_an_unread_unit_on_a_part_that_states_none_is_not_searched_again() -> None:
+    resolver = ScriptedResolver([_unit_unread("debt service per head")])
+    split = ScriptedSplit()
+    _, _, events = await _start(_per_head_workflow(resolver, split), "debt service per head")
+
+    assert len(resolver.calls) == 1
+    assert split.calls == []
+    assert "denominator_split" not in _output_of(events, "probe")
+
+
+def _measure_offers_a_choice() -> dict[str, Any]:
+    choice = {**_part("debt service", "candidates"), "wide": False}
+    return _envelope(
+        status="candidates",
+        spec_id=None,
+        parts=2,
+        candidates=choice["candidates"],
+        part_digests=[choice, _part("population", "definite", SPEC_A)],
+    )
+
+
+async def test_a_refined_question_refused_for_its_denominator_is_split_again() -> None:
+    """A free-text clarify answer re-enters through converse, which drafts
+    the per-head part again: that draft gets its own split."""
+    resolver = ScriptedResolver(
+        [_refused_envelope(), _measure_offers_a_choice(), _refused_envelope(), _two_measures()]
+    )
+    split = ScriptedSplit()
+    runner, session_id, events = await _start(
+        _per_head_workflow(resolver, split), "debt service per head"
+    )
+    assert _pending_interrupt(events) == CLARIFY_INTERRUPT
+
+    events = await _resume(runner, session_id, CLARIFY_INTERRUPT, {"text": "external debt"})
+
+    assert len(resolver.calls) == 4
+    assert len(split.calls) == 2
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+async def test_a_turn_splits_no_more_often_than_the_clarify_bound_lets_it_redraft() -> None:
+    """Every search refuses the per-head part and every split offers a
+    choice, answered in free text each time clarify asks."""
+    resolver = ScriptedResolver(
+        [_refused_envelope(), _measure_offers_a_choice()] * (MAX_CLARIFY_ROUNDS + 2)
+    )
+    split = ScriptedSplit()
+    runner, session_id, events = await _start(
+        _per_head_workflow(resolver, split), "debt service per head"
+    )
+    answers = 0
+    while _pending_interrupt(events) == CLARIFY_INTERRUPT:
+        answers += 1
+        events = await _resume(runner, session_id, CLARIFY_INTERRUPT, {"text": "external debt"})
+
+    assert answers == MAX_CLARIFY_ROUNDS
+    assert len(split.calls) == MAX_CLARIFY_ROUNDS + 1
 
 
 class ReplyConverse:

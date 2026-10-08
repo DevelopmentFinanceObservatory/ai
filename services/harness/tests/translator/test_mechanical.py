@@ -25,7 +25,6 @@ from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
-from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import McpSurface
 from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefinitionStore
@@ -33,12 +32,6 @@ from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.server import mcp as real_data_mcp
 from fastmcp import FastMCP
-from google.adk.agents import LlmAgent
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
 
 # The key set and the walker that hold the model-facing boundary, shared
 # with the module that established it on the discovery and refusal paths.
@@ -51,6 +44,7 @@ from planner.agent import _window_pins
 from planner.operations import (
     FilterOperation,
     JoinOperation,
+    QuotientOfOperation,
     RankOperation,
     ShareOfOperation,
     Side,
@@ -74,6 +68,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     SeededSource,
@@ -84,6 +79,7 @@ from planner.plan import (
     save_plan,
     save_seeded_sources,
 )
+from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
     EntityIn,
@@ -91,10 +87,12 @@ from planner.records import (
     PlaceType,
     RankAmong,
     RankDirection,
+    Reduction,
+    RelativePeriod,
+    RollingWindow,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import SelectedSource
-from pydantic import Field as PydanticField
 from translator import mechanical
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
@@ -119,7 +117,7 @@ from translator.referral import (
     load_referral,
     save_referral,
 )
-from translator.tool import build_translate_tool, build_translator_core
+from translator.tool import build_translate, build_translator_core
 
 from ..bounded_seeds import fullest_described_seed, read_seed
 from ..data_mcp_definitions import SearchStub, search_api
@@ -262,6 +260,25 @@ def test_build_translation_matches_a_retrieve_and_aggregate_pair(draft: DraftFac
             id="share_of",
         ),
         pytest.param(
+            QuotientRequirement(
+                id="per_head",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="a", entity="Kenya"),
+                denominator=RequirementSide(input_id="b", entity="Uganda"),
+                axis="recipient",
+                denominator_axis="country",
+            ),
+            QuotientOfOperation(
+                id="per_head",
+                requirement_id="per_head",
+                numerator=Side(input="a", entity="Kenya"),
+                denominator=Side(input="b", entity="Uganda"),
+                axis="recipient",
+                denominator_axis="country",
+            ),
+            id="quotient_of",
+        ),
+        pytest.param(
             JoinRequirement(id="joined", decision_ids=["measure"], left_id="a", right_id="b"),
             JoinOperation(id="joined", requirement_id="joined", left="a", right="b"),
             id="join",
@@ -291,6 +308,58 @@ def test_operation_for_copies_every_derived_kind_verbatim(
     built = _operation_for(requirement, {})  # type: ignore[arg-type]
 
     assert built == expected
+
+
+# "The last five years": both bounds follow the newest period.
+_LAST_FIVE = RollingWindow(
+    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+)
+# "Since 2019": the start is fixed and the end follows the newest period.
+_SINCE = RollingWindow(window_end=RelativePeriod(offset=0))
+
+
+def _rolling_growth(rolling: RollingWindow) -> GrowthRequirement:
+    return GrowthRequirement(
+        id="growth",
+        decision_ids=["measure"],
+        input_id="a",
+        window_start=2019,
+        window_end=2024,
+        rolling=rolling,
+    )
+
+
+def _rolling_rank(rolling: RollingWindow) -> RankRequirement:
+    return RankRequirement(
+        id="ranked",
+        decision_ids=["measure"],
+        input_id="a",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        reduction=Reduction.SUM,
+        window_start=2019,
+        window_end=2024,
+        rolling=rolling,
+    )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        pytest.param(_rolling_growth(_LAST_FIVE), id="growth-last-five"),
+        pytest.param(_rolling_growth(_SINCE), id="growth-since"),
+        pytest.param(_rolling_rank(_LAST_FIVE), id="rank-last-five"),
+        pytest.param(_rolling_rank(_SINCE), id="rank-since"),
+    ],
+)
+def test_operation_for_carries_a_rolling_window_the_proof_accepts(requirement: object) -> None:
+    """A growth or rank that follows the newest data ("since 2019", "the last five
+    years") builds an operation with the same `rolling`, so `planner.proof.mismatches`
+    finds nothing to refuse."""
+    built = _operation_for(requirement, {})  # type: ignore[arg-type]
+
+    assert built.rolling == requirement.rolling  # type: ignore[union-attr]
+    assert mismatches(requirement, built, {"a": "a"}) == []  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -399,71 +468,12 @@ async def test_a_compiled_plan_reaches_the_model_carrying_no_upstream_envelope(
     assert _flat_keys(result) & _ENVELOPE_KEYS == set()
 
 
-class _ScriptedLlm(BaseLlm):
-    """Answers each generation from `script`, in order: a list entry is
-    either a list of `(tool_name, args)` function calls, a string of final
-    text, or a callable that reads the `LlmRequest` and returns one of the
-    other two. Past the end of the script it answers "done", so an
-    unscripted extra generation ends the turn rather than looping.
-    """
-
-    model: str = "scripted-mechanical-test"
-    script: list[Any] = PydanticField(default_factory=list)
-    captured_requests: list[Any] = PydanticField(default_factory=list)
-
-    async def generate_content_async(self, llm_request: Any, stream: bool = False) -> Any:
-        del stream
-        self.captured_requests.append(llm_request)
-        index = len(self.captured_requests) - 1
-        step = self.script[index] if index < len(self.script) else "done"
-        if callable(step):
-            step = step(llm_request)
-        if isinstance(step, str):
-            yield LlmResponse(
-                content=types.Content(role="model", parts=[types.Part.from_text(text=step)])
-            )
-            return
-        yield LlmResponse(
-            content=types.Content(
-                role="model",
-                parts=[types.Part.from_function_call(name=name, args=args) for name, args in step],
-            )
-        )
-
-
-def _last_function_response(request: Any) -> Any:
-    """The function response the model's next turn would read, from `request`."""
-    (response,) = [p.function_response for p in request.contents[-1].parts if p.function_response]
-    return response
-
-
-async def _planner_reads(plan: Plan, surface: McpSurface) -> dict[str, Any]:
-    """Call `translate` from an agent's turn; return what that agent's next generation reads.
-
-    The agent's model calls `translate` once, with no arguments. The plan is
-    written into the session at creation, so `translate` finds it.
-    """
-    root_llm = _ScriptedLlm(script=[[("translate", {})]])
-    root = LlmAgent(name="root", model=root_llm, tools=[build_translate_tool(surface=surface)])
-    session_service = InMemorySessionService()
-    await session_service.create_session(
-        app_name="app",
-        user_id="u",
-        session_id="s",
-        state={PLAN_STATE_KEY: plan.model_dump_json()},
-    )
-    runner = Runner(agent=root, app_name="app", session_service=session_service)
-    async for _event in runner.run_async(
-        user_id="u",
-        session_id="s",
-        new_message=types.Content(role="user", parts=[types.Part.from_text(text="go")]),
-    ):
-        pass
-
-    assert len(root_llm.captured_requests) == 2
-    response = _last_function_response(root_llm.captured_requests[1])
-    assert response.name == "translate"
-    return cast("dict[str, Any]", response.response)
+async def _planner_reads(
+    plan: Plan, surface: McpSurface, context_holding: ContextHolding
+) -> dict[str, Any]:
+    """The verdict translation answers for `plan`, which `propose_plan` hands the
+    planner's model under `translation`."""
+    return await build_translate(surface=surface)(context_holding(plan))
 
 
 def _ranking_plan(
@@ -487,15 +497,16 @@ async def test_a_referral_reaches_the_caller_with_its_outcome_and_candidates(
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
     combined_surface: McpSurface,
+    context_holding: ContextHolding,
 ) -> None:
-    """`translate` answers with the referral itself, its `outcome` on top.
+    """Translation answers with the referral itself, its `outcome` on top.
 
     Each candidate renders as `compact_source` does, with the `spec_id` the
     requirement may pin.
     """
     plan = _ranking_plan(requirement, derived_requirement, decision, measure="aid disbursed")
 
-    answer = await _planner_reads(plan, combined_surface)
+    answer = await _planner_reads(plan, combined_surface, context_holding)
 
     assert answer["outcome"] == "choice_required"
     assert answer["kind"] == "source_ambiguous"
@@ -508,10 +519,11 @@ async def test_a_no_data_referral_reaches_the_caller_with_its_nearest_sources_un
     derived_requirement: DerivedRequirementFactory,
     decision: DecisionFactory,
     combined_surface: McpSurface,
+    context_holding: ContextHolding,
 ) -> None:
     plan = _ranking_plan(requirement, derived_requirement, decision, measure="nearly aid")
 
-    answer = await _planner_reads(plan, combined_surface)
+    answer = await _planner_reads(plan, combined_surface, context_holding)
 
     assert answer["outcome"] == "invalid_input"
     assert answer["kind"] == "no_data"
@@ -521,14 +533,14 @@ async def test_a_no_data_referral_reaches_the_caller_with_its_nearest_sources_un
 
 
 async def test_a_compiled_plan_answers_the_outcome_alone(
-    draft: DraftFactory, combined_surface: McpSurface
+    draft: DraftFactory, combined_surface: McpSurface, context_holding: ContextHolding
 ) -> None:
     """The version, revision and warnings are `submit_plan`'s to answer, and
     the sources and steps are on the approval card, so the caller reads
     `ok` and nothing else."""
     plan = draft()
 
-    answer = await _planner_reads(plan, combined_surface)
+    answer = await _planner_reads(plan, combined_surface, context_holding)
 
     assert answer == {"outcome": "ok"}
 
@@ -582,7 +594,7 @@ async def test_run_translate_closes_an_ambiguous_requirement_on_its_candidates(
     """A Guatemala-shaped plan: one requirement resolves `definite`, the other `candidates`.
 
     `population_gtm` resolves clean, `gdp_gtm` comes back with two
-    candidates and no pin. The one `translate` call closes on a
+    candidates and no pin. The one translation closes on a
     `choice_required` referral carrying both, each with the spec_id and
     coverage the planner chooses by, and nothing ranks them.
     """
@@ -615,7 +627,7 @@ async def test_run_translate_closes_an_ambiguous_requirement_on_its_candidates(
 async def test_run_translate_refers_a_timed_out_search_as_discovery_unavailable(
     draft: DraftFactory, context_holding: ContextHolding
 ) -> None:
-    """A `search` that never reaches the server ends `translate` on a
+    """A `search` that never reaches the server ends translation on a
     transient `discovery_unavailable` referral, the same typed shape every
     other stopping path produces, and never on `discover_source`'s own raw
     refusal handed back unwrapped.
@@ -637,20 +649,23 @@ async def test_run_translate_refers_a_timed_out_search_as_discovery_unavailable(
 async def test_a_budget_spent_on_timed_out_searches_stays_a_transient_referral(
     draft: DraftFactory, context_holding: ContextHolding
 ) -> None:
-    # Each transient referral is retried, and each retry spends one search
-    # on the same revision, until the requirement's share of the budget is
-    # gone. The refusals that follow name the outage, not a plan too big,
-    # and are marked so the planner entry ends on them.
+    # Each transient referral is retried by proposing the plan again, which
+    # clears the referral, and each retry spends one search on the same
+    # revision, until the requirement's share of the budget is gone. The
+    # refusals that follow name the outage, not a plan too big, and are
+    # marked so the planner entry ends on them.
     unreachable = McpSurface(sources={"data-mcp": "http://127.0.0.1:9/mcp"})
     core = build_translator_core(surface=unreachable)
     plan = draft()
     context = context_holding(plan)
-    retried = [
-        (await run_translate(context, core=core))["referral"]
-        for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT)
-    ]
 
-    spent = [(await run_translate(context, core=core))["referral"] for _ in range(2)]
+    async def proposed_again() -> dict[str, Any]:
+        clear_referral(context.state)
+        return cast("dict[str, Any]", (await run_translate(context, core=core))["referral"])
+
+    retried = [await proposed_again() for _ in range(DISCOVERY_CALL_BUDGET_PER_REQUIREMENT)]
+
+    spent = [await proposed_again() for _ in range(2)]
 
     assert ["budget_spent" in r for r in retried] == [False] * len(retried)
     for referral in spent:
@@ -788,14 +803,14 @@ async def test_run_translate_compiles_a_seed_whose_sibling_over_other_years_was_
     assert search_calls == []
 
 
-# What one further retrieval of a dataset adds to a `translate` result: its
+# What one further retrieval of a dataset adds to a `run_translate` result: its
 # spec_id and the phrase it was searched as (`translator.discovery.described_sources`).
 _ALSO_RETRIEVED_CHARS = (
     len(json.dumps({"spec_id": "spec_" + "0" * 32, "searched_as": ""}))
     + MAX_MEASURE_CHARS
     + len(", ")
 )
-# The `sources` of a `translate` result for a plan over seeds: each seed
+# The `sources` of a `run_translate` result for a plan over seeds: each seed
 # described once, at most `MAX_SEED_SOURCE_CHARS` with its stamped phrase, and
 # one `_ALSO_RETRIEVED_CHARS` for every other requirement that retrieves one.
 TRANSLATE_SEEDED_SOURCES_CEILING = (
@@ -1353,11 +1368,12 @@ async def test_a_translation_failing_the_same_way_again_is_referred_as_repeated(
     assert len(context.state[mechanical.COMPILE_FAILURES_STATE_KEY]) == 2
 
 
-async def test_a_transient_failure_is_retried_and_may_repeat_unmarked(
+async def test_a_transient_failure_proposed_again_is_retried_and_may_repeat_unmarked(
     draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
 ) -> None:
-    """A pending transient referral is retried, never restated: the second
-    `translate` call on the unchanged plan reaches the surface again."""
+    """A transient referral is retried by proposing the unchanged plan again,
+    which clears the referral: the second translation reaches the surface
+    again, and the repeat is not marked `repeated`."""
     unavailable = {
         "outcome": "refused",
         "code": "surface_unavailable",
@@ -1376,6 +1392,7 @@ async def test_a_transient_failure_is_retried_and_may_repeat_unmarked(
     context = context_holding(draft())
 
     first = await run_translate(context, core=core)
+    clear_referral(context.state)
     second = await run_translate(context, core=core)
 
     assert len(proposed) == 2
@@ -1384,31 +1401,6 @@ async def test_a_transient_failure_is_retried_and_may_repeat_unmarked(
         assert result["referral"]["outcome"] == "transient"
         assert result["referral"]["repeated"] is False
     assert mechanical.COMPILE_FAILURES_STATE_KEY not in context.state
-
-
-async def test_a_pending_referral_is_answered_again_without_translating(
-    draft: DraftFactory,
-    core: TranslatorCore,
-    context_holding: ContextHolding,
-    search_calls: list[dict[str, Any]],
-) -> None:
-    """The plan has not changed since it was referred, so `translate` restates
-    the referral instead of reaching the same stop through discovery."""
-    context = context_holding(draft())
-    pending = Referral(
-        kind=ReferralKind.REQUIREMENT_NEEDS_REPAIR,
-        reason="r",
-        requirement_id="annual_debt_service",
-        constraint=CompileIssueCode.ENTITY_REQUIRED,
-        repair="name the entity",
-    )
-    save_referral(context.state, pending)
-
-    result = await run_translate(context, core=core)
-
-    assert result["outcome"] == "referred", result
-    assert load_referral(context.state) == pending
-    assert search_calls == []
 
 
 # --- _resolve_dataset_sources: a settled requirement is not re-spent -------

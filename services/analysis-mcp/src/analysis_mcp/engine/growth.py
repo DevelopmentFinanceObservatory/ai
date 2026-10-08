@@ -56,7 +56,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
 from analysis_mcp.engine.columnar import (
@@ -195,7 +195,7 @@ class GrowthResult:
     """
 
     frame: Frame
-    resolved_unit: str | UnitRequest | None
+    resolved_unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     window_start: str
@@ -266,7 +266,7 @@ def run_growth(
     window_end: str,
     entity_by: Sequence[str],
     change: GrowthChange = "relative",
-    pinned_unit: str | UnitRequest | None = None,
+    pinned_unit: UnitCell | None = None,
 ) -> GrowthResult:
     """Compute each entity's growth across `[window_start, window_end]`
     (whole calendar years) -- a relative rate or an absolute change per
@@ -425,14 +425,13 @@ def run_growth(
         **{column: groups.keys.column(column).take(computed) for column in entity_by},
         **facet_columns(resolved.facet_selections, count=count),
     }
-    # A relative growth rate is dimensionless -- `engine/share_of.py`'s own
-    # output row writes `None` for the same reason, and a missing `unit`
+    # A relative growth rate is a unit-less fraction, and a missing `unit`
     # column builds as nulls. `resolved.unit` still selected which input rows
     # this entity's `value_start`/`value_end` were read from; it just doesn't
     # denominate the ratio those two values produced. An absolute change
     # keeps the input's own unit -- it is that unit's own value, subtracted
-    # -- which is `None` too when the input itself was already unitless (e.g.
-    # a prior relative-growth or share_of result).
+    # -- which is `None` too when the input itself was unitless (a prior
+    # relative-growth result), and `Percent` over a share_of result.
     if change == "absolute":
         columns[UNIT_COLUMN] = unit_column(computed_rows, count=count)
     output_frame = frame_from_columns(columns, role_keys=entity_by)

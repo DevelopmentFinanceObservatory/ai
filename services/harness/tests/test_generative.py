@@ -33,6 +33,8 @@ from harness.generative import (
     _NARRATE_INSTRUCTION,
     GeminiCompose,
     GeminiConverse,
+    GeminiDenominatorSplit,
+    GeminiEdit,
 )
 
 
@@ -133,6 +135,20 @@ def test_edit_instruction_updates_a_title_that_names_what_changed() -> None:
     assert "open side read from the frame's coverage" in _EDIT_INSTRUCTION
 
 
+def test_edit_instruction_states_the_relative_period_grammar() -> None:
+    assert '{"anchor": "latest", "offset": N}' in _EDIT_INSTRUCTION
+    assert '"The last three years" is {"start": {"anchor": "latest",' in _EDIT_INSTRUCTION
+    assert "A window with a\n  relative side states both sides" in _EDIT_INSTRUCTION
+    assert (
+        '"Compare with\n  the previous year" is {"basis": [{"anchor": "latest", "offset": -1}'
+        in (_EDIT_INSTRUCTION)
+    )
+    # Years a person names stay labels, in a window and in a change alike.
+    assert '"2015\n  to 2020" is {"start": "2015", "end": "2020"}' in _EDIT_INSTRUCTION
+    assert '"compare 2015 with 2020" is\n  {"basis": ["2015", "2020"]}' in _EDIT_INSTRUCTION
+    assert "its title names no\n  year and no year range" in _EDIT_INSTRUCTION
+
+
 class _FakeResponse:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -142,8 +158,10 @@ class _FakeResponse:
 class _FakeModels:
     def __init__(self, text: str) -> None:
         self._text = text
+        self.contents: list[Any] = []
 
-    async def generate_content(self, **_kwargs: Any) -> _FakeResponse:
+    async def generate_content(self, **kwargs: Any) -> _FakeResponse:
+        self.contents.append(kwargs["contents"])
         return _FakeResponse(self._text)
 
 
@@ -158,6 +176,9 @@ class _FakeClient:
 
     def __init__(self, text: str) -> None:
         self.aio = _FakeAio(text)
+
+
+_LATEST = {"anchor": "latest", "offset": 0}
 
 
 def _drafted_intent(*, select_json: str) -> dict[str, Any]:
@@ -182,6 +203,40 @@ async def _compose_result(*, select_json: str) -> dict[str, Any]:
         frame_views=[{"available": True, "view": {}}],
         frame_provenance=[{"step": 0, "tool": "get_data", "is_final_step": True}],
     )
+
+
+@pytest.mark.parametrize(
+    "period",
+    [
+        pytest.param(
+            {"window": {"start": {"anchor": "latest", "offset": -2}, "end": _LATEST}},
+            id="relative-window",
+        ),
+        pytest.param({"window": {"start": "2015", "end": "2020"}}, id="fixed-window"),
+        pytest.param(
+            {"change": {"basis": [{"anchor": "latest", "offset": -1}, _LATEST]}},
+            id="relative-change",
+        ),
+        pytest.param({"change": {"basis": ["2015", "2020"]}}, id="fixed-change"),
+    ],
+)
+async def test_edit_passes_a_recreates_period_through_as_the_model_wrote_it(
+    period: dict[str, Any],
+) -> None:
+    recreate = {"type": "stat_card", "title": "Aid", "select": {"donor": "country/FRA"}, **period}
+    client = _FakeClient(
+        json.dumps({"text": "Done.", "patch_json": None, "recreate_json": json.dumps(recreate)})
+    )
+
+    drafted = await GeminiEdit(model_name="test-model", client=client)(
+        message="change the period",
+        stored_intent={"type": "stat_card", "title": "Aid", "select": {"donor": "country/FRA"}},
+        frame_view={"dimensions": [], "rolling": True},
+    )
+
+    assert drafted["recreate"] == recreate
+    (content,) = client.aio.models.contents
+    assert json.loads(content)["frame_view"]["rolling"] is True
 
 
 async def test_compose_skips_an_intent_whose_select_json_is_a_json_array(
@@ -244,6 +299,22 @@ async def test_converse_merge_keeps_first_seen_order_and_drops_repeats() -> None
         {"text": "Nigeria"},
         {"text": "Guatemala"},
         {"text": "Benin"},
+    ]
+
+
+async def test_converse_merge_gives_a_repeated_text_one_members_reading() -> None:
+    """A text named with and without `members` is one entity asking for its
+    members, in the first occurrence's position."""
+    draft = _two_part_draft()
+    draft["search_parts"][0]["entities"] = [{"text": "Africa"}, {"text": "Nigeria"}]
+    draft["search_parts"][1]["entities"] = [
+        {"text": "Africa", "members": True},
+        {"text": "Africa", "members": False},
+    ]
+    result = await _converse_result(draft)
+    assert result["search_parts"][0]["entities"] == [
+        {"text": "Africa", "members": True},
+        {"text": "Nigeria"},
     ]
 
 
@@ -539,3 +610,26 @@ async def test_converse_reads_no_skill_for_a_greeting() -> None:
 
     assert surface.calls == []
     assert result["text"] == "Hello!"
+
+
+async def test_the_denominator_split_sends_the_part_and_returns_the_draft() -> None:
+    part = {"variable": "aid per head", "entities": [{"text": "Kenya", "role": "to"}]}
+    drafted = {
+        "measure": "aid",
+        "measure_unit": None,
+        "denominator": "population",
+        "denominator_unit": None,
+        "denominator_entities": [0],
+        "denominator_keeps_roles": False,
+    }
+    client = _DraftsInTurn(drafted)
+    split = GeminiDenominatorSplit(model_name="test-model", client=client)
+
+    result = await split(question="aid per head to Kenya", part=part, message="none held")
+
+    assert result == drafted
+    assert json.loads(client.contents[0]) == {
+        "question": "aid per head to Kenya",
+        "part": part,
+        "message": "none held",
+    }

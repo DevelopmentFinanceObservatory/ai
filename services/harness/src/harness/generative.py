@@ -50,6 +50,7 @@ def _schema(**properties: types.Schema) -> types.Schema:
 
 _STR = types.Schema(type=types.Type.STRING)
 _OPT_STR = types.Schema(type=types.Type.STRING, nullable=True)
+_OPT_BOOL = types.Schema(type=types.Type.BOOLEAN, nullable=True)
 
 
 def _array(items: types.Schema) -> types.Schema:
@@ -111,7 +112,11 @@ question, produce:
   only fields the user actually expressed: variable (required, what is
   measured), entities (who/where, each with its text and, when the user
   stated a relation, a role), time (their time phrase), unit (their unit
-  phrase).
+  phrase). An entity naming a set of places (a continent, a subregion, a
+  group such as the European Union) keeps the set's name as its text, with
+  members true when the user asks for each member on its own: "African
+  countries" is {"text": "Africa", "members": true}; "Africa" alone leaves
+  members out.
 - about: "canvas" ONLY when the question asks about the canvas/cards
   themselves ("what's on my canvas", "describe that chart") rather than for
   data; "reply" when the message asks for no data at all -- a greeting,
@@ -187,7 +192,7 @@ _CONVERSE_SCHEMA = _schema(
                     nullable=True,
                     items=types.Schema(
                         type=types.Type.OBJECT,
-                        properties={"text": _STR, "role": _OPT_STR},
+                        properties={"text": _STR, "role": _OPT_STR, "members": _OPT_BOOL},
                         required=["text"],
                     ),
                 ),
@@ -230,16 +235,17 @@ def _role_free(entities: list[dict[str, Any]]) -> bool:
 
 
 def _dedup_entities_by_text(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """`entities` with repeated `text` values dropped, first occurrence kept."""
-    seen: set[Any] = set()
-    deduped: list[dict[str, Any]] = []
+    """`entities` with repeated `text` values dropped, first occurrence kept.
+
+    A part holds one reading of a text, and Search refuses a part that posts
+    one text with two `members` values. The kept entity carries `members`
+    true when any entry sharing its text does, and its own fields otherwise."""
+    by_text: dict[Any, dict[str, Any]] = {}
     for entity in entities:
-        text = entity.get("text")
-        if text in seen:
-            continue
-        seen.add(text)
-        deduped.append(dict(entity))
-    return deduped
+        kept = by_text.setdefault(entity.get("text"), dict(entity))
+        if entity.get("members"):
+            kept["members"] = True
+    return list(by_text.values())
 
 
 def _merge_same_variable_parts(
@@ -356,6 +362,59 @@ class GeminiConverse(_ModelCall):
                 )
                 text = DFO_FAQ_NOT_READ
         return {"text": text, "search_parts": [], "about": "reply", "revises": None, "recall": None}
+
+
+_DENOMINATOR_SPLIT_INSTRUCTION = """\
+A data search could not answer one part of a question, because the part asks
+for a measure divided by a denominator (per head, per capita, per person)
+and no series is published in that form. You are given the user's question,
+that search part, and the search's message. Name the two measured variables
+whose division gives the figure the user asked for. The part's time is
+carried to both for you, and its entities to the measure.
+- measure: the part's variable with the per-denominator phrasing taken out.
+- measure_unit: the unit the user stated for the measure, with any
+  per-denominator phrasing taken out of it ("euros" from "euros per head");
+  null when none is left.
+- denominator: what the measure is divided by, named plainly as a measured
+  variable of its own ("population" for a per-head figure).
+- denominator_unit: null unless the user stated a unit for the denominator.
+- denominator_entities: the entities whose population or other denominator
+  is meant, as their positions in the part's entities list, counting from
+  0: for aid per head, the recipients. Empty only when the part has no
+  entities.
+- denominator_keeps_roles: whether the roles on those entities also
+  describe the denominator. A population has no giving or receiving side,
+  so false for a per-head figure.
+Use the part's own words for what you keep.
+"""
+
+_DENOMINATOR_SPLIT_SCHEMA = _schema(
+    measure=_STR,
+    measure_unit=_OPT_STR,
+    denominator=_STR,
+    denominator_unit=_OPT_STR,
+    denominator_entities=_array(types.Schema(type=types.Type.INTEGER)),
+    denominator_keeps_roles=types.Schema(type=types.Type.BOOLEAN),
+)
+
+
+class GeminiDenominatorSplit(_ModelCall):
+    """Names the measure and the denominator of a search part the search
+    refused for its denominator: each one's variable text and unit, which
+    of the part's entities the denominator is about, and whether they keep
+    their roles. The graph builds
+    the two search parts from the refused part and this draft
+    (`harness.graph._measure_and_denominator`), so the draft carries no
+    entity and no time."""
+
+    async def __call__(
+        self, *, question: str, part: dict[str, Any], message: str
+    ) -> dict[str, Any]:
+        return await self._generate(
+            instruction=_DENOMINATOR_SPLIT_INSTRUCTION,
+            content=_content(question=question, part=part, message=message),
+            schema=_DENOMINATOR_SPLIT_SCHEMA,
+        )
 
 
 _COMPOSE_INSTRUCTION = """\
@@ -544,9 +603,10 @@ so. If the facts are thin, say what was prepared rather than inventing
 detail. When failed_step is set, a plan step could not run: say what that
 step was doing and why it could not, in plain words without its id or the
 counts or codes its failure message carries, and do not claim the result it
-would have produced. Each stat_var_totals entry says the figures are a total
-over several indicators: state it word for word, and never describe such a
-figure as one indicator's value. Never internal jargon (cosine scores,
+would have produced. Each stat_var_totals entry says how the figures were
+computed (a total over several indicators, or entries left out of a
+division): state it word for word, and never describe a total as one
+indicator's value. Never internal jargon (cosine scores,
 spec ids, content versions, status codes, "no_observations") even when a
 fact contains it -- describe an unavailable frame or a refused write in
 plain words instead.
@@ -592,22 +652,38 @@ class GeminiRefusal(_ModelCall):
 _EDIT_INSTRUCTION = """\
 You apply a user's edit to one canvas card. You are given the card's stored
 intent (type, title, select, frame_ref, window), a view of its frame's
-dimensions, and the user's instruction. The platform's rules, which are
+dimensions (with rolling: true when the frame's period is counted back from
+the latest data), and the user's instruction. The platform's rules, which are
 hard constraints:
 - A REVISION may change ONLY title and/or select. Emit patch_json for
   title/selection edits: a JSON object literal (as a string) with only the
   keys you change, e.g. {"title": "..."} or {"select": {...}}.
-- type, window, and frame_ref CANNOT be revised. For those edits emit
-  recreate_json instead: the FULL new intent as a JSON object literal
-  (type, title, select, optional window) -- keep every field you are not
-  changing identical to the stored intent. Never include frame_ref; the
-  caller pins it.
+- type, window, change, and frame_ref CANNOT be revised. For those edits
+  emit recreate_json instead: the FULL new intent as a JSON object literal
+  (type, title, select, optional window, optional change) -- keep every
+  field you are not changing identical to the stored intent. Never include
+  frame_ref; the caller pins it.
 - window is an object of period labels at the frame's grain, e.g.
   {"start": "2000", "end": "2023"}. Either side may be omitted and runs to
   the edge of the frame's coverage: "since 2000" is {"start": "2000"}.
+- A period the user counts back from the latest data is a relative period,
+  {"anchor": "latest", "offset": N}: 0 is the latest period and -1 the one
+  before it. "The last three years" is {"start": {"anchor": "latest",
+  "offset": -2}, "end": {"anchor": "latest", "offset": 0}}. A window with a
+  relative side states both sides. Years the user names stay labels: "2015
+  to 2020" is {"start": "2015", "end": "2020"}.
+- change, on a stat_card only, compares two periods of its series:
+  {"basis": [from, to]}, each a label or a relative period. "Compare with
+  the previous year" is {"basis": [{"anchor": "latest", "offset": -1},
+  {"anchor": "latest", "offset": 0}]}; "compare 2015 with 2020" is
+  {"basis": ["2015", "2020"]}.
 - A title that names something you change (a period, an entity, a chart
   type) changes with it: "... (1960-2023)" shown since 2000 becomes
   "... (2000-2023)", with an open side read from the frame's coverage.
+- A card whose window or change holds a relative period, or whose
+  frame_view says rolling: true, moves with the data: its title names no
+  year and no year range ("... over the last three years", never
+  "... (2021-2023)").
 - select values must come from the frame view; never invent dimension
   values. If the user asks for data the frame does not hold, emit neither
   field and say so in text.
@@ -622,7 +698,7 @@ _EDIT_SCHEMA = _schema(
 )
 
 _PATCH_KEYS = frozenset({"title", "select"})
-_RECREATE_KEYS = frozenset({"type", "title", "select", "window"})
+_RECREATE_KEYS = frozenset({"type", "title", "select", "window", "change"})
 
 
 class GeminiEdit(_ModelCall):
@@ -663,6 +739,7 @@ class GeminiEdit(_ModelCall):
 __all__ = [
     "GeminiCompose",
     "GeminiConverse",
+    "GeminiDenominatorSplit",
     "GeminiEdit",
     "GeminiNarrate",
     "GeminiRefusal",

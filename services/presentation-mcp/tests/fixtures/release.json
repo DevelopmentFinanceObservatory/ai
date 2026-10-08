@@ -1,1 +1,4160 @@
-{"catalog_version":"2026.8.0","schema_version":1,"member_types":["bar_chart","line_chart","note_narration","source_card","stat_card","table"],"constraint_ids":["bar_zero_in_domain","comparable_units_required","log_scale_requires_positive_values","range_contains_visible_data","stat_change_basis_observed"],"retry_modes":{"schema_invalid":"correct_and_retry","binding_invalid":"correct_and_retry","constraint_violation":"correct_and_retry","edit_conflict":"refresh_then_retry","not_found":"do_not_retry","request_invalid":"correct_and_retry","resource_exhausted":"do_not_retry","frame_unavailable":"refresh_then_retry","release_mismatch":"retry_after_delay","service_unavailable":"retry_after_delay","timeout":"retry_after_delay","internal_error":"do_not_retry"},"intent_schemas_tolerant":{"line_chart":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/line_chart","description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"anyOf":[{"$ref":"#/$defs/window"},{"type":"null"}]},"title":{"anyOf":[{"$ref":"#/$defs/title"},{"type":"null"}]}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}},"stat_card":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/stat_card","description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"anyOf":[{"$ref":"#/$defs/window"},{"type":"null"}]},"title":{"anyOf":[{"$ref":"#/$defs/title"},{"type":"null"}]}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}},"bar_chart":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/bar_chart","description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"anyOf":[{"$ref":"#/$defs/window"},{"type":"null"}]},"title":{"anyOf":[{"$ref":"#/$defs/title"},{"type":"null"}]}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}},"table":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/table","type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"anyOf":[{"$ref":"#/$defs/window"},{"type":"null"}]},"title":{"anyOf":[{"$ref":"#/$defs/title"},{"type":"null"}]}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}},"note_narration":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/note_narration","description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"anyOf":[{"type":"string","minLength":1,"maxLength":2000},{"type":"null"}]}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}},"source_card":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"dfo/presentation/intent.v0/source_card","description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":[],"additionalProperties":false,"$defs":{"frame_ref":{"description":"The pinned frame this component draws from, exactly as the data layer returned it.","type":"object","properties":{"spec_id":{"type":"string","minLength":1,"maxLength":200},"content_version":{"type":"string","minLength":1,"maxLength":200}},"required":["spec_id","content_version"],"additionalProperties":false},"window":{"description":"Period labels at the frame's grain, e.g. \"2024\". An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.","type":"object","properties":{"start":{"type":"string","minLength":1,"maxLength":20},"end":{"type":"string","minLength":1,"maxLength":20}},"additionalProperties":false},"title":{"type":"string","minLength":1,"maxLength":120},"line_chart":{"description":"One line per selected series, over time.","type":"object","properties":{"type":{"const":"line_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":8}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"bar_chart":{"description":"Bars compare entities or periods, never both.","type":"object","properties":{"type":{"const":"bar_chart"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"table":{"type":"object","properties":{"type":{"const":"table"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.","type":"object","additionalProperties":{"anyOf":[{"type":"string","minLength":1,"maxLength":200},{"type":"array","items":{"type":"string","minLength":1,"maxLength":200},"minItems":1,"maxItems":30}]}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"stat_card":{"description":"One value with its label and unit: the latest observed period within the window.","type":"object","properties":{"type":{"const":"stat_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"},"select":{"description":"Dimension name to value, naming exactly one series.","type":"object","additionalProperties":{"type":"string","minLength":1,"maxLength":200}},"window":{"$ref":"#/$defs/window"},"title":{"$ref":"#/$defs/title"}},"required":["type","frame_ref","select"],"additionalProperties":false},"note_narration":{"description":"Model-authored text, labelled as model voice wherever it appears.","type":"object","properties":{"type":{"const":"note_narration"},"text":{"type":"string","minLength":1,"maxLength":2000}},"required":["type","text"],"additionalProperties":false},"source_card":{"description":"Source, licence, dates, and citation, derived from the frame's provenance.","type":"object","properties":{"type":{"const":"source_card"},"frame_ref":{"$ref":"#/$defs/frame_ref"}},"required":["type","frame_ref"],"additionalProperties":false}}}},"minimal_intents":{"line_chart":{"type":"line_chart","frame_ref":{"spec_id":"spec_9f2e41a7c03b58d2a4c1f6b2e8d35790","content_version":"cv_f4a81c22d9075e3ba61c2ee98f83b405"},"select":{"statvar":"health_oda"}},"stat_card":{"type":"stat_card","frame_ref":{"spec_id":"spec_9f2e41a7c03b58d2a4c1f6b2e8d35790","content_version":"cv_f4a81c22d9075e3ba61c2ee98f83b405"},"select":{"statvar":"health_oda"}},"bar_chart":{"type":"bar_chart","frame_ref":{"spec_id":"spec_9f2e41a7c03b58d2a4c1f6b2e8d35790","content_version":"cv_f4a81c22d9075e3ba61c2ee98f83b405"},"select":{"statvar":"health_oda"}},"table":{"type":"table","frame_ref":{"spec_id":"spec_9f2e41a7c03b58d2a4c1f6b2e8d35790","content_version":"cv_f4a81c22d9075e3ba61c2ee98f83b405"},"select":{"statvar":"health_oda"}},"note_narration":{"type":"note_narration","text":"Disbursements rose each year after 2020."},"source_card":{"type":"source_card","frame_ref":{"spec_id":"spec_9f2e41a7c03b58d2a4c1f6b2e8d35790","content_version":"cv_f4a81c22d9075e3ba61c2ee98f83b405"}}}}
+{
+  "catalog_version": "2026.10.0",
+  "schema_version": 1,
+  "member_types": [
+    "bar_chart",
+    "line_chart",
+    "note_narration",
+    "source_card",
+    "stat_card",
+    "table"
+  ],
+  "constraint_ids": [
+    "bar_zero_in_domain",
+    "comparable_units_required",
+    "log_scale_requires_positive_values",
+    "range_contains_visible_data",
+    "stat_change_basis_observed"
+  ],
+  "retry_modes": {
+    "schema_invalid": "correct_and_retry",
+    "binding_invalid": "correct_and_retry",
+    "constraint_violation": "correct_and_retry",
+    "edit_conflict": "refresh_then_retry",
+    "write_refused": "do_not_retry",
+    "not_found": "do_not_retry",
+    "request_invalid": "correct_and_retry",
+    "resource_exhausted": "do_not_retry",
+    "frame_unavailable": "refresh_then_retry",
+    "release_mismatch": "retry_after_delay",
+    "refresh_not_permitted": "do_not_retry",
+    "render_target_mismatch": "do_not_retry",
+    "service_unavailable": "retry_after_delay",
+    "timeout": "retry_after_delay",
+    "internal_error": "do_not_retry"
+  },
+  "envelope_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://developmentfinance.org/presentation/schema/v1/envelope.schema.json",
+    "title": "Presentation envelope",
+    "description": "Every resolved component payload has this one shape (Contract - Presentation Primitive, \"The envelope\"). `component` is closed to the members this catalogue release ships (line_chart, bar_chart, table, stat_card, note_narration, source_card); a member added later is a new catalogue release, per \"The union is closed per release\".",
+    "type": "object",
+    "additionalProperties": false,
+    "unevaluatedProperties": false,
+    "required": [
+      "schema_version",
+      "catalog_version",
+      "component_id",
+      "revision",
+      "provenance",
+      "component"
+    ],
+    "properties": {
+      "schema_version": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "the integer version of the catalogue schema this payload was generated against"
+      },
+      "catalog_version": {
+        "$ref": "#/$defs/catalog_version"
+      },
+      "component_id": {
+        "type": "string",
+        "pattern": "^cmp_[A-Za-z0-9]{8,32}$",
+        "description": "globally unique, minted at creation; the id every edit tool targets"
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "increments on every applied edit; revisions are immutable once minted"
+      },
+      "provenance": {
+        "$ref": "#/$defs/provenance"
+      },
+      "component": {
+        "oneOf": [
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/line_chart.schema.json"
+          },
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/bar_chart.schema.json"
+          },
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/table.schema.json"
+          },
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/stat_card.schema.json"
+          },
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/note_narration.schema.json"
+          },
+          {
+            "$ref": "https://developmentfinance.org/presentation/schema/v1/component/source_card.schema.json"
+          }
+        ]
+      }
+    },
+    "if": {
+      "properties": {
+        "component": {
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      },
+      "required": [
+        "component"
+      ]
+    },
+    "else": {
+      "$comment": "Every member but note_narration resolves a frame, so provenance.inputs names at least the one frame it resolved; note_narration carries no frame_ref and its own inputs stays empty, the base bound (minItems 0) the $defs/provenance schema declares.",
+      "properties": {
+        "provenance": {
+          "properties": {
+            "inputs": {
+              "minItems": 1
+            }
+          }
+        }
+      }
+    },
+    "$defs": {
+      "catalog_version": {
+        "type": "string",
+        "$comment": "Calver, provisional; redefined in place pre-freeze rather than bumped, until a first real freeze fixes it.",
+        "pattern": "^[0-9]{4}\\.[0-9]{1,2}\\.[0-9]+$",
+        "maxLength": 32
+      },
+      "spec_id": {
+        "type": "string",
+        "$comment": "spec_ (Datasets) or ops_ (Analysis Toolkit) prefix per \"Frame and series references\"; hex-length bound is loose because the contract itself calls identifier spellings illustrative pending the identifier decision.",
+        "pattern": "^(spec|ops)_[0-9a-f]{6,64}$"
+      },
+      "content_version": {
+        "type": "string",
+        "$comment": "cv_ (Datasets) or ocv_ (Analysis Toolkit) prefix per \"Frame and series references\", matching the prefixes `spec_id` accepts; hex-length bound is loose for the same reason.",
+        "pattern": "^(cv|ocv)_[0-9a-f]{6,64}$"
+      },
+      "data_commons_id": {
+        "type": "string",
+        "enum": [
+          "dfo",
+          "base",
+          "un_system"
+        ]
+      },
+      "named_ref": {
+        "type": "object",
+        "additionalProperties": false,
+        "unevaluatedProperties": false,
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "provenance": {
+        "type": "object",
+        "additionalProperties": false,
+        "unevaluatedProperties": false,
+        "required": [
+          "inputs",
+          "execution_ref",
+          "sources",
+          "freshness",
+          "warnings",
+          "generated_at",
+          "citation",
+          "refreshed_from"
+        ],
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 20,
+            "description": "empty for a component with no frame_ref (note_narration); every other member names at least the one frame it resolved.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "unevaluatedProperties": false,
+              "required": [
+                "spec_id",
+                "content_version"
+              ],
+              "properties": {
+                "spec_id": {
+                  "$ref": "#/$defs/spec_id"
+                },
+                "content_version": {
+                  "$ref": "#/$defs/content_version"
+                }
+              }
+            }
+          },
+          "execution_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200,
+            "description": "content-addressed identity of the Analysis Toolkit execution behind derived values; null for a direct read"
+          },
+          "sources": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "unevaluatedProperties": false,
+              "required": [
+                "id",
+                "name",
+                "url",
+                "licence",
+                "retrieved"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^src_[a-z0-9_]{1,60}$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "maxLength": 2048
+                },
+                "licence": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "retrieved": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "the Data Commons provenance dcid this entry was built from (for example `provenance/OECDCreditorReportingSystem` or `dc/base/WorldDevelopmentIndicators`), so a renderer can look the source up in the graph; absent on components minted before platforms wrote it"
+                },
+                "source": {
+                  "$ref": "#/$defs/named_ref",
+                  "description": "the Data Commons Source node behind the provenance (for a UN System Data Commons series, the agency provenance itself); absent on dataset versions minted before the origin catalogue"
+                },
+                "data_commons": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "unevaluatedProperties": false,
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "id": {
+                      "$ref": "#/$defs/data_commons_id"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  },
+                  "description": "the Data Commons the provenance is served from; absent on dataset versions minted before the origin catalogue"
+                }
+              }
+            }
+          },
+          "freshness": {
+            "type": "object",
+            "additionalProperties": false,
+            "unevaluatedProperties": false,
+            "required": [
+              "data_through",
+              "last_refreshed",
+              "next_expected",
+              "partial_period"
+            ],
+            "properties": {
+              "data_through": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "$comment": "nullable: the upstream frame may not yet supply a coverage-through period.",
+                "maxLength": 10
+              },
+              "last_refreshed": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date"
+              },
+              "next_expected": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "$comment": "nullable: not every source publishes a refresh cadence.",
+                "maxLength": 10
+              },
+              "partial_period": {
+                "type": "boolean"
+              }
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "unevaluatedProperties": false,
+              "required": [
+                "kind",
+                "detail"
+              ],
+              "properties": {
+                "kind": {
+                  "$comment": "Closed vocabulary drawn from the contract's own examples (\"provisional status, estimates, imputations, coverage gaps, comparability breaks\"); the taxonomy is seam-owed to the Datasets/Analysis layers that populate it.",
+                  "enum": [
+                    "provisional",
+                    "estimated",
+                    "imputed",
+                    "coverage_gap",
+                    "comparability_break"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                }
+              }
+            }
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "the payload's generation timestamp, stamped by the assembler"
+          },
+          "citation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "ready-to-paste string the assembler generates from the structured provenance fields"
+          },
+          "refreshed_from": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "the revision (of this same component_id) this payload was drawn from on newer data: the revision a render redrew without minting a new one, or the revision a refresh revision was minted from; null otherwise"
+          }
+        }
+      }
+    }
+  },
+  "component_schemas": {
+    "line_chart": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/line_chart.schema.json",
+      "title": "line_chart component",
+      "description": "Resolved payload for the `line_chart` catalogue member (Contract, \"Worked component: the line chart\").",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "title",
+        "series",
+        "x_axis",
+        "y_axis"
+      ],
+      "properties": {
+        "type": {
+          "const": "line_chart"
+        },
+        "title": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "text",
+            "authorship"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "authorship": {
+              "$comment": "Only \"model\" exists at launch (Contract's Model-authored-claims row); the enum stays closed rather than open-string so a future first-party/user authorship arrives as a deliberate catalogue change.",
+              "enum": [
+                "model"
+              ]
+            }
+          }
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/series"
+          }
+        },
+        "x_axis": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "window"
+          ],
+          "properties": {
+            "window": {
+              "$ref": "#/$defs/window"
+            }
+          }
+        },
+        "y_axis": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "label",
+            "scale",
+            "range"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "scale": {
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "$ref": "#/$defs/range"
+            }
+          }
+        }
+      },
+      "$defs": {
+        "period": {
+          "type": "string",
+          "pattern": "^[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?$",
+          "maxLength": 10
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "start",
+            "end"
+          ],
+          "properties": {
+            "start": {
+              "$ref": "#/$defs/period"
+            },
+            "end": {
+              "$ref": "#/$defs/period"
+            }
+          }
+        },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "max": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "unit": {
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "$ref": "#/$defs/structured_unit"
+            }
+          ]
+        },
+        "structured_unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            "magnitude": {
+              "type": "string",
+              "enum": [
+                "units",
+                "thousands",
+                "millions",
+                "billions",
+                "trillions"
+              ]
+            },
+            "prices": {
+              "enum": [
+                "current",
+                "constant"
+              ]
+            },
+            "base_year": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1900,
+              "maximum": 2100
+            }
+          }
+        },
+        "point": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "period"
+          ],
+          "properties": {
+            "period": {
+              "$ref": "#/$defs/period"
+            },
+            "value": {
+              "type": "number"
+            },
+            "status": {
+              "$comment": "The status vocabulary the contract reserves: a derived-missing point (no observation for a visible series over the window/grain) and the source-supplied statuses that pass through unchanged.",
+              "enum": [
+                "missing",
+                "suppressed",
+                "not_applicable"
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "status": false
+              }
+            },
+            {
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "value": false
+              }
+            }
+          ]
+        },
+        "series": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "id",
+            "label",
+            "unit",
+            "source_ref",
+            "points"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,64}$",
+              "description": "derived by the assembler from the series' coordinates; the same selection always yields the same id"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "unit": {
+              "$ref": "#/$defs/unit"
+            },
+            "source_ref": {
+              "type": "string",
+              "pattern": "^src_[a-z0-9_]{1,60}$"
+            },
+            "points": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 500,
+              "items": {
+                "$ref": "#/$defs/point"
+              }
+            }
+          }
+        }
+      }
+    },
+    "stat_card": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/stat_card.schema.json",
+      "title": "stat_card component",
+      "description": "Resolved payload for the `stat_card` catalogue member: one headline number with label, unit, and an optional derived change (Contract, \"The catalogue\").",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "value",
+        "label",
+        "unit",
+        "period"
+      ],
+      "properties": {
+        "type": {
+          "const": "stat_card"
+        },
+        "title": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "text",
+            "authorship"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "authorship": {
+              "$comment": "Only \"model\" exists at launch (Contract's Model-authored-claims row); the enum stays closed rather than open-string so a future first-party/user authorship arrives as a deliberate catalogue change.",
+              "enum": [
+                "model"
+              ]
+            }
+          }
+        },
+        "value": {
+          "type": "number"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "period": {
+          "description": "The period the headline `value` covers: the observation's period, or the span a value derived from several periods covers.",
+          "$ref": "#/$defs/observed_period"
+        },
+        "unit": {
+          "$comment": "Pass-through unit slot, identical shape to line_chart's; no conversion happens in Presentation.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "$ref": "#/$defs/structured_unit"
+            }
+          ]
+        },
+        "change": {
+          "$comment": "Optional: a headline with no requested comparison period carries no change. When present, both fields are mandatory -- a change with no stated derivation or basis is exactly the ambiguity stat_change_basis_observed exists to prevent.",
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "derivation",
+            "basis",
+            "value"
+          ],
+          "properties": {
+            "derivation": {
+              "$comment": "Closed, golden-tested derivation set (Contract: \"drawn from a closed, golden-tested derivation set: difference and percent change\").",
+              "enum": [
+                "difference",
+                "percent_change"
+              ]
+            },
+            "basis": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "$ref": "#/$defs/period"
+              }
+            },
+            "value": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "$defs": {
+        "period": {
+          "type": "string",
+          "pattern": "^[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?$",
+          "maxLength": 10
+        },
+        "observed_period": {
+          "$comment": "A point at year, month or day grain, or a closed span `start/end` whose two ends share one grain. The frame grammar's period rule also requires start before end, which a pattern cannot compare.",
+          "type": "string",
+          "pattern": "^([0-9]{4}(/[0-9]{4})?|[0-9]{4}-(0[1-9]|1[0-2])(/[0-9]{4}-(0[1-9]|1[0-2]))?|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(/[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))?)$",
+          "maxLength": 21
+        },
+        "structured_unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            "magnitude": {
+              "type": "string",
+              "enum": [
+                "units",
+                "thousands",
+                "millions",
+                "billions",
+                "trillions"
+              ]
+            },
+            "prices": {
+              "enum": [
+                "current",
+                "constant"
+              ]
+            },
+            "base_year": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1900,
+              "maximum": 2100
+            }
+          }
+        }
+      }
+    },
+    "bar_chart": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/bar_chart.schema.json",
+      "title": "bar_chart component",
+      "description": "Resolved payload for the `bar_chart` catalogue member. Bars compare entities or periods, never both: entity mode bars one point per selected entity at one shared period or one shared span; period mode bars one series' points across a window, the same shape as `line_chart`.",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "title",
+        "series",
+        "category_axis",
+        "value_axis"
+      ],
+      "properties": {
+        "type": {
+          "const": "bar_chart"
+        },
+        "title": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "text",
+            "authorship"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "authorship": {
+              "enum": [
+                "model"
+              ]
+            }
+          }
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/bar_series"
+          }
+        },
+        "category_axis": {
+          "description": "Entity mode names the dimension bars categorize by and the one shared period every bar was minted at. Period mode names the window bars span, the same shape line_chart's x_axis carries.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/category_axis_entity_mode"
+            },
+            {
+              "$ref": "#/$defs/category_axis_period_mode"
+            }
+          ]
+        },
+        "value_axis": {
+          "description": "The axis values are drawn on, whichever side orientation puts it.",
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "label",
+            "scale",
+            "range"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "scale": {
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "$ref": "#/$defs/range"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "category_axis": {
+            "properties": {
+              "mode": {
+                "const": "period"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "$comment": "Period mode bars one series across a window, so each bar's period is a point; only entity mode carries a span.",
+        "properties": {
+          "series": {
+            "items": {
+              "properties": {
+                "points": {
+                  "items": {
+                    "properties": {
+                      "period": {
+                        "$ref": "#/$defs/period"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "$defs": {
+        "period": {
+          "type": "string",
+          "pattern": "^[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?$",
+          "maxLength": 10
+        },
+        "observed_period": {
+          "$comment": "A point at year, month or day grain, or a closed span `start/end` whose two ends share one grain. The frame grammar's period rule also requires start before end, which a pattern cannot compare.",
+          "type": "string",
+          "pattern": "^([0-9]{4}(/[0-9]{4})?|[0-9]{4}-(0[1-9]|1[0-2])(/[0-9]{4}-(0[1-9]|1[0-2]))?|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(/[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))?)$",
+          "maxLength": 21
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "start",
+            "end"
+          ],
+          "properties": {
+            "start": {
+              "$ref": "#/$defs/period"
+            },
+            "end": {
+              "$ref": "#/$defs/period"
+            }
+          }
+        },
+        "category_axis_entity_mode": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "mode",
+            "category_dimension",
+            "period"
+          ],
+          "properties": {
+            "mode": {
+              "const": "entity"
+            },
+            "category_dimension": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "period": {
+              "$ref": "#/$defs/observed_period"
+            }
+          }
+        },
+        "category_axis_period_mode": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "mode",
+            "window"
+          ],
+          "properties": {
+            "mode": {
+              "const": "period"
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            }
+          }
+        },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "max": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "unit": {
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "$ref": "#/$defs/structured_unit"
+            }
+          ]
+        },
+        "structured_unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            "magnitude": {
+              "type": "string",
+              "enum": [
+                "units",
+                "thousands",
+                "millions",
+                "billions",
+                "trillions"
+              ]
+            },
+            "prices": {
+              "enum": [
+                "current",
+                "constant"
+              ]
+            },
+            "base_year": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1900,
+              "maximum": 2100
+            }
+          }
+        },
+        "bar_point": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "period"
+          ],
+          "properties": {
+            "period": {
+              "$ref": "#/$defs/observed_period"
+            },
+            "value": {
+              "type": "number"
+            },
+            "status": {
+              "$comment": "The status vocabulary the contract reserves: a derived-missing point (no observation for a visible series over the window/grain) and the source-supplied statuses that pass through unchanged.",
+              "enum": [
+                "missing",
+                "suppressed",
+                "not_applicable"
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "status": false
+              }
+            },
+            {
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "value": false
+              }
+            }
+          ]
+        },
+        "bar_series": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "id",
+            "label",
+            "unit",
+            "source_ref",
+            "points"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,64}$",
+              "description": "derived by the assembler from the series' coordinates; the same selection always yields the same id"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "unit": {
+              "$ref": "#/$defs/unit"
+            },
+            "source_ref": {
+              "type": "string",
+              "pattern": "^src_[a-z0-9_]{1,60}$"
+            },
+            "points": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 500,
+              "items": {
+                "$ref": "#/$defs/bar_point"
+              }
+            }
+          }
+        }
+      }
+    },
+    "table": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/table.schema.json",
+      "title": "table component",
+      "description": "Resolved payload for the `table` catalogue member: one row per (selected coordinate, period), the cross-product of every arrayed selection.",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "title",
+        "columns",
+        "rows"
+      ],
+      "properties": {
+        "type": {
+          "const": "table"
+        },
+        "title": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "text",
+            "authorship"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "authorship": {
+              "enum": [
+                "model"
+              ]
+            }
+          }
+        },
+        "columns": {
+          "description": "One entry per selected dimension, in select order, followed by period and value.",
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/column"
+          }
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2000,
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        }
+      },
+      "$defs": {
+        "period": {
+          "type": "string",
+          "pattern": "^[0-9]{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12][0-9]|3[01]))?)?$",
+          "maxLength": 10
+        },
+        "observed_period": {
+          "$comment": "A point at year, month or day grain, or a closed span `start/end` whose two ends share one grain. The frame grammar's period rule also requires start before end, which a pattern cannot compare.",
+          "type": "string",
+          "pattern": "^([0-9]{4}(/[0-9]{4})?|[0-9]{4}-(0[1-9]|1[0-2])(/[0-9]{4}-(0[1-9]|1[0-2]))?|[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(/[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))?)$",
+          "maxLength": 21
+        },
+        "column": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "key",
+            "label"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "unit": {
+          "$comment": "Pass-through unit slot: null, an opaque graph-ref string, or a structured object. No conversion happens in Presentation; the structured object's own field set is seam-owed to the upstream unit design.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "$ref": "#/$defs/structured_unit"
+            }
+          ]
+        },
+        "structured_unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            },
+            "magnitude": {
+              "type": "string",
+              "enum": [
+                "units",
+                "thousands",
+                "millions",
+                "billions",
+                "trillions"
+              ]
+            },
+            "prices": {
+              "enum": [
+                "current",
+                "constant"
+              ]
+            },
+            "base_year": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1900,
+              "maximum": 2100
+            }
+          }
+        },
+        "row": {
+          "type": "object",
+          "additionalProperties": false,
+          "unevaluatedProperties": false,
+          "required": [
+            "dimensions",
+            "period",
+            "source_ref",
+            "unit"
+          ],
+          "properties": {
+            "series_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,64}$",
+              "description": "the series identity the row belongs to, equal to the id a bar or line series would carry for the same coordinates"
+            },
+            "dimensions": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "period": {
+              "$ref": "#/$defs/observed_period"
+            },
+            "source_ref": {
+              "type": "string",
+              "pattern": "^src_[a-z0-9_]{1,60}$"
+            },
+            "unit": {
+              "$ref": "#/$defs/unit"
+            },
+            "value": {
+              "type": "number"
+            },
+            "status": {
+              "enum": [
+                "missing",
+                "suppressed",
+                "not_applicable"
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "status": false
+              }
+            },
+            {
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "value": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    "note_narration": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/note_narration.schema.json",
+      "title": "note_narration component",
+      "description": "Resolved payload for the `note_narration` catalogue member: model-authored text, labelled as model voice.",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "text",
+        "authorship"
+      ],
+      "properties": {
+        "type": {
+          "const": "note_narration"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "authorship": {
+          "$comment": "Only \"model\" exists at launch, the same closed vocabulary the other components' title.authorship carries.",
+          "enum": [
+            "model"
+          ]
+        }
+      }
+    },
+    "source_card": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "https://developmentfinance.org/presentation/schema/v1/component/source_card.schema.json",
+      "title": "source_card component",
+      "description": "Resolved payload for the `source_card` catalogue member: which of the envelope's own provenance.sources this card presents. Carries no duplicated source objects; provenance stays the single source of truth and this component is the presentation instruction.",
+      "type": "object",
+      "additionalProperties": false,
+      "unevaluatedProperties": false,
+      "required": [
+        "type",
+        "source_refs"
+      ],
+      "properties": {
+        "type": {
+          "const": "source_card"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "pattern": "^src_[a-z0-9_]{1,60}$"
+          }
+        }
+      }
+    }
+  },
+  "intent_schemas_tolerant": {
+    "line_chart": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/line_chart",
+      "description": "One line per selected series, over time.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "line_chart"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/frame_ref"
+        },
+        "select": {
+          "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "minItems": 1,
+                "maxItems": 8
+              }
+            ]
+          }
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/title"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range": {
+          "anyOf": [
+            {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "stat_card": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/stat_card",
+      "description": "One value with its label and unit: the latest observed period within the window.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "stat_card"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/frame_ref"
+        },
+        "select": {
+          "description": "Dimension name to value, naming exactly one series.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/title"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "change": {
+          "anyOf": [
+            {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "bar_chart": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/bar_chart",
+      "description": "Bars compare entities or periods, never both.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "bar_chart"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/frame_ref"
+        },
+        "select": {
+          "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "minItems": 1,
+                "maxItems": 30
+              }
+            ]
+          }
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/title"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "range": {
+          "anyOf": [
+            {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "table": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/table",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "table"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/frame_ref"
+        },
+        "select": {
+          "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "minItems": 1,
+                "maxItems": 30
+              }
+            ]
+          }
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/window"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/title"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "note_narration": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/note_narration",
+      "description": "Model-authored text, labelled as model voice wherever it appears.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "note_narration"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "source_card": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "dfo/presentation/intent.v0/source_card",
+      "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "source_card"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/frame_ref"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$defs": {
+        "frame_ref": {
+          "description": "The pinned frame this component draws from, exactly as the data layer returned it.",
+          "type": "object",
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "spec_id",
+            "content_version"
+          ],
+          "additionalProperties": false
+        },
+        "relative_period": {
+          "description": "A period counted from the latest one: `anchor` \"latest\" is the newest period at least half of the component's series hold, and `offset` moves back from it by whole periods at the frame's grain, 0 for the anchor itself. It is resolved to a period label each time the component is drawn.",
+          "$comment": "dfo_frame_grammar.rolling resolves it: latest_anchor finds the anchor and shift_period applies the offset. A day-grain frame admits offset 0 only, and a span frame admits no relative period. `integer` admits an integral float such as -1.0, and shift_period takes an int, so a consumer converts the offset before calling.",
+          "type": "object",
+          "properties": {
+            "anchor": {
+              "const": "latest"
+            },
+            "offset": {
+              "type": "integer",
+              "maximum": 0
+            }
+          },
+          "required": [
+            "anchor",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
+        "window": {
+          "description": "Each side is a period label at the frame's grain, e.g. \"2024\", the frame's span, e.g. \"2018/2022\", or a relative period, e.g. {\"anchor\": \"latest\", \"offset\": -9}. An omitted side runs to the edge of the frame's coverage; omitting the window entirely means full coverage.",
+          "$comment": "A label's maxLength is 21, the longest period the frame grammar's parse_time_period accepts: a day-grain span such as 2024-01-01/2024-01-31. The component schemas' $defs.observed_period carries the same bound.",
+          "type": "object",
+          "properties": {
+            "start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            },
+            "end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 21
+                },
+                {
+                  "$ref": "#/$defs/relative_period"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "line_chart": {
+          "description": "One line per selected series, over time.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "line_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 8 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 8
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "bar_chart": {
+          "description": "Bars compare entities or periods, never both.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "bar_chart"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. At most one dimension may be an array of up to 30 values; the rest are single strings.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "scale": {
+              "description": "The scale of the value axis. \"log\" plots the axis logarithmically and requires every visible series value to be positive. Absent means linear.",
+              "enum": [
+                "linear",
+                "log"
+              ]
+            },
+            "range": {
+              "description": "Fixed bounds for the value axis. Both keys are required when `range` is present, and a null bound follows the data. The fixed range must contain the visible data.",
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value. Any dimension may be an array; rows are the cross-product of all values.",
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 30
+                  }
+                ]
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "stat_card": {
+          "description": "One value with its label and unit: the latest observed period within the window.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "stat_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            },
+            "select": {
+              "description": "Dimension name to value, naming exactly one series.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "window": {
+              "$ref": "#/$defs/window"
+            },
+            "title": {
+              "$ref": "#/$defs/title"
+            },
+            "change": {
+              "description": "A derived comparison between two observed periods of the primary series. `basis` names the two periods in order, from then to. `derivation` selects how the comparison is computed and absent means \"difference\".",
+              "type": "object",
+              "properties": {
+                "basis": {
+                  "description": "The two periods being compared, in order: [from, to]. Each is a period label or a relative period, e.g. [{\"anchor\": \"latest\", \"offset\": -1}, {\"anchor\": \"latest\", \"offset\": 0}].",
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 20
+                      },
+                      {
+                        "$ref": "#/$defs/relative_period"
+                      }
+                    ]
+                  },
+                  "minItems": 2,
+                  "maxItems": 2
+                },
+                "derivation": {
+                  "description": "How the change is computed. Absent means \"difference\".",
+                  "enum": [
+                    "difference",
+                    "percent_change"
+                  ]
+                }
+              },
+              "required": [
+                "basis"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref",
+            "select"
+          ],
+          "additionalProperties": false
+        },
+        "note_narration": {
+          "description": "Model-authored text, labelled as model voice wherever it appears.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "note_narration"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "source_card": {
+          "description": "Source, licence, dates, and citation, derived from the frame's provenance.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "source_card"
+            },
+            "frame_ref": {
+              "$ref": "#/$defs/frame_ref"
+            }
+          },
+          "required": [
+            "type",
+            "frame_ref"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "minimal_intents": {
+    "line_chart": {
+      "type": "line_chart",
+      "frame_ref": {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      },
+      "select": {
+        "stat_var": "health_oda"
+      }
+    },
+    "stat_card": {
+      "type": "stat_card",
+      "frame_ref": {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      },
+      "select": {
+        "stat_var": "health_oda"
+      }
+    },
+    "bar_chart": {
+      "type": "bar_chart",
+      "frame_ref": {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      },
+      "select": {
+        "stat_var": "health_oda"
+      }
+    },
+    "table": {
+      "type": "table",
+      "frame_ref": {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      },
+      "select": {
+        "stat_var": "health_oda"
+      }
+    },
+    "note_narration": {
+      "type": "note_narration",
+      "text": "Disbursements rose each year after 2020."
+    },
+    "source_card": {
+      "type": "source_card",
+      "frame_ref": {
+        "spec_id": "spec_9f2e41a7c03b58d2a4c1f6b2e8d35790",
+        "content_version": "cv_f4a81c22d9075e3ba61c2ee98f83b405"
+      }
+    }
+  }
+}

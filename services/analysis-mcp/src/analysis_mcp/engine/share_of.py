@@ -1,6 +1,5 @@
 """The `share_of` engine: numerator/denominator ratio over two slices.
-`share_of` refuses on a denominator/numerator grain mismatch, with both
-coverages in the refusal's fix payload.
+`share_of` divides over the periods both sides report and records the rest.
 
 A "slice" is `frame_ref` (or `denominator_frame_ref`) plus an `entity`
 binding, the same `{role_column: value}` narrowing shape
@@ -16,22 +15,32 @@ must match -- a ratio of two different units (dollars over a headcount, say)
 is silently wrong, so `run_share_of` refuses (`ShareOfUnitMismatchError`) if
 the units differ. One side's rows leaving `unit` unbound entirely is a
 separate case (`ShareOfUnitUnboundError`): one side has no declared unit at
-all, so there is no second unit to compare. Facets are checked the same way
-(`ShareOfFacetMismatchError`): each side resolves its own facet selections
-independently; nothing else catches a numerator scoped to `provenance=dcid:P1`
-paired against a denominator scoped to `dcid:P2`. Neither check runs when
+all, so there is no second unit to compare. Facets are checked across the
+sides too: each side resolves its own facet selections independently, and
+when both sides hold the same StatVar, a numerator scoped to
+`provenance=dcid:P1` paired against a denominator scoped to `dcid:P2` refuses
+(`ShareOfFacetMismatchError`), since that is one measure from two sources.
+Two different StatVars (debt service over GDP) divide with a warning naming
+both selections. Neither check runs when
 either side's slice is empty; `ShareOfGrainMismatchError` names that real
 problem once the period sets are compared.
 
-The grain-match policy: each side's own summed `{time_period: value}` series
-is computed independently, and the two sides' period sets must be identical
-(a stricter bar than intersecting as `compare` does). Any mismatch refuses
-with `ShareOfGrainMismatchError`, naming both sides' periods and coverage.
-This is the refusing side of the partial-overlap policy in
-`analysis_mcp.engine.common`, whose docstring carries the reasoning. A
-denominator period whose summed value is exactly zero makes the ratio
-undefined and refuses (`ShareOfNonFiniteResultError`) before any division
-is attempted.
+The period policy is `quotient_of`'s, through the same
+`analysis_mcp.engine.two_sided.pair_periods`: each side's own summed
+`{time_period: value}` series is computed independently, each numerator key
+divides over the periods it shares with its denominator group, and every
+(key, period) either side holds outside them is recorded as a
+`period_unmatched` exclusion with its side. A key sharing no period at all
+refuses (`ShareOfGrainMismatchError`). This is the proceeding side of the
+partial-overlap policy in `analysis_mcp.engine.common`. A denominator
+period whose summed value is exactly zero makes the ratio undefined and
+refuses (`ShareOfNonFiniteResultError`) before any division is attempted.
+
+A side in a composed unit (dollars per person, a `quotient_of` result) is
+one figure per (key, period) or nothing: a cell holding more than one such
+row refuses (`analysis_mcp.engine.aggregate.ComposedUnitSumError`, naming
+the side), since figures per head have no total. Two sides of one row per
+cell divide as any two figures in one unit do.
 
 `numerator_by`/`denominator_by` key the sum: `numerator_by` names role
 column(s) on the numerator's own frame, so the sum runs once per (key,
@@ -54,60 +63,66 @@ pairing for the column(s) it leaves out (`ShareOfKeyUnknownError`). A
 numerator key with no matching denominator group under this mapping
 refuses distinctly (`ShareOfKeyUnmatchedError`). `numerator_by=()` (the
 default) computes a single total, with no key.
+
+Every result row states what it holds. Its `value` is the share in per cent
+(numerator / denominator x 100), its `unit` is
+`common.unit_refs.PERCENT_UNIT`, the ref dfo-apis writes on a published
+share such as a "% of GDP" series, and its `stat_var` is the caller-supplied
+`stat_var`, the operation's own minted ref, as `quotient_of` labels its
+rows. A computed share and a published one therefore compare and plot
+together.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from itertools import pairwise
-from typing import Literal, cast
 
 import pyarrow as pa
-from dfo_frame_grammar import Frame
+from common.unit_refs import PERCENT_UNIT
+from dfo_frame_grammar import Frame, unit_cell_array
 from dfo_frame_grammar.grammar import (
     STAT_VAR_COLUMN,
     TIME_PERIOD_COLUMN,
+    UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
-from analysis_mcp.engine.columnar import frame_from_columns, group_rows, repeated
+from analysis_mcp.engine.columnar import frame_from_columns, repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     combine_exclusions,
+    cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
     first_cross_side_facet_mismatch,
-    narrow_and_resolve,
-    require_one_place_level,
-    require_single_stat_var,
-    role_columns,
-    validate_entity_columns,
+)
+from analysis_mcp.engine.two_sided import (
+    DenominatorByPartialError,
+    KeyPairs,
+    KeyPeriods,
+    NonFiniteCellError,
+    denominator_key_columns,
+    divide_cell,
+    pair_periods,
+    record_unmatched_periods,
+    sum_side,
 )
 
 
 class ShareOfGrainMismatchError(Exception):
-    """The numerator's and denominator's own summed period sets differ.
+    """A numerator key shares no period with its denominator group, so it
+    has no share to report.
 
-    `numerator_periods`/`denominator_periods` are each side's own periods,
-    sorted; `numerator_coverage_fraction`/`denominator_coverage_fraction` are
-    each side's own "how much of my periods does the other side also cover"
-    fraction; `matched_periods` is the sorted intersection -- every period
-    both sides actually share, if any -- naming the exact `time_period`
-    values a `filter` retry (`category_match` on `time_period`) would narrow
-    each side down to, since narrowing both sides to `matched_periods` and
-    retrying `share_of` on the results is a repair fully inside this
-    toolkit. All four land in the refusal's `fix` payload together, per the
-    declared policy: never report one side's numbers and proceed on the
-    other's say-so.
-
-    `key` names the offending `numerator_by` key -- empty (`()`) for an
-    un-keyed call, where this whole call has exactly one implicit key. The
-    identical-period-set rule applies per key, so a multi-key call reports
-    the first key (in sorted order) whose own periods disagree, never a
-    pooled figure across every key.
+    `numerator_periods`/`denominator_periods` are that key's own periods on
+    each side, sorted, and `key` names it -- empty (`()`) for an un-keyed
+    call, where this whole call has exactly one implicit key. A multi-key
+    call reports the first key, in sorted order, sharing no period. Both
+    tuples empty means a side's entity binding matched no row: both sides
+    for an un-keyed call, the numerator for a keyed one.
     """
 
     def __init__(
@@ -115,19 +130,13 @@ class ShareOfGrainMismatchError(Exception):
         *,
         numerator_periods: Sequence[str],
         denominator_periods: Sequence[str],
-        numerator_coverage_fraction: float,
-        denominator_coverage_fraction: float,
-        matched_periods: Sequence[str],
         key: Sequence[tuple[str, str]] = (),
     ) -> None:
         self.numerator_periods = tuple(numerator_periods)
         self.denominator_periods = tuple(denominator_periods)
-        self.numerator_coverage_fraction = numerator_coverage_fraction
-        self.denominator_coverage_fraction = denominator_coverage_fraction
-        self.matched_periods = tuple(matched_periods)
         self.key = tuple(key)
         super().__init__(
-            f"numerator periods {self.numerator_periods!r} do not match denominator "
+            f"numerator periods {self.numerator_periods!r} share none with denominator "
             f"periods {self.denominator_periods!r} for key {dict(self.key)!r}"
         )
 
@@ -152,9 +161,7 @@ class ShareOfUnitMismatchError(Exception):
     divided.
     """
 
-    def __init__(
-        self, *, numerator_unit: str | UnitRequest, denominator_unit: str | UnitRequest
-    ) -> None:
+    def __init__(self, *, numerator_unit: UnitCell, denominator_unit: UnitCell) -> None:
         self.numerator_unit = numerator_unit
         self.denominator_unit = denominator_unit
         super().__init__(
@@ -174,9 +181,7 @@ class ShareOfUnitUnboundError(Exception):
     CompareUnitUnboundError` already draws for `compare`.
     """
 
-    def __init__(
-        self, *, unbound_side: str, bound_side: str, bound_unit: str | UnitRequest
-    ) -> None:
+    def __init__(self, *, unbound_side: str, bound_side: str, bound_unit: UnitCell) -> None:
         self.unbound_side = unbound_side
         self.bound_side = bound_side
         self.bound_unit = bound_unit
@@ -187,9 +192,10 @@ class ShareOfUnitUnboundError(Exception):
 
 
 class ShareOfFacetMismatchError(Exception):
-    """Each side resolved its own facet selections independently, but they
-    disagree on at least one axis -- a `provenance=dcid:P1` numerator
-    compared against a `provenance=dcid:P2` denominator, say. Distinct from
+    """Both sides hold the same `stat_var` and resolved their own facet
+    selections independently, but they disagree on at least one axis, for
+    example a `provenance=dcid:P1` numerator compared against a
+    `provenance=dcid:P2` denominator. Distinct from
     `analysis_mcp.engine.common.FacetHeterogeneousError`, which fires when
     *one* slice itself carries more than one declared value on an axis;
     here each side is internally uniform (or unbound) on its own, and it's
@@ -198,13 +204,16 @@ class ShareOfFacetMismatchError(Exception):
     `ShareOfUnitMismatchError` already applies to `unit`.
     """
 
-    def __init__(self, *, axis: str, numerator_ref: str, denominator_ref: str) -> None:
+    def __init__(
+        self, *, axis: str, numerator_ref: str, denominator_ref: str, stat_var: str
+    ) -> None:
         self.axis = axis
         self.numerator_ref = numerator_ref
         self.denominator_ref = denominator_ref
+        self.stat_var = stat_var
         super().__init__(
-            f"numerator resolved facet {axis!r} to {numerator_ref!r}, denominator to "
-            f"{denominator_ref!r}"
+            f"both sides hold {stat_var!r}; numerator resolved facet {axis!r} to "
+            f"{numerator_ref!r}, denominator to {denominator_ref!r}"
         )
 
 
@@ -251,35 +260,65 @@ class ShareOfKeyUnmatchedError(Exception):
 @dataclass(frozen=True, kw_only=True)
 class PeriodShare:
     """One matched (key, period)'s own numerator/denominator values and
-    their ratio, addressed by `time_period` and `key` -- the same "never
-    trust row order" discipline `analysis_mcp.engine.compare.
-    PeriodComparison` follows. `key` is `()` for an un-keyed call, where
-    every row shares the one implicit key."""
+    their share in per cent, the `value` its output row holds, addressed by
+    `time_period` and `key` -- the same "never trust row order" discipline
+    `analysis_mcp.engine.compare.PeriodComparison` follows. `key` is `()`
+    for an un-keyed call, where every row shares the one implicit key."""
 
     time_period: str
     numerator_value: float
     denominator_value: float
-    share: float
-    key: tuple[tuple[str, str], ...] = ()
+    percent: float
+    key: KeyPairs = ()
 
 
 @dataclass(frozen=True, kw_only=True)
 class ShareOfResult:
     """Everything `share_of_tool.py` needs to mint identity, write the
-    store, and render the digest."""
+    store, and render the digest.
+
+    Periods, coverage and the periods one side holds alone read as
+    `analysis_mcp.engine.quotient_of.QuotientOfResult`'s do
+    (`analysis_mcp.engine.two_sided.PeriodPairing`): `matched_periods` are
+    the periods some key shares with its denominator group, and each side's
+    coverage fraction counts the (key, period) cells it shares over those it
+    holds.
+
+    `stat_var` labels every output row; `numerator_stat_var` and
+    `denominator_stat_var` are the StatVars each side resolved to.
+    """
 
     frame: Frame
-    numerator_resolved_unit: str | UnitRequest | None
-    denominator_resolved_unit: str | UnitRequest | None
+    stat_var: str
+    numerator_stat_var: str
+    denominator_stat_var: str
+    numerator_resolved_unit: UnitCell | None
+    denominator_resolved_unit: UnitCell | None
     numerator_facet_selections: tuple[FacetSelection, ...]
     denominator_facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     numerator_periods: tuple[str, ...]
     denominator_periods: tuple[str, ...]
+    matched_periods: tuple[str, ...]
     numerator_coverage_fraction: float
     denominator_coverage_fraction: float
     period_shares: tuple[PeriodShare, ...]
+    numerator_only_periods: tuple[KeyPeriods, ...] = ()
+    denominator_only_periods: tuple[KeyPeriods, ...] = ()
     exclusions: Exclusions = field(default_factory=Exclusions)
+
+
+def _differing_facet_warning(axis: str, numerator_ref: str, denominator_ref: str) -> str:
+    """One `cross_side_differing_facet_axes` finding, worded for share_of's
+    numerator/denominator vocabulary. It reaches a result only when the two
+    sides hold different StatVars, each read under its own selection. Short
+    enough to fit `analysis_mcp.disambiguation.MAX_LABEL_CHARS` with refs of
+    45 characters each, the digest's cap on one warning line.
+    """
+    return (
+        f"facet {axis!r} differs: numerator {numerator_ref!r}, denominator "
+        f"{denominator_ref!r}; two stat_vars, each keeps its own"
+    )
 
 
 def _one_sided_facet_warning(
@@ -304,140 +343,70 @@ def _one_sided_facet_warning(
     )
 
 
-def _summed_by_key_and_period(
-    frame: Frame,
-    *,
-    side: Literal["numerator", "denominator"],
-    entity: Mapping[str, str],
-    by: Sequence[str],
-    pinned_unit: str | UnitRequest | None,
-) -> tuple[
-    dict[tuple[str, ...], dict[str, float]],
-    str | UnitRequest | None,
-    tuple[FacetSelection, ...],
-    tuple[str, ...],
-    Exclusions,
-]:
-    """Narrow `frame` to `entity`'s own rows, resolve unit/facets over
-    exactly that slice, then sum (`math.fsum`) every remaining row sharing
-    both `by`'s own key values and a `time_period` -- one summed value per
-    (key, period), never a per-row value, so more than one matching row in
-    one cell is a deliberate total, not an ambiguity. `by=()` computes one
-    key, the empty tuple, covering every remaining row. Refuses
-    (`UnknownEntityColumnError`) if `entity` or `by` names a column this
-    frame has no grain for, and (`PlaceLevelsMixedError`) if `frame`'s
-    places share no level, whether this side sums across them or keys by them,
-    as the harness's `planner.shapes` refuses either side of a share over such a frame.
-
-    Returns a mapping keyed by `by`'s own key tuple to that key's own
-    `{time_period: summed_value}` series -- a key with no rows at all is
-    simply absent, never present with an empty series; the caller decides
-    what an absent key means for its own side.
-    """
-    require_single_stat_var(frame)
-    validate_entity_columns(frame, (*entity, *by))
-    require_one_place_level(frame, role_columns(frame))
-    # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from
-    # this side's sum, consistent with the policy `aggregate` applies.
-    table, resolved, exclusions = narrow_and_resolve(
-        frame, entity=entity, pinned_unit=pinned_unit, exclude_unitless=True, side=side
-    )
-
-    # Groups come in order of their first row, so keys land in this dict in
-    # order of their first row and each key's periods in order of theirs:
-    # the order an overflowing sum below is found in.
-    groups = group_rows(table, (*by, TIME_PERIOD_COLUMN))
-    values = cast("list[float]", table.column(VALUE_COLUMN).take(groups.indices).to_pylist())
-    key_columns = [cast("list[str]", groups.keys.column(column).to_pylist()) for column in by]
-    periods = cast("list[str]", groups.keys.column(TIME_PERIOD_COLUMN).to_pylist())
-    by_key_and_period: dict[tuple[str, ...], dict[str, list[float]]] = {}
-    for group, (start, end) in enumerate(pairwise(groups.offsets)):
-        key = tuple(column[group] for column in key_columns)
-        by_key_and_period.setdefault(key, {})[periods[group]] = values[start:end]
-
-    summed: dict[tuple[str, ...], dict[str, float]] = {}
-    for key, by_period in by_key_and_period.items():
-        summed_periods: dict[str, float] = {}
-        for period, values in by_period.items():
-            try:
-                # `math.fsum` raises `OverflowError` for a sum whose exact
-                # value exceeds the finite double range, rather than
-                # returning `inf` the way naive `+` accumulation would --
-                # the same guard `aggregate.run_aggregate` and
-                # `rank.run_rank` already apply to their own `math.fsum`
-                # reduction.
-                summed_periods[period] = math.fsum(values)
-            except OverflowError as exc:
-                raise ShareOfNonFiniteResultError(time_period=period, reason="overflow") from exc
-        summed[key] = summed_periods
-
-    return summed, resolved.unit, resolved.facet_selections, tuple(resolved.warnings), exclusions
+@contextmanager
+def _share_of_refusals() -> Iterator[None]:
+    """Re-raise `analysis_mcp.engine.two_sided`'s own exceptions as the
+    `share_of` exceptions carrying the same fields."""
+    try:
+        yield
+    except NonFiniteCellError as exc:
+        raise ShareOfNonFiniteResultError(time_period=exc.time_period, reason=exc.reason) from exc
+    except DenominatorByPartialError as exc:
+        raise ShareOfKeyUnknownError(
+            column=exc.column,
+            numerator_by=exc.numerator_by,
+            denominator_by_keys=exc.denominator_by_keys,
+        ) from exc
 
 
 def run_share_of(
     numerator_frame: Frame,
     denominator_frame: Frame,
     *,
+    stat_var: str,
     numerator_entity: Mapping[str, str],
     denominator_entity: Mapping[str, str],
     numerator_by: Sequence[str] = (),
     denominator_by: Mapping[str, str] | None = None,
-    numerator_pinned_unit: str | UnitRequest | None = None,
-    denominator_pinned_unit: str | UnitRequest | None = None,
+    numerator_pinned_unit: UnitCell | None = None,
+    denominator_pinned_unit: UnitCell | None = None,
 ) -> ShareOfResult:
     """Compute `numerator_frame`'s (narrowed by `numerator_entity`) share of
     `denominator_frame`'s (narrowed by `denominator_entity`) own value, per
-    matched (key, period). See the module docstring for the keying,
-    grain-match and zero-denominator policies; see each raised exception's
-    own docstring for its refusal condition. `numerator_by=()` (the
-    default) computes a single total, with no key.
+    matched (key, period), in per cent, labelling every result row
+    `stat_var`. See the module docstring for the keying, grain-match and
+    zero-denominator policies; see each raised exception's own docstring for
+    its refusal condition. `numerator_by=()` (the default) computes a single
+    total, with no key.
     """
     numerator_by = tuple(numerator_by)
     denominator_by = dict(denominator_by or {})
 
-    if denominator_by:
-        missing = sorted(set(numerator_by) - set(denominator_by))
-        if missing:
-            raise ShareOfKeyUnknownError(
-                column=missing[0],
-                numerator_by=numerator_by,
-                denominator_by_keys=tuple(sorted(denominator_by)),
-            )
-        denominator_columns: tuple[str, ...] = tuple(
-            denominator_by[column] for column in numerator_by
+    with _share_of_refusals():
+        denominator_columns = denominator_key_columns(
+            numerator_by=numerator_by, denominator_by=denominator_by
         )
-    else:
-        denominator_columns = ()
-
-    (
-        numerator_grouped,
-        numerator_unit,
-        numerator_facets,
-        numerator_warnings,
-        numerator_exclusions,
-    ) = _summed_by_key_and_period(
-        numerator_frame,
-        side="numerator",
-        entity=numerator_entity,
-        by=numerator_by,
-        pinned_unit=numerator_pinned_unit,
-    )
-    (
-        denominator_grouped,
-        denominator_unit,
-        denominator_facets,
-        denominator_warnings,
-        denominator_exclusions,
-    ) = _summed_by_key_and_period(
-        denominator_frame,
-        side="denominator",
-        entity=denominator_entity,
-        by=denominator_columns,
-        pinned_unit=denominator_pinned_unit,
-    )
+        numerator = sum_side(
+            numerator_frame,
+            side="numerator",
+            entity=numerator_entity,
+            by=numerator_by,
+            pinned_unit=numerator_pinned_unit,
+        )
+        denominator = sum_side(
+            denominator_frame,
+            side="denominator",
+            entity=denominator_entity,
+            by=denominator_columns,
+            pinned_unit=denominator_pinned_unit,
+        )
+    numerator_grouped, denominator_grouped = numerator.by_key, denominator.by_key
+    numerator_unit, denominator_unit = numerator.unit, denominator.unit
+    numerator_facets = numerator.facet_selections
+    denominator_facets = denominator.facet_selections
 
     # An un-keyed call (`by=()`) has exactly one implicit key, `()`,
-    # whatever it summed to -- including empty. `_summed_by_key_and_period`
+    # whatever it summed to -- including empty. `two_sided.sum_side`
     # only ever records a key some row actually produced, so an entity
     # binding matching zero rows leaves the `()` key entirely absent rather
     # than present with an empty series. Reinstating it here keeps the
@@ -453,13 +422,7 @@ def run_share_of(
     # "matched nothing" fault the un-keyed case already refuses, rather
     # than an empty per-key loop silently returning a vacuous success.
     if numerator_by and not numerator_grouped:
-        raise ShareOfGrainMismatchError(
-            numerator_periods=(),
-            denominator_periods=(),
-            numerator_coverage_fraction=0.0,
-            denominator_coverage_fraction=0.0,
-            matched_periods=(),
-        )
+        raise ShareOfGrainMismatchError(numerator_periods=(), denominator_periods=())
 
     # Both checks only run when both sides actually have rows -- an empty
     # slice (an `entity` binding matching nothing) resolves to `unit=None`
@@ -488,11 +451,19 @@ def run_share_of(
                 numerator_unit=numerator_unit, denominator_unit=denominator_unit
             )
 
-        facet_mismatch = first_cross_side_facet_mismatch(numerator_facets, denominator_facets)
+        facet_mismatch = first_cross_side_facet_mismatch(
+            numerator_facets,
+            denominator_facets,
+            left_stat_vars=(numerator.stat_var,),
+            right_stat_vars=(denominator.stat_var,),
+        )
         if facet_mismatch is not None:
             axis, numerator_ref, denominator_ref = facet_mismatch
             raise ShareOfFacetMismatchError(
-                axis=axis, numerator_ref=numerator_ref, denominator_ref=denominator_ref
+                axis=axis,
+                numerator_ref=numerator_ref,
+                denominator_ref=denominator_ref,
+                stat_var=numerator.stat_var,
             )
 
         # A one-sided axis (see `cross_side_one_sided_facet_axes`'s own
@@ -505,11 +476,22 @@ def run_share_of(
         # denominator's, regardless of which side happened to declare the
         # axis (`share_of`'s own output rows carry no facet columns at all
         # -- see `run_share_of`'s output frame below).
-        cross_side_facet_warnings = tuple(
-            _one_sided_facet_warning(axis, numerator_ref, denominator_ref)
-            for axis, numerator_ref, denominator_ref in cross_side_one_sided_facet_axes(
-                numerator_facets, denominator_facets
-            )
+        # An axis both sides declare to different values reaches here only
+        # when the two sides hold different StatVars, each with its own
+        # selection (see `first_cross_side_facet_mismatch`).
+        cross_side_facet_warnings = (
+            *(
+                _differing_facet_warning(axis, numerator_ref, denominator_ref)
+                for axis, numerator_ref, denominator_ref in cross_side_differing_facet_axes(
+                    numerator_facets, denominator_facets
+                )
+            ),
+            *(
+                _one_sided_facet_warning(axis, numerator_ref, denominator_ref)
+                for axis, numerator_ref, denominator_ref in cross_side_one_sided_facet_axes(
+                    numerator_facets, denominator_facets
+                )
+            ),
         )
 
     # In per-axis mode (`denominator_columns` non-empty) every numerator key
@@ -519,114 +501,66 @@ def run_share_of(
     # denominator key tuple carry identical values). In pooled mode
     # (`denominator_columns` empty) every numerator key shares the single
     # `()` group.
-    pooled_denominator = denominator_grouped.get(()) if not denominator_columns else None
+    pooled = not denominator_columns
+    numerator_keys = sorted(numerator_grouped)
+    for key in numerator_keys:
+        if not pooled and key not in denominator_grouped:
+            raise ShareOfKeyUnmatchedError(
+                key=tuple(zip(numerator_by, key, strict=True)),
+                available=tuple(
+                    tuple(zip(numerator_by, other_key, strict=True))
+                    for other_key in sorted(denominator_grouped)
+                ),
+            )
+    pairing = pair_periods(
+        numerator, denominator, numerator_by=numerator_by, paired_keys=numerator_keys, pooled=pooled
+    )
 
     period_shares: list[PeriodShare] = []
-    all_numerator_periods: set[str] = set()
-    all_denominator_periods: set[str] = set()
-    for key in sorted(numerator_grouped):
+    for key, shared in pairing.shared.items():
         numerator_by_period = numerator_grouped[key]
-        if denominator_columns:
-            if key not in denominator_grouped:
-                raise ShareOfKeyUnmatchedError(
-                    key=tuple(zip(numerator_by, key, strict=True)),
-                    available=tuple(
-                        tuple(zip(numerator_by, other_key, strict=True))
-                        for other_key in sorted(denominator_grouped)
-                    ),
-                )
-            denominator_by_period = denominator_grouped[key]
-        else:
-            denominator_by_period = pooled_denominator if pooled_denominator is not None else {}
-
-        numerator_periods = tuple(sorted(numerator_by_period))
-        denominator_periods = tuple(sorted(denominator_by_period))
+        denominator_by_period = denominator_grouped[() if pooled else key]
         key_pairs = tuple(zip(numerator_by, key, strict=True))
-
-        # `or not numerator_periods`: two *empty* period sets satisfy
-        # `set(numerator_periods) != set(denominator_periods)` trivially
-        # (both equal the empty set), which would otherwise fall through to
-        # the empty `period_shares` loop below and return a vacuous success
-        # -- `is_error=False`, a registered pair, "0 matched period(s)" --
-        # for, say, a typo'd role value on both `numerator_entity` and
-        # `denominator_entity` that matches no rows on either side. Refuse
-        # the same as any other grain mismatch, per key; two keys with
-        # genuinely matching, non-empty period sets proceed to the
-        # per-period loop below.
-        if set(numerator_periods) != set(denominator_periods) or not numerator_periods:
-            matched = set(numerator_periods) & set(denominator_periods)
-            numerator_coverage_fraction = (
-                len(matched) / len(numerator_periods) if numerator_periods else 0.0
-            )
-            denominator_coverage_fraction = (
-                len(matched) / len(denominator_periods) if denominator_periods else 0.0
-            )
+        # A key sharing no period has no share to report, including a key
+        # whose two sides both hold no row (a typo'd entity binding on each
+        # side); the call refuses at the first such key rather than return
+        # a result missing it.
+        if not shared:
             raise ShareOfGrainMismatchError(
-                numerator_periods=numerator_periods,
-                denominator_periods=denominator_periods,
-                numerator_coverage_fraction=numerator_coverage_fraction,
-                denominator_coverage_fraction=denominator_coverage_fraction,
-                matched_periods=sorted(matched),
+                numerator_periods=sorted(numerator_by_period),
+                denominator_periods=sorted(denominator_by_period),
                 key=key_pairs,
             )
-
-        for period in numerator_periods:
+        for period in shared:
             numerator_value = numerator_by_period[period]
             denominator_value = denominator_by_period[period]
-            if denominator_value == 0.0:
-                raise ShareOfNonFiniteResultError(time_period=period, reason="zero denominator")
-            share = numerator_value / denominator_value
-            if not math.isfinite(share):
+            with _share_of_refusals():
+                share = divide_cell(
+                    numerator_value=numerator_value,
+                    denominator_value=denominator_value,
+                    time_period=period,
+                )
+            percent = share * 100.0
+            if not math.isfinite(percent):
                 raise ShareOfNonFiniteResultError(time_period=period, reason="overflow")
-            # Signed zero is normalized at the engine boundary. This is an
-            # engine-level invariant this toolkit states for every verb
-            # (see `engine/growth.py`'s own `growth_rate += 0.0`), applied
-            # so a `-0.0` cannot persist into the stored output frame where
-            # it might be re-chained to another verb.
-            share += 0.0
             period_shares.append(
                 PeriodShare(
                     time_period=period,
                     numerator_value=numerator_value,
                     denominator_value=denominator_value,
-                    share=share,
+                    percent=percent,
                     key=key_pairs,
                 )
             )
-        all_numerator_periods.update(numerator_periods)
-        all_denominator_periods.update(denominator_periods)
 
-    # Computed from the period sets every key's own `ShareOfGrainMismatchError`
-    # check above already passed, not a bare `1.0` literal. Each contributing
-    # key's own numerator periods equal its own denominator periods exactly
-    # (the per-key check above refuses otherwise), so the union across every
-    # key is equal on both sides too, and `matched_periods` here equals the
-    # whole of both.
-    numerator_periods = tuple(sorted(all_numerator_periods))
-    denominator_periods = tuple(sorted(all_denominator_periods))
-    matched_periods = set(numerator_periods) & set(denominator_periods)
-    numerator_coverage_fraction = len(matched_periods) / len(numerator_periods)
-    denominator_coverage_fraction = len(matched_periods) / len(denominator_periods)
-
-    numerator_stat_var = require_single_stat_var(numerator_frame)
-    # Inherits the numerator's own `stat_var` rather than minting a new one:
-    # a share is a ratio, not a newly measured quantity, so there is no
-    # real-world dcid this toolkit could mint for it. The output frame
-    # requires `stat_var` to be `dcid:`-prefixed, so the only alternative is
-    # fabricating a string that *looks* like a Data Commons reference and
-    # resolves to nothing -- worse than inheriting the numerator's, since a
-    # reader trusting `stat_var` would fail visibly against a real dcid and
-    # silently against a fake one. The inherited value no longer describes
-    # what this row's own `value` is measured in; `frame_ref_resolution`'s
-    # derived-ness marker (`applied_policy.detail["derived"]`, populated in
-    # `share_of_tool.py`) is what tells a downstream verb that.
     output_frame = frame_from_columns(
         {
-            STAT_VAR_COLUMN: repeated(numerator_stat_var, len(period_shares)),
+            STAT_VAR_COLUMN: repeated(stat_var, len(period_shares)),
             TIME_PERIOD_COLUMN: pa.array(
                 [ps.time_period for ps in period_shares], type=pa.string()
             ),
-            VALUE_COLUMN: pa.array([ps.share for ps in period_shares], type=pa.float64()),
+            VALUE_COLUMN: pa.array([ps.percent for ps in period_shares], type=pa.float64()),
+            UNIT_COLUMN: unit_cell_array(PERCENT_UNIT, len(period_shares)),
             **{
                 column: pa.array([ps.key[index][1] for ps in period_shares], type=pa.string())
                 for index, column in enumerate(numerator_by)
@@ -637,17 +571,30 @@ def run_share_of(
 
     return ShareOfResult(
         frame=output_frame,
+        stat_var=stat_var,
+        numerator_stat_var=numerator.stat_var,
+        denominator_stat_var=denominator.stat_var,
         numerator_resolved_unit=numerator_unit,
         denominator_resolved_unit=denominator_unit,
         numerator_facet_selections=numerator_facets,
         denominator_facet_selections=denominator_facets,
         warnings=tuple(
-            dict.fromkeys((*numerator_warnings, *denominator_warnings, *cross_side_facet_warnings))
+            dict.fromkeys((*numerator.warnings, *denominator.warnings, *cross_side_facet_warnings))
         ),
-        numerator_periods=numerator_periods,
-        denominator_periods=denominator_periods,
-        numerator_coverage_fraction=numerator_coverage_fraction,
-        denominator_coverage_fraction=denominator_coverage_fraction,
+        numerator_periods=pairing.numerator_periods,
+        denominator_periods=pairing.denominator_periods,
+        matched_periods=pairing.matched_periods,
+        numerator_coverage_fraction=pairing.numerator_coverage_fraction,
+        denominator_coverage_fraction=pairing.denominator_coverage_fraction,
         period_shares=tuple(period_shares),
-        exclusions=combine_exclusions(numerator_exclusions, denominator_exclusions),
+        numerator_only_periods=pairing.numerator_only_periods,
+        denominator_only_periods=pairing.denominator_only_periods,
+        exclusions=record_unmatched_periods(
+            combine_exclusions(numerator.exclusions, denominator.exclusions),
+            pairing,
+            numerator=numerator,
+            denominator=denominator,
+            numerator_by=numerator_by,
+            denominator_columns=denominator_columns,
+        ),
     )

@@ -1,0 +1,1206 @@
+{
+  "about": "Request and response pairs of the dfo-apis live-refresh routes, recorded from the composed test app by tests/live_refresh/wire_pairs.py. Ids are numbered stand-ins in their own grammar, the same id by the same stand-in in every pair. <timestamp>, <date>, <trace_id>, <capability_version>, and the two principal names stand for values that differ between runs or deployments.",
+  "pairs": {
+    "component_read.at_revision": {
+      "request": {
+        "method": "GET",
+        "path": "/api/presentation/components/cmp_000000000000000000000001?revision=1",
+        "headers": {}
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "component_id": "cmp_000000000000000000000001",
+          "revision": 1,
+          "catalog_version": "2026.10.0",
+          "composition_id": null,
+          "composition_revision": null,
+          "stored_intent": {
+            "type": "line_chart",
+            "frame_ref": {
+              "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+              "content_version": "cv_00000000000000000000000000000001"
+            },
+            "select": {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": [
+                "country/KEN",
+                "country/GHA"
+              ]
+            }
+          },
+          "fact_summary": {
+            "changed": [],
+            "series": [
+              {
+                "id": "s_f9203fe8883952e2",
+                "label": "Kenya",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/KEN",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 3,
+                "first_value": "200",
+                "last_value": "220"
+              },
+              {
+                "id": "s_f41b8d658de8187b",
+                "label": "Ghana",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/GHA",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 3,
+                "first_value": "100",
+                "last_value": "120"
+              }
+            ],
+            "series_cut": 0,
+            "window": {
+              "start": "2022",
+              "end": "2024"
+            },
+            "unit": "USD",
+            "change": null,
+            "source_refs": null,
+            "defaults": []
+          },
+          "resolved_payload": {
+            "schema_version": 1,
+            "catalog_version": "2026.10.0",
+            "component_id": "cmp_000000000000000000000001",
+            "revision": 1,
+            "provenance": {
+              "inputs": [
+                {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000001"
+                }
+              ],
+              "execution_ref": null,
+              "sources": [
+                {
+                  "id": "src_oecd_dac2a_6ec092e3",
+                  "name": "OECD_DAC2A",
+                  "url": "",
+                  "licence": "Not stated",
+                  "retrieved": "<date>",
+                  "ref": "OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "data_through": "2024",
+                "last_refreshed": null,
+                "next_expected": null,
+                "partial_period": false
+              },
+              "warnings": [
+                {
+                  "kind": "provisional",
+                  "detail": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
+                },
+                {
+                  "kind": "provisional",
+                  "detail": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
+                }
+              ],
+              "generated_at": "<timestamp>",
+              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "refreshed_from": null
+            },
+            "component": {
+              "type": "line_chart",
+              "title": {
+                "text": "Grants",
+                "authorship": "model"
+              },
+              "series": [
+                {
+                  "id": "s_f9203fe8883952e2",
+                  "label": "Kenya",
+                  "unit": "USD",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 200
+                    },
+                    {
+                      "period": "2023",
+                      "value": 210
+                    },
+                    {
+                      "period": "2024",
+                      "value": 220
+                    }
+                  ]
+                },
+                {
+                  "id": "s_f41b8d658de8187b",
+                  "label": "Ghana",
+                  "unit": "USD",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 100
+                    },
+                    {
+                      "period": "2023",
+                      "value": 110
+                    },
+                    {
+                      "period": "2024",
+                      "value": 120
+                    }
+                  ]
+                }
+              ],
+              "x_axis": {
+                "window": {
+                  "start": "2022",
+                  "end": "2024"
+                }
+              },
+              "y_axis": {
+                "label": "Grants",
+                "scale": "linear",
+                "range": {
+                  "min": null,
+                  "max": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "frame_refresh.current": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "content_version": "cv_00000000000000000000000000000001"
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "status": "current",
+          "frame": {
+            "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+            "content_version": "cv_00000000000000000000000000000001"
+          }
+        }
+      }
+    },
+    "frame_refresh.refresh_not_permitted": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "content_version": "cv_00000000000000000000000000000001"
+        },
+        "headers": {
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/refresh_not_permitted",
+          "title": "Refresh Not Permitted",
+          "status": 403,
+          "detail": "no principal header was presented; live refresh is restricted to its first-party principal",
+          "code": "refresh_not_permitted",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "publish.with_recipe": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/publish",
+        "body": {
+          "schema_version": 1,
+          "spec_id": "ops_00000000000000000000000000000001",
+          "content_version": "ocv_00000000000000000000000000000001",
+          "role_keys": [
+            "recipient"
+          ],
+          "rows": [
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/GHA",
+              "time_period": "2023",
+              "value": 10.0,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            },
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/GHA",
+              "time_period": "2024",
+              "value": 9.090909,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            },
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/KEN",
+              "time_period": "2023",
+              "value": 5.0,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            },
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/KEN",
+              "time_period": "2024",
+              "value": 4.761905,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            },
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/TZA",
+              "time_period": "2023",
+              "value": 3.333333,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            },
+            {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": "country/TZA",
+              "time_period": "2024",
+              "value": 3.225806,
+              "unit": "Percent",
+              "provenance": "OECD_DAC2A"
+            }
+          ],
+          "input_content_versions": [
+            "cv_00000000000000000000000000000001"
+          ],
+          "recipe": {
+            "schema_version": 1,
+            "normal_form_hash": "rnf_00000000000000000000000000000001",
+            "replay_key": "rpk_00000000000000000000000000000001",
+            "execution_identity": "engine-test|grammar-1.0.0|reduction-test",
+            "tree": {
+              "frame": {
+                "spec_id": "ops_00000000000000000000000000000001",
+                "content_version": "ocv_00000000000000000000000000000001"
+              },
+              "op_spec": {
+                "identity_version": "ops1",
+                "verb": "growth",
+                "frame_ref": {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000001"
+                },
+                "parameters": {
+                  "periods": 1
+                }
+              },
+              "inputs": {
+                "frame_ref": {
+                  "frame": {
+                    "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                    "content_version": "cv_00000000000000000000000000000001"
+                  },
+                  "root": 0
+                }
+              }
+            },
+            "roots": [
+              {
+                "schema_version": 1,
+                "frame": {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000001"
+                },
+                "dataset": {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000001"
+                },
+                "options": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                },
+                "scope": {}
+              }
+            ],
+            "anchor": {
+              "period": "2024",
+              "rule": "half1",
+              "left_out": [
+                {
+                  "root": 0,
+                  "coordinates": {
+                    "recipient": "country/UGA"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "schema_version": 1,
+          "published": {
+            "spec_id": "ops_00000000000000000000000000000001",
+            "content_version": "ocv_00000000000000000000000000000001",
+            "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+            "created": true
+          }
+        }
+      }
+    },
+    "recipe_read.found": {
+      "request": {
+        "method": "GET",
+        "path": "/api/datasets/frames/ops_00000000000000000000000000000001/ocv_00000000000000000000000000000001/recipe",
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "schema_version": 1,
+          "normal_form_hash": "rnf_00000000000000000000000000000001",
+          "replay_key": "rpk_00000000000000000000000000000001",
+          "execution_identity": "engine-test|grammar-1.0.0|reduction-test",
+          "tree": {
+            "frame": {
+              "spec_id": "ops_00000000000000000000000000000001",
+              "content_version": "ocv_00000000000000000000000000000001"
+            },
+            "op_spec": {
+              "identity_version": "ops1",
+              "verb": "growth",
+              "frame_ref": {
+                "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000001"
+              },
+              "parameters": {
+                "periods": 1
+              }
+            },
+            "inputs": {
+              "frame_ref": {
+                "frame": {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000001"
+                },
+                "root": 0
+              }
+            }
+          },
+          "roots": [
+            {
+              "schema_version": 1,
+              "frame": {
+                "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000001"
+              },
+              "dataset": {
+                "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                "content_version": "cv_00000000000000000000000000000001"
+              },
+              "options": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              },
+              "scope": {}
+            }
+          ],
+          "anchor": {
+            "period": "2024",
+            "rule": "half1",
+            "left_out": [
+              {
+                "root": 0,
+                "coordinates": {
+                  "recipient": "country/UGA"
+                },
+                "label": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    "frame_refresh.frame_not_refreshable": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "ops_00000000000000000000000000000001",
+          "content_version": "ocv_00000000000000000000000000000001"
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/frame_not_refreshable",
+          "title": "Frame Not Refreshable",
+          "status": 422,
+          "detail": "'ops_00000000000000000000000000000001' is a derived frame; only a dataset frame (`spec_`) is refreshed here",
+          "code": "frame_not_refreshable",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "frame_refresh.pending": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "content_version": "cv_00000000000000000000000000000001"
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "status": "pending",
+          "operation_id": "op_0000000000000000000000000000000000000000000000000000000000000001",
+          "retry_after_s": 1.5
+        }
+      }
+    },
+    "frame_refresh.moved": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "content_version": "cv_00000000000000000000000000000001"
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "status": "moved",
+          "frame": {
+            "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+            "content_version": "cv_00000000000000000000000000000002"
+          }
+        }
+      }
+    },
+    "render.dataset_card": {
+      "request": {
+        "method": "POST",
+        "path": "/api/presentation/components/cmp_000000000000000000000001/revisions/1/render",
+        "body": {
+          "frame": {
+            "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+            "content_version": "cv_00000000000000000000000000000002"
+          }
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "component_id": "cmp_000000000000000000000001",
+          "revision": 1,
+          "catalog_version": "2026.10.0",
+          "composition_id": null,
+          "composition_revision": null,
+          "stored_intent": {
+            "type": "line_chart",
+            "frame_ref": {
+              "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+              "content_version": "cv_00000000000000000000000000000001"
+            },
+            "select": {
+              "stat_var": "dcid:LiveRefreshGrants",
+              "recipient": [
+                "country/KEN",
+                "country/GHA"
+              ]
+            }
+          },
+          "fact_summary": {
+            "changed": [],
+            "series": [
+              {
+                "id": "s_f9203fe8883952e2",
+                "label": "Kenya",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/KEN",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 4,
+                "first_value": "200",
+                "last_value": "230"
+              },
+              {
+                "id": "s_f41b8d658de8187b",
+                "label": "Ghana",
+                "coordinates": {
+                  "measurementMethod": "GrantEquivalent",
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/GHA",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "USD"
+                },
+                "point_count": 4,
+                "first_value": "100",
+                "last_value": "130"
+              }
+            ],
+            "series_cut": 0,
+            "window": {
+              "start": "2022",
+              "end": "2025"
+            },
+            "unit": "USD",
+            "change": null,
+            "source_refs": null,
+            "defaults": []
+          },
+          "resolved_payload": {
+            "schema_version": 1,
+            "catalog_version": "2026.10.0",
+            "component_id": "cmp_000000000000000000000001",
+            "revision": 1,
+            "provenance": {
+              "inputs": [
+                {
+                  "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+                  "content_version": "cv_00000000000000000000000000000002"
+                }
+              ],
+              "execution_ref": null,
+              "sources": [
+                {
+                  "id": "src_oecd_dac2a_6ec092e3",
+                  "name": "OECD_DAC2A",
+                  "url": "",
+                  "licence": "Not stated",
+                  "retrieved": "<date>",
+                  "ref": "OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "data_through": "2025",
+                "last_refreshed": null,
+                "next_expected": null,
+                "partial_period": false
+              },
+              "warnings": [
+                {
+                  "kind": "provisional",
+                  "detail": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
+                },
+                {
+                  "kind": "provisional",
+                  "detail": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
+                }
+              ],
+              "generated_at": "<timestamp>",
+              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "refreshed_from": 1
+            },
+            "component": {
+              "type": "line_chart",
+              "title": {
+                "text": "Grants",
+                "authorship": "model"
+              },
+              "series": [
+                {
+                  "id": "s_f9203fe8883952e2",
+                  "label": "Kenya",
+                  "unit": "USD",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 200
+                    },
+                    {
+                      "period": "2023",
+                      "value": 210
+                    },
+                    {
+                      "period": "2024",
+                      "value": 220
+                    },
+                    {
+                      "period": "2025",
+                      "value": 230
+                    }
+                  ]
+                },
+                {
+                  "id": "s_f41b8d658de8187b",
+                  "label": "Ghana",
+                  "unit": "USD",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2022",
+                      "value": 100
+                    },
+                    {
+                      "period": "2023",
+                      "value": 110
+                    },
+                    {
+                      "period": "2024",
+                      "value": 120
+                    },
+                    {
+                      "period": "2025",
+                      "value": 130
+                    }
+                  ]
+                }
+              ],
+              "x_axis": {
+                "window": {
+                  "start": "2022",
+                  "end": "2025"
+                }
+              },
+              "y_axis": {
+                "label": "Grants",
+                "scale": "linear",
+                "range": {
+                  "min": null,
+                  "max": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "render.render_target_mismatch": {
+      "request": {
+        "method": "POST",
+        "path": "/api/presentation/components/cmp_000000000000000000000001/revisions/1/render",
+        "body": {
+          "frame": {
+            "spec_id": "ops_00000000000000000000000000000001",
+            "content_version": "ocv_00000000000000000000000000000001"
+          }
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/render_target_mismatch",
+          "title": "Render Target Mismatch",
+          "status": 409,
+          "detail": "cmp_000000000000000000000001 revision 1: frame 'ops_00000000000000000000000000000001' at content_version 'ocv_00000000000000000000000000000001' is not on record as a frame of the same kind as the stored frame 'spec_176b1b132147fff98b37810b759f6f90' at content_version 'cv_00000000000000000000000000000001'",
+          "code": "render_target_mismatch",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "render_data.csv": {
+      "request": {
+        "method": "GET",
+        "path": "/api/presentation/components/cmp_000000000000000000000001/revisions/1/render/data?spec_id=spec_176b1b132147fff98b37810b759f6f90&content_version=cv_00000000000000000000000000000002&format=csv&bundle=false",
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/csv; charset=utf-8",
+          "cache-control": "no-store",
+          "content-disposition": "attachment; filename=\"dfo_grants_<date>_r1.csv\""
+        },
+        "body_starts": "series,stat_var,stat_var_label,recipient,recipient_label,time_period,value,unit,measurementMethod,provenance,provenance_label,status\r\nKenya,dcid:LiveRefreshGrants,Grants,country/KEN,Kenya,2022,200.0,USD,GrantEquivalent,OECD_DAC2A,OECD_DAC2A"
+      }
+    },
+    "render_data.bundle": {
+      "request": {
+        "method": "GET",
+        "path": "/api/presentation/components/cmp_000000000000000000000001/revisions/1/render/data?spec_id=spec_176b1b132147fff98b37810b759f6f90&content_version=cv_00000000000000000000000000000002",
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/zip",
+          "cache-control": "no-store",
+          "content-disposition": "attachment; filename=\"dfo_grants_<date>_csv_r1.zip\""
+        },
+        "body_starts_hex": "504b0304"
+      }
+    },
+    "replay_lookup.recipe_not_found": {
+      "request": {
+        "method": "GET",
+        "path": "/api/datasets/recipes/replays/rpk_00000000000000000000000000000002",
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/recipe_not_found",
+          "title": "Recipe Not Found",
+          "status": 404,
+          "detail": "no frame is stored under replay_key 'rpk_00000000000000000000000000000002'",
+          "code": "recipe_not_found",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "recipe_read.recipe_not_found": {
+      "request": {
+        "method": "GET",
+        "path": "/api/datasets/frames/ops_00000000000000000000000000000002/ocv_00000000000000000000000000000002/recipe",
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/recipe_not_found",
+          "title": "Recipe Not Found",
+          "status": 404,
+          "detail": "spec_id 'ops_00000000000000000000000000000002' content_version 'ocv_00000000000000000000000000000002' holds no recipe",
+          "code": "recipe_not_found",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "replay_lookup.found": {
+      "request": {
+        "method": "GET",
+        "path": "/api/datasets/recipes/replays/rpk_00000000000000000000000000000002",
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "spec_id": "ops_00000000000000000000000000000002",
+          "content_version": "ocv_00000000000000000000000000000002"
+        }
+      }
+    },
+    "render.derived_card_with_anchor_warning": {
+      "request": {
+        "method": "POST",
+        "path": "/api/presentation/components/cmp_000000000000000000000002/revisions/1/render",
+        "body": {
+          "frame": {
+            "spec_id": "ops_00000000000000000000000000000002",
+            "content_version": "ocv_00000000000000000000000000000002"
+          }
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "component_id": "cmp_000000000000000000000002",
+          "revision": 1,
+          "catalog_version": "2026.10.0",
+          "composition_id": null,
+          "composition_revision": null,
+          "stored_intent": {
+            "type": "line_chart",
+            "frame_ref": {
+              "spec_id": "ops_00000000000000000000000000000001",
+              "content_version": "ocv_00000000000000000000000000000001"
+            },
+            "select": {
+              "recipient": [
+                "country/GHA",
+                "country/KEN",
+                "country/TZA",
+                "country/UGA"
+              ]
+            },
+            "window": {
+              "start": {
+                "anchor": "latest",
+                "offset": -1
+              },
+              "end": {
+                "anchor": "latest",
+                "offset": 0
+              }
+            }
+          },
+          "fact_summary": {
+            "changed": [],
+            "series": [
+              {
+                "id": "s_862dac2f0b3df0e3",
+                "label": "Ghana",
+                "coordinates": {
+                  "measurementMethod": null,
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/GHA",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "Percent"
+                },
+                "point_count": 2,
+                "first_value": "9.09",
+                "last_value": "8.33"
+              },
+              {
+                "id": "s_ba99b44bc36432d9",
+                "label": "Kenya",
+                "coordinates": {
+                  "measurementMethod": null,
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/KEN",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "Percent"
+                },
+                "point_count": 2,
+                "first_value": "4.76",
+                "last_value": "4.55"
+              },
+              {
+                "id": "s_56bf513a20ffc54d",
+                "label": "Tanzania",
+                "coordinates": {
+                  "measurementMethod": null,
+                  "provenance": "OECD_DAC2A",
+                  "recipient": "country/TZA",
+                  "stat_var": "dcid:LiveRefreshGrants",
+                  "unit": "Percent"
+                },
+                "point_count": 2,
+                "first_value": "3.23",
+                "last_value": "3.12"
+              }
+            ],
+            "series_cut": 0,
+            "window": {
+              "start": "2024",
+              "end": "2025"
+            },
+            "unit": "Percent",
+            "change": null,
+            "source_refs": null,
+            "defaults": []
+          },
+          "resolved_payload": {
+            "schema_version": 1,
+            "catalog_version": "2026.10.0",
+            "component_id": "cmp_000000000000000000000002",
+            "revision": 1,
+            "provenance": {
+              "inputs": [
+                {
+                  "spec_id": "ops_00000000000000000000000000000002",
+                  "content_version": "ocv_00000000000000000000000000000002"
+                }
+              ],
+              "execution_ref": null,
+              "sources": [
+                {
+                  "id": "src_oecd_dac2a_6ec092e3",
+                  "name": "OECD_DAC2A",
+                  "url": "",
+                  "licence": "Not stated",
+                  "retrieved": "<date>",
+                  "ref": "OECD_DAC2A"
+                }
+              ],
+              "freshness": {
+                "data_through": null,
+                "last_refreshed": null,
+                "next_expected": null,
+                "partial_period": false
+              },
+              "warnings": [
+                {
+                  "kind": "coverage_gap",
+                  "detail": "1 series has no 2025 value: Uganda"
+                }
+              ],
+              "generated_at": "<timestamp>",
+              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "refreshed_from": 1
+            },
+            "component": {
+              "type": "line_chart",
+              "title": {
+                "text": "Grants",
+                "authorship": "model"
+              },
+              "series": [
+                {
+                  "id": "s_862dac2f0b3df0e3",
+                  "label": "Ghana",
+                  "unit": "Percent",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2024",
+                      "value": 9.090909
+                    },
+                    {
+                      "period": "2025",
+                      "value": 8.333333
+                    }
+                  ]
+                },
+                {
+                  "id": "s_ba99b44bc36432d9",
+                  "label": "Kenya",
+                  "unit": "Percent",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2024",
+                      "value": 4.761905
+                    },
+                    {
+                      "period": "2025",
+                      "value": 4.545455
+                    }
+                  ]
+                },
+                {
+                  "id": "s_56bf513a20ffc54d",
+                  "label": "Tanzania",
+                  "unit": "Percent",
+                  "source_ref": "src_oecd_dac2a_6ec092e3",
+                  "points": [
+                    {
+                      "period": "2024",
+                      "value": 3.225806
+                    },
+                    {
+                      "period": "2025",
+                      "value": 3.125
+                    }
+                  ]
+                }
+              ],
+              "x_axis": {
+                "window": {
+                  "start": "2024",
+                  "end": "2025"
+                }
+              },
+              "y_axis": {
+                "label": "Grants",
+                "scale": "linear",
+                "range": {
+                  "min": null,
+                  "max": null
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "frame_refresh.rendering_not_recorded": {
+      "request": {
+        "method": "POST",
+        "path": "/api/datasets/frames/refresh",
+        "body": {
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "content_version": "cv_00000000000000000000000000000002"
+        },
+        "headers": {
+          "x-dfo-principal": "<LIVE_REFRESH_PRINCIPAL>",
+          "content-type": "application/json"
+        }
+      },
+      "response": {
+        "status": 422,
+        "headers": {
+          "content-type": "application/problem+json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "type": "/codes/rendering_not_recorded",
+          "title": "Rendering Not Recorded",
+          "status": 422,
+          "detail": "the rendering of 'spec_176b1b132147fff98b37810b759f6f90' at content_version 'cv_00000000000000000000000000000002' is ambiguous: the version links a groupby sum and a plain file, and the two renderings of the current data are no longer one frame",
+          "code": "rendering_not_recorded",
+          "trace_id": "<trace_id>",
+          "capability_version": "<capability_version>",
+          "retryable": false
+        }
+      }
+    },
+    "versions_list": {
+      "request": {
+        "method": "GET",
+        "path": "/api/datasets/spec_176b1b132147fff98b37810b759f6f90/versions",
+        "headers": {
+          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "cache-control": "no-store"
+        },
+        "body": {
+          "schema_version": 1,
+          "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "versions": [
+            {
+              "content_version": "cv_00000000000000000000000000000003",
+              "base_content_version": "cv_00000000000000000000000000000004",
+              "rendering": "groupby",
+              "groupby": {
+                "by": [
+                  "recipient"
+                ],
+                "op": "sum"
+              }
+            },
+            {
+              "content_version": "cv_00000000000000000000000000000004",
+              "base_content_version": null,
+              "rendering": "plain",
+              "groupby": null
+            },
+            {
+              "content_version": "cv_00000000000000000000000000000002",
+              "base_content_version": null,
+              "rendering": "plain",
+              "groupby": null
+            },
+            {
+              "content_version": "cv_00000000000000000000000000000001",
+              "base_content_version": null,
+              "rendering": "plain",
+              "groupby": null
+            }
+          ]
+        }
+      }
+    }
+  }
+}

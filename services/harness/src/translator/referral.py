@@ -21,7 +21,7 @@ a discovery budget is spent and the most recent call that spent it timed
 out (`translator.discovery._budget_referral`). Translating the same revision
 again cannot search, so retrying cannot succeed.
 
-Three kinds carry `candidates`, for different reasons. `SOURCE_AMBIGUOUS`
+Four kinds carry `candidates`, for different reasons. `SOURCE_AMBIGUOUS`
 always carries two or more: discovery found a real choice. The planner
 records it as a source decision naming one of them, or puts the candidates
 to the user. `PINNED_SOURCE_NOT_FOUND` carries
@@ -36,7 +36,14 @@ what is nearby, not a source the planner may pin without a fresh search of
 its own. `no_data_reason` names the closed code `search` gave for why nothing
 was found -- an opaque string from another service, since a value it does
 not yet recognise is still data to report, not a reason to fail the referral.
-Every other kind carries neither.
+`REQUIREMENT_UNMEETABLE` carries them only when marked `source_mismatch`: the
+requirement states a source that none of the sources discovery found names,
+and the candidates are those sources, zero or more, the same ones a
+`PINNED_SOURCE_NOT_FOUND` referral offers. Whether to take one in place of
+the stated source is the user's choice. A `requirement_unmeetable` referral
+for any other cause, a period or coverage the source cannot meet, carries
+none, since another source found for the same search would not meet it
+either. Every other kind carries neither.
 
 A `pinned_source_not_found` referral also carries, in `stale_pins`, every
 other requirement of the same plan revision whose pin discovery did not find,
@@ -139,8 +146,14 @@ ABOUT_A_REQUIREMENT = frozenset(
 # whatever the requirement's latest matching search found, which is empty
 # when that search found no source a pin may be taken from, or when
 # `no_data`'s own nearest-series relaxation found nothing.
+# `REQUIREMENT_UNMEETABLE` carries them only when marked `source_mismatch`.
 MAY_CARRY_CANDIDATES = frozenset(
-    {ReferralKind.SOURCE_AMBIGUOUS, ReferralKind.PINNED_SOURCE_NOT_FOUND, ReferralKind.NO_DATA}
+    {
+        ReferralKind.SOURCE_AMBIGUOUS,
+        ReferralKind.PINNED_SOURCE_NOT_FOUND,
+        ReferralKind.NO_DATA,
+        ReferralKind.REQUIREMENT_UNMEETABLE,
+    }
 )
 
 
@@ -164,6 +177,7 @@ class Referral(StrictModel):
     reference: str | None = Field(default=None, min_length=1)
     repeated: bool = False
     budget_spent: bool = False
+    source_mismatch: bool = False
     stale_pins: tuple[StalePin, ...] = ()
 
     @property
@@ -213,6 +227,17 @@ class Referral(StrictModel):
             raise ValueError("a source_ambiguous referral carries the candidate sources")
         if self.kind not in MAY_CARRY_CANDIDATES and self.candidates:
             raise ValueError(f"a {self.kind.value} referral carries no candidates")
+        if self.source_mismatch and self.kind is not ReferralKind.REQUIREMENT_UNMEETABLE:
+            raise ValueError(f"a {self.kind.value} referral is never marked source_mismatch")
+        if (
+            self.kind is ReferralKind.REQUIREMENT_UNMEETABLE
+            and self.candidates
+            and not self.source_mismatch
+        ):
+            raise ValueError(
+                "a requirement_unmeetable referral carries candidates only for a stated "
+                "source the sources found do not name"
+            )
         if self.kind is not ReferralKind.NO_DATA and self.no_data_reason is not None:
             raise ValueError(f"a {self.kind.value} referral carries no reason code")
         if self.stale_pins and self.kind is not ReferralKind.PINNED_SOURCE_NOT_FOUND:

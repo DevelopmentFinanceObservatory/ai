@@ -34,7 +34,7 @@ PINNED_FRAME_CONTENT_VERSIONS = {
     "compare": "cv_277147898697c7632697ccf368bf76e2",
     "growth": "cv_0550c3c0da0da583a6dbca59b1b00403",
     "rank": "cv_1c5967c054a6ca4a9f46d9a18d36af3b",
-    "share_of": "cv_911c9b0d1db2c4abd072b19b524b7cbc",
+    "share_of": "cv_0089a5ef716630e1e6c6b04a3f7795f6",
     "join": "cv_bbd7943e659ae2af4fd9f19bb6a974f7",
     "filter": "cv_87c6e5ebbe4bb63cf6faf99bdbd38971",
 }

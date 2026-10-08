@@ -38,7 +38,8 @@ from planner.plan import (
     plan_revision,
 )
 from planner.records import StatVarReading, StrictModel
-from pydantic import ConfigDict
+from planner.workflow import ResolvedGroup
+from pydantic import ConfigDict, Field
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
@@ -101,7 +102,8 @@ class PlanSource(StrictModel):
     carried none. It is kept so a later turn's pin of a source only the
     translator found has its definition on record
     (`harness.studio_state.ConversationState.recorded_identity`). No
-    rendering of the record reads it.
+    rendering of the record reads it. `groups` are the sets its places were
+    asked for as, kept beside it for the same pin, and left out when none.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -120,13 +122,16 @@ class PlanSource(StrictModel):
     members: int | None
     origin: Origin
     identity: dict[str, Any] | None = None
+    groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
 
 
 class RecordedIdentity(StrictModel):
     """A source's definition as a later turn resubmits it to Search.
 
     `identity` is the identity document its spec_id hashes from. Search
-    derives the population from it. Like `PlanSource`, it ignores the
+    derives the population from it. `groups` are the sets its places were
+    asked for as, which a resubmit posts beside it; left out of the record
+    when there are none. Like `PlanSource`, it ignores the
     `stat_vars` that ledger records stored before Search stopped listing
     members carry.
     """
@@ -134,6 +139,7 @@ class RecordedIdentity(StrictModel):
     model_config = ConfigDict(extra="ignore")
 
     identity: dict[str, Any]
+    groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
 
 
 class PlanDecision(StrictModel):
@@ -801,6 +807,7 @@ def _sources(
             members=stat_var_count(source) if family else None,
             origin=origin,
             identity=source.identity,
+            groups=source.groups,
         )
     return tuple(seen.values())
 

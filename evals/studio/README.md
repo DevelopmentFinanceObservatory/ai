@@ -74,12 +74,13 @@ entry in the file's `scenarios`) holds:
   `warnings`), run through the same digest the served resolver builds.
 - `plan_spec_id`: the source the canned plan retrieves. The planner's model submits
   the plan `harness.scripted_plan` builds, so the seam renders its real first message
-  and the approval, execution and hand-back nodes run as served; `translate` and
-  `propose_plan` are not exercised.
+  and the approval, execution and hand-back nodes run as served; `propose_plan` and
+  its translation are not exercised.
 - `planner`: the planner model's replies instead, in the orchestrator script's shape.
-  The planner then calls the real `propose_plan` and `translate`, which discovers
+  The planner then calls the real `propose_plan`, whose translation discovers
   through `translator_search`, the canned results of each translation `search`, in the
-  `search` entries' shape, and compiles against the real servers' tool schemas.
+  `search` entries' shape, and compiles against the real servers' tool schemas. The
+  translation's verdict comes back under `translation` in `propose_plan`'s answer.
 - `get_data_refusals`: spec id to the refusal (`code`, `retry_mode`) a plan step's
   `get_data` returns for it.
 
@@ -102,7 +103,8 @@ every tool call, a scripted planner's own included, is recorded in order. A case
 - `translation_stops_on_a_repeated_failure`: once a translation fails the way it
   failed before, nothing is translated again in that planner entry.
 - `blocked_reading_is_searched_again`: a source whose search reading carries a
-  blocking warning is searched again by `translate` before a plan step retrieves it.
+  blocking warning is searched again by the plan's translation before a plan step
+  retrieves it.
 - `every_ask_accounted_for`: each output the orchestrator listed as an ask when it
   called `plan` is on the plan card, answered by steps the card shows or declined with
   a reason, and comes back in the plan's hand-back with each answering step's status
