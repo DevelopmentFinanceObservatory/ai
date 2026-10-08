@@ -5,6 +5,7 @@ the result's own `stat_var`, and every refusal condition.
 from __future__ import annotations
 
 import pytest
+from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.compare import (
     CompareAmbiguousSliceError,
     CompareNonFiniteResultError,
@@ -16,6 +17,7 @@ from analysis_mcp.engine.sum_of import run_sum_of
 from analysis_mcp.fixtures import join_compatible_frame_pair, two_source_sum_frame_pair
 from analysis_mcp.result import observed_shape
 from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
 _OWN_REF = "dcid:ops_" + "e" * 32
 
@@ -173,3 +175,19 @@ def test_refusals(
         )
     for name, expected in attributes.items():
         assert getattr(raised.value, name) == expected
+
+
+def test_two_sides_in_a_composed_unit_refuse() -> None:
+    """Two per-head series agree on their unit, so the pairing's own unit
+    rules pass and the sum is refused for what it would add."""
+    per_head = {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}}
+    left = _frame([_row(value=2.0, unit=per_head)])
+    right = _frame([_row(value=6.0, stat_var="dcid:Y", unit=per_head)])
+
+    with pytest.raises(ComposedUnitSumError) as exc_info:
+        run_sum_of(left, right, stat_var=_OWN_REF, left_entity={}, right_entity={})
+
+    assert exc_info.value.side == "left"
+    assert exc_info.value.unit == ComposedUnit(
+        numerator="dcid:USDollar", denominator=StatVarPart("dcid:Count_Person")
+    )

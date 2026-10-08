@@ -103,7 +103,7 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   prose. `surface` ∈ `studio | download | embed` and is **optional with
   default `"studio"`** (delta 6: doc 1 required it, doc 2's fixtures omit
   it; resolved in favour of the lenient parse). It feeds the harness's
-  depth policy per turn (`download` earns no dialogue). `component_ref` scopes the turn to one card ("Ask follow
+  depth policy per turn (`download` earns no dialogue, and a per-head figure no series holds refuses there, where `studio` computes it from two sources). `component_ref` scopes the turn to one card ("Ask follow
   up" / agent-driven "Edit Card"). `seed_spec` is the Search handoff
   (delta 18, see "Seeds from Search" below). `auto_add`
   (optional, default `true`; delta 11): when `false`, components the turn
@@ -329,9 +329,13 @@ question, and the `seed` node reports the reference in a failed step,
 `schema_version` stays 1.
 
 - `spec` is a definite part's Search API Spec block (`SeedSpec`), capped
-  at `MAX_SEED_SPEC_BYTES` as posted. The harness keeps its `spec_id`
-  and its `definition`, and drops every other member as it reads the
-  seed. A client may leave `resolved` out.
+  at `MAX_SEED_SPEC_BYTES` as posted. The harness keeps its `spec_id`,
+  its `definition`, and `resolved.entity_groups`, the sets a role's
+  places were asked for as, which it posts again beside the identity when
+  it resolves the seed. It keeps a set only on a role the identity binds
+  and with a name of 1 to 120 characters, drops any other set, and drops
+  every other member as it reads the seed. A client may leave `resolved`
+  out.
 - `operations` are the question's operations on it (`SeedOperation`):
   `{verb, phrase, over, target_year}`, with no other member, at most
   `MAX_SEED_OPERATIONS` (8) of them. `target_year` is the year a forecast

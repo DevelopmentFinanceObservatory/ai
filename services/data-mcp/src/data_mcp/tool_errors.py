@@ -176,6 +176,9 @@ class FacetIssue:
     axis: str | None
     alternatives: list[FacetAlternative]
     truncated: bool
+    # The issue's own cause, when dfo-apis sends one.
+    code: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -202,6 +205,15 @@ class ToolRefusal:
             # unlikely to succeed unmodified. Reading `retry_after_delay`
             # off the table here would contradict that message with the one
             # field a model actually acts on.
+            return RetryMode.DO_NOT_RETRY
+        if self.code is ToolErrorCode.DEFAULT_FACET_UNDEFINED:
+            # dfo-apis' `retryable` says whether the same request might succeed
+            # (`dfo_platform/problem.py`). When it can't, a changed request can
+            # only when an issue lists values to change to.
+            if self.fix.get("retryable"):
+                return RetryMode.RETRY_AFTER_DELAY
+            if any(issue["alternatives"] for issue in self.fix.get("issues", [])):
+                return RetryMode.CORRECT_AND_RETRY
             return RetryMode.DO_NOT_RETRY
         return _RETRY_MODE_BY_CODE[self.code]
 
@@ -243,24 +255,33 @@ class ToolRefusal:
     def default_facet_undefined(
         cls,
         *,
-        axes: Sequence[str],
+        issues: Sequence[FacetIssue],
+        detail: str | None,
+        retryable: bool,
+        spec_id: str | None = None,
+        entities: Mapping[str, Sequence[str]] | None = None,
+        places: str | None = None,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # Same `issues[]` mechanism as `facet_not_available`.
-        # `DefaultFacetUndefinedError` (`src/materialise/errors.py`)
-        # entries are `{pointer, axis}` only, with no `alternatives`
-        # parameter carrying candidate values.
-        axes_list = list(axes)
-        message = (
-            f"No default facet on {axes_list}; specify explicit values and retry."
-            if axes_list
-            else "No default facet for this query; specify one explicitly and retry."
-        )
+        # Relays dfo-apis' `detail`, `issues[]` (each with its own code and
+        # detail) and `retryable` in `fix`. The message names what was asked
+        # for; `get_data` adds the spec_id and the places it was minting, which
+        # the operation-poll path does not have.
+        message = f"The platform refused the requested data{f' for {places}' if places else ''}."
+        fix: dict[str, Any] = {
+            "issues": [asdict(i) for i in issues],
+            "detail": detail,
+            "retryable": retryable,
+        }
+        if spec_id is not None:
+            fix["spec_id"] = spec_id
+        if entities is not None:
+            fix["entities"] = {role: list(refs) for role, refs in entities.items()}
         return cls(
             code=ToolErrorCode.DEFAULT_FACET_UNDEFINED,
             message=message,
-            fix={"axes": axes_list},
+            fix=fix,
             trace_id=trace_id,
             capability_version=capability_version,
         )
@@ -1187,7 +1208,7 @@ _UPSTREAM_CODE_MAP: dict[str, ToolErrorCode] = {
 }
 
 
-def _facet_issues_from_extensions(extensions: Mapping[str, Any]) -> list[FacetIssue]:
+def facet_issues_from(extensions: Mapping[str, Any]) -> list[FacetIssue]:
     """Datasets aggregates failing axes into `issues[]`; Search sets a single
     top-level `pointer`/`alternatives` pair with no `issues` array — both
     wire shapes are live for a client that calls both surfaces.
@@ -1213,11 +1234,13 @@ def _facet_issues_from_extensions(extensions: Mapping[str, Any]) -> list[FacetIs
 
 
 def _facet_issue_from_raw(raw: Mapping[str, Any]) -> FacetIssue:
-    axis = raw.get("axis")
+    axis, code, detail = raw.get("axis"), raw.get("code"), raw.get("detail")
     return FacetIssue(
         axis=axis if isinstance(axis, str) else None,
         alternatives=_facet_alternatives_from_raw(raw.get("alternatives")),
         truncated=bool(raw.get("truncated")),
+        code=code if isinstance(code, str) else None,
+        detail=detail if isinstance(detail, str) else None,
     )
 
 
@@ -1429,13 +1452,15 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
     tool_code = _UPSTREAM_CODE_MAP.get(code) if code is not None else None
     factories: dict[ToolErrorCode, Callable[[], ToolRefusal]] = {
         ToolErrorCode.FACET_NOT_AVAILABLE: lambda: ToolRefusal.facet_not_available(
-            issues=_facet_issues_from_extensions(exc.extensions),
+            issues=facet_issues_from(exc.extensions),
             detail=exc.detail,
             trace_id=exc.trace_id,
             capability_version=exc.capability_version,
         ),
         ToolErrorCode.DEFAULT_FACET_UNDEFINED: lambda: ToolRefusal.default_facet_undefined(
-            axes=_issue_axes(exc.extensions),
+            issues=facet_issues_from(exc.extensions),
+            detail=exc.detail,
+            retryable=exc.retryable,
             trace_id=exc.trace_id,
             capability_version=exc.capability_version,
         ),

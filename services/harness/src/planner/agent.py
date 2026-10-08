@@ -25,27 +25,33 @@ standalone eval agents run without a live server.
 The planner settles methodology and states what evidence an answer rests on,
 then stops. A proposed plan is a `DRAFT` carrying `decisions` and
 `evidence_requirements`; finding the data, proposing the operations and
-compiling the workflow belong to `translator.tool`'s `translate`, a function
-tool the planner calls before the user ever sees the plan --
-`create_planner_agent` takes that tool, and `harness.agents` builds it. So no
-tool name, column or operation appears here, `PENDING_APPROVAL` is a status
-only translation writes, and `submit_plan` requires a plan that has been
-through that step.
+compiling the workflow belong to `translator.tool`'s `build_translate`, the
+translation `propose_plan` runs on every plan it records before the user ever
+sees it -- `create_planner_agent` takes that function, and `harness.agents`
+builds it. So no tool name, column or operation appears here,
+`PENDING_APPROVAL` is a status only translation writes, and `submit_plan`
+requires a plan that has been through that step.
 
 Every tool below answers with `planner.tool_results`' typed shape -- `ok`,
 `problem`, with a stable `code` and, where the next step is known, an
 `action` -- rather than an unstructured `{"error": ...}` a caller has to
-parse. When translation cannot carry a plan out, `translate` answers with
-the `Referral` itself: this agent's instruction reads it straight off that
-result, with nothing here to fetch it back a second time.
+parse. When translation cannot carry a plan out, `propose_plan`'s
+`translation` is the `Referral` itself: this agent's instruction reads it
+straight off that answer, with nothing here to fetch it back a second time.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any
+import asyncio
+import functools
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
+from compiler.sources import block_groups
 from compiler.surface import ToolSurface
+from data_mcp.definition_writes import windowed_identity
+from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.agents import LlmAgent
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.function_tool import FunctionTool
@@ -53,13 +59,19 @@ from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from orchestrator.agent import _retrying
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
+from translator.discovery import (
+    DefinitionNotResolvedError,
+    PartNotResolvedError,
+    resolve_definition,
+    resolved_spec,
+)
 from translator.referral import ReferralKind, clear_referral, load_referral
-from translator.tool import TRANSLATE_TOOL_NAME
+from translator.tool import Translate
 
 from planner.declaration import PlanTool
-from planner.parties import PARTY_ROLES, party_role
+from planner.parties import PARTY_ROLES, across_party, party_role
 from planner.plan import (
     MAX_DECLINES,
     MAX_PLAN_ASKS,
@@ -75,25 +87,36 @@ from planner.plan import (
     DecisionFixes,
     Decline,
     EvidenceRequirement,
+    FullHistory,
+    PinSource,
     Plan,
     PlanStatus,
+    RecordedDefinition,
     ResolvedBy,
     SeededSource,
+    SessionState,
     UnsettledFixError,
     UnsupportedPlanError,
     WindowedPin,
     cut_user_text,
+    full_histories,
+    full_history,
     is_search_pin,
     load_asks,
+    load_optional_declines,
     load_plan,
     load_plan_rounds,
     load_unsupported,
     names_dropped_seed,
+    open_window,
     period_window,
     pin_sources,
     plan_revision,
     record_unsupported,
     recorded_identity,
+    rolling_readers,
+    rolls_from_its_start,
+    save_full_history,
     save_plan,
     save_plan_rounds,
     save_seeded_sources,
@@ -101,14 +124,17 @@ from planner.plan import (
     search_pin_slot,
     seeded_sources,
     settle_decisions,
+    shown_identity,
     windowed_copy,
     windowed_pin,
     windowed_pins,
 )
-from planner.records import Identifier
+from planner.records import Identifier, OpenPeriodFault, RollingIssue, RollingPlanError
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
+from planner.shapes import PLACE_PHRASE
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
+from planner.workflow import ResolvedGroup
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -139,7 +165,12 @@ class _Patch(BaseModel):
 
     @model_validator(mode="after")
     def _roles_are_party_words(self) -> _Patch:
-        """Reject an entity `role` outside `PARTY_ROLES`, naming the word it stands for when one does."""
+        """Reject an entity `role` outside `PARTY_ROLES`, naming the word it stands for when one does.
+
+        A place word is no role: a place the measure is about states none,
+        and an axis names its dimension by a place word all the same
+        (`planner.shapes.roles_named`).
+        """
         refused = []
         for requirement in self.evidence_requirements:
             if not isinstance(requirement, DatasetRequirement):
@@ -148,10 +179,12 @@ class _Patch(BaseModel):
                 if entity.role is None or entity.role in PARTY_ROLES:
                     continue
                 meant = party_role(entity.role)
-                refused.append(
-                    f"{requirement.id}/{entity.name}: {entity.role!r}"
-                    + (f", write {meant!r}" if meant is not None else "")
-                )
+                advice = ""
+                if meant is not None:
+                    advice = f", write {meant!r}"
+                elif across_party(entity.role) == "place":
+                    advice = f", leave it unset: an axis names such places {PLACE_PHRASE!r}"
+                refused.append(f"{requirement.id}/{entity.name}: {entity.role!r}{advice}")
         if refused:
             raise ValueError(
                 f"an entity's role is one of {', '.join(PARTY_ROLES)}, or unset for a place "
@@ -187,7 +220,15 @@ _PLANNING = (
     "`period` and whose rationale says why, such as a latest year whose "
     "counts fall far below the years before it. Never call a year the latest "
     "available when a result shows data for a later one. When no result "
-    "carries a window, the period is a decision like any other. Source is "
+    "carries a window, the period is a decision like any other. A period the "
+    'question words against the newest data ("the last five years", "the '
+    'latest year", "since 2015") also follows it: state the years from the '
+    "`window` as above, set `period_end_open` on the dataset requirement, and "
+    "state `rolling` on the growth, rank or period threshold that reads "
+    "those years, the newest at offset 0 and a year five before it at -5. "
+    '"Since 2015" keeps 2015 a fixed start and rolls only the end. Years '
+    'the question names ("from 2015 to 2020") stay fixed, with no '
+    "`rolling` and no `period_end_open`. Source is "
     "different: when a result's own `spec_id` (a definite or chosen reading, "
     "or the envelope's `spec_id`) answers a dataset requirement, pin it as "
     "that requirement's `source_spec_id`, verbatim, and cite no decision "
@@ -209,8 +250,8 @@ _PLANNING = (
     "`growth`, `rank` or `comparison`: a group by `entity` keeps the parties "
     "the requirement names apart and sums its `across` party, so each named "
     "entity has one value per year. Grouped by period alone, it totals every "
-    "party into one series per year, which a `share_of` reads as a whole "
-    "side. Over a requirement that names no entity, a group by `entity` "
+    "party into one series per year, which a `share_of` or `quotient_of` "
+    "reads as a whole side. Over a requirement that names no entity, a group by `entity` "
     "keeps nothing and is refused: group by period, or `rank` with a "
     "`reduction` to set each member's total beside the others. "
     "A rate, index or per-person figure is never summed. "
@@ -222,7 +263,8 @@ _PLANNING = (
     "party (recipient, debtor or importer), `observationAbout` the place. "
     "A requirement whose `across` is the place, such as `'country'`, names "
     "no place, so its retrieval holds every level (see `PlaceType`). Before "
-    "a `rank`, an `aggregate` across places or a `share_of` reads it, keep "
+    "a `rank`, an `aggregate` across places, a `share_of` or a "
+    "`quotient_of` reads it, keep "
     "one level with a `filter` reading that requirement directly, whose "
     "predicate is `place_level`. Take the level the "
     'question names ("top 10 countries"). When it names none and reads as '
@@ -238,10 +280,13 @@ _PLANNING = (
     "dataset requirement, which under `answer_mode='series'` is itself the "
     "answer. Reach for "
     "`comparison` only when the question asks for a difference, for "
-    "`share_of` only for a ratio whose two sources declare one unit or both "
-    "declare none, and for `join` only across different measures, since "
+    "`share_of` only for a part of its whole, both in one unit, for "
+    "`quotient_of` only for one measure per unit of another, such as a "
+    'per-head or per-capita figure or "divide one by the other", and for '
+    "`join` only across different measures, since "
     "none of them keeps the separate series a chart of one measure over "
-    "several entities shows. "
+    "several entities shows. An `axis` or a `denominator_axis` names a role "
+    "its side's entities state, or `'country'` for places stating none. "
     "A family of StatVars is read summed or separately: see `stat_vars`. "
     "When the question asks which members of a classification hold the most, "
     'such as "which sectors received the most aid", state `breakdown` on the '
@@ -294,7 +339,8 @@ _PLANNING = (
     "`limit` when the question asks for a top or bottom N, or for the "
     'members that hold the most, as "top donors" or "which sectors '
     'received the most" does, with a `Decision` fixing the N when the '
-    "question names none. A growth or a per-entity `share_of` goes "
+    "question names none. A growth or a per-entity `share_of` or "
+    "`quotient_of` goes "
     "before a rank with `per_period` and a `limit`, and a top N by each "
     "entity's total is one rank stating the `reduction` and the `limit` "
     "with `per_period` unset. No rank reads another rank's output: put the "
@@ -339,19 +385,19 @@ _SKILLS = (
     "included, draft the plan without that skill. "
 )
 
-# What to do once a plan is recorded, when the `translate` tool is attached to
-# carry it out. Held apart because the planner is also built standalone -- its
-# own eval set scores it that way -- and a standalone planner that is told to
-# call `translate` calls a tool that is not there. ADK raises on an unknown
-# tool name rather than answering the model, so the run dies mid-turn.
+# What to do once a plan is recorded, when a translator is attached to carry it
+# out and `propose_plan` answers with its verdict under `translation`. Held
+# apart because the planner is also built standalone -- its own eval set scores
+# it that way -- and its `propose_plan` answers with no translation to read.
 _TRANSLATING = (
-    "Once `propose_plan` has recorded the plan, call `translate`. Once a "
+    "`propose_plan` has every plan it records translated at once and answers "
+    "with the verdict in `translation`. Once a "
     "referral is settled, by your own decision or the "
     "user's answer, propose with the `amends_version` the last "
-    "`propose_plan` call answered with, so the patch lands on that plan, and "
-    "call `translate` again. When `translate` answers that the plan "
-    "compiled, call `submit_plan`. Otherwise it "
-    "answers with the referral. `choice_required` "
+    "`propose_plan` call answered with, so the patch lands on that plan and "
+    "is translated in turn. When `translation` answers that the plan "
+    "compiled, call `submit_plan`. Otherwise `translation` "
+    "is the referral. `choice_required` "
     "(`source_ambiguous`, or `pinned_source_not_found` when the pinned source "
     "was not found) means a requirement's source is not settled: "
     "the referral's `candidates`, each with its `spec_id`, `sentence`, "
@@ -380,20 +426,33 @@ _TRANSLATING = (
     "`unsupported_ask` or `requirement_unmeetable` means the requirement cannot be "
     "met as stated: tell the user what cannot be done and ask, through "
     "`adk_request_input`, before proposing anything, since what to change is "
-    "theirs to choose; `ask_not_understood` means search dropped part of the ask and "
-    "answered a narrower one, so reword the part the referral names; "
+    "theirs to choose; a `requirement_unmeetable` referral with `candidates` "
+    "means the source the requirement states holds none of the data, and the "
+    "candidates are the sources found instead, so offer them and pin the one "
+    "the user picks as its `source_spec_id` under a `Decision` resolved by "
+    "`user`, which replaces the stated source; `ask_not_understood` means "
+    "search dropped part of the ask and answered a narrower one, so reword "
+    "the part the referral names; "
     "`seed_dropped` means remove that requirement; "
     "`requirement_needs_repair` names the `constraint` the requirement breaks and "
     "the `repair` you may make, so make it and propose again; "
     "`no_operation_covers` means no operation carries that requirement out; "
     "`unsupported_ask` and `no_operation_covers` are `unsupported` answers, "
-    "which earn a decline (see `declined`); `discovery_budget_exhausted` means the plan asks "
+    "which earn a decline (see `declined`); a `requirement_unmeetable` whose "
+    "`reason` says it earns a decline lets the plan make that decline once the "
+    "user's answer is to see the two sides apart, and does not require it; "
+    "`discovery_budget_exhausted` means the plan asks "
     "for too much at once; `discovery_unavailable` or `surface_unavailable` means "
     "the data service "
     "could not answer just now, so nothing about the requirement needs to "
-    "change and the same plan is worth trying again; `internal_failure` is a "
+    "change: propose the same plan again, with `amends_version` and no other "
+    "change, to have that version translated again, which records no new "
+    "version and spends no plan round; "
+    "`internal_failure` is a "
     "fault in the system that no change to the plan repairs, so tell the user, "
-    "with its `reference`, and propose nothing further. A plan "
+    "with its `reference`, and propose nothing further. The options an ask "
+    "offers come only from the referral's `candidates`; with none, the ask "
+    "says what cannot be done and asks what to change. A plan "
     "that cannot be carried out is not one to approve. "
 )
 
@@ -419,8 +478,9 @@ def planner_instruction(
     """The planner's instruction, for the agent it is actually part of.
 
     `has_translator` and `has_skills` each name something the agent carries:
-    the `translate` tool, or the skill tools. An instruction naming
-    either where the agent has none sends the model at a tool ADK raises on.
+    a translator `propose_plan` runs, or the skill tools. An instruction
+    describing a translation the agent does not run, or naming a tool it
+    lacks, sends the model after something that is not there.
 
     `question_fixed` selects which paragraph explains `starts_new_plan`:
     `_VERSIONING_FREE` where a restart begins a second plan of its own
@@ -475,7 +535,8 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
     so its text is the message. A rule that refused what the system cannot do
     (`UnsupportedPlanError`) is no malformed draft, so it answers `_unsupported`;
     nor is an ask left unaccounted for (`AsksUnaccountedError`), which answers
-    `_asks_unaccounted`.
+    `_asks_unaccounted`. A rolling period a rule refused (`RollingPlanError`)
+    answers `_rolling_refused`, which names the rule.
 
     `exc.errors()` carries a `loc` tuple and, for a `model_validator` failure,
     the raised exception itself in `ctx["error"]`. Neither is JSON on its own,
@@ -483,6 +544,8 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
     JSON (a list, a string) rather than `problem()`'s own validation rejecting
     the detail it was just handed.
     """
+    if isinstance(exc, RollingPlanError):
+        return _rolling_refused(exc)
     if not isinstance(exc, ValidationError):
         return _invalid_plan(f"Invalid plan data: {exc}")
     cause = _unsupported_cause(exc)
@@ -490,9 +553,11 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
         return _unsupported(cause)
     errors = exc.errors(include_url=False, include_input=False)
     for error in errors:
-        unaccounted = error.get("ctx", {}).get("error")
-        if isinstance(unaccounted, AsksUnaccountedError):
-            return _asks_unaccounted(unaccounted)
+        raised = error.get("ctx", {}).get("error")
+        if isinstance(raised, AsksUnaccountedError):
+            return _asks_unaccounted(raised)
+        if isinstance(raised, RollingPlanError):
+            return _rolling_refused(raised)
     reported = [
         {**error, "loc": tuple(_cut_loc_element(element) for element in error["loc"])}
         for error in errors[:_MAX_REPORTED_ERRORS]
@@ -507,6 +572,31 @@ def _invalid_data(exc: ValueError) -> dict[str, object]:
         f"Invalid plan data: {'; '.join(lines)}",
         outcome=Outcome.INVALID_INPUT,
         detail={"errors": to_jsonable_python(reported, serialize_unknown=True)},
+    )
+
+
+def _rolling_refused(exc: RollingPlanError) -> dict[str, object]:
+    """Return the `INVALID_PLAN` problem for a rolling period a plan rule refused.
+
+    `detail.issue` is the rule (`planner.records.RollingIssue`),
+    `detail.requirement_ids` the requirements to change, and `detail.fault`,
+    under `rolling_needs_open_period`, which part of it holds
+    (`planner.records.OpenPeriodFault`). `detail.spec_id` is the pinned
+    dataset whose first year is missing, when that is the fault.
+    """
+    detail: dict[str, Any] = {
+        "issue": exc.issue.value,
+        "requirement_ids": list(exc.requirement_ids),
+    }
+    if exc.fault is not None:
+        detail["fault"] = exc.fault.value
+    if exc.spec_id is not None:
+        detail["spec_id"] = exc.spec_id
+    return problem(
+        ProblemCode.INVALID_PLAN,
+        f"Invalid plan data: {exc}",
+        outcome=Outcome.INVALID_INPUT,
+        detail=detail,
     )
 
 
@@ -553,7 +643,8 @@ def _asks_unaccounted(exc: AsksUnaccountedError) -> dict[str, object]:
     return problem(
         ProblemCode.ASKS_UNACCOUNTED,
         f"{exc}. Answer an ask in `answered` with the ids of the requirements whose results "
-        "answer it, or, when an `unsupported` answer earned its decline (see `declined`), "
+        "answer it, or, when an `unsupported` answer or a `requirement_unmeetable` whose "
+        "reason names a decline earned it (see `declined`), "
         "decline it in `declined` with its number as `ask_ref`; an ask the plan computes in "
         "part takes one "
         "of each. A patch that answers or declines an ask replaces whatever accounted for it "
@@ -573,10 +664,11 @@ def _asks_unaccounted(exc: AsksUnaccountedError) -> dict[str, object]:
 def _decline_missing(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
     """Return the refusal for a plan that drops an ask answered `unsupported`.
 
-    Each `unsupported` answer `propose_plan` or `translate` gave in this
+    Each `unsupported` answer `propose_plan` or its translation gave in this
     planner entry (`load_unsupported`) needs a `Decline` with its operation
     as `code`, so the ask stays on the record instead of vanishing from a
-    reshaped plan.
+    reshaped plan. An optional decline (`load_optional_declines`) is owed by
+    no plan.
     """
     declined = {decline.code for decline in plan.declined}
     missing = sorted(code.value for code in load_unsupported(tool_context.state) - declined)
@@ -604,12 +696,13 @@ def _decline_unearned(
 
     A decline this plan adds needs its code among the `unsupported` answers
     recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
-    `translate`'s, or one a replan's run-time refusal stands for
-    (`harness.planner_seam._earned_by_refusal`). A decline carried unchanged from `previous`, the
+    its translation's, or one a replan's run-time refusal stands for
+    (`harness.planner_seam._earned_by_refusal`); or among its optional
+    declines (`load_optional_declines`). A decline carried unchanged from `previous`, the
     plan this one amends, was earned when it was recorded; one restated with
     the same `Decline.key` in other words is the same decline.
     """
-    earned = load_unsupported(tool_context.state)
+    earned = load_unsupported(tool_context.state) | load_optional_declines(tool_context.state)
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
     unearned = sorted(
         {
@@ -623,8 +716,9 @@ def _decline_unearned(
     return problem(
         ProblemCode.DECLINE_UNEARNED,
         f"`declined` names {unearned!r}, and nothing in this planner entry earned that "
-        "code. A decline is earned when `propose_plan` or `translate` answers `unsupported` "
-        "with its code, or when the refusal this entry replans from means no operation "
+        "code. A decline is earned when `propose_plan` or its `translation` answers `unsupported` "
+        "with its code, when a `requirement_unmeetable` translation's reason says it earns "
+        "that code, or when the refusal this entry replans from means no operation "
         "covers the step. To earn it, propose the computation the ask states; if nothing "
         "carries it out, that answer names the code.",
         outcome=Outcome.INVALID_INPUT,
@@ -657,7 +751,7 @@ def _approval_summary(plan: Plan) -> dict[str, object]:
     and every warning the compiler let through (`Workflow.warnings`). The
     plan's own decisions, requirements, sources and steps are deliberately
     absent. `harness.studio_translate` builds the card the user approves from
-    the plan record, through `harness.plan_display`, and `translate` and
+    the plan record, through `harness.plan_display`, and translation and
     `submit_plan` both read the record out of session state, so a copy here is
     a second description of one plan that can disagree with the first.
 
@@ -714,14 +808,15 @@ def _execution_blocked(
         # translation, so approving one would approve nothing to run.
         return problem(
             ProblemCode.WORKFLOW_MISSING,
-            "This plan still needs translating and compiling into a workflow "
+            "This plan has not compiled into a workflow, so nothing can execute "
             + (
-                "before it can execute. Call `translate` first."
+                "yet. Propose it again, with its `version` as `amends_version`, to have it "
+                "translated."
                 if has_translator
-                else "before anything can execute, and no translator is attached here."
+                else "yet, and no translator is attached here."
             ),
             outcome=Outcome.REFUSED,
-            action=Action(call=TRANSLATE_TOOL_NAME) if has_translator else None,
+            action=Action(call="propose_plan") if has_translator else None,
         )
     if plan.version != version:
         return problem(
@@ -862,6 +957,46 @@ def _resolve_intent(
     if invalid is not None:
         return invalid
     return existing, rounds_so_far + 1
+
+
+# The `propose_plan` arguments that patch a plan. A call naming none of them
+# changes nothing about the version it amends.
+_PATCH_ARGUMENTS = (
+    "decisions",
+    "evidence_requirements",
+    "removed_decisions",
+    "removed_evidence_requirements",
+    "declined",
+    "answered",
+)
+
+
+def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan | None:
+    """The recorded plan a `propose_plan` call asks to have translated again, or `None`.
+
+    A transient referral (the data service did not answer) leaves the
+    recorded plan as it was. A call amending that version and changing
+    nothing (`amends_version` alone, any restated `question` or
+    `answer_mode` equal to the recorded one) asks only for that version to
+    be translated again, so it records no new version and spends no plan
+    round. Any other call is a proposal.
+    """
+    referral = load_referral(state)
+    plan = load_plan(state)
+    if (
+        referral is None
+        or referral.outcome is not Outcome.TRANSIENT
+        or plan is None
+        or arguments.get("amends_version") != plan.version
+        or arguments.get("starts_new_plan")
+        or any(arguments.get(name) for name in _PATCH_ARGUMENTS)
+    ):
+        return None
+    if arguments.get("question") not in (None, plan.question):
+        return None
+    if arguments.get("answer_mode") not in (None, plan.answer_mode):
+        return None
+    return plan
 
 
 def _question_fixed_restart_blocked(
@@ -1086,34 +1221,44 @@ def _is_answer(body: dict[str, Any]) -> bool:
 
 def _answered_since_referral(tool_context: ToolContext) -> bool:
     """Whether the user has answered an ask the planner raised after seeing the
-    translator's referral, read off this session's event history as
-    `_elected_spec_ids` reads it.
+    translator's referral (`_answers_since_referral`)."""
+    return _answers_since_referral(tool_context)[0]
 
-    The referral reaches the planner as the `FunctionResponse` for its own
-    `translate` call, carrying its `kind` and `requirement_id`. This walks the
-    session once, in event order. An `adk_request_input` call event after that
-    response is an ask the model raised knowing the referral, and its `id` is
-    remembered. A response counts as the user's answer when it pairs by `id` with
-    one of those asks and `_is_answer` holds. An ask issued before the referral, a
-    call the tool or ADK rejected, and a skip do not count. A skip is the user
-    declining to choose, which the planner may not substitute for, so the planner
-    ends the turn by telling them what cannot be done.
 
-    A `translate` response naming a different referral than the last one starts
-    the walk over. `translate` called again on a plan whose referral is still pending
-    answers with that same referral, so the answer the user gave in between still
-    counts. A `propose_plan` that recorded a version clears the referral in
-    session state, so it ends the referral this walk is following too. A refused
+def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[str]]:
+    """Whether the user has answered an ask the planner raised after seeing the
+    translator's referral, and the spec_ids they picked answering those asks,
+    read off this session's event history as `_elected_spec_ids` reads it.
+
+    The referral reaches the planner in the `translation` of the `propose_plan`
+    response that recorded the plan, carrying its `kind` and `requirement_id`.
+    This walks the session once, in event order. An `adk_request_input` call
+    event after that response is an ask the model raised knowing the referral,
+    and its `id` is remembered. A response counts as the user's answer when it
+    pairs by `id` with one of those asks and `_is_answer` holds. An ask issued
+    before the referral, a call the tool or ADK rejected, and a skip do not
+    count. A skip is the user declining to choose, which the planner may not
+    substitute for, so the planner ends the turn by telling them what cannot be
+    done.
+
+    A `propose_plan` that recorded a version clears the referral in session
+    state and translates the new version, so it ends the referral this walk is
+    following and starts the one its `translation` names, if any. A refused
     proposal leaves both alone, which keeps the user's answer standing for the
     retry.
 
-    With no `translate` response on record the result is no answer. The guard
-    refuses when it cannot say where the referral began, so an answer given for
-    something else settles nothing.
+    With no referral on record the result is no answer. The guard refuses when
+    it cannot say where the referral began, so an answer given for something
+    else settles nothing.
+
+    A spec_id counts as picked when an answer names it and the ask it answers,
+    the nearest preceding one with its `id`, offered it, as `_elected_spec_ids`
+    pairs them. A pick made before the referral is not counted.
     """
     answered = False
     referral: tuple[object, object] | None = None
-    asks: set[str] = set()
+    asks: dict[str, frozenset[str]] = {}
+    picked: set[str] = set()
     for event in tool_context.session.events:
         if not (event.content and event.content.parts):
             continue
@@ -1125,22 +1270,30 @@ def _answered_since_referral(tool_context: ToolContext) -> bool:
                 and call.id is not None
                 and referral is not None
             ):
-                asks.add(call.id)
+                asks[call.id] = _offered_candidates(call.args or {})
             response = part.function_response
             if response is None:
                 continue
             body = response.response or {}
             if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                answered = answered or (response.id in asks and _is_answer(body))
-            elif response.name == TRANSLATE_TOOL_NAME:
-                handed_back = (body.get("kind"), body.get("requirement_id"))
-                if handed_back != referral:
-                    referral, answered = handed_back, False
-                    asks.clear()
+                if response.id not in asks or not _is_answer(body):
+                    continue
+                answered = True
+                result = body.get("result")
+                spec_id = result.get("spec_id") if isinstance(result, dict) else None
+                if spec_id is not None and str(spec_id) in asks[response.id]:
+                    picked.add(str(spec_id))
             elif response.name == "propose_plan" and body.get("outcome") == Outcome.OK.value:
-                referral, answered = None, False
+                translation = body.get("translation")
+                referral = (
+                    (translation.get("kind"), translation.get("requirement_id"))
+                    if isinstance(translation, dict) and "kind" in translation
+                    else None
+                )
+                answered = False
                 asks.clear()
-    return answered
+                picked.clear()
+    return answered, frozenset(picked)
 
 
 def _referral_unanswered(
@@ -1237,6 +1390,38 @@ def _refound_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     return frozenset(
         candidates[0].spec_id for candidates in referral.offered().values() if len(candidates) == 1
     )
+
+
+def _stated_source_given_way(
+    requirements: Sequence[EvidenceRequirement], tool_context: ToolContext
+) -> list[EvidenceRequirement]:
+    """`requirements`, with the stated `source` dropped from a requirement that pins the source the user chose.
+
+    A pending `requirement_unmeetable` referral marked `source_mismatch`
+    hands a requirement back because the source it states names none of the
+    sources discovery found, and offers those. A pin of one of them that the
+    user picked, answering an ask raised after the referral
+    (`_answers_since_referral`), names the exact source they chose, so the
+    stated source gives way to it. Left in place, it would refuse that source
+    as `compiler.evidence`'s `SOURCE_MISMATCH` and refer the plan back the
+    same way. Any other pin keeps the stated source, including one the planner
+    settled itself after a free-text answer and one the user picked before the
+    referral, so the compiler still refuses a source the user neither named
+    nor chose.
+    """
+    referral = load_referral(tool_context.state)
+    if referral is None or not referral.source_mismatch:
+        return list(requirements)
+    offered = {candidate.spec_id for candidate in referral.candidates}
+    chosen = offered & _answers_since_referral(tool_context)[1]
+    return [
+        requirement.model_copy(update={"source": None})
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.id == referral.requirement_id
+        and requirement.source_spec_id in chosen
+        else requirement
+        for requirement in requirements
+    ]
 
 
 def _choice_not_offered(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
@@ -1439,8 +1624,170 @@ def _copied_spec_id(copy: SeededSource | WindowedPin) -> str:
     return copy.source.spec_id if isinstance(copy, SeededSource) else copy.spec_id
 
 
+def _first_year_on_record(
+    pin: str,
+    *,
+    seed: SeededSource | None,
+    shown: Mapping[str, PinSource],
+    read: Mapping[str, FullHistory | None],
+) -> FullHistory | None:
+    """What is on record about every year the dataset `pin` holds; `None` when nothing is.
+
+    Read from the Search answer the planner was shown for `pin`
+    (`planner.plan.full_history`), or else from what `propose_plan` read for
+    it over no window (`read`, `planner.plan.full_histories`), or else from
+    a seed whose identity is over no window and whose coverage is a series
+    window, which states the first year and counts no rows.
+    """
+    source = shown.get(pin)
+    block = source.spec_block(pin) if source is not None else None
+    if block is not None and (history := full_history(block)) is not None:
+        return history
+    if (history := read.get(pin)) is not None:
+        return history
+    if seed is None or seed.source.coverage_window is None:
+        return None
+    requested = (seed.source.identity or {}).get("requested_window")
+    if not isinstance(requested, Mapping) or requested.get("kind") != "all":
+        return None
+    return FullHistory(first_year=seed.source.coverage_window.start, rows=None)
+
+
+def _open_window(
+    plan: Plan,
+    requirement: DatasetRequirement,
+    *,
+    seed: SeededSource | None,
+    shown: Mapping[str, PinSource],
+    read: Mapping[str, FullHistory | None],
+) -> dict[str, object]:
+    """The window with no end year a pinned `requirement` stating `period_end_open` is retrieved over.
+
+    It starts at the requirement's own first year when every period that
+    follows the newest data over it keeps a fixed start. When one rolls
+    from its start (`planner.plan.rolls_from_its_start`), the year it reads
+    can sit before the stated period, so the window starts at the first
+    year the dataset holds (`_first_year_on_record`) and the frame holds
+    its whole history. That frame is refused here when Search counted more
+    rows for it than one frame may hold (data-mcp's `max_frame_rows`); an
+    uncounted one is refused by `get_data` itself (`over_ceiling`) if it is
+    too large.
+
+    Raises:
+        RollingPlanError: `RollingIssue.NEEDS_OPEN_PERIOD` when no first year
+            is on record: `OpenPeriodFault.FIRST_YEAR_UNKNOWN` before the
+            dataset was read over no window, `FIRST_YEAR_READ_FAILED` when
+            that read's answer stated none (`read` holds the pin with
+            `None`). `RollingIssue.FRAME_TOO_LARGE` when the history is past
+            the ceiling.
+    """
+    if not _rolls_from_its_start(plan, requirement):
+        return period_window(requirement.period, end_open=True)
+    pin = requirement.source_spec_id or ""
+    history = _first_year_on_record(pin, seed=seed, shown=shown, read=read)
+    if history is None and pin in read:
+        raise RollingPlanError(
+            RollingIssue.NEEDS_OPEN_PERIOD,
+            f"{requirement.id!r} is read from a start that follows the newest data, and "
+            f"Search's answer for {pin} over all its years states no first year, so the "
+            "retrieval cannot be started there. This is a limit of what was read, not a "
+            "fault in the question. State the start as a fixed year and roll only the "
+            "end, or drop `rolling` and `period_end_open` for fixed years",
+            requirement_ids=[requirement.id],
+            fault=OpenPeriodFault.FIRST_YEAR_READ_FAILED,
+            spec_id=pin,
+        )
+    if history is None:
+        raise RollingPlanError(
+            RollingIssue.NEEDS_OPEN_PERIOD,
+            f"{requirement.id!r} is read from a start that follows the newest data, which "
+            f"needs the first year {pin} holds, and no search result over all its years "
+            "states one. State the start as a fixed year and roll only the end, or drop "
+            "`rolling` and `period_end_open` for fixed years",
+            requirement_ids=[requirement.id],
+            fault=OpenPeriodFault.FIRST_YEAR_UNKNOWN,
+            spec_id=pin,
+        )
+    ceiling = DataMcpSettings().max_frame_rows
+    if history.rows is not None and history.rows > ceiling:
+        raise RollingPlanError(
+            RollingIssue.FRAME_TOO_LARGE,
+            f"{requirement.id!r} is read from a start that follows the newest data, so it "
+            f"retrieves every year {pin} holds: {history.rows:,} rows, over the {ceiling:,} "
+            "one retrieval may return. Name fewer entities, state the start as a fixed "
+            "year and roll only the end, or drop `rolling` and `period_end_open`",
+            requirement_ids=[requirement.id],
+        )
+    return open_window(history.first_year)
+
+
+@dataclass(frozen=True)
+class _ShownDefinition:
+    """The definition of a dataset the planner was shown, as its block carries it,
+    with the sets its places were asked for as."""
+
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+
+
+def _identity_on_record(
+    pin: str,
+    seeds: Mapping[str, SeededSource],
+    *,
+    shown: Mapping[str, PinSource],
+    end_open: bool,
+) -> tuple[SeededSource | None, RecordedDefinition | None, Mapping[str, Any] | None]:
+    """The seed `pin` names, or else the definition on record for it, and its identity.
+
+    The definition is the one a search in the conversation recorded
+    (`planner.plan.recorded_identity`). For a requirement stating
+    `period_end_open` it is otherwise the one the block the planner was
+    shown carries (`planner.plan.shown_identity`): the translator can find
+    a closed requirement's pin by searching its stated years, and no search
+    finds a definition with no end year.
+    """
+    seed = seeds.get(pin)
+    if seed is not None:
+        return seed, None, seed.source.identity
+    recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and end_open and pin in shown:
+        identity = shown_identity(pin, shown[pin])
+        block = shown[pin].spec_block(pin)
+        recorded = (
+            _ShownDefinition(identity, block_groups(block) if block is not None else ())
+            if identity is not None
+            else None
+        )
+    return None, recorded, recorded.identity if recorded is not None else None
+
+
+def _rolls_from_its_start(plan: Plan, requirement: DatasetRequirement) -> bool:
+    """Whether a period over `requirement` follows the newest data from its start (`planner.plan.rolls_from_its_start`)."""
+    requirements = {item.id: item for item in plan.evidence_requirements}
+    return any(
+        rolls_from_its_start(reader) for reader in rolling_readers(requirements, requirement.id)
+    )
+
+
+def _needs_a_pin(plan: Plan, requirement: DatasetRequirement) -> bool:
+    """Whether `requirement`, stating `period_end_open` with no identity on record, cannot be retrieved open.
+
+    An unpinned one whose start is fixed can: the translator searches for it
+    from its first year on (`translator.discovery`), and Search answers with
+    a definition that has no end year. One read from a start that follows
+    the newest data needs the first year its dataset holds, which only a
+    dataset on record has. A pin with nothing on record is confirmed by a
+    search over the stated years, which finds a fixed end.
+    """
+    return requirement.source_spec_id is not None or _rolls_from_its_start(plan, requirement)
+
+
 def _window_pins(
-    plan: Plan, seeded: Sequence[SeededSource]
+    plan: Plan,
+    seeded: Sequence[SeededSource],
+    *,
+    shown: Mapping[str, PinSource] = {},
+    read: Mapping[str, FullHistory | None] = {},
 ) -> tuple[Plan, list[SeededSource], list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
 
@@ -1459,6 +1806,16 @@ def _window_pins(
     the window whole, as `get_data`'s scope surgery does, and the translator
     confirms the copy through Search before it is retrieved.
 
+    A requirement stating `period_end_open` is pinned to that identity over
+    a range with no end year (`_open_window`), which dfo-apis ends at the
+    current year at every mint, so its retrieval reaches years published
+    after the plan. `shown` are the datasets the planner was shown this
+    entry (`planner.plan.pin_sources`) and `read` what `propose_plan` read
+    over no window (`planner.plan.full_histories`), both read for the first
+    year one holds.
+    Such a requirement needs an identity on record (`_identity_on_record`),
+    unless it is unpinned and its start is fixed (`_needs_a_pin`).
+
     Returns the moved plan and every copy it pins: of a seed, the one
     `seeded` holds for that spec_id or a new one (`planner.plan.
     windowed_copy`); of any other pin, a `planner.plan.WindowedPin`. Neither
@@ -1472,32 +1829,49 @@ def _window_pins(
     searches for each, unless the pin is a seed's.
 
     Raises:
-        ValueError: If one decision fixes a seed's pin for requirements over
+        ValueError: If one decision fixes a seed's pin, or the pin of a
+            requirement stating `period_end_open`, for requirements over
             different periods.
+        RollingPlanError: If a requirement stating `period_end_open` needs an
+            identity on record and has none, or `_open_window` refuses it.
     """
     seeds = {item.source.spec_id: item for item in seeded if item.windowed_from is None}
     pinning: dict[str, str] = {}
     copies: dict[str, SeededSource | WindowedPin | None] = {}
+    open_ended: set[str] = set()
     for requirement in plan.evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+        if not isinstance(requirement, DatasetRequirement):
             continue
         pin = requirement.source_spec_id
-        seed = seeds.get(pin)
-        recorded = None if seed is not None else recorded_identity(pin)
-        if seed is not None:
-            identity = seed.source.identity
-        else:
-            identity = recorded.identity if recorded is not None else None
-        if identity is None:
+        seed, recorded, identity = (
+            _identity_on_record(pin, seeds, shown=shown, end_open=requirement.period_end_open)
+            if pin is not None
+            else (None, None, None)
+        )
+        if requirement.period_end_open and identity is None and _needs_a_pin(plan, requirement):
+            raise RollingPlanError(
+                RollingIssue.NEEDS_OPEN_PERIOD,
+                f"{requirement.id!r} states `period_end_open`, which takes a dataset on "
+                "record to retrieve with no end year: pin a search result's `spec_id` as its "
+                "`source_spec_id`, or drop `period_end_open` and every `rolling` reading it "
+                "for fixed years",
+                requirement_ids=[requirement.id],
+                fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
+            )
+        if pin is None or identity is None:
             continue
         pinning[requirement.id] = pin
-        window = period_window(requirement.period)
+        if requirement.period_end_open:
+            open_ended.add(requirement.id)
+            window = _open_window(plan, requirement, seed=seed, shown=shown, read=read)
+        else:
+            window = period_window(requirement.period)
         if identity.get("requested_window") == window:
             copies[requirement.id] = None
         elif seed is not None:
             copies[requirement.id] = windowed_copy(seed, window)
         elif recorded is not None:
-            copies[requirement.id] = windowed_pin(pin, recorded, requirement.period)
+            copies[requirement.id] = windowed_pin(pin, recorded, window)
     targets: dict[str, set[str]] = {}
     for requirement in plan.evidence_requirements:
         if requirement.id not in copies:
@@ -1515,7 +1889,12 @@ def _window_pins(
             continue
         pinned = targets.get(decision.slot, set())
         if len(pinned) > 1:
-            if pin in seeds:
+            citing = {
+                requirement.id
+                for requirement in plan.evidence_requirements
+                if decision.slot in requirement.decision_ids
+            }
+            if pin in seeds or citing & open_ended:
                 raise ValueError(
                     f"decision {decision.slot!r} fixes the pin of requirements over different "
                     "periods, which retrieve different spec_ids; give each of those requirements "
@@ -1835,8 +2214,10 @@ _PROPOSE_PLAN_ARGUMENTS = {
     "declined": (
         "Each part of the question no operation computes, one per `code` and "
         "`ask_ref`. Only an `unsupported` answer earns a decline, with that "
-        "answer's code: one from `propose_plan` or `translate`, or a run-time "
-        "refusal the plan is replanned from that names the code."
+        "answer's code: one `propose_plan` answered, itself or in its `translation`, "
+        "or a run-time refusal the plan is replanned from that names the code. A "
+        "`requirement_unmeetable` translation whose `reason` says it earns a "
+        "decline earns that code too, which the plan may make or leave out."
     ),
     "answered": (
         "When the brief lists asks, the requirements that answer each one, "
@@ -1871,22 +2252,108 @@ _FIXED_ARGUMENTS = {
 }
 
 
+def _first_year_wanted(result: Mapping[str, object]) -> str | None:
+    """The pinned dataset a refusal says no first year is on record for; `None` for any other answer."""
+    detail = result.get("detail")
+    if (
+        not isinstance(detail, Mapping)
+        or detail.get("fault") != OpenPeriodFault.FIRST_YEAR_UNKNOWN.value
+    ):
+        return None
+    spec_id = detail.get("spec_id")
+    return spec_id if isinstance(spec_id, str) else None
+
+
+# The seconds one first-year read may take (`_read_full_history`). It runs
+# inside a `propose_plan` call, so inside the planner entry's remaining time,
+# which `translator.discovery.resolve_definition` already holds it to; this
+# keeps a slow Search from spending that whole remainder on one read.
+FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
+
+
+async def _read_full_history(
+    surface: ToolSurface, identity: Mapping[str, Any]
+) -> FullHistory | None:
+    """What Search states about every year the dataset of `identity` holds, read now.
+
+    One `resolve_definition` call for `identity` over no window, the same
+    read the translator makes for a pin's copy
+    (`translator.discovery.resolve_definition`): data-mcp posts the identity
+    to Search once and stores the definition it answers. `None` when Search
+    does not answer with that one dataset, or its answer states no first
+    year (`planner.plan.full_history`). The window is read for its first
+    year only and is never retrieved.
+
+    Raises:
+        DefinitionNotResolvedError: If the call did not complete, or did not
+            answer within `FIRST_YEAR_READ_DEADLINE_SECONDS`, and can succeed
+            later (`retryable`).
+    """
+    spec_id, unwindowed = windowed_identity(identity, {"kind": "all"})
+    try:
+        async with asyncio.timeout(FIRST_YEAR_READ_DEADLINE_SECONDS):
+            part = await resolve_definition(surface, spec_id=spec_id, identity=unwindowed)
+        return full_history(resolved_spec(part, spec_id=spec_id))
+    except TimeoutError as exc:
+        raise DefinitionNotResolvedError(
+            f"Search did not answer in {FIRST_YEAR_READ_DEADLINE_SECONDS:.0f} s", retryable=True
+        ) from exc
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            raise
+        return None
+    except PartNotResolvedError:
+        return None
+
+
+def _first_year_unreadable(
+    refused: Mapping[str, object], exc: DefinitionNotResolvedError
+) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a first-year read that did not complete.
+
+    `refused` is the `first_year_unknown` refusal the read was made for; its
+    requirements and dataset carry over, under the fault
+    `first_year_read_failed`. The same proposal can succeed later, so
+    nothing in it needs changing.
+    """
+    detail = dict(cast("Mapping[str, JsonValue]", refused["detail"]))
+    detail["fault"] = OpenPeriodFault.FIRST_YEAR_READ_FAILED.value
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"The first year {detail['spec_id']} holds could not be read: {exc}. The plan is "
+        "sound and nothing was recorded; propose it again, or state the start as a fixed "
+        "year and roll only the end.",
+        outcome=Outcome.REFUSED,
+        detail=detail,
+    )
+
+
 def build_planner_tools(
     *,
-    has_translator: bool = True,
+    translate: Translate | None = None,
     question_fixed: bool = False,
+    surface: ToolSurface | None = None,
 ) -> list[FunctionTool]:
     """Build the planner's tool set.
 
-    `has_translator` says whether a translator is attached to the agent these
-    tools belong to. A refusal names the tool to call next, and naming one the
-    agent does not have sends the model at a tool ADK raises on.
+    `translate` is the translation (`translator.tool.build_translate`) a
+    `propose_plan` that records a plan runs on it, answering with the verdict
+    under `translation` alongside its own `ok`. Given, `propose_plan` is a
+    coroutine function. Omitted, `propose_plan` records the plan and stops,
+    and `submit_plan`'s refusal of an uncompiled plan names no next call.
+
+    `surface` is the tool surface `propose_plan` reads a pinned dataset's
+    first year through, when a start that follows the newest data needs one
+    no answer on record states (`_read_full_history`). Given, `propose_plan`
+    is a coroutine function. Omitted, it reads nothing and refuses such a
+    plan `first_year_unknown`.
 
     `question_fixed` closes over into `propose_plan`, which passes it straight
     to `_resolve_intent` on every call, and selects `_FIXED_ARGUMENTS`'
     descriptions of `question` and `starts_new_plan`, so those two arguments
     describe the mode this tool set actually enforces.
     """
+    has_translator = translate is not None
 
     # Named `ask_user` here, for readability, but renamed below (once
     # defined) to `adk_request_input` -- the function-call name ADK's own
@@ -1909,7 +2376,8 @@ def build_planner_tools(
         response on your next turn, naming the `spec_id` they picked, or free
         text if they answered outside the candidates. A `resolved_by=user`
         decision may pin only a `spec_id` this call offered and the user
-        picked.
+        picked. The options offered come from the referral's candidates; with
+        none, the question says what cannot be done and asks what to change.
 
         Args:
             message: The question to show the user, naming what is
@@ -2023,6 +2491,7 @@ def build_planner_tools(
         )
         if isinstance(settled, dict):
             return settled
+        evidence_requirements = _stated_source_given_way(evidence_requirements, tool_context)
         # A verbatim pin of a spec_id a search settled on gets the citing
         # `Decision` it needs written here, on the model's behalf, so
         # `Plan`'s own validator never has to refuse it for lacking one.
@@ -2082,7 +2551,9 @@ def build_planner_tools(
                     asks=load_asks(tool_context.state),
                     answered=answered,
                 )
-            plan, windows, copies = _window_pins(plan, seeded)
+            plan, windows, copies = _window_pins(
+                plan, seeded, shown=pins, read=full_histories(tool_context.state)
+            )
         except (ValidationError, ValueError) as exc:
             # The plan-level rules: unique slots and ids, every citation naming
             # a decision, every decision cited,
@@ -2118,7 +2589,7 @@ def build_planner_tools(
         # Only what the model cannot read back off its own call, and the
         # question as stored. The decisions and requirements the model sent are
         # echoed nowhere, because the plan is in session state and
-        # `translate` reads it from there. `status` is always the
+        # translation reads it from there. `status` is always the
         # literal `"draft"` this call just wrote. `version` and its
         # predecessor are what the call did not already state.
         # `Plan.amend` bumps both and returns to `DRAFT`, and they are how
@@ -2185,11 +2656,82 @@ def build_planner_tools(
             summary=_approval_summary(plan),
         )
 
+    @functools.wraps(propose_plan)
+    async def propose_plan_reading(**arguments: Any) -> dict[str, object]:
+        """`propose_plan`, reading each first year it refuses for want of.
+
+        A refusal records nothing, so the proposal is made again once the
+        read is held (`planner.plan.save_full_history`). One read serves
+        every requirement, and every later proposal of the turn, that pins
+        the dataset; an answer stating no first year is held too, and the
+        next refusal says so (`first_year_read_failed`).
+        """
+        assert surface is not None
+        state = arguments["tool_context"].state
+        while True:
+            result = propose_plan(**arguments)
+            pin = _first_year_wanted(result)
+            if pin is None or pin in full_histories(state):
+                return result
+            seeds = {
+                item.source.spec_id: item
+                for item in seeded_sources(state)
+                if item.windowed_from is None
+            }
+            _, _, identity = _identity_on_record(
+                pin, seeds, shown=pin_sources(state), end_open=True
+            )
+            if identity is None:
+                return result
+            try:
+                history = await _read_full_history(surface, identity)
+            except DefinitionNotResolvedError as exc:
+                return _first_year_unreadable(result, exc)
+            save_full_history(state, pin, history)
+
+    @functools.wraps(propose_plan)
+    async def propose_plan_translating(**arguments: Any) -> dict[str, object]:
+        """`propose_plan`, translating the plan it records.
+
+        Translation runs once, on the version the proposal recorded, after
+        any first-year reads (`propose_plan_reading`). The proposal's own
+        `outcome` stays `ok` whatever the verdict, since the version is
+        recorded either way. A proposal that records nothing translates
+        nothing. A bare re-proposal after a transient verdict
+        (`_transient_retry`) translates the recorded version again and
+        records nothing.
+        """
+        assert translate is not None
+        tool_context = arguments["tool_context"]
+        retried = _transient_retry(arguments, tool_context.state)
+        if retried is not None:
+            clear_referral(tool_context.state)
+            return ok(
+                status=retried.status.value,
+                version=retried.version,
+                previous_version=retried.previous_version,
+                question=retried.question,
+                translation=await translate(tool_context),
+            )
+        result = (
+            propose_plan(**arguments)
+            if surface is None
+            else await propose_plan_reading(**arguments)
+        )
+        if result.get("outcome") != Outcome.OK.value:
+            return result
+        return {**result, "translation": await translate(arguments["tool_context"])}
+
     ask_user.__name__ = REQUEST_INPUT_FUNCTION_CALL_NAME
+    proposing: Callable[..., Any] = propose_plan
+    if translate is not None:
+        proposing = propose_plan_translating
+    elif surface is not None:
+        proposing = propose_plan_reading
     return [
         LongRunningFunctionTool(ask_user),
         PlanTool(
-            propose_plan,
+            proposing,
             arguments=(
                 _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS
                 if question_fixed
@@ -2204,7 +2746,7 @@ def build_planner_tools(
 def create_planner_agent(
     *,
     model_name: str,
-    translate: FunctionTool | None = None,
+    translate: Translate | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
     prefix_cache: PrefixCache | None = None,
@@ -2213,14 +2755,18 @@ def create_planner_agent(
 
     Args:
         model_name: The model this agent runs on.
-        translate: The `translate` tool (`translator.tool.build_translate_tool`),
-            which is how a draft plan gets translated and compiled. Omitted,
-            the planner is the standalone agent its own eval set scores --
+        translate: The translation (`translator.tool.build_translate`)
+            `propose_plan` runs on every plan it records, which is how a
+            draft plan gets translated and compiled. It runs inside
+            `propose_plan`, so the model spends no generation on it. Omitted, the
+            planner is the standalone agent its own eval set scores --
             which is also what keeps that set from needing a live tool
             surface.
         surface: The tool surface `get_skill` and `get_skill_file` call
-            data-mcp through. Omitted, the planner has neither tool and its
-            instruction does not name them.
+            data-mcp through, and `propose_plan` reads a pinned dataset's
+            first year through. Omitted, the planner has neither skill tool,
+            its instruction does not name them, and `propose_plan` reads
+            nothing.
         question_fixed: Whether the question this planner drafts for is fixed
             for the entry it is called in. The harness graph's own seam sets
             this when it builds the planner (`harness.planner_seam`), since the
@@ -2251,9 +2797,10 @@ def create_planner_agent(
         tools=[
             *(build_skill_tools(surface) if surface is not None else []),
             *build_planner_tools(
-                has_translator=translate is not None, question_fixed=question_fixed
+                translate=translate,
+                question_fixed=question_fixed,
+                surface=surface,
             ),
-            *([translate] if translate is not None else []),
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s
         # `ctx.run_node`), ADK defaults an agent with no explicit `mode` to

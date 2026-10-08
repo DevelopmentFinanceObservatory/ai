@@ -274,10 +274,6 @@
           }
         },
         {
-          "call": "translate",
-          "args": {}
-        },
-        {
           "call": "submit_plan",
           "args": {
             "version": 1
@@ -411,10 +407,6 @@
           }
         },
         {
-          "call": "translate",
-          "args": {}
-        },
-        {
           "call": "propose_plan",
           "args": {
             "decisions": [
@@ -466,10 +458,6 @@
           }
         },
         {
-          "call": "translate",
-          "args": {}
-        },
-        {
           "call": "propose_plan",
           "args": {
             "decisions": [
@@ -519,10 +507,6 @@
             ],
             "amends_version": 2
           }
-        },
-        {
-          "call": "translate",
-          "args": {}
         },
         {
           "text": "The plan cannot be carried out."
@@ -798,10 +782,6 @@
               }
             ]
           }
-        },
-        {
-          "call": "translate",
-          "args": {}
         },
         {
           "call": "submit_plan",

@@ -15,6 +15,8 @@ schema is declared safely for refusals too.
 
 `role_keys` and `stat_var_count` are read off the frame `store_result_and_render`
 already holds, via `observed_shape` below -- no verb signature changes.
+`dropped_key_count` is the one shape fact a frame cannot state, the keys a
+verb left out of it, so the verb passes it to `store_result_and_render`.
 
 Every verb declares version "1" until the toolkit's first release. Until
 then a deploy ships the harness's capability pins and the servers together,
@@ -50,6 +52,10 @@ class VerbResult(BaseModel):
       them -- `()` for a keyless verb output.
     - `stat_var_count`: distinct `stat_var`s the frame carries; 0 when
       `rows` is 0.
+    - `dropped_key_count`: how many of the numerator's keys a keyed
+      `quotient_of` holds no row for: those with no denominator group, those
+      sharing no period with it, and those whose every matched cell has a
+      zero denominator. 0 for an un-keyed call and for every other verb.
     - `exclusions`/`time`: as `Trace` carries them.
     """
 
@@ -61,6 +67,7 @@ class VerbResult(BaseModel):
     rows: int = Field(ge=0)
     role_keys: tuple[str, ...] = ()
     stat_var_count: int = Field(ge=0)
+    dropped_key_count: int = Field(default=0, ge=0)
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)
 
@@ -76,6 +83,7 @@ IMPLEMENTATION_VERSIONS: Mapping[str, str] = {
     "join": "1",
     "filter": "1",
     "sum_of": "1",
+    "quotient_of": "1",
 }
 
 

@@ -667,6 +667,20 @@ def test_a_focus_on_a_component_off_the_canvas_adds_its_block_and_names_it():
     assert digest["blocks"][-1]["component_id"] == "cmp_off"
 
 
+def test_a_focus_card_older_than_the_block_cap_stays_in_the_digest():
+    """The card the user asks about is the one block the digest must keep."""
+    entries = {f"cmp_{index:02d}": _entry(f"Card {index}", None) for index in range(17)}
+    state = _canvas(entries)
+
+    digest = state.canvas_digest_state(focus="cmp_00")
+
+    assert digest is not None
+    ids = [block["component_id"] for block in digest["blocks"]]
+    assert len(ids) == studio_state._DIGEST_BLOCK_CAP
+    assert "cmp_00" in ids
+    assert digest["focus_component_id"] == "cmp_00"
+
+
 def test_a_component_id_a_type_and_a_title_of_any_size_are_cut_to_their_caps():
     """The digest's maximum holds for every field of a block.
 
@@ -2342,3 +2356,50 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
+
+
+def test_a_recorded_identity_keeps_the_set_its_places_were_asked_for_as():
+    """A Spec over Africa's countries is recorded with Africa beside its identity, so
+    a later turn's pin of it asks Search for the set again."""
+    block = json.loads(
+        (Path(__file__).parent / "fixtures" / "search_spec_region_members.json").read_text()
+    )["spec"]
+    spec_id = block["spec_id"]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_readings = [
+        SearchReading.from_part(
+            {"variable": "x", "status": "definite", "spec_id": spec_id}
+        ).model_dump(mode="json")
+    ]
+    state.turn_specs = {spec_id: block}
+
+    recorded = state.recorded_identity(spec_id)
+
+    assert recorded is not None
+    assert [(g.role, g.label, g.ref) for g in recorded.groups] == [
+        ("observationAbout", "Africa", "africa")
+    ]
+
+
+def test_a_plan_retrieving_a_sets_places_records_the_set_into_the_next_turn():
+    """A plan whose source binds Africa's countries keeps Africa on its plan record
+    (`PlanSource.groups`) and on the identity a later turn's pin resolves, through
+    the turn's close."""
+    block = json.loads(
+        (Path(__file__).parent / "fixtures" / "search_spec_region_members.json").read_text()
+    )["spec"]
+    spec_id = block["spec_id"]
+    plan_json = _plan_json_retrieving(source_from_spec_block(block))
+    (source,) = plan_json["sources"]
+    assert source["groups"] == [{"role": "observationAbout", "label": "Africa", "ref": "africa"}]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_plans = [plan_json]
+
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+
+    recorded = state.recorded_identity(spec_id)
+    assert recorded is not None
+    assert [(g.role, g.label, g.ref) for g in recorded.groups] == [
+        ("observationAbout", "Africa", "africa")
+    ]

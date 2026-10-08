@@ -105,8 +105,12 @@ MAX_CHARTS_PER_CALL = 8
 # The download surface fetches one dataset and never plans.
 DOWNLOAD_BUDGETS = {**BUDGETS, "fetch": 1, "plan": 0}
 # The turn's completed fetches: `_fetch_key` -> the spec_id fetched, its
-# summary and the ids of its frames, every one described.
+# summary and the ids of its frames, every one described, or the refusal of a
+# fetch that served no observations.
 _FETCHES_KEY = "orchestrator:fetches"
+# The code dfo-apis warns with, and `fetch` refuses with, when a mint serves
+# no observations.
+EMPTY_RESULT = "empty_result"
 # The refusal code of a `fetch` whose `get_data` call did not complete.
 FETCH_UNAVAILABLE = "transient_unavailable"
 # The refusal code of a `fetch` whose `get_data` call ran past its deadline.
@@ -133,6 +137,19 @@ TOOL_NAMES = (
 )
 
 
+# The most periods a chart counts back from the latest data.
+MAX_LATEST_PERIODS = 200
+
+
+def _latest_window(periods: int) -> dict[str, dict[str, Any]]:
+    """The intent window of the `periods` most recent periods: relative periods,
+    which the platform resolves against the latest data each time the card is drawn."""
+    return {
+        "start": {"anchor": "latest", "offset": 1 - periods},
+        "end": {"anchor": "latest", "offset": 0},
+    }
+
+
 class Chart(BaseModel):
     """One chart to draw from a frame `fetch` or a plan returned."""
 
@@ -153,8 +170,24 @@ class Chart(BaseModel):
     title: str = Field(
         description=(
             "what the chart shows and the period it shows; a stat card's title carries "
-            "the period of the value on the card"
+            "the period of the value on the card. The exception is a chart whose period "
+            "moves with the data, which is one on a frame whose view says rolling: true "
+            "and one given latest_periods: its title leaves out the years it shows "
+            "('over the last five years', never '2019-2024'), and a title naming one of "
+            "them is refused"
         )
+    )
+    latest_periods: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_LATEST_PERIODS,
+        description=(
+            "set to N to show the N most recent periods counted back from the latest "
+            "data, so the chart moves forward when newer data arrives: 5 for 'the last "
+            "five years'. Use it when the user counts a period back from now, on a frame "
+            "fetched with no window of fixed years. Leave it unset to show every period "
+            "the frame covers, and on a frame whose rows all cover one period"
+        ),
     )
     select_json: str = Field(
         description=(
@@ -288,6 +321,18 @@ def _spec_block(tool_context: ToolContext, spec_id: str) -> Mapping[str, Any] | 
     return block if block is not None else earlier_block(spec_id)
 
 
+def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
+    """`data`, a `get_data` outcome that served no observations, as the refusal `fetch`
+    gives for it, with dfo-apis' own `empty_result` warning when it sent one."""
+    warning = next((w for w in data.get("warnings") or [] if w.get("code") == EMPTY_RESULT), {})
+    said = f" ({warning['message']})" if warning.get("message") else ""
+    message = (
+        f"This data holds no observations for the places and period asked{said}. Fetching it "
+        "again unchanged returns nothing: change the places or period, or answer without it."
+    )
+    return {"outcome": "refusal", "refusal": {"code": EMPTY_RESULT, "message": message}}
+
+
 def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     """Add a `fetch` result to every stored search reading of its spec_id.
 
@@ -379,7 +424,11 @@ def build_orchestrator_tools(
         sent as one self-contained question naming the measure, places and
         period. `parts` is one entry per measured variable in it, each with
         the entities, time, unit or source the question gives for that
-        variable, as spoken. All parts go in one call. A flow measure such
+        variable, as spoken. An entity that names a set of places keeps
+        the set's name as its text, with `members: true` when the question
+        asks for each member on its own: "African countries" is
+        `{"text": "Africa", "members": true}`, and "Africa" alone is the
+        region as one place. All parts go in one call. A flow measure such
         as aid, donors or recipients needs its entity's role, as spoken:
         `to` for a recipient, `from` for a donor.
 
@@ -468,10 +517,13 @@ def build_orchestrator_tools(
 
         Returns a one-line summary and the frames the data landed in, each
         with an id to chart and a view listing its dimensions and their
-        values; or a refusal with its `code` and reason. The code
-        `capability_unavailable` means this deployment cannot do what the
-        call asked. A fetch of the same data as an earlier fetch this turn
-        returns that fetch's frames, with `same_data_as` naming its spec_id.
+        values; or a refusal with its `code` and reason, and the platform's
+        `retry_mode` and `fix` (its details and the values to change to) when
+        it gave them. The code `capability_unavailable` means this deployment
+        cannot do what the call asked; `empty_result` means the data holds no
+        observations for the places and period asked. A fetch of the same data
+        as an earlier fetch this turn returns that fetch's result, with
+        `same_data_as` naming its spec_id.
         """
         unavailable = (tool_context.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}).get(spec_id)
         if unavailable is not None:
@@ -512,12 +564,16 @@ def build_orchestrator_tools(
         earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
             frames = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
-            found = {
-                "spec_id": spec_id,
-                "summary": earlier["summary"],
-                "frames": [{"frame": f, "view": frames[f]["view"]} for f in earlier["frames"]],
-                "same_data_as": earlier["spec_id"],
-            }
+            found = (
+                {**earlier, "spec_id": spec_id, "same_data_as": earlier["spec_id"]}
+                if earlier.get("refusal")
+                else {
+                    "spec_id": spec_id,
+                    "summary": earlier["summary"],
+                    "frames": [{"frame": f, "view": frames[f]["view"]} for f in earlier["frames"]],
+                    "same_data_as": earlier["spec_id"],
+                }
+            )
             _attach_fetch(tool_context, found)
             return found
         try:
@@ -545,6 +601,9 @@ def build_orchestrator_tools(
                 }
             _attach_fetch(tool_context, refused)
             return refused
+        if data.get("outcome") == "ok" and data.get("rows") == 0:
+            # A mint that served no observations is refused as `empty_result`.
+            data = _empty_outcome(data)
         if data.get("outcome") != "ok":
             refusal = data.get("refusal") or {}
             refused = {
@@ -553,10 +612,17 @@ def build_orchestrator_tools(
                 or "get_data refused this fetch and gave no reason.",
                 "code": refusal.get("code"),
             }
+            refused.update({k: refusal[k] for k in ("retry_mode", "fix") if refusal.get(k)})
             if refused["code"] == ToolErrorCode.CAPABILITY_UNAVAILABLE.value:
                 tool_context.state[ORCHESTRATOR_UNAVAILABLE_KEY] = {
                     **(tool_context.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}),
                     spec_id: refused["refusal"],
+                }
+            elif refused["code"] == EMPTY_RESULT:
+                # Kept for the turn, so the same fetch again answers from here.
+                tool_context.state[_FETCHES_KEY] = {
+                    **(tool_context.state.get(_FETCHES_KEY) or {}),
+                    key: refused,
                 }
             _attach_fetch(tool_context, refused)
             return refused
@@ -610,12 +676,14 @@ def build_orchestrator_tools(
                 if issue is not None:
                     drawn.append({"title": chart.title, "error": issue["message"]})
                     continue
-                intent = {
+                intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
                     "select": select,
                     "title": chart.title[:120],
                 }
+                if chart.latest_periods is not None:
+                    intent["window"] = _latest_window(chart.latest_periods)
                 written = await executor(tool="write_component", args={"intent": intent})
                 component = written.get("component") if written.get("outcome") == "ok" else None
                 if component is None or not usable_component(component):

@@ -19,6 +19,7 @@ def test_the_output_schema_declares_every_verb_result_field() -> None:
         "rows",
         "role_keys",
         "stat_var_count",
+        "dropped_key_count",
         "exclusions",
         "time",
     }

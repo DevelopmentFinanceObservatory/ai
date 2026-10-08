@@ -12,11 +12,14 @@ table bodies, and says where the table is (`ROWLESS_NOTICE`, or
 `UNKNOWN_HOST_ROWLESS_NOTICE` for a client whose capabilities the server
 cannot see).
 
-The projection is bounded whatever the payload. Every free-text field is
-clipped to a character limit, and table rows are added only while the table
-stays within `MAX_TABLE_BYTES`, so the largest payload the catalogue admits
-(50 series of 500 points, or a 2,000-row table of 32 columns) projects to at
-most `MAX_PROJECTION_BYTES`. What the bounds cut, the projection says, and it
+The projection is bounded whatever the payload. Every free-text field but a
+unit is clipped to a character limit, and table rows are added only while the
+table stays within `MAX_TABLE_BYTES`. A unit is printed whole, so two units
+never read as one: a table's unit cells count toward `MAX_TABLE_BYTES`, and
+the paragraph naming each series' unit adds series only while it stays within
+`MAX_UNITS_BYTES`. So the largest payload the catalogue admits (50 series of
+500 points, or a 2,000-row table of 32 columns) projects to at most
+`MAX_PROJECTION_BYTES`. What the bounds cut, the projection says, and it
 names the frame that holds the rest. A final cut holds the same bound for an
 envelope outside the catalogue's limits.
 
@@ -31,13 +34,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, Literal
 
 MAX_ROWS = 20
 MAX_VALUE_COLUMNS = 5
 MAX_CELL_CHARS = 32
 MAX_TABLE_BYTES = 4096
+MAX_UNITS_BYTES = 2048
 MAX_TEXT_CHARS = 120
 MAX_NAMED_ENTITIES = 3
 MAX_WARNINGS = 3
@@ -179,12 +183,16 @@ def title_text(component: Mapping[str, Any]) -> str | None:
 
 
 def unit_text(unit: Any) -> str:
-    """A unit slot as words: `""` for null, a string as given, a structured
-    unit as currency, magnitude, and price basis."""
+    """A unit slot as words on one line, whole: `""` for null, a string as
+    given, a structured unit as currency, magnitude, and price basis, and a
+    composed unit as `<numerator> per <denominator>`, each side worded the
+    same way and a StatVar side by its label."""
     if unit is None:
         return ""
     if isinstance(unit, str):
-        return _clip(unit)
+        return _one_line(unit)
+    if "numerator" in unit:
+        return f"{_unit_part_text(unit['numerator'])} per {_unit_part_text(unit['denominator'])}"
     parts = [unit.get("currency", "")]
     if unit.get("magnitude") not in (None, "units"):
         parts.append(unit["magnitude"])
@@ -199,6 +207,13 @@ def unit_text(unit: Any) -> str:
         case _:
             prices = ""
     return ", ".join(part for part in (words, prices) if part)
+
+
+def _unit_part_text(part: Any) -> str:
+    """One side of a composed unit: a StatVar part's label, else `unit_text`."""
+    if not isinstance(part, str) and "stat_var" in part:
+        return _one_line(part["label"])
+    return unit_text(part)
 
 
 def number_text(value: float) -> str:
@@ -231,7 +246,9 @@ def change_text(change: Mapping[str, Any], *, number: Callable[[float], str] = n
 
 
 def shared_unit(units: Sequence[Any]) -> str | None:
-    """The one unit every entry shares, as words, or `None` when they differ."""
+    """The one unit every entry shares, as words, or `None` when they differ
+    or there is no entry. Units are compared by their words, so two the
+    payload spells differently that read alike are one unit."""
     texts = {unit_text(unit) for unit in units}
     return texts.pop() if len(texts) == 1 else None
 
@@ -316,13 +333,13 @@ def _series_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) ->
     rows = [[period, *(by_period.get(period, "") for by_period in cells)] for period in periods]
     table, kept = _table(header, rows, keep="last")
 
-    lines = [*table, *_unit_lines(shown)]
+    unit_lines, unit_cuts = _unit_lines(shown, noun="series")
     cuts = []
     if kept < len(periods):
         cuts.append(f"the latest {kept} of {len(periods):,} periods")
     if len(shown) < len(series):
         cuts.append(f"{len(shown)} of {len(series)} series")
-    return lines, cuts
+    return [*table, *unit_lines], [*cuts, *unit_cuts]
 
 
 def _bar_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
@@ -336,7 +353,8 @@ def _bar_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _B
     rows = [[one["label"], cell_text(one["points"][0])] for one in series]
     table, kept = _table(header, rows, keep="first")
     cuts = [f"{kept} of {len(series)} bars"] if kept < len(series) else []
-    return [*table, *_unit_lines(series[:kept])], cuts
+    unit_lines, unit_cuts = _unit_lines(series[:kept], noun="bars")
+    return [*table, *unit_lines], [*cuts, *unit_cuts]
 
 
 def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
@@ -359,7 +377,9 @@ def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> 
         if unit is None:
             cells.append(unit_text(row["unit"]))
         body.append(cells)
-    table, kept = _table(header, body, keep="first")
+    table, kept = _table(
+        header, body, keep="first", whole=() if unit is not None else (len(shown),)
+    )
 
     lines = [*table, *(["", f"Unit: {_md(unit)}."] if unit else [])]
     cuts = []
@@ -421,12 +441,18 @@ _DATA_TABLE_TYPES = frozenset({"line_chart", "bar_chart", "table"})
 
 
 def _table(
-    header: Sequence[str], rows: Sequence[Sequence[str]], *, keep: Literal["first", "last"]
+    header: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    keep: Literal["first", "last"],
+    whole: Collection[int] = (),
 ) -> tuple[list[str], int]:
     """A Markdown table of as many rows as fit `MAX_ROWS` and `MAX_TABLE_BYTES`.
 
     `keep="first"` keeps rows from the top. `keep="last"` keeps them from the
-    bottom, still printed in order.
+    bottom, still printed in order. Every cell is clipped to `MAX_CELL_CHARS`
+    but those of the columns at the `whole` positions, which hold one-line text
+    already; `MAX_TABLE_BYTES` bounds the table either way.
 
     Returns:
         The table's lines and how many of `rows` it kept.
@@ -436,7 +462,7 @@ def _table(
     ordered = rows if keep == "first" else list(reversed(rows))
     kept: list[str] = []
     for row in ordered[:MAX_ROWS]:
-        line = _table_row(row)
+        line = _table_row(row, whole=whole)
         size += len(line.encode()) + 1
         if size > MAX_TABLE_BYTES:
             break
@@ -446,8 +472,14 @@ def _table(
     return lines + kept, len(kept)
 
 
-def _table_row(cells: Sequence[str]) -> str:
-    return "| " + " | ".join(_md(_clip(cell)) for cell in cells) + " |"
+def _table_row(cells: Sequence[str], *, whole: Collection[int] = ()) -> str:
+    return (
+        "| "
+        + " | ".join(
+            _md(cell if position in whole else _clip(cell)) for position, cell in enumerate(cells)
+        )
+        + " |"
+    )
 
 
 def _table_cell(row: Mapping[str, Any], key: str) -> str:
@@ -458,16 +490,28 @@ def _table_cell(row: Mapping[str, Any], key: str) -> str:
     return row["dimensions"].get(key, "")
 
 
-def _unit_lines(series: Sequence[Mapping[str, Any]]) -> list[str]:
+def _unit_lines(series: Sequence[Mapping[str, Any]], *, noun: str) -> _Body:
     """A `Unit:` paragraph when the series share a unit, else one naming each
-    series' unit; nothing when they share no unit at all."""
+    series' unit, for as many series as fit `MAX_UNITS_BYTES`; nothing when
+    they share no unit at all.
+
+    Returns:
+        The paragraph's lines and what it cut, counted in `noun`.
+    """
     unit = shared_unit([one["unit"] for one in series])
     if unit is not None:
-        return ["", f"Unit: {_md(unit)}."] if unit else []
-    per_series = "; ".join(
-        f"{_md(_clip(one['label']))}: {_md(unit_text(one['unit']) or 'none')}" for one in series
-    )
-    return ["", f"Units: {per_series}."]
+        return (["", f"Unit: {_md(unit)}."] if unit else []), []
+    kept: list[str] = []
+    size = len("Units: .")
+    for one in series:
+        entry = f"{_md(_clip(one['label']))}: {_md(unit_text(one['unit']) or 'none')}"
+        size += len(f"; {entry}".encode())
+        if size > MAX_UNITS_BYTES:
+            break
+        kept.append(entry)
+    lines = ["", f"Units: {'; '.join(kept)}."] if kept else []
+    cuts = [f"the units of {len(kept)} of {len(series)} {noun}"] if len(kept) < len(series) else []
+    return lines, cuts
 
 
 def _change_text(entry: Mapping[str, Any]) -> str:
@@ -539,9 +583,14 @@ def _bounded(text: str) -> str:
     return f"{head.rstrip()}\n\n{PROJECTION_CUT_NOTICE}"
 
 
+def _one_line(text: str) -> str:
+    """`text` with every run of whitespace, line breaks included, as one space."""
+    return " ".join(text.split())
+
+
 def _clip(text: str, limit: int = MAX_CELL_CHARS) -> str:
     """`text` on one line, cut to `limit` characters with an ellipsis."""
-    flat = " ".join(text.split())
+    flat = _one_line(text)
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 

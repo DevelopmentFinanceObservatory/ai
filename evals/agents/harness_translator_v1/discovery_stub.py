@@ -2,11 +2,12 @@
 
 The eval sets and the tests that run translation grade what translation does
 with what discovery finds, not the search backend, so `search` here answers by
-the ask: one debt service source, one population source, two aid candidates, and nothing for
-anything else. Every answer resolves exactly the entities the search part
-named -- role and label as they were sent, `ref` as `country/<code>` -- the
-way the real server resolves what it is asked about, so a plan naming Kenya
-gets Kenya's frame and one naming Kenya and Ghana gets both. Its `describe`
+the ask: one debt service source, one population source, one exports source,
+one official development assistance source, two aid candidates, and nothing for
+anything else. Every answer resolves exactly the entities the search part named -- role
+and label as they were sent, `ref` as `country/<code>` -- the way the real
+server resolves what it is asked about, so a plan naming Kenya gets Kenya's
+frame and one naming Kenya and Ghana gets both. Its `describe`
 names only an identifier this stub can ever put in an answer, and refuses any
 other the way the real server refuses a dcid its graph does not hold, so a
 translator cannot confirm an identifier it invented. That set is fixed rather
@@ -38,6 +39,8 @@ from planner.workflow import ToolId
 DEBT_SPEC = "spec_" + "d" * 32
 POPULATION_SPEC = "spec_" + "9" * 32
 AID_SPECS = ("spec_" + "b" * 32, "spec_" + "c" * 32)
+ODA_SPEC = "spec_" + "e" * 32
+EXPORTS_SPEC = "spec_" + "a" * 32
 
 # ISO 3166-1 alpha-3 codes for the names the seeded plans send, plus a few a
 # live planner drafting its own plan is likely to; `country/<code>` is the ref
@@ -55,8 +58,11 @@ _COUNTRY_CODES = {
 # role. `recipient` because that is what the graph actually answers with for
 # an unqualified country, and what the non-eval canned server uses: a stub
 # that invents a role no real server emits shows a live model a string it
-# would never meet.
+# would never meet. A population is not about a party to a flow, so its
+# countries resolve under `observationAbout`, the column the graph holds them on.
 _UNROLED = "recipient"
+_POPULATION_UNROLED = "observationAbout"
+_POPULATION = re.compile(r"\b(population|people|inhabitants)\b")
 _USD = {"ref": "USD", "label": "US dollars"}
 _WINDOW = {
     "kind": "exact",
@@ -66,7 +72,7 @@ _WINDOW = {
 }
 
 
-def _resolved_entities(part: Mapping[str, Any]) -> list[dict[str, str]] | None:
+def _resolved_entities(part: Mapping[str, Any], *, unroled: str) -> list[dict[str, str]] | None:
     """The entities `part` names, resolved as the real server would.
 
     Returns `None` when a name is not a country this stub knows, which the
@@ -78,7 +84,7 @@ def _resolved_entities(part: Mapping[str, Any]) -> list[dict[str, str]] | None:
         code = _COUNTRY_CODES.get(text.casefold())
         if code is None:
             return None
-        role = entity.get("role") or _UNROLED
+        role = entity.get("role") or unroled
         resolved.append({"role": str(role), "label": text, "ref": f"country/{code}"})
     return resolved
 
@@ -119,8 +125,8 @@ def _spec(
 # case order. The point of the refusal is that an id the stub never emits
 # cannot be confirmed, and that holds run to run.
 NAMED_IDS = frozenset(
-    {DEBT_SPEC, POPULATION_SPEC, *AID_SPECS}
-    | {"DebtServicePaid", "Population", "AidDisbursements", "AidReceived"}
+    {DEBT_SPEC, POPULATION_SPEC, ODA_SPEC, EXPORTS_SPEC, *AID_SPECS}
+    | {"DebtServicePaid", "Population", "AidDisbursements", "AidReceived", "OdaReceived", "Exports"}
     | {str(_USD["ref"])}
     | {f"country/{code}" for code in _COUNTRY_CODES.values()}
 )
@@ -139,6 +145,26 @@ def _no_data(reason: str) -> dict[str, Any]:
 def _specs_for(variable: str, entities: list[dict[str, str]]) -> list[dict[str, Any]]:
     """The spec blocks the ask in `variable` finds, over `entities`; empty for anything else."""
     about = _about(entities)
+    if re.search(r"\bofficial development assistance\b", variable):
+        return [
+            _spec(
+                ODA_SPEC,
+                f"official development assistance received by {about}",
+                "OdaReceived",
+                _USD,
+                entities,
+            )
+        ]
+    if re.search(r"\bexports?\b", variable):
+        return [
+            _spec(
+                EXPORTS_SPEC,
+                f"exports of goods and services by {about}",
+                "Exports",
+                _USD,
+                entities,
+            )
+        ]
     # Whole words: "paid" is not "aid".
     if re.search(r"\b(aid|disbursements?)\b", variable):
         return [
@@ -157,7 +183,7 @@ def _specs_for(variable: str, entities: list[dict[str, str]]) -> list[dict[str, 
                 entities,
             ),
         ]
-    if re.search(r"\b(population|people|inhabitants)\b", variable):
+    if _POPULATION.search(variable):
         return [
             _spec(POPULATION_SPEC, f"total population of {about}", "Population", None, entities)
         ]
@@ -198,7 +224,8 @@ def make_discovery() -> FastMCP:
         """Answer by the variable asked about, over the entities the part names."""
         part = parts[0]
         variable = str(part.get("variable", "")).casefold()
-        entities = _resolved_entities(part)
+        unroled = _POPULATION_UNROLED if _POPULATION.search(variable) else _UNROLED
+        entities = _resolved_entities(part, unroled=unroled)
         if entities is None:
             envelope = _no_data("an entity named is not a country this graph holds")
         else:

@@ -140,9 +140,10 @@ is `capability_unpinned`. Either way the plan does not compile, and `tests/compi
 re-read and re-pinned. Changing a tool the compiler targets therefore costs a
 reviewed change here, which is the point.
 
-**The four analysis verbs beyond aggregate, growth and compare.** `rank`
+**The six analysis verbs beyond aggregate, growth and compare.** `rank`
 orders `RankRequirement`'s entities and writes the requirement's own role
-columns as `rank_by`; `share_of` and `join` are two-sided like a comparison, writing
+columns as `rank_by`; `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
+like a comparison, writing
 `{role_column: ref}` entity bindings the same way and, for `join`, the role
 columns both upstream sources resolve in common as `join_keys` (else
 `join_no_common_key_columns`); `filter` writes each `Predicate` as the frame
@@ -153,8 +154,36 @@ source, the same way a comparison's side does. A `PlaceLevel` becomes a
 reads, directly or through other filters, asks `get_data` for that column with
 `place_types: true` (`_read_by_level_filter`). Every kind gets `mismatches`'s
 proof and its own operation-level checks (`entity_unresolved`,
-`entity_ambiguous`, `degenerate_sides`, `periods_disjoint`, and so on) exactly
+`entity_ambiguous`, `entity_not_on_frame` for a name the frame it is read from
+carries no column for, `keys_disjoint` for two keyed sides holding no entity in
+common, `degenerate_sides`, `periods_disjoint`, and so on) exactly
 as aggregate, growth and compare already did.
+
+**`share_of` and `quotient_of` divide differently.** A `share_of` divides a part by
+its whole, so two sides in different units, or one unit against none, are
+`share_units_differ`, which the translator refers back to the planner for repair
+with `quotient_of` among the permitted repairs. A `quotient_of` takes any pair of
+units. It pins each side's own unit (`numerator_unit`, `denominator_unit`) when its
+source declares one, and analysis-mcp states the result in the unit the two
+compose. A quotient's numerator is keyed by `axis` and its denominator by
+`denominator_axis`, each resolved on that side's own frame, and `denominator_by`
+maps the numerator's key column to the denominator's. A numerator that still holds
+several members with no `axis` is `quotient_axis_required`, and a key its frame
+carries no column for is `quotient_key_unknown`; both are repairs the planner makes.
+
+**`compare` and `sum_of` pair two sides in one unit.** analysis-mcp sets two
+frames against each other only when their `unit` cells are equal, and no
+requirement may ask for constant prices, so the one unit two sides can both be
+stated in is a current-price one. A side whose requirement pins its source is
+always served in that source's own unit. When the pinned source's unit states
+constant prices, read the way `check_evidence` reads it (the unit id, then its
+label), the pair is `frame_units_irreconcilable`: it names the pinned side's
+requirement, the translator refers it as `requirement_unmeetable` so the
+planner asks the user, and it records a `no_operation_covers` answer so a plan
+that then shows the two series apart may decline the pairing. Any other pair
+with a side in constant prices is `frame_price_bases_differ`, repaired by
+stating one currency at current prices on both sides; `frame_unit_forms_differ`
+and `frame_units_differ` cover the rest.
 
 **Every issue is reported in one pass.** `compile_plan` never stops at the
 first problem: a failed attempt returns the whole list, each issue naming the

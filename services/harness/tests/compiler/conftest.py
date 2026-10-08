@@ -1,7 +1,7 @@
 """Fixtures for the compiler suite: a pinned tool surface and a discovered source.
 
 The schemas here are cut down from the real `get_data`, `aggregate`, `growth`,
-`compare`, `rank`, `share_of`, `join` and `filter` -- same required arguments,
+`compare`, `rank`, `share_of`, `quotient_of`, `join` and `filter` -- same required arguments,
 same types, same `additionalProperties: false` -- so a test can state a case
 against a fixed surface. `test_capabilities.py` is what checks the real
 surface still matches what the capability table pins, and `test_surface.py`
@@ -168,6 +168,34 @@ SHARE_OF_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+QUOTIENT_OF_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "frame_ref": FRAME_REF_PARAMETER,
+        "denominator_frame_ref": {
+            "anyOf": [FRAME_REF_PARAMETER, {"type": "null"}],
+            "default": None,
+        },
+        "numerator_entity": {"anyOf": [FRAME_REF_PARAMETER, {"type": "null"}], "default": None},
+        "denominator_entity": {"anyOf": [FRAME_REF_PARAMETER, {"type": "null"}], "default": None},
+        "numerator_unit": _PINNED_UNIT_PARAMETER,
+        "denominator_unit": _PINNED_UNIT_PARAMETER,
+        "numerator_by": {
+            "anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}],
+            "default": None,
+        },
+        "denominator_by": {
+            "anyOf": [
+                {"type": "object", "additionalProperties": {"type": "string"}},
+                {"type": "null"},
+            ],
+            "default": None,
+        },
+    },
+    "required": ["frame_ref"],
+    "additionalProperties": False,
+}
+
 JOIN_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -246,7 +274,7 @@ def tool_schema() -> Callable[..., ToolSchema]:
 
 @pytest.fixture
 def schemas(tool_schema: Callable[..., ToolSchema]) -> dict[str, ToolSchema]:
-    """A nine-tool surface: retrieval, then the eight analysis verbs the compiler maps."""
+    """A ten-tool surface: retrieval, then the nine analysis verbs the compiler maps."""
     return {
         "get_data": tool_schema(
             server="data-mcp",
@@ -265,6 +293,11 @@ def schemas(tool_schema: Callable[..., ToolSchema]) -> dict[str, ToolSchema]:
         "share_of": tool_schema(
             name="share_of", description="Share of a denominator.", parameters=SHARE_OF_PARAMETERS
         ),
+        "quotient_of": tool_schema(
+            name="quotient_of",
+            description="Divide one side by another.",
+            parameters=QUOTIENT_OF_PARAMETERS,
+        ),
         "join": tool_schema(
             name="join", description="Join two frames.", parameters=JOIN_PARAMETERS
         ),
@@ -273,6 +306,19 @@ def schemas(tool_schema: Callable[..., ToolSchema]) -> dict[str, ToolSchema]:
         ),
         "sum_of": tool_schema(
             name="sum_of", description="Add two sides.", parameters=COMPARE_PARAMETERS
+        ),
+        "resolve_anchor": tool_schema(
+            name="resolve_anchor",
+            description="Find the latest period rolling steps follow.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "populations": {"type": "array", "items": {"type": "object"}},
+                    "roots": {"type": "array", "items": FRAME_REF_PARAMETER},
+                },
+                "required": ["populations", "roots"],
+                "additionalProperties": False,
+            },
         ),
     }
 

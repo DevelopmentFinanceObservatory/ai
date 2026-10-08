@@ -43,6 +43,7 @@ from harness.combined_mcp import build_combined_mcp, children_start_once, combin
 from harness.depth_hints import GeminiDepthHintExtractor
 from harness.generative import GeminiEdit
 from harness.graph import AGENT_NAME, GenerativeNodes, create_root_workflow
+from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
@@ -284,6 +285,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.studio.aclose()
     except Exception:
         logger.exception("failed to close the studio executor during shutdown")
+    try:
+        await app.state.live_refresh.aclose()
+    except Exception:
+        logger.exception("failed to close the live refresh clients during shutdown")
     # Disposes whatever `build_session_service` opened for the session
     # service above: a no-op for the in-memory backend, the engine dispose
     # `DatabaseSessionService.close` already does for the plain-`DATABASE_URL`
@@ -379,14 +384,18 @@ def create_app(
     app.state.session_service = session_service_handle.service
     app.state.session_service_aclose = session_service_handle.aclose
 
+    # Built before the studio stack, which replays a card's frame through it.
+    live_refresh = build_live_refresh(settings=resolved_settings)
+    app.state.live_refresh = live_refresh
+
     # The studio stack: the workflow graph behind the v1 wire contract
     # (docs/studio-contract-v1.md). Resolver/executor speak MCP to the mounts
     # below over loopback; the generative nodes and the depth-hint extractor
     # build their genai clients lazily, so construction here stays keyless --
     # a missing GOOGLE_API_KEY fails the first turn, visibly, as a
     # stream-fatal error frame. The planner node is `planner.agent`'s planner
-    # with `translator.tool`'s `translate` attached, behind
-    # `harness.planner_seam.PlannerSeam`.
+    # with `translator.tool.build_translate`'s translation attached to
+    # `propose_plan`, behind `harness.planner_seam.PlannerSeam`.
     # Scripted mode allows every origin: a locally served test page is the
     # mode's whole point. A live server allows exactly the origins listed in
     # STUDIO_CORS_ORIGINS (a browser page on another port during local
@@ -444,7 +453,11 @@ def create_app(
         # `McpExecutor`'s own direct-fetch writer land in the same store
         # component assembly reads from -- see `harness.provenance`.
         provenance = ProvenanceStore()
-        executor = McpExecutor(settings=resolved_settings, provenance=provenance)
+        # The executor replays a rolling frame through the refresh's clients when
+        # a card draws other series than the frame's latest period was taken over.
+        executor = McpExecutor(
+            settings=resolved_settings, provenance=provenance, card_replay=live_refresh.replay
+        )
         # The store exists before the workflow because the recall seam is
         # bound to it (conversation resolved per request via contextvar).
         store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
@@ -530,6 +543,16 @@ def create_app(
         )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))
+
+    # `POST /api/studio/refresh` sits on a router of its own: it takes the
+    # live-refresh principal as its bearer, runs no model, and is served in
+    # scripted mode as in live mode.
+    if resolved_settings.live_refresh_principal is None:
+        logger.warning(
+            "LIVE REFRESH IS CLOSED: LIVE_REFRESH_PRINCIPAL is unset, so "
+            "POST /api/studio/refresh refuses every caller with 401."
+        )
+    app.include_router(create_live_refresh_router(settings=resolved_settings))
 
     # Each mounted app keeps its own `/healthz` (registered by each MCP
     # package's server module) under its prefix, e.g. `/mcp/data/healthz`,

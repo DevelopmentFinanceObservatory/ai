@@ -595,21 +595,25 @@ class DerivedMarker:
     naming which of a derived result's inherited fields (`unit`, `value`,
     `stat_var`) no longer mean what they meant on the input.
 
-    `dimensionless`/`inherited_stat_var` -- `growth`'s and `share_of`'s
-    output rows carry `unit=None` (a rate/ratio has none); `share_of`'s
-    numerator's `stat_var` carries onto the output row, `growth`'s output
-    inherits its input's `stat_var` unconditionally, and `compare` sets
-    `inherited_stat_var` when its two sides' `stat_var`s differ. All are
-    already-honest metadata: `unit=None` correctly says "no unit", and
-    downstream unit resolution already refuses a genuine cross-unit
-    combination without this marker's help. These two fields are carried
-    for a human reading the trace; no verb refuses on them.
+    `dimensionless` marks a value that is a ratio already, either a relative
+    `growth` rate, whose rows carry `unit=None`, or a `share_of` result, whose
+    rows carry the per cent unit (`common.unit_refs.PERCENT_UNIT`) and a
+    StatVar of its own. `quotient_of` refuses a `dimensionless` side
+    (`ToolRefusal.quotient_of_side_unit_unsupported`), since a ratio is no
+    amount to be a part of the composed unit; no other verb refuses on it,
+    and downstream unit resolution already refuses a genuine cross-unit
+    combination without its help.
+
+    `inherited_stat_var` is set when `growth`'s output inherits its input's
+    `stat_var` (always) and when `compare`'s two sides' `stat_var`s differ.
+    It is carried for a human reading the trace, and no
+    verb refuses on it.
 
     `ordinal` -- a per-period `rank` with no `limit` carries the rank
     position as its output row's `value`, not the measured value the
     collapsing and limited modes emit (`engine/rank.py`). A ratio, a relative growth rate or a
-    ranking over a position is not a meaningful number, so `share_of`, a
-    relative `growth` and `rank` all refuse on this flag
+    ranking over a position is not a meaningful number, so `share_of`,
+    `quotient_of`, a relative `growth` and `rank` all refuse on this flag
     (`ToolRefusal.derived_input_ordinal`),
     independently of whatever the harness itself checks. Merged by OR like
     every other flag here -- a growth-over-a-rank output also carries
@@ -661,11 +665,12 @@ def derived_marker_detail(
     that both reads (via `read_derived_marker`, or `merge_derived_markers`
     for a verb with more than one input) a marker its input(s) may already
     carry, and can set flags of its own: `rank` (`ordinal` when
-    `per_period=True` with no `limit`), `growth`/`share_of` (`dimensionless`,
-    both also `inherited_stat_var`, unconditional), `compare`
-    (`inherited_stat_var`, only when its two sides' `stat_var`s differ).
-    `aggregate`, `filter` and `join` call this with none of these, a pure
-    passthrough of whatever `inherited` already carries.
+    `per_period=True` with no `limit`), `growth` (`inherited_stat_var`,
+    unconditional, and `dimensionless` for a relative change), `share_of`
+    (`dimensionless`, unconditional), `compare` (`inherited_stat_var`, only
+    when its two sides' `stat_var`s differ).
+    `aggregate`, `filter`, `join`, `sum_of` and `quotient_of` call this with
+    none of these, a pure passthrough of whatever `inherited` already carries.
 
     Merges rather than overwrites: every verb must carry its input's marker
     onward on its own output, merged with whatever flags it sets itself, or
@@ -698,7 +703,8 @@ def derived_marker_detail(
 
 def merge_derived_markers(*markers: DerivedMarker | None) -> DerivedMarker | None:
     """Combine markers read off more than one independently-resolved input
-    (`compare`/`share_of`/`join`'s own two sides) into the single
+    (the two sides of `compare`, `share_of`, `join`, `sum_of` or
+    `quotient_of`) into the single
     `inherited` a `derived_marker_detail` call can take -- OR-ing each flag
     and joining each side's own `reason`, the same "never drop a flag
     already set" discipline `derived_marker_detail` applies to one input,

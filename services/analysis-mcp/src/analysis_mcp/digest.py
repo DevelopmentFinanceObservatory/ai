@@ -8,8 +8,8 @@ the model needs to act on has to be in this text: the result's own
 `{spec_id, content_version}` pair, the computed numbers, units, coverage,
 warnings, and trace identity. Each `render_*_digest` function reads only
 its own result dataclass's summary tuples (`GroupSummary`, `EntityGrowth`,
-`PeriodComparison`, `PeriodSum`, `EntityRank`), never `frame.rows`. The frame itself
-never appears in a digest.
+`PeriodComparison`, `PeriodSum`, `PeriodQuotient`, `EntityRank`), never
+`frame.rows`. The frame itself never appears in a digest.
 
 Every list is capped at `_LIST_CAP` entries, following `data_mcp.digest`'s
 own discipline of bounding the model-facing text while the full result stays
@@ -30,8 +30,9 @@ from collections.abc import Callable, Mapping, Sequence
 
 import pyarrow as pa
 from common.time_grain import span_label
+from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar import array_kernel
-from dfo_frame_grammar.grammar import UnitRequest
+from dfo_frame_grammar.grammar import UnitCell
 
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.disambiguation import truncate_value
@@ -40,6 +41,7 @@ from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
 from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey
+from analysis_mcp.engine.quotient_of import KeyPairs, PeriodQuotient, QuotientOfResult
 from analysis_mcp.engine.rank import EntityRank, RankResult
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
 from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
@@ -112,9 +114,10 @@ def _signed_number_text(value: float) -> str:
     return text if text.startswith("-") else f"+{text}"
 
 
-def _unit_text(unit: str | UnitRequest | None) -> str:
+def _unit_text(unit: UnitCell | None) -> str:
     """`unit` named as `units.unit_name` names it (a converted unit as
-    "converted to <price basis>"), capped the same way `truncate_value` caps
+    "converted to <price basis>", a composed unit as "<numerator> per
+    <denominator>"), capped the same way `truncate_value` caps
     a key value, or `'(none declared)'` when unbound. `unit` is read straight
     off input rows and carries the same unbounded-length risk as any key
     value."""
@@ -320,18 +323,19 @@ def _artifact_sections(*, exclusions: Sequence[Exclusion], time_line: str | None
 def _derived_note(derived: Mapping[str, object] | None) -> str | None:
     """A fixed-size statement naming which of this result's own inherited
     fields have become unreliable after transformation, or `None` when the
-    result carries no derived marker.
+    result carries no derived marker or none of its flags makes a field
+    unreliable.
 
     `derived` is `applied_policy.detail["derived"]` (see
     `frame_ref_resolution.DerivedMarker`), written to the trace by every
     producer verb. Every flag that's set folds into one `"; "`-joined
-    sentence rather than a line per flag.
+    sentence rather than a line per flag. `dimensionless` names no field,
+    since a share states its unit (per cent) and a relative growth rate
+    states none, and both are true of the result.
     """
     if not derived:
         return None
     dishonest: list[str] = []
-    if derived.get("dimensionless"):
-        dishonest.append("unit (inherited from an input value this result no longer denominates)")
     if derived.get("inherited_stat_var"):
         dishonest.append("stat_var (inherited; no longer names what this value measures)")
     if derived.get("ordinal"):
@@ -519,7 +523,9 @@ def render_growth_digest(
     When the input carried `DerivedMarker.ordinal` (a per-period rank's own
     output, or a growth reading one), every entity's own line and the
     `unit:` line both read in places, in words, rather than as a signed
-    number or a bare `None` unit -- see `_places_text`.
+    number or a bare `None` unit -- see `_places_text`. A relative change is
+    a rate with no unit, which the `unit:` line states before naming the
+    input's unit.
     """
     entity_by_text = (
         ", ".join(entity_by) if entity_by else "(none -- the whole frame is one entity)"
@@ -537,14 +543,24 @@ def render_growth_digest(
     if ordinal:
         unit_line = "unit: absolute change (places)"
     elif result.change == "relative":
-        unit_line = f"unit: {_unit_text(result.resolved_unit)}"
-    elif result.resolved_unit is not None:
-        unit_line = f"unit: absolute change ({_unit_text(result.resolved_unit)})"
-    elif derived is not None and derived.get("dimensionless"):
-        # The input was already dimensionless (a prior relative-growth or
-        # share_of result) -- its own unit-less ratio reads as percentage
-        # points once differenced, not as a bare unitless number.
+        # A rate carries no unit, whatever the input was measured in.
+        input_text = (
+            f"input in {_unit_text(result.resolved_unit)}"
+            if result.resolved_unit is not None
+            else "the input declared no unit"
+        )
+        unit_line = f"unit: none (a relative change; {input_text})"
+    elif result.resolved_unit == PERCENT_UNIT:
+        # A difference of two per cent figures, such as two years of a
+        # share_of result or a published "% of GDP" series.
         unit_line = "unit: absolute change (percentage points)"
+    elif result.resolved_unit is None and derived is not None and derived.get("dimensionless"):
+        # The input was a relative growth rate, a unit-less fraction, so a
+        # difference of two rates is a fraction too.
+        unit_line = (
+            "unit: absolute change (a difference of rates stated as fractions: "
+            "0.02 is 2 percentage points)"
+        )
     else:
         unit_line = f"unit: absolute change ({_unit_text(result.resolved_unit)})"
 
@@ -853,17 +869,35 @@ def render_rank_digest(
     return "\n\n".join(sections)
 
 
+def _percent_text(share: PeriodShare) -> str:
+    """`share`'s value as its output row holds it, already in per cent."""
+    return f"{share.percent:.3f}%"
+
+
 def _share_line(share: PeriodShare) -> str:
     return (
         f"  {share.time_period}: {_format_number(share.numerator_value)} / "
-        f"{_format_number(share.denominator_value)} = {share.share:.3%}"
+        f"{_format_number(share.denominator_value)} = {_percent_text(share)}"
+    )
+
+
+def _first_latest_text(shares: Sequence[PeriodShare]) -> str:
+    """The earliest and the latest share of one key's chronological
+    `shares`, or the one share when there is one."""
+    first, latest = shares[0], shares[-1]
+    if first is latest:
+        return f"only {first.time_period}: {_percent_text(first)}"
+    return (
+        f"first {first.time_period}: {_percent_text(first)}; "
+        f"latest {latest.time_period}: {_percent_text(latest)}"
     )
 
 
 def _key_share_block(key: tuple[tuple[str, str], ...], shares: Sequence[PeriodShare]) -> str:
     key_text = _key_text(key)
     lines = [_share_line(share) for share in shares]
-    return "\n".join([f"{key_text} [{len(shares)} period(s)]:", *lines])
+    heading = f"{key_text} [{len(shares)} period(s)], {_first_latest_text(shares)}:"
+    return "\n".join([heading, *lines])
 
 
 def render_share_of_digest(
@@ -879,53 +913,69 @@ def render_share_of_digest(
     """Render `result` (from `analysis_mcp.engine.share_of.run_share_of`)
     into the digest text a successful `share_of` tool call returns.
 
-    An un-keyed call (every `PeriodShare.key` empty) renders one flat,
-    magnitude-capped list of period shares. A keyed call (`numerator_by`
-    non-empty) instead renders one
-    block per key -- `result.period_shares` is already grouped by key, then
+    Every share prints as its output row holds it, in per cent, which the
+    header names. An un-keyed call states its first and latest share on the
+    line after the header, ahead of everything a reader keeping only the
+    digest's start could lose, then renders one flat, magnitude-capped list
+    of period shares. A keyed call (`numerator_by` non-empty) instead
+    renders one block per key, its heading stating that key's first and
+    latest share -- `result.period_shares` is already grouped by key, then
     by period, in the order `run_share_of` built it (sorted keys, sorted
     periods within each), so grouping here needs no re-sort. The key list
     itself is magnitude-capped by each key's own largest-magnitude share,
     the same selection rule every other renderer's own grouped list uses.
     """
+    unit_text = _unit_text(PERCENT_UNIT)
     keyed = any(share.key for share in result.period_shares)
+    lead: list[str] = []
     if keyed:
         grouped: dict[tuple[tuple[str, str], ...], list[PeriodShare]] = {}
         for share in result.period_shares:
             grouped.setdefault(share.key, []).append(share)
         keys = list(grouped)
         shown_keys = _capped(
-            keys, magnitude=lambda key: max(abs(share.share) for share in grouped[key])
+            keys, magnitude=lambda key: max(abs(share.percent) for share in grouped[key])
         )
         header = (
             f"share_of: {len(keys)} key(s), {len(result.period_shares)} matched "
-            "(key, period) pair(s)"
+            f"(key, period) pair(s), in per cent ({unit_text})"
         )
         shares_block = "\n\n".join(_key_share_block(key, grouped[key]) for key in shown_keys)
         shares_block += _truncation_note(shown_keys, len(keys), selection=_MAGNITUDE_SELECTION)
     else:
-        header = f"share_of: {len(result.period_shares)} matched period(s)"
+        header = (
+            f"share_of: {len(result.period_shares)} matched period(s), in per cent ({unit_text})"
+        )
+        lead.append(_first_latest_text(result.period_shares))
         # Magnitude, not positional: `period_shares` is ordered
         # chronologically. A magnitude cap hides periods with the smallest
         # share, often the direct answer to "in which periods was this
         # share near zero?"
-        shown = _capped(result.period_shares, magnitude=lambda share: share.share)
+        shown = _capped(result.period_shares, magnitude=lambda share: share.percent)
         lines = [_share_line(share) for share in shown]
         shares_block = "\n".join([f"{len(result.period_shares)} period share(s):", *lines])
         shares_block += _truncation_note(
             shown, len(result.period_shares), selection=_MAGNITUDE_SELECTION
         )
 
-    numerator_unit_text = _unit_text(result.numerator_resolved_unit)
-    denominator_unit_text = _unit_text(result.denominator_resolved_unit)
-    unit_line = f"numerator unit: {numerator_unit_text}, denominator unit: {denominator_unit_text}"
-    coverage_line = (
-        f"period overlap: numerator {result.numerator_coverage_fraction:.1%}, "
-        f"denominator {result.denominator_coverage_fraction:.1%} (share of each side's own "
-        "offered periods that the other side also covers)"
+    label_line = (
+        f"stat_var {result.stat_var}: "
+        f"{_side_text(result.numerator_stat_var, result.numerator_resolved_unit)} as a share of "
+        f"{_side_text(result.denominator_stat_var, result.denominator_resolved_unit)}"
     )
+    coverage_line = _coverage_line(result, keyed=keyed)
 
-    sections = [header, shares_block, unit_line, coverage_line]
+    # What the share leaves out comes straight after the header, the first
+    # and latest share and the label, as `render_quotient_of_digest` places
+    # it, so a reader keeping only the digest's start still has it.
+    sections = [
+        header,
+        *lead,
+        label_line,
+        *_periods_left_out_lines(result),
+        shares_block,
+        coverage_line,
+    ]
     if result.warnings:
         sections.append(
             "\n".join(
@@ -933,6 +983,194 @@ def render_share_of_digest(
             )
         )
     sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    derived_note = _derived_note(derived)
+    if derived_note is not None:
+        sections.append(derived_note)
+    sections.append(
+        _identity_block(
+            op_spec_hash=op_spec_hash,
+            content_version=content_version,
+            execution_identity=execution_identity,
+        )
+    )
+    return "\n\n".join(sections)
+
+
+# How many periods or keys one of a quotient's left-out lines names before it
+# gives the count alone.
+_LEFT_OUT_NAME_CAP = 5
+
+
+def _quotient_line_covers(exclusion: Exclusion) -> bool:
+    """Whether `render_quotient_of_digest`'s own left-out lines state all
+    `exclusion` holds, so its exclusions block leaves the record out. The
+    dropped-keys line names every unmatched key. The zero-denominator line
+    gives cells and periods and no key, so it covers a `zero_denominator`
+    record only when that record names no key either."""
+    return exclusion.reason == "unmatched_key" or (
+        exclusion.reason == "zero_denominator" and not any(exclusion.entities.values())
+    )
+
+
+def _named(items: Sequence[str]) -> str:
+    """Up to `_LEFT_OUT_NAME_CAP` of `items`, then how many there are in all."""
+    text = ", ".join(items[:_LEFT_OUT_NAME_CAP])
+    return f"{text} ({len(items)} total)" if len(items) > _LEFT_OUT_NAME_CAP else text
+
+
+def _keys_named(keys: Sequence[KeyPairs]) -> str:
+    return _named([_key_text(key) for key in keys])
+
+
+def _quotient_line(entry: PeriodQuotient) -> str:
+    label = f"{_key_text(entry.key)}, {entry.time_period}" if entry.key else entry.time_period
+    return (
+        f"  {label}: {_format_number(entry.numerator_value)} / "
+        f"{_format_number(entry.denominator_value)} = {_format_number(entry.quotient)}"
+    )
+
+
+def _periods_left_out_lines(result: QuotientOfResult | ShareOfResult) -> list[str]:
+    """A line for the periods one side reports and the other reports under
+    no key, and one for the (key, period) pairs one side alone reports under
+    a key that has rows, when there are any. A key's one-sided period goes
+    to the pairs line when the other side reports that period under another
+    key, and to the periods line otherwise, so each is named once."""
+    lines = []
+    sides = (
+        ("numerator", result.numerator_periods, result.numerator_only_periods),
+        ("denominator", result.denominator_periods, result.denominator_only_periods),
+    )
+    one_sided = []
+    one_sided_pairs = []
+    for (side, own, by_key), (_, other, _) in zip(sides, reversed(sides), strict=True):
+        other_reports = set(other)
+        unmatched = [period for period in own if period not in other_reports]
+        if unmatched:
+            one_sided.append(f"only the {side} reports {_named(unmatched)}")
+        pairs = [
+            f"{_key_text(key)} {_period_range_text(shown)} ({len(shown)})"
+            for key, periods in by_key
+            if (shown := [period for period in periods if period in other_reports])
+        ]
+        if pairs:
+            one_sided_pairs.append(f"only the {side} reports {_named(pairs)}")
+    if one_sided:
+        lines.append(f"periods left out: {'; '.join(one_sided)}")
+    if one_sided_pairs:
+        lines.append(f"pairs left out: {'; '.join(one_sided_pairs)}")
+    return lines
+
+
+def _coverage_line(result: QuotientOfResult | ShareOfResult, *, keyed: bool) -> str:
+    """The periods divided over, each side's offered periods, and each
+    side's coverage. A keyed call's coverage counts cells, so a period some
+    keys lack lowers it while every period still appears in the ranges."""
+    coverage_of = "coverage of (key, period) cells:" if keyed else "coverage"
+    return (
+        f"divided over {_period_range_text(result.matched_periods)}, the periods both sides "
+        f"report (numerator offered {_period_range_text(result.numerator_periods)}, denominator "
+        f"{_period_range_text(result.denominator_periods)}); {coverage_of} numerator "
+        f"{result.numerator_coverage_fraction:.1%}, denominator "
+        f"{result.denominator_coverage_fraction:.1%}"
+    )
+
+
+def _quotient_left_out_lines(result: QuotientOfResult) -> list[str]:
+    """One line for each kind of thing the quotient leaves out, when there is
+    any: the periods and pairs `_periods_left_out_lines` names, the
+    numerator keys the result holds no row for, by why, and cells whose
+    denominator sums to zero."""
+    lines = _periods_left_out_lines(result)
+    dropped = [
+        f"{len(keys)} {why} ({_keys_named(keys)})"
+        for why, keys in (
+            ("with no denominator match", result.unmatched_keys),
+            ("sharing no period with the denominator", result.keys_without_shared_period),
+            ("with a zero denominator in every matched period", result.keys_with_zero_denominator),
+        )
+        if keys
+    ]
+    if dropped:
+        lines.append(f"numerator keys left out: {'; '.join(dropped)}")
+    zero_cells = result.zero_denominator_cells
+    if zero_cells:
+        periods = sorted({cell.time_period for cell in zero_cells})
+        lines.append(
+            f"zero denominators: {len(zero_cells)} matched cell(s) left out, the denominator "
+            f"summing to zero there, in {_named(periods)}"
+        )
+    return lines
+
+
+def _side_text(stat_var: str, unit: UnitCell | None) -> str:
+    return f"{truncate_value(stat_var)} (unit: {_unit_text(unit)})"
+
+
+def render_quotient_of_digest(
+    *,
+    result: QuotientOfResult,
+    op_spec_hash: str,
+    content_version: str,
+    execution_identity: ExecutionIdentity,
+    derived: Mapping[str, object] | None = None,
+    exclusions: Sequence[Exclusion] = (),
+    time: Time | None = None,
+) -> str:
+    """Render `result` (from `analysis_mcp.engine.quotient_of.run_quotient_of`)
+    into the digest text a successful `quotient_of` tool call returns.
+
+    Every quotient is a plain number in the composed unit, which the header
+    and the quotients' heading both name. What the result leaves out comes
+    straight after the label (`_quotient_left_out_lines`), so a reader keeping
+    only the digest's start still has it. Quotients are one flat list, each
+    line led by its key when the call is keyed, capped by magnitude across
+    every (key, period), so a keyed call over many keys and periods stays
+    within the same bound as an un-keyed one.
+    """
+    quotients = result.period_quotients
+    unit_text = _unit_text(result.unit)
+    keys = {entry.key for entry in quotients}
+    counted = (
+        f"{len(keys)} key(s), {len(quotients)} matched (key, period) pair(s)"
+        if any(keys)
+        else f"{len(quotients)} matched period(s)"
+    )
+    header = f"quotient_of: {counted}, in {unit_text}"
+    label_line = (
+        f"stat_var {result.stat_var}: "
+        f"{_side_text(result.numerator_stat_var, result.numerator_resolved_unit)} divided by "
+        f"{_side_text(result.denominator_stat_var, result.denominator_resolved_unit)}"
+    )
+
+    # Magnitude, not positional, as `render_share_of_digest` caps its shares.
+    shown = _capped(quotients, magnitude=lambda entry: entry.quotient)
+    quotients_block = "\n".join(
+        [
+            f"{len(quotients)} quotient(s), numerator / denominator, in {unit_text}:",
+            *(_quotient_line(entry) for entry in shown),
+        ]
+    )
+    quotients_block += _truncation_note(shown, len(quotients), selection=_MAGNITUDE_SELECTION)
+
+    coverage_line = _coverage_line(result, keyed=any(keys))
+
+    sections = [header, label_line, *_quotient_left_out_lines(result)]
+    sections += [quotients_block, coverage_line]
+    if result.warnings:
+        sections.append(
+            "\n".join(
+                ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
+            )
+        )
+    sections.extend(
+        _artifact_sections(
+            exclusions=[
+                exclusion for exclusion in exclusions if not _quotient_line_covers(exclusion)
+            ],
+            time_line=_time_line(time),
+        )
+    )
     derived_note = _derived_note(derived)
     if derived_note is not None:
         sections.append(derived_note)

@@ -17,14 +17,16 @@ and `operation_rows` each carry a longer `sentence`, read off the same
 requirement a step's label is read off; a rank or a keyed share_of sentence
 states `among`, `axis`, `per_period`, `limit` and `denominator_scope` in
 words, using `planner.phrasing` for the words themselves, so the card states
-those claims the way the rest of the package does.
+those claims the way the rest of the package does. A keyed quotient_of
+sentence states `axis` and whether each entity divides by its own
+counterpart (`denominator_axis`) or by the denominator's one total.
 
 `_builder_label` and `_sentence` each dispatch through a `dict` keyed by the
 exact requirement class, one builder function per `EvidenceRequirement` union
-member; `_measure_of` walks the same eight by `isinstance`, as does
+member; `_measure_of` walks the same members by `isinstance`, as does
 `planner.phrasing.datasets_of`. Every one of the three ends in an
-`AssertionError` rather than a silent default: a ninth kind fails loudly
-here rather than rendering a blank sentence on the wire. `_ranked_value`
+`AssertionError` rather than a silent default: a kind none of them names
+fails loudly here rather than rendering a blank sentence on the wire. `_ranked_value`
 passes every kind it does not transform to `_measure_of`, so it fails the
 same way.
 """
@@ -61,6 +63,7 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     ShareOfRequirement,
     SumOfRequirement,
@@ -76,6 +79,7 @@ from planner.records import (
     PlaceLevel,
     Predicate,
     Reduction,
+    RollingWindow,
     StatVarReading,
     ValueThreshold,
 )
@@ -271,12 +275,28 @@ def _breakdown_clause(breakdown: Breakdown) -> str:
     return f"broken down by {breakdown.dimension.value}, each code rolled up to {level}"
 
 
+# What follows a year, or a span of years, that moves with the newest year the
+# data holds. The years beside it are the ones the plan read.
+_FOLLOWING = ", following the newest year"
+
+
+def _following(rolling: RollingWindow | None) -> str:
+    """How a window's years follow the newest data, as a clause after them; empty for fixed years."""
+    if rolling is None:
+        return ""
+    if rolling.window_start is not None and rolling.window_end is not None:
+        return _FOLLOWING
+    end = "start" if rolling.window_start is not None else "end"
+    return f", the {end} following the newest year"
+
+
 def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, EntityIn):
         subject = predicate.role or "the entity"
         return f"{subject} is one of {', '.join(predicate.names)}"
     if isinstance(predicate, PeriodThreshold):
-        return f"the year is {_THRESHOLD_WORDS[predicate.op]} {predicate.year}"
+        following = _FOLLOWING if predicate.rolling is not None else ""
+        return f"the year is {_THRESHOLD_WORDS[predicate.op]} {predicate.year}{following}"
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
@@ -309,13 +329,29 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
         left = _measure_of(plan.requirement(requirement.left.input_id), plan)
         right = _measure_of(plan.requirement(requirement.right.input_id), plan)
         return f"{left} plus {right}"
-    if isinstance(requirement, ShareOfRequirement):
-        return f"share of {_measure_of(plan.requirement(requirement.numerator.input_id), plan)}"
+    if isinstance(requirement, ShareOfRequirement | QuotientRequirement):
+        return _divided(requirement, plan, _measure_of)
     if isinstance(requirement, JoinRequirement):
         left = _measure_of(plan.requirement(requirement.left_id), plan)
         right = _measure_of(plan.requirement(requirement.right_id), plan)
         return f"{left} joined with {right}"
     raise AssertionError(f"unhandled requirement kind: {requirement!r}")
+
+
+def _divided(
+    requirement: ShareOfRequirement | QuotientRequirement,
+    plan: Plan,
+    name: typing.Callable[[EvidenceRequirement, Plan], str],
+) -> str:
+    """A share or a quotient in words, each side named by `name`.
+
+    A share names its numerator alone; a quotient names both measures.
+    """
+    numerator = name(plan.requirement(requirement.numerator.input_id), plan)
+    if isinstance(requirement, ShareOfRequirement):
+        return f"share of {numerator}"
+    denominator = name(plan.requirement(requirement.denominator.input_id), plan)
+    return f"{numerator} divided by {denominator}"
 
 
 def _ranked_value(requirement: EvidenceRequirement, plan: Plan) -> str:
@@ -324,7 +360,7 @@ def _ranked_value(requirement: EvidenceRequirement, plan: Plan) -> str:
     `_measure_of` names the measure a value is a reading of; this names the
     value after each transform, in the words that transform's own sentence
     uses: "the total of ODA", "the change in ODA from 2016 to 2020", "share
-    of ODA". A filter keeps its input's values. A rank keeps them too, or
+    of ODA", "ODA divided by population". A filter keeps its input's values. A rank keeps them too, or
     their reduction when it states one, since the planner refuses a rank
     over rank positions; a rank's own label and sentence name the value it
     orders by through this. A comparison and a join feed nothing.
@@ -341,10 +377,10 @@ def _ranked_value(requirement: EvidenceRequirement, plan: Plan) -> str:
         change = "percentage change" if requirement.change is GrowthChange.RELATIVE else "change"
         return (
             f"the {change} in {upstream} from {requirement.window_start} to "
-            f"{requirement.window_end}"
+            f"{requirement.window_end}{_following(requirement.rolling)}"
         )
-    if isinstance(requirement, ShareOfRequirement):
-        return f"share of {_ranked_value(plan.requirement(requirement.numerator.input_id), plan)}"
+    if isinstance(requirement, ShareOfRequirement | QuotientRequirement):
+        return _divided(requirement, plan, _ranked_value)
     return _measure_of(requirement, plan)
 
 
@@ -403,7 +439,7 @@ def _label_growth(requirement: GrowthRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
     return (
         f"Growth in {_measure_of(upstream, plan)}, "
-        f"{requirement.window_start}-{requirement.window_end}"
+        f"{requirement.window_start}-{requirement.window_end}{_following(requirement.rolling)}"
     )
 
 
@@ -431,6 +467,15 @@ def _label_rank(requirement: RankRequirement, plan: Plan) -> str:
 def _label_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     numerator = plan.requirement(requirement.numerator.input_id)
     label = f"Share of {_measure_of(numerator, plan)}"
+    if requirement.axis is not None:
+        label += f" per {requirement.axis}"
+    return label
+
+
+def _label_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:
+    numerator = plan.requirement(requirement.numerator.input_id)
+    denominator = plan.requirement(requirement.denominator.input_id)
+    label = f"Divide {_measure_of(numerator, plan)} by {_measure_of(denominator, plan)}"
     if requirement.axis is not None:
         label += f" per {requirement.axis}"
     return label
@@ -472,6 +517,7 @@ _LABEL_BUILDERS: dict[type, typing.Callable[[typing.Any, Plan], str]] = {
     SumOfRequirement: _label_sum_of,
     RankRequirement: _label_rank,
     ShareOfRequirement: _label_share_of,
+    QuotientRequirement: _label_quotient_of,
     JoinRequirement: _label_join,
     FilterRequirement: _label_filter,
 }
@@ -532,7 +578,8 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     parties = entities_phrase(requirement.entities, across=requirement.across)
     clauses = [
         f"Retrieves {requirement.measure} for {parties}",
-        f"{requirement.period.start}-{requirement.period.end}",
+        f"{requirement.period.start}-{requirement.period.end}"
+        + (_FOLLOWING if requirement.period_end_open else ""),
     ]
     if requirement.breakdown is not None:
         clauses.append(_breakdown_clause(requirement.breakdown))
@@ -620,7 +667,7 @@ def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
     )
     return (
         f"The change in {_measure_of(upstream, plan)} from {requirement.window_start} to "
-        f"{requirement.window_end}, read as {change_text}."
+        f"{requirement.window_end}{_following(requirement.rolling)}, read as {change_text}."
     )
 
 
@@ -705,6 +752,25 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     )
 
 
+def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:
+    """The quotient in words, naming each side by its measure.
+
+    A keyed quotient says whose denominator each entity divides by: its own
+    counterpart when the requirement states `denominator_axis`, else the
+    denominator's one total.
+    """
+    numerator = _measure_of(plan.requirement(requirement.numerator.input_id), plan)
+    denominator = _measure_of(plan.requirement(requirement.denominator.input_id), plan)
+    if requirement.axis is None:
+        sentence = f"{numerator} divided by {denominator}"
+    elif requirement.denominator_axis is not None:
+        sentence = f"{numerator} per {requirement.axis}, each divided by its own {denominator}"
+    else:
+        sentence = f"{numerator} per {requirement.axis}, each divided by {denominator}"
+    # `str.capitalize` would lower the rest of an acronym such as "GDP".
+    return f"{sentence[0].upper()}{sentence[1:]}, at each period both report."
+
+
 def _sentence_join(requirement: JoinRequirement, plan: Plan) -> str:
     left = plan.requirement(requirement.left_id)
     right = plan.requirement(requirement.right_id)
@@ -728,6 +794,7 @@ _SENTENCE_BUILDERS: dict[type, typing.Callable[[typing.Any, Plan], str]] = {
     SumOfRequirement: _sentence_sum_of,
     RankRequirement: _sentence_rank,
     ShareOfRequirement: _sentence_share_of,
+    QuotientRequirement: _sentence_quotient_of,
     JoinRequirement: _sentence_join,
     FilterRequirement: _sentence_filter,
 }
@@ -737,7 +804,8 @@ def _sentence(requirement: EvidenceRequirement, plan: Plan) -> str:
     """One prose sentence stating what approving `requirement` approves.
 
     A rank sentence states `among`, `per_period` and any `limit`. A keyed share_of
-    sentence states `axis` and `denominator_scope`. These are population and
+    sentence states `axis` and `denominator_scope`, and a keyed quotient_of sentence
+    `axis` and whose denominator each entity divides by. These are population and
     series-shape claims a person reads in words rather than inferring from a
     field name, worded by `planner.phrasing`.
     """

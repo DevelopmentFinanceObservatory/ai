@@ -32,10 +32,12 @@ from planner.records import (
     RankDirection,
     RankLimit,
     Reduction,
+    RollingWindow,
     SpecId,
     StrictModel,
     TaggedModel,
     Year,
+    check_rolling_window,
 )
 
 
@@ -49,6 +51,7 @@ class OperationKind(StrEnum):
     SUM_OF = "sum_of"
     RANK = "rank"
     SHARE_OF = "share_of"
+    QUOTIENT_OF = "quotient_of"
     JOIN = "join"
     FILTER = "filter"
 
@@ -125,6 +128,20 @@ class GrowthOperation(TaggedModel):
             "'absolute' reads a difference in the input's own unit."
         ),
     )
+    rolling: Annotated[RollingWindow | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        description="Which ends of the window follow the newest data, as the requirement states them.",
+    )
+
+    @model_validator(mode="after")
+    def _rolling_agrees_with_the_years(self) -> GrowthOperation:
+        check_rolling_window(
+            self.rolling,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            error=ValueError,
+        )
+        return self
 
     @model_validator(mode="after")
     def _window_spans_more_than_one_year(self) -> GrowthOperation:
@@ -228,6 +245,20 @@ class RankOperation(TaggedModel):
         default=None,
         description="Keep only the entities ranked at this place or better; unset keeps every entity ranked.",
     )
+    rolling: Annotated[RollingWindow | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        description="Which ends of the window follow the newest data, as the requirement states them.",
+    )
+
+    @model_validator(mode="after")
+    def _rolling_agrees_with_the_years(self) -> RankOperation:
+        check_rolling_window(
+            self.rolling,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            error=ValueError,
+        )
+        return self
 
     @model_validator(mode="after")
     def _window_is_paired_and_ordered(self) -> RankOperation:
@@ -288,6 +319,55 @@ class ShareOfOperation(TaggedModel):
         return self
 
 
+class QuotientOfOperation(TaggedModel):
+    """`numerator` divided by `denominator`, at each period both report."""
+
+    kind: Literal[OperationKind.QUOTIENT_OF] = Field(
+        default=OperationKind.QUOTIENT_OF, description="Tags this operation as a quotient_of."
+    )
+    id: Identifier = Field(
+        description="This operation's name; unique within a translation, so a later operation can cite it as input."
+    )
+    requirement_id: Identifier = Field(description="The requirement this operation carries out.")
+    numerator: Side = Field(description="The side that is divided.")
+    denominator: Side = Field(description="The side `numerator` is divided by.")
+    axis: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The numerator's role dimension to compute one quotient per entity on, rather "
+            "than one figure overall. Alone, every entity divides by the denominator's one "
+            "total."
+        ),
+    )
+    denominator_axis: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The role the denominator's frame carries the same entities under, so each "
+            "divides by its own counterpart."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _sides_differ(self) -> QuotientOfOperation:
+        if (self.numerator.input, self.numerator.entity) == (
+            self.denominator.input,
+            self.denominator.entity,
+        ):
+            raise ValueError("a quotient_of's numerator and denominator must differ")
+        return self
+
+    @model_validator(mode="after")
+    def _denominator_axis_needs_an_axis(self) -> QuotientOfOperation:
+        if self.denominator_axis is not None and self.axis is None:
+            raise ValueError(
+                "denominator_axis names the denominator's role for the entities axis keys the "
+                "numerator by, so it is stated only with axis"
+            )
+        return self
+
+
 class JoinOperation(TaggedModel):
     """Join two operations' frames into one."""
 
@@ -333,6 +413,7 @@ Operation = Annotated[
     | SumOfOperation
     | RankOperation
     | ShareOfOperation
+    | QuotientOfOperation
     | JoinOperation
     | FilterOperation,
     Field(discriminator="kind"),

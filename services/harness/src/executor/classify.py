@@ -19,9 +19,16 @@ side, not landing in the stop bucket by omission:
   entity, unit, facet, window, coverage or denominator -- and choosing one
   changes the plan. Goes to the planner as `MethodChoiceNeeded`, candidates
   attached. `share_of_key_unmatched` belongs here alongside
-  `share_of_zero_denominator` and `share_of_grain_mismatch`: which
-  denominator_frame_ref or entity binding covers the missing key is a
-  data-dependent choice, not something the compiler could have ruled out.
+  `share_of_zero_denominator` and `share_of_grain_mismatch`, which fires
+  only when a key shares no period with its denominator: which
+  denominator_frame_ref or entity binding covers the missing key or years
+  is a data-dependent choice, not something the compiler could have ruled
+  out.
+  `quotient_of_zero_denominator` and `quotient_of_no_key_matched` sit beside
+  them for the same reason: `quotient_of` refuses only when every matched
+  cell divides by zero, or when no numerator key pairs with a denominator
+  key at all, and which denominator, window or `denominator_axis` gives the
+  division something to divide by is the planner's to choose.
 - `REDISCOVERY_CODES`: the source the step was approved to read is gone or
   has moved on, and only discovering it again, under a new plan revision,
   changes what a retry would get. `upstream_version_changed` says so in its
@@ -45,7 +52,13 @@ side, not landing in the stop bucket by omission:
   does `place_levels_mixed`: `planner.shapes.rejects` refuses a rank, a
   total or a share over a requirement that names no place until a
   place-level filter keeps one level, and only that filter's retrieval asks
-  `get_data` for place types.
+  `get_data` for place types. And `composed_unit_sum_unsupported`:
+  `planner.shapes` refuses a sum over a quotient (`_rejects_summed_rate`,
+  `_rejects_sum_of`, `_rejects_pooled_rate`), and the compiler refuses a
+  `share_of` side holding several named entities un-keyed
+  (`entity_required`, `share_axis_required`), so a summing `aggregate`,
+  `rank` or `sum_of` reading a composed unit, or a `share_of` side summing
+  several rows of one, is a plan the door let through.
 - `STOP_CODES`: genuine dead ends. Either the tool says `do_not_retry`, or
   the correction it asks for is one the executor may not make and the user
   could not pick from offered candidates -- a different entity, frame,
@@ -55,7 +68,12 @@ side, not landing in the stop bucket by omission:
   a set of candidates, and the actual correction (a different `frame_ref`,
   `change="absolute"`, or a fresh run from the source data) is a different
   plan for the planner to propose, not a choice the executor offers
-  mid-run. `over_ceiling` sits here as its default, but it is not
+  mid-run. `quotient_of_side_unit_unsupported` is the same kind: its `fix`
+  names the side and why it gives no unit to compose (a share or a growth
+  rate, which is a ratio already; a quotient; a unit-less sum), and
+  dividing something else is a different plan. The planner's shape rules and the compiler refuse the sides they can
+  read off the plan, but a side's unit and its trace are the frame's own, so
+  the code is not compiler-provable. `over_ceiling` sits here as its default, but it is not
   uniform: see the `fix.ceiling_kind` carve-outs below.
 
 `over_ceiling`'s own disposition depends on `fix.ceiling_kind`, which
@@ -75,6 +93,13 @@ gets. A refusal built without a
 hand -- stays `STOP` for the same reason: the executor cannot tell whether
 an unnamed ceiling narrows with scope, and guessing wrong spends a replan
 reproducing the identical failing call.
+
+`rolling_anchor_unresolved` stops under every `fix.detail`, and the detail
+says whose stop it is. `no_qualifying_period` is `resolve_anchor` finding no
+year that half of the series hold, which the user is told. Every other detail
+says the populations, root frames, key or periods the executor itself sent do
+not fit together (`is_anchor_fault`); the run reports that as an
+`internal_error`, since nothing the user asked for is wrong.
 
 A stop does not throw the tool's offer away: `Refused.payload` carries the
 refusal verbatim, `fix` included. It just does not act on it.
@@ -104,6 +129,8 @@ METHOD_CHOICE_CODES = frozenset(
         "coverage_insufficient",
         "share_of_zero_denominator",
         "share_of_key_unmatched",
+        "quotient_of_zero_denominator",
+        "quotient_of_no_key_matched",
     }
 )
 
@@ -141,6 +168,7 @@ COMPILER_PROVABLE_CODES = frozenset(
         "filter_predicate_type_mismatch",
         "share_of_key_unknown",
         "place_levels_mixed",
+        "composed_unit_sum_unsupported",
     }
 )
 
@@ -183,6 +211,14 @@ STOP_CODES = frozenset(
         "derived_input_unusable",
         "derived_input_unrecoverable",
         "derived_input_ordinal",
+        "quotient_of_side_unit_unsupported",
+        # The newest period a run's rolling steps stand on, which the executor
+        # resolves and writes each step's periods from. No year is held by half
+        # of the series, or the periods are no calendar years. Both are facts of
+        # the retrieved data, which the same plan meets again. Every other
+        # `rolling_anchor_unresolved` is a fault of the run (`is_anchor_fault`).
+        "rolling_anchor_unresolved",
+        "rolling_grain_unsupported",
         "internal_error",
     }
 )
@@ -254,6 +290,22 @@ MALFORMED_REFUSAL = "malformed_refusal"
 FAMILY_NOT_SUMMED = "family_not_summed"
 
 
+# The code of the executor's own stop when a rolling step's resolved start
+# falls before the first year its dataset holds (`executor.run._Run.
+# _check_rolled_start`). It travels with `do_not_retry`, since the same plan
+# resolves the same start over the same data.
+ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+
+# analysis-mcp's code for a newest period that is not established, and the one
+# `fix.detail` of it that states a fact of the data.
+ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
+_NO_QUALIFYING_PERIOD = "no_qualifying_period"
+
+# The code a fault of the run itself is reported under, as both servers report
+# their own.
+INTERNAL_ERROR = "internal_error"
+
+
 class ToolFailure(StrictModel):
     """A tool's refusal, typed off the raw MCP payload.
 
@@ -311,6 +363,21 @@ def classify_refusal(failure: ToolFailure) -> Disposition:
             return Disposition.METHOD_CHOICE
         return _CORRECTION_DISPOSITIONS.get(failure.code, Disposition.STOP)
     return Disposition.STOP
+
+
+def is_anchor_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` says the run's own account of its newest period is wrong.
+
+    `resolve_anchor` refuses populations and root frames that do not fit
+    together, and a rolling `growth`, `rank` or `filter` refuses a key,
+    population, root or period that its stored resolution does not cover. The
+    executor writes all of them, so either is its own fault. Only a refusal
+    whose `fix.detail` says no period qualified is about the data.
+    """
+    return (
+        failure.code == ROLLING_ANCHOR_UNRESOLVED
+        and failure.fix.get("detail") != _NO_QUALIFYING_PERIOD
+    )
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:

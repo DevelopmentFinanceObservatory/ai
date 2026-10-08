@@ -373,6 +373,12 @@ def _identity(**members: object) -> dict[str, object]:
     return {"stat_var": "DebtServicePaid", **members}
 
 
+# The window of the copy a requirement stating `period_end_open` is pinned to:
+# a range with no end year, which holds every later year.
+_OPEN_WINDOW = {"kind": "range", "start_year": 2015}
+_OPEN_COPY = "spec_" + "c" * 32
+
+
 def _scope_codes(requirement: DatasetRequirement, source: SelectedSource) -> list[tuple[str, str]]:
     return [
         (code, severity)
@@ -496,6 +502,29 @@ def test_an_identity_range_without_its_years_says_nothing(
     identity = _identity(requested_window={"kind": "range"})
 
     assert _scope_codes(requirement(), source(identity=identity)) == []
+
+
+@pytest.mark.parametrize(
+    ("start_year", "expected"),
+    [
+        (2015, []),
+        (2010, []),
+        (2018, [("scope_window_short", "warning")]),
+        (2030, [("scope_window_short", "error")]),
+    ],
+    ids=["from-the-period-start", "from-before-it", "from-inside-it", "from-after-it"],
+)
+def test_an_identity_range_with_no_end_year_is_short_only_when_it_starts_late(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    start_year: int,
+    expected: list[tuple[str, str]],
+) -> None:
+    # The requirement asks for 2015-2024; a range with no end year holds every
+    # year from its start on.
+    identity = _identity(requested_window={"kind": "range", "start_year": start_year})
+
+    assert _scope_codes(requirement(period_end_open=True), source(identity=identity)) == expected
 
 
 def test_a_unit_naming_the_required_currency_matches(
@@ -1099,6 +1128,45 @@ def test_an_identity_other_than_the_approved_one_is_drift(
         requirement(),
         evidence_from_manifest(_manifest(), series_stats=_default_series_stats()),
         approved=source(identity={"stat_var": "SomethingElse"}),
+    )
+
+    assert [i.code for i in errors(issues)] == [EvidenceIssueCode.SOURCE_DRIFT]
+
+
+def _open_manifest() -> Manifest:
+    """What `get_data` answers for the copy of the definition over a range with no end year."""
+    return _manifest(
+        definition={
+            "schema_version": 1,
+            "spec_id": _OPEN_COPY,
+            "identity": _identity(requested_window=_OPEN_WINDOW),
+        }
+    )
+
+
+def test_a_retrieval_of_the_approved_open_copy_is_not_drift(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    approved = source(spec_id=_OPEN_COPY, identity=_identity(requested_window=_OPEN_WINDOW))
+
+    issues = check_evidence(
+        requirement(period_end_open=True),
+        evidence_from_manifest(_open_manifest(), series_stats=_default_series_stats()),
+        approved=approved,
+    )
+
+    assert errors(issues) == []
+
+
+def test_a_retrieval_of_the_open_copy_drifts_from_an_approved_closed_one(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    closed = {"kind": "range", "start_year": 2015, "end_year": 2024}
+
+    issues = check_evidence(
+        requirement(),
+        evidence_from_manifest(_open_manifest(), series_stats=_default_series_stats()),
+        approved=source(identity=_identity(requested_window=closed)),
     )
 
     assert [i.code for i in errors(issues)] == [EvidenceIssueCode.SOURCE_DRIFT]

@@ -24,11 +24,11 @@ Activity feed holds one line per step and updates it in place.
 The planner node has no such recorder -- its work happens inside a
 `PlannerModel` seam's own model round trips, not through the tool surface.
 Its agent's function-call events reach the runner stream as each call is
-made, so each call it makes becomes a status line ("Drafting a plan",
-"Checking the plan against the data", ...) the moment it happens, after
-the "Working on a plan" line the node opens as a draft starts. One
-status line runs at a time; the next one, the plan card, a pause or the
-segment's end completes it. The seam's own `on_progress` reports, which
+made, so each call it makes becomes a status line ("Checking the plan
+against the data", "Getting the plan ready for you", ...) the moment it
+happens, after the "Working on a plan" line the node opens as a draft
+starts. One status line runs at a time; the next one, the plan card, a
+pause or the segment's end completes it. The seam's own `on_progress` reports, which
 the node can only relay once the draft is done (`harness.graph`'s
 `planner` node), say the same thing late and are not shown.
 """
@@ -66,7 +66,6 @@ from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
-from translator.tool import TRANSLATE_TOOL_NAME
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -82,7 +81,12 @@ from harness.graph import (
 )
 from harness.orchestrator_tools import HANDED_OFF
 from harness.planner_seam import PlannerSeamError
-from harness.provenance import ProvenanceStore, manifest_with_stat_vars, retrieval_frame_ref
+from harness.provenance import (
+    ProvenanceStore,
+    SidePart,
+    manifest_with_stat_vars,
+    retrieval_frame_ref,
+)
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -137,11 +141,19 @@ _RESOLVED_BY_TO_WIRE = {"planner_default": "default", "user": "user"}
 # Status lines for the planner's own calls. A call not named here leaves
 # the current line running.
 _PLANNER_CALL_LABELS = {
-    TRANSLATE_TOOL_NAME: "Checking the plan against the data",
     "submit_plan": "Getting the plan ready for you",
 }
 
-# The line for a `propose_plan` call that follows a refused one, and the
+# The line a `propose_plan` call opens and its response closes. The call
+# runs the translation (`planner.agent`'s `propose_plan_translating`), so
+# the line's duration covers it. The label stays generic: a call's arguments
+# are a patch on the recorded plan, so they name only the datasets the patch
+# changes, and the recorded plan is not yet the one being checked. The
+# closing frame's `detail` names the recorded plan's data (`_data_phrase`),
+# which Studio shows as the line's summary.
+_CHECKING = "Checking the plan against the data"
+
+# The line a refused `propose_plan` opens while the planner redrafts, and the
 # Activity detail for the refusal's code. The refusal's own message names
 # plan fields, so only the code reaches the wire, and a code not listed
 # here leaves the line without a detail.
@@ -173,8 +185,11 @@ _TOOL_LABELS = {
     "growth": "Calculating growth",
     "rank": "Ranking",
     "share_of": "Calculating shares",
+    "quotient_of": "Dividing values",
+    "sum_of": "Adding values",
     "filter": "Filtering data",
     "join": "Joining data",
+    "resolve_anchor": "Finding the latest year",
     "describe_frame": "Checking data",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
@@ -257,8 +272,8 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     reason to retry.
 
     A `PlannerSeamError` keeps its code and retry mode but not its detail:
-    that text is the seam's message to the planner model ("Call
-    `translate` first"), logged by the caller, and the user reads
+    that text is the seam's message to the planner model ("Propose it again
+    ... to have it translated"), logged by the caller, and the user reads
     `_PLANNER_FAILED_DETAIL` with the trace id instead.
     """
     timeout_tool = getattr(exc, "timeout_tool", None)
@@ -758,8 +773,13 @@ class _RecordingSurface:
         stat_var_count: int | None,
         carried_frame_refs: Sequence[Mapping[str, str | None]],
         summed_frame_refs: Sequence[Sequence[Mapping[str, str | None]]] = (),
-        sum_of_sides: Mapping[
-            str, tuple[Sequence[Mapping[str, str | None]], Sequence[Mapping[str, str | None]]]
+        own_stat_vars: Mapping[
+            str,
+            tuple[
+                str,
+                Sequence[Mapping[str, str | None] | str],
+                Sequence[Mapping[str, str | None] | str],
+            ],
         ]
         | None = None,
     ) -> None:
@@ -776,11 +796,12 @@ class _RecordingSurface:
         StatVars the terminal step declared its frame carries (`None` for a
         retrieval whose `get_data` call did not read the frame), counting a
         summed family ref from a retrieval in `carried_frame_refs` as the
-        StatVars it sums, and each `sum_of` ref the frame carries as the
-        distinct StatVars of its entry in `summed_frame_refs`, the retrievals
-        under that sum. `sum_of_sides` maps each `sum_of` result's StatVar
-        ref to the retrieval frames under its left and right side, which the
-        card names that ref by. Called once per terminal frame from
+        StatVars it sums, and each ref a `sum_of`, `quotient_of` or
+        `share_of` wrote for its own result that the frame carries as the
+        distinct StatVars of its entry in `summed_frame_refs`, the
+        retrievals under that verb's sides. `own_stat_vars` maps each such ref to the verb's tool name
+        and the parts of its first and second side (a retrieval frame, or
+        an earlier verb's own ref), which the card names that ref by. Called once per terminal frame from
         `harness.graph._link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
@@ -807,12 +828,9 @@ class _RecordingSurface:
                 [(ref.get("spec_id"), ref.get("content_version")) for ref in under]
                 for under in summed_frame_refs
             ],
-            sum_of_sides={
-                stat_var: tuple(
-                    tuple((ref.get("spec_id"), ref.get("content_version")) for ref in side)
-                    for side in sides
-                )
-                for stat_var, sides in (sum_of_sides or {}).items()
+            own_stat_vars={
+                stat_var: (tool, _side_parts(first), _side_parts(second))
+                for stat_var, (tool, first, second) in (own_stat_vars or {}).items()
             },
         )
         if not linked:
@@ -873,6 +891,15 @@ class _RecordingSurface:
     def step_labels(self, conversation: str) -> dict[str, str]:
         """`conversation`'s latest plan step labels by step id, or `{}`."""
         return self._step_labels.get(conversation, {})
+
+
+def _side_parts(side: Sequence[Mapping[str, str | None] | str]) -> tuple[SidePart, ...]:
+    """A verb's side as `ProvenanceStore.alias` holds it: each retrieval
+    frame as its `(spec_id, content_version)` key, each own ref as it is."""
+    return tuple(
+        part if isinstance(part, str) else (part.get("spec_id"), part.get("content_version"))
+        for part in side
+    )
 
 
 def _first_line(text: str, *, limit: int = 160) -> str | None:
@@ -936,24 +963,16 @@ def _record_label(record: _ExecutorRecord, plan_labels: Mapping[str, str]) -> st
     return _step_label(record.tool, plan_labels.get(record.step_id or ""))
 
 
-def _planner_call_label(name: str, args: dict[str, Any]) -> str | None:
-    """The status line for one of the planner's own calls, or None to
-    leave the current one running."""
-    if name == "propose_plan":
-        return "Revising the plan" if args.get("amends_version") is not None else "Drafting a plan"
-    return _PLANNER_CALL_LABELS.get(name)
-
-
-def _checking_label(plan: PlannerPlan) -> str | None:
-    """The translate call's line, naming the plan's first dataset: "Checking
-    health spending per person for Kenya and Uganda", with "and N more" for
-    the rest. None for a plan with no dataset."""
+def _data_phrase(plan: PlannerPlan) -> str | None:
+    """The plan's data for the checking line's summary, naming its first
+    dataset: "health spending per person for Kenya and Uganda", with "and N
+    more" for the rest. None for a plan with no dataset."""
     datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
     if not datasets:
         return None
     first = datasets[0]
-    label = f"Checking {first.measure} for {entities_phrase(first.entities, across=first.across)}"
-    return f"{label} and {len(datasets) - 1} more" if len(datasets) > 1 else label
+    phrase = f"{first.measure} for {entities_phrase(first.entities, across=first.across)}"
+    return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
@@ -1044,13 +1063,6 @@ class _Translator:
         # The dropped seeds the running draft's `PLANNER_STARTED_KEY` names,
         # which a question the planner asks opens with.
         self._untold_drops: str | None = None
-        # Set by a refused `propose_plan`, as the refusal's code (None when it
-        # carried none), so the next call reads "Reworking the draft"; an
-        # accepted one clears it.
-        self._rework_code: str | None = None
-        self._reworking = False
-        # The translate call's line for the plan the planner last recorded.
-        self._checking: str | None = None
 
     def translate(self, event: Event) -> list[Any]:
         step_progress = (
@@ -1073,17 +1085,11 @@ class _Translator:
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
             for call in event.get_function_calls():
-                frames.extend(self._planner_call_status(call.name or "", call.args or {}))
+                frames.extend(self._planner_call_status(call.name or ""))
             for response in event.get_function_responses():
                 if response.name == "propose_plan":
-                    answer = response.response or {}
-                    self._reworking = answer.get("outcome") != "ok"
-                    self._rework_code = answer.get("code") if self._reworking else None
-            # A recorded or checked plan rides on its tool response's state
-            # delta, a refused one on none, so this is always the plan held.
-            recorded = event.actions.state_delta.get(PLAN_STATE_KEY) if event.actions else None
-            if isinstance(recorded, str):
-                self._checking = _checking_label(PlannerPlan.model_validate_json(recorded))
+                    recorded = event.actions.state_delta.get(PLAN_STATE_KEY)
+                    frames.extend(self._proposal_answered(response.response or {}, recorded))
             return frames
         node = _node_name(event)
         # The planner node's other `custom_metadata` events, the seam's
@@ -1093,7 +1099,6 @@ class _Translator:
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
             self._untold_drops = started.get("untold_drops")
-            self._reworking = False
         output = event.output if isinstance(event.output, dict) else None
         if output is None:
             return frames
@@ -1159,6 +1164,28 @@ class _Translator:
         if detail and len(parts) > 1:
             listed = "; ".join(f"{part.get('variable')}: {part.get('status')}" for part in parts)
             detail = f"{detail} — {len(parts)} parts: {listed}"
+        split = envelope.get("denominator_split")
+        if detail and isinstance(split, dict):
+            # The searches `harness.graph`'s `probe` made after the first: of
+            # a part with its unit moved into its variable, and of a part
+            # refused for its denominator as its measure and its denominator,
+            # a denominator several parts share searched once. A kept split's
+            # parts are the ones listed above; one that was not kept names
+            # its own.
+            if probed := split.get("probed"):
+                moved = ", ".join(f'"{variable}"' for variable in probed)
+                detail = f"{detail} — searched again with the unit in the measure: {moved}"
+            if replaced := split.get("replaced"):
+                asked = ", ".join(f'"{variable}"' for variable in replaced)
+                detail = (
+                    f"{detail} — searched again as {split.get('searched_as')} parts "
+                    f"in place of {asked}"
+                )
+                if not split.get("kept") and (again := split.get("parts")):
+                    listed = "; ".join(
+                        f"{part.get('variable')}: {part.get('status')}" for part in again
+                    )
+                    detail = f"{detail}: {listed}"
         if detail and diagnostics:
             detail = f"{detail} — {diagnostics[:500]}"
         return ActivityStep(
@@ -1171,18 +1198,31 @@ class _Translator:
             detail=detail,
         )
 
-    def _planner_call_status(self, name: str, args: dict[str, Any]) -> list[ActivityStep]:
-        """The status line for one of the planner's own calls: a draft after
-        a refused one is "Reworking the draft", and the translate call names
-        the plan's data once one is recorded."""
-        if name == "propose_plan" and self._reworking:
-            return self._open_status(
-                _REWORKING, detail=_REWORK_REASONS.get(self._rework_code or "")
-            )
-        if name == TRANSLATE_TOOL_NAME and self._checking is not None:
-            return self._open_status(self._checking)
-        label = _planner_call_label(name, args)
+    def _planner_call_status(self, name: str) -> list[ActivityStep]:
+        """The status line for one of the planner's own calls. A
+        `propose_plan` call opens the checking line, since the tool translates
+        the plan it records before it answers."""
+        if name == "propose_plan":
+            return self._open_status(_CHECKING)
+        label = _PLANNER_CALL_LABELS.get(name)
         return self._open_status(label) if label is not None else []
+
+    def _proposal_answered(self, answer: dict[str, Any], recorded: object) -> list[ActivityStep]:
+        """The line change a `propose_plan` response makes: an accepted
+        proposal completes the checking line with the data of the plan it
+        recorded as `detail` (`recorded` is the plan's JSON from the
+        response's state delta), and a refused one (it recorded nothing, so
+        ran no translation) makes the planner's redraft a separate "Reworking
+        the draft" line. The refusal's code shows in plain words; its message,
+        which names plan fields, never reaches the wire."""
+        if answer.get("outcome") == "ok":
+            detail = (
+                _data_phrase(PlannerPlan.model_validate_json(recorded))
+                if isinstance(recorded, str)
+                else None
+            )
+            return self._close_status(detail=detail)
+        return self._open_status(_REWORKING, detail=_REWORK_REASONS.get(answer.get("code") or ""))
 
     def _open_status(self, label: str, *, detail: str | None = None) -> list[ActivityStep]:
         """Start a `running` status line for `label`, completing the one
@@ -1211,9 +1251,10 @@ class _Translator:
             return self._close_status()
         return []
 
-    def _close_status(self) -> list[ActivityStep]:
+    def _close_status(self, *, detail: str | None = None) -> list[ActivityStep]:
         """Complete the running status line, if there is one. The
-        `duration_ms` is what tells Studio the line is done."""
+        `duration_ms` is what tells Studio the line is done; `detail` is the
+        summary Studio shows for it."""
         if self._status is None:
             return []
         step_id, label, started = self._status
@@ -1226,6 +1267,7 @@ class _Translator:
                 label=label,
                 status=StepStatus.COMPLETE,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                detail=detail,
             )
         ]
 

@@ -26,7 +26,7 @@ from compiler.surface import (
 )
 from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefinitionStore
 from data_mcp.definition_store import set_store as set_definition_store
-from data_mcp.definition_writes import identity_definition
+from data_mcp.definition_writes import identity_definition, windowed_identity
 from google.adk.tools.function_tool import FunctionTool
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
@@ -79,7 +79,7 @@ from translator.discovery import (
 )
 from translator.referral import ReferralKind
 
-from ..data_mcp_definitions import DataMcpDefinitions, SearchStub
+from ..data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -225,6 +225,25 @@ async def test_the_ask_reaches_search_in_the_requirements_own_fields(
             "unit": "current USD",
         }
     ]
+
+
+async def test_an_open_period_reaches_search_from_its_first_year_on(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    search_calls: list[dict[str, Any]],
+    context_holding: ContextHolding,
+) -> None:
+    # "since 2015" is the form Search binds as a range with no end year, so
+    # the definition it finds reaches years published after the plan.
+    opened = requirement(period_end_open=True)
+    context = context_holding(draft(evidence_requirements=[opened, derived_requirement()]))
+
+    await _discover(surface, context)
+
+    (call,) = search_calls
+    assert call["parts"][0]["time"] == "since 2015"
 
 
 @pytest.mark.parametrize(
@@ -1218,6 +1237,52 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
     assert log.sources["annual_debt_service"][spec_id].coverage_window == Period(
         start=2010, end=2023
     )
+
+
+async def test_a_copy_with_no_end_year_is_read_for_a_requirement_whose_period_end_is_open(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # `propose_plan` pinned the dataset over a range from 2010 with no end
+    # year, for a requirement stating 2015-2023 with `period_end_open`. That
+    # copy is the requirement's source: a fresh `search` would be over the
+    # stated years and find a definition that ends in 2023.
+    answered = copy.deepcopy(_KENYA_OVER["2010-2023"])
+    spec_id, identity = windowed_identity(
+        answered["definition"]["identity"], {"kind": "range", "start_year": 2010}
+    )
+    answered["spec_id"] = answered["definition"]["spec_id"] = spec_id
+    answered["definition"]["identity"] = identity
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(
+                    source_spec_id=spec_id,
+                    period=Period(start=2015, end=2023),
+                    period_end_open=True,
+                ),
+                derived_requirement(),
+            ],
+        )
+    )
+    earlier = _KENYA_OVER["2015-2023"]["spec_id"]
+    save_windowed_pins(
+        context.state, [WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)]
+    )
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+
+    result = await _discover(_SearchAndResolve(surface, resolving), context)
+
+    assert search_calls == []
+    assert resolving.calls == [{"spec_id": spec_id, "identity": identity}]
+    assert result["status"] == "definite"
+    assert spec_id in load_log(context.state).sources["annual_debt_service"]
 
 
 @pytest.mark.parametrize("axis_open", [True, False], ids=["axis-open", "axis-closed"])
@@ -2894,3 +2959,28 @@ async def test_definite_source_ids_scans_back_past_a_later_transport_failure(
     definite_ids = log.definite_source_ids(requirement_keys=keys, pinned={})
 
     assert definite_ids == {"annual_debt_service"}
+
+
+@pytest.mark.parametrize("posted", [True, False], ids=["with-groups", "identity-alone"])
+async def test_a_spec_over_a_sets_places_resolved_again_names_the_set_only_when_posted(
+    posted: bool,
+) -> None:
+    # A recorded identity or a windowed copy of "African countries" is resolved
+    # again through `resolve_definition`. Posted with its groups, Search names
+    # Africa again; posted alone, Africa is gone from the answer.
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    recorded = source_from_spec_block(block)
+    assert recorded.identity is not None
+    assert recorded.groups
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), search=GroupsSearchStub([block]))
+
+    part = await resolve_definition(
+        resolving,
+        spec_id=recorded.spec_id,
+        identity=recorded.identity,
+        groups=recorded.groups if posted else (),
+    )
+
+    again = source_from_spec_block(resolved_spec(part, spec_id=recorded.spec_id))
+    assert again.groups == (recorded.groups if posted else ())

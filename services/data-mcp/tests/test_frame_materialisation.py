@@ -22,6 +22,7 @@ from common.materialisation import (
     HeldFrame,
     InMemoryMaterialisationStore,
     MaterialisationTrace,
+    MintRecord,
     gcs_store,
 )
 from common.materialisation import get_store as get_frame_store
@@ -39,8 +40,14 @@ from data_mcp.frame_materialisation import (
 from data_mcp.manifest import Manifest, strip_manifest
 from data_mcp.settings import Settings
 from data_mcp.tool_errors import RetryMode, ToolErrorCode
-from dfo_frame_grammar import Frame, FrameError
-from dfo_frame_grammar.grammar import UnitRequest
+from dfo_frame_grammar import (
+    ComposedUnit,
+    Frame,
+    FrameError,
+    StatVarPart,
+    UnitRequest,
+    unit_cell_array,
+)
 from google.api_core.exceptions import NotFound
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
@@ -169,8 +176,8 @@ def _snapshot_payload(
 class _RecordingMaterialisationStore:
     """A hand-written fake mirroring `test_get_data_tool.py`'s own `_RecordingStore`
     pattern, but for `common.materialisation.MaterialisationStore`: pre-seedable, and
-    recording every `open`, `HeldFrame.read` and `put` call so a test can assert on the
-    already-held no-op path.
+    recording every `open`, `HeldFrame.read`, `put` and `put_mint_record` call so a
+    test can assert on the already-held no-op path.
     """
 
     def __init__(self) -> None:
@@ -178,6 +185,10 @@ class _RecordingMaterialisationStore:
         self.open_calls: list[FrameRef] = []
         self.reads = 0
         self.put_calls: list[FrameRef] = []
+        self.mint_records: list[MintRecord] = []
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        self.mint_records.append(record)
 
     def seed(self, ref: FrameRef, *, frame: Any = None, trace: Any = None) -> None:
         self._entries[(ref.spec_id, ref.content_version)] = (frame, trace)
@@ -232,6 +243,9 @@ class _SlowMaterialisationStore:
         self._get_delay_s = get_delay_s
         self._put_delay_s = put_delay_s
         self.put_calls: list[FrameRef] = []
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        del record
 
     async def open(self, _ref: FrameRef) -> HeldFrame | None:
         await asyncio.sleep(self._get_delay_s)
@@ -314,6 +328,9 @@ async def test_materialise_and_register_registers_a_real_frame() -> None:
     frame, trace = stored
     assert frame.num_rows == 1
     assert trace.upstream_trace == manifest.trace
+    assert await get_frame_store().get_mint_record(_FRAME_REF) == MintRecord(
+        frame=_FRAME_REF, dataset=_FRAME_REF, options=_OPTIONS, stat_var_count=1
+    )
 
 
 def _family_parquet_bytes() -> bytes:
@@ -380,6 +397,7 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
     store = _RecordingMaterialisationStore()
     store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()))
     set_frame_store(store)
+    scope = {"entities": {"recipient": ["country/UGA"]}}
 
     def unreachable_get(_request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("no GET is expected on the already-held path")
@@ -391,6 +409,7 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
             options=_OPTIONS,
+            scope=scope,
             manifest=manifest,
             settings=_settings(),
             writer="tester",
@@ -409,6 +428,12 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
     # check the store's read makes.
     assert store.put_calls == []
     assert store.reads == 1
+    # The frame was held before this call and still gains its mint record.
+    assert store.mint_records == [
+        MintRecord(
+            frame=_FRAME_REF, dataset=_FRAME_REF, options=_OPTIONS, scope=scope, stat_var_count=1
+        )
+    ]
 
 
 async def test_cache_check_integrity_failure_refuses_without_refetching() -> None:
@@ -714,6 +739,9 @@ class _ThreadedSlowReadStore:
     async def put(self, ref: FrameRef, *, frame: Any, trace: Any, writer: str) -> None:
         raise AssertionError("no write is expected")
 
+    async def put_mint_record(self, record: MintRecord) -> None:
+        del record
+
     async def aclose(self) -> None:
         pass
 
@@ -875,7 +903,12 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
 
     assert outcome.status == "registered"
     assert fetched == [digests[requested_at]]
-    assert outcome.frame_ref == FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
+    ref = FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
+    assert outcome.frame_ref == ref
+    # The mint record sits under the frame's pair and names dfo-apis' own.
+    assert await get_frame_store().get_mint_record(ref) == MintRecord(
+        frame=ref, dataset=_FRAME_REF, options=options, stat_var_count=1
+    )
 
 
 async def test_a_manifest_without_the_requested_rendering_refuses_without_fetching(
@@ -929,6 +962,9 @@ async def test_fetch_failure_after_the_retry_budget_returns_degraded_not_refused
     assert outcome.attempts == _ARTIFACT_GET_ATTEMPTS
     assert outcome.refusal is None
     assert outcome.degraded_reason == "fetch"
+    # No frame was read, so no record is written: one without the frame's StatVar
+    # count would stand for good under the store's first-writer rule.
+    assert await get_frame_store().get_mint_record(_FRAME_REF) is None
 
 
 async def test_fetch_budget_timeout_returns_degraded() -> None:
@@ -1510,6 +1546,51 @@ async def test_a_store_write_that_outruns_the_deadline_degrades_unconfirmed() ->
     assert store.put_calls == []
 
 
+class _SlowMintRecordStore(InMemoryMaterialisationStore):
+    """An in-memory store whose frame read takes 16.95s of `clock` and whose mint
+    record write never ends."""
+
+    def __init__(self, clock: _FakeClock) -> None:
+        super().__init__()
+        self._clock = clock
+
+    async def open(self, ref: FrameRef) -> HeldFrame | None:
+        held = await super().open(ref)
+        self._clock.now += 16.95
+        return held
+
+    async def put_mint_record(self, record: MintRecord) -> None:
+        del record
+        await asyncio.sleep(60.0)
+
+
+async def test_a_mint_record_write_that_outruns_the_deadline_leaves_the_frame_registered() -> None:
+    """The read leaves 3.05s, and the write must end with 3s left, so it gets 0.05s."""
+    clock = _FakeClock()
+    store = _SlowMintRecordStore(clock)
+    await store.put(
+        _FRAME_REF,
+        frame=frame_materialisation._frame_from_parquet_bytes(_parquet_bytes()),
+        trace=MaterialisationTrace(
+            upstream_trace={}, spec_id=_SPEC_ID, content_version=_CONTENT_VERSION
+        ),
+        writer="tester",
+    )
+    set_frame_store(store)
+
+    async with asyncio.timeout(5.0):
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=_manifest(),
+            settings=_settings(),
+            writer="tester",
+            deadline=CallDeadline.after(20.0, clock=clock),
+        )
+
+    assert outcome.status == "registered"
+    assert outcome.frame_ref == _FRAME_REF
+
+
 class _ThreadedSlowPutStore(InMemoryMaterialisationStore):
     """An in-memory store whose write waits in a worker thread until `finish` is set, as
     `GcsMaterialisationStore.put` encodes and uploads in one."""
@@ -1846,20 +1927,35 @@ def test_a_timestamp_period_in_an_unknown_zone_refuses() -> None:
     assert raised.value.category == "invalid_time_period"
 
 
+def _unit_cells(frame: Any) -> dict[str, object]:
+    """The `unit` cell for each `observationAbout` entity, as `Frame.rows` gives it."""
+    about, unit = frame.columns.index("observationAbout"), frame.columns.index("unit")
+    return {row[about]: row[unit] for row in frame.rows}
+
+
 def test_a_unit_struct_without_a_base_year_field_decodes_current_prices() -> None:
     frame = _decoded(unit=pa.array([{"currency": "USD", "prices": "current"}] * 4))
 
-    request = {"currency": "USD", "prices": "current", "base_year": None}
-    assert list(_cells(frame, "unit").values()) == [{"ref": None, "request": request}] * 4
+    assert set(_unit_cells(frame).values()) == {UnitRequest(currency="USD", prices="current")}
 
 
-def test_a_unit_struct_in_the_frame_tagged_form_refuses_as_an_invalid_unit() -> None:
-    """An artifact's struct `unit` holds requests; the frame's own `ref`/`request`
-    tagged form is two unknown request members."""
-    unit = pa.array([{"ref": "dcid:USDollar", "request": None}] * 4)
-
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "dcid:USDollar",
+        ComposedUnit(
+            numerator="dcid:USDollar", denominator=StatVarPart(stat_var="dcid:Count_Person")
+        ),
+    ],
+    ids=["ref", "composed"],
+)
+def test_a_unit_struct_in_the_frame_tagged_form_refuses_as_an_invalid_unit(
+    unit: str | ComposedUnit,
+) -> None:
+    """An artifact's struct `unit` holds requests; the members of the frame's own
+    tagged form are unknown request members."""
     with pytest.raises(FrameError) as raised:
-        _decoded(unit=unit)
+        _decoded(unit=unit_cell_array(unit, 4))
 
     assert raised.value.category == "invalid_unit"
 
@@ -1877,16 +1973,10 @@ def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_
 
     frame = _decoded(unit=unit)
 
-    assert _cells(frame, "unit") == {
-        "country/C0": {"ref": "dcid:USDollar", "request": None},
-        "country/C1": {
-            "ref": None,
-            "request": {"currency": "EUR", "prices": "current", "base_year": None},
-        },
-        "country/C2": {
-            "ref": None,
-            "request": {"currency": "USD", "prices": "constant", "base_year": 2024},
-        },
+    assert _unit_cells(frame) == {
+        "country/C0": "dcid:USDollar",
+        "country/C1": UnitRequest(currency="EUR", prices="current"),
+        "country/C2": UnitRequest(currency="USD", prices="constant", base_year=2024),
         "country/C3": None,
     }
 
@@ -1898,8 +1988,12 @@ def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_
         ("{1}", "schema_violation"),
         ('{"currency":"EUR","prices":"current","base_year":2024}', "invalid_unit"),
         ('{"currency":"EUR","prices":"current","scale":"millions"}', "invalid_unit"),
+        (
+            '{"denominator":{"stat_var":"dcid:Count_Person"},"numerator":"dcid:USDollar"}',
+            "invalid_unit",
+        ),
     ],
-    ids=["truncated", "invalid-json", "current-with-base-year", "unknown-member"],
+    ids=["truncated", "invalid-json", "current-with-base-year", "unknown-member", "composed"],
 )
 def test_a_text_unit_that_opens_an_object_but_is_no_converted_unit_refuses(
     text: str, category: str
@@ -1937,11 +2031,8 @@ def test_an_all_null_optional_column_of_any_type_decodes_as_none(
 ) -> None:
     frame = _decoded(**{column: pa.nulls(4, type=arrow_type)})
 
-    cells = _cells(frame, column).values()
-    if column == "unit":
-        assert all(cell is None or cell == {"ref": None, "request": None} for cell in cells)
-    else:
-        assert set(cells) == {None}
+    cells = _unit_cells(frame) if column == "unit" else _cells(frame, column)
+    assert set(cells.values()) == {None}
 
 
 @pytest.mark.parametrize("column", ["unit", "measurementMethod", "provenance"])
@@ -1965,10 +2056,7 @@ def test_an_all_null_struct_facet_column_decodes_as_none(column: str) -> None:
 def test_an_all_null_struct_unit_column_keeps_its_type_and_decodes() -> None:
     frame = _decoded(unit=pa.nulls(4, type=_UNIT_STRUCT))
 
-    assert all(
-        cell is None or cell == {"ref": None, "request": None}
-        for cell in _cells(frame, "unit").values()
-    )
+    assert set(_unit_cells(frame).values()) == {None}
 
 
 @pytest.mark.parametrize("column", ["measurementMethod", "provenance"])

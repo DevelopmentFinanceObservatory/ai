@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    ComposedUnitSumError,
     GroupSummary,
     NonFiniteAggregateResultError,
     StatVarUnresolvedError,
@@ -31,6 +32,7 @@ from analysis_mcp.fixtures import (
     unit_and_unitless_row_frame,
 )
 from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -49,6 +51,10 @@ def _row(
         "value": value,
         **extra,
     }
+
+
+_PER_HEAD_JSON = {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}}
+_PER_HEAD = ComposedUnit(numerator="dcid:USDollar", denominator=StatVarPart("dcid:Count_Person"))
 
 
 # Golden file -----------------------------------------------------------------
@@ -554,3 +560,42 @@ def test_non_finite_result_refuses() -> None:
         run_aggregate(frame, group_by=(), aggregation="sum")
     assert exc_info.value.aggregation == "sum"
     assert not math.isfinite(near_max + near_max)  # sanity: this really does overflow
+
+
+# A composed unit ---------------------------------------------------------------
+
+
+def _per_head_frame() -> Frame:
+    return _frame(
+        [
+            _row(year="2020", value=2.0, unit=_PER_HEAD_JSON),
+            _row(year="2021", value=6.0, unit=_PER_HEAD_JSON),
+        ]
+    )
+
+
+def test_a_sum_over_a_composed_unit_refuses() -> None:
+    with pytest.raises(ComposedUnitSumError) as exc_info:
+        run_aggregate(_per_head_frame(), group_by=["reporter"], aggregation="sum")
+
+    assert exc_info.value.unit == _PER_HEAD
+    assert exc_info.value.side is None
+
+
+@pytest.mark.parametrize(("aggregation", "expected"), [("mean", 4.0), ("max", 6.0), ("min", 2.0)])
+def test_a_composed_unit_reduces_by_every_aggregation_that_does_not_add(
+    aggregation: str, expected: float
+) -> None:
+    result = run_aggregate(_per_head_frame(), group_by=["reporter"], aggregation=aggregation)
+
+    assert [summary.value for summary in result.group_summaries] == [expected]
+    assert result.resolved_unit == _PER_HEAD
+
+
+def test_a_sum_over_a_frame_mixing_a_composed_and_a_plain_unit_refuses_as_heterogeneous() -> None:
+    frame = _frame(
+        [_row(year="2020", unit=_PER_HEAD_JSON), _row(year="2021", unit="dcid:USDollar")]
+    )
+
+    with pytest.raises(UnitHeterogeneousError):
+        run_aggregate(frame, group_by=["reporter"], aggregation="sum")

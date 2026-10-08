@@ -14,7 +14,13 @@ from typing import Any
 from compiler.surface import ToolSurface
 from google.genai import Client
 
-from harness.generative import GeminiCompose, GeminiConverse, GeminiNarrate, GeminiRefusal
+from harness.generative import (
+    GeminiCompose,
+    GeminiConverse,
+    GeminiDenominatorSplit,
+    GeminiNarrate,
+    GeminiRefusal,
+)
 from harness.graph import GenerativeNodes, PlannerModel
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
@@ -35,9 +41,10 @@ def build_generative_nodes(
 
     The model seams here are single constrained calls that build their genai
     client lazily on first use; pass `client` to share one across them. The
-    planner is `planner.agent`'s planner with `translator.tool`'s `translate`
-    attached, adapted by `harness.planner_seam.PlannerSeam`. `surface`
-    is the tool surface `translate` discovers on, the compiler checks
+    planner is `planner.agent`'s planner with `translator.tool.build_translate`'s
+    translation attached to `propose_plan`, adapted by
+    `harness.planner_seam.PlannerSeam`. `surface` is the tool surface the
+    translation discovers on, the compiler checks
     against, the planner's `get_skill` and `get_skill_file` call through,
     and converse reads dfo-faq through for a reply about DFO itself;
     pass the one `harness.server.create_app` already built for the
@@ -56,6 +63,7 @@ def build_generative_nodes(
         compose=GeminiCompose(model_name=model_name, client=shared),
         narrate=GeminiNarrate(model_name=model_name, client=shared),
         refusal=GeminiRefusal(model_name=model_name, client=shared),
+        denominator_split=GeminiDenominatorSplit(model_name=model_name, client=shared),
     )
 
 

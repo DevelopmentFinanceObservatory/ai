@@ -12,6 +12,7 @@ import pyarrow as pa
 import pytest
 from analysis_mcp.engine import rank as rank_module
 from analysis_mcp.engine.aggregate import (
+    ComposedUnitSumError,
     NonFiniteAggregateResultError,
     UnsupportedAggregationError,
     run_aggregate,
@@ -34,6 +35,7 @@ from analysis_mcp.fixtures import (
     unit_and_unitless_row_frame,
 )
 from dfo_frame_grammar import Frame, build_frame_from_arrow
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -52,6 +54,10 @@ def _row(
         "value": value,
         **extra,
     }
+
+
+_PER_HEAD_JSON = {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}}
+_PER_HEAD = ComposedUnit(numerator="dcid:USDollar", denominator=StatVarPart("dcid:Count_Person"))
 
 
 # Golden file -----------------------------------------------------------------
@@ -1293,3 +1299,29 @@ def test_beyond_limit_accounting_copies_no_row(monkeypatch: pytest.MonkeyPatch) 
     assert record.row_count == entities - 1
     assert proxy.max_memory() == 0
     assert peaks["python"] < entities
+
+
+# A composed unit ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("aggregation", ["mean", "max", "min", None])
+def test_a_rank_over_a_composed_unit_reduces_by_anything_but_a_sum(
+    aggregation: str | None,
+) -> None:
+    """One row per reporter needs no reduction, so `None` ranks it too; a
+    `sum` refuses whether or not any entity holds two rows to add."""
+    frame = _frame(
+        [
+            _row(reporter="dcid:USA", value=2.0, unit=_PER_HEAD_JSON),
+            _row(reporter="dcid:GBR", value=6.0, unit=_PER_HEAD_JSON),
+        ]
+    )
+    window = {"window_start": None, "window_end": None, "ascending": False}
+
+    with pytest.raises(ComposedUnitSumError) as exc_info:
+        run_rank(frame, rank_by=["reporter"], aggregation="sum", **window)
+
+    assert exc_info.value.unit == _PER_HEAD
+    result = run_rank(frame, rank_by=["reporter"], aggregation=aggregation, **window)
+    assert _frame_reporters(result) == ["dcid:GBR", "dcid:USA"]
+    assert result.resolved_unit == _PER_HEAD

@@ -1,7 +1,7 @@
 """A small, committed corpus of every verb's digest-rendering scenarios for
 the budget test (`test_digest_budget.py`), mirroring `data_mcp.tests.
 digest_corpus`'s own shape: named cases, a size ceiling, and named pairs
-proving specific size-regression properties -- scaled down to what eight
+proving specific size-regression properties -- scaled down to what nine
 digest shapes (one tool per verb, no status discriminator) actually need.
 """
 
@@ -18,6 +18,7 @@ from analysis_mcp.digest import (
     render_filter_digest,
     render_growth_digest,
     render_join_digest,
+    render_quotient_of_digest,
     render_rank_digest,
     render_share_of_digest,
     render_sum_of_digest,
@@ -27,11 +28,13 @@ from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
 from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey, MatchedKeys
+from analysis_mcp.engine.quotient_of import PeriodQuotient, QuotientOfResult, ZeroDenominatorCell
 from analysis_mcp.engine.rank import EntityRank, RankResult
 from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
 from analysis_mcp.engine.sum_of import PeriodSum, SumOfResult
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
 _EI = ExecutionIdentity(
     engine_version="0.1.0", frame_grammar_version="1.0.0", reduction_policy_version="0.1.0"
@@ -320,6 +323,123 @@ SUM_OF_CASES: tuple[CorpusCase, ...] = (
 )
 
 
+# quotient_of -----------------------------------------------------------------
+
+
+def quotient_of_result(
+    period_quotients: tuple[PeriodQuotient, ...],
+    *,
+    matched_periods: tuple[str, ...] | None = None,
+    numerator_periods: tuple[str, ...] | None = None,
+    denominator_periods: tuple[str, ...] | None = None,
+    **overrides: object,
+) -> QuotientOfResult:
+    matched = matched_periods or tuple(sorted({entry.time_period for entry in period_quotients}))
+    numerator_periods = matched if numerator_periods is None else numerator_periods
+    denominator_periods = matched if denominator_periods is None else denominator_periods
+    defaults: dict[str, object] = {
+        "frame": None,
+        "stat_var": "dcid:ops_" + "a" * 32,
+        "numerator_stat_var": "dcid:test_stat_var_numerator",
+        "denominator_stat_var": "dcid:Count_Person",
+        "numerator_resolved_unit": "dcid:USDollar",
+        "denominator_resolved_unit": None,
+        "unit": ComposedUnit(
+            numerator="dcid:USDollar", denominator=StatVarPart("dcid:Count_Person")
+        ),
+        "facet_selections": (),
+        "numerator_facet_selections": (),
+        "denominator_facet_selections": (),
+        "warnings": (),
+        "numerator_periods": numerator_periods,
+        "denominator_periods": denominator_periods,
+        "matched_periods": matched,
+        "numerator_coverage_fraction": len(matched) / len(numerator_periods),
+        "denominator_coverage_fraction": len(matched) / len(denominator_periods),
+    }
+    defaults.update(overrides)
+    return QuotientOfResult(period_quotients=period_quotients, **defaults)
+
+
+def _quotient_of_digest_kwargs(result: QuotientOfResult) -> dict:
+    return {
+        "result": result,
+        "op_spec_hash": "ops_" + "a" * 32,
+        "content_version": "ocv_" + "b" * 32,
+        "execution_identity": _EI,
+    }
+
+
+def _period_quotients(count: int, *, key: str | None = None) -> tuple[PeriodQuotient, ...]:
+    return tuple(
+        PeriodQuotient(
+            time_period=f"20{i:02d}",
+            numerator_value=float(i) + 1.0,
+            denominator_value=(float(i) + 1.0) * 50.0,
+            quotient=0.02,
+            key=(("recipient", key),) if key else (),
+        )
+        for i in range(count)
+    )
+
+
+def _keyed_period_quotients(count: int) -> tuple[PeriodQuotient, ...]:
+    return tuple(
+        PeriodQuotient(
+            time_period="2020",
+            numerator_value=float(i) + 1.0,
+            denominator_value=50.0,
+            quotient=(float(i) + 1.0) / 50.0,
+            key=(("recipient", f"dcid:R{i:03d}"),),
+        )
+        for i in range(count)
+    )
+
+
+QUOTIENT_OF_CASES: tuple[CorpusCase, ...] = (
+    CorpusCase(
+        id="quotient_of_unkeyed_periods_left_out",
+        kwargs=_quotient_of_digest_kwargs(
+            quotient_of_result(
+                _period_quotients(3),
+                numerator_periods=("2000", "2001", "2002", "2003", "2004"),
+                denominator_periods=("1999", "2000", "2001", "2002"),
+            )
+        ),
+        render=render_quotient_of_digest,
+    ),
+    CorpusCase(
+        id="quotient_of_keyed_dropped_key_and_zero_denominator",
+        kwargs=_quotient_of_digest_kwargs(
+            quotient_of_result(
+                _period_quotients(2, key="dcid:KEN"),
+                unmatched_keys=((("recipient", "dcid:GTM"),),),
+                keys_with_zero_denominator=((("recipient", "dcid:TZA"),),),
+                zero_denominator_cells=(
+                    ZeroDenominatorCell(
+                        time_period="2002",
+                        numerator_value=4.0,
+                        key=(("recipient", "dcid:KEN"),),
+                    ),
+                    ZeroDenominatorCell(
+                        time_period="2002",
+                        numerator_value=9.0,
+                        key=(("recipient", "dcid:TZA"),),
+                    ),
+                ),
+                matched_periods=("2000", "2001", "2002"),
+            )
+        ),
+        render=render_quotient_of_digest,
+    ),
+    CorpusCase(
+        id="quotient_of_capped_25_keys",
+        kwargs=_quotient_of_digest_kwargs(quotient_of_result(_keyed_period_quotients(25))),
+        render=render_quotient_of_digest,
+    ),
+)
+
+
 # rank --------------------------------------------------------------------------
 
 
@@ -397,13 +517,16 @@ def _period_share(period: str, numerator: float, denominator: float) -> PeriodSh
         time_period=period,
         numerator_value=numerator,
         denominator_value=denominator,
-        share=numerator / denominator,
+        percent=numerator / denominator * 100.0,
     )
 
 
-def _share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object) -> ShareOfResult:
+def share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object) -> ShareOfResult:
     defaults: dict[str, object] = {
         "frame": None,
+        "stat_var": "dcid:ops_" + "a" * 32,
+        "numerator_stat_var": "dcid:test_stat_var_numerator",
+        "denominator_stat_var": "dcid:test_stat_var_denominator",
         "numerator_resolved_unit": "dcid:USDollar",
         "denominator_resolved_unit": "dcid:USDollar",
         "numerator_facet_selections": (),
@@ -411,6 +534,7 @@ def _share_of_result(period_shares: tuple[PeriodShare, ...], **overrides: object
         "warnings": (),
         "numerator_periods": tuple(ps.time_period for ps in period_shares),
         "denominator_periods": tuple(ps.time_period for ps in period_shares),
+        "matched_periods": tuple(ps.time_period for ps in period_shares),
         "numerator_coverage_fraction": 1.0,
         "denominator_coverage_fraction": 1.0,
     }
@@ -436,12 +560,12 @@ def _period_shares(count: int) -> tuple[PeriodShare, ...]:
 SHARE_OF_CASES: tuple[CorpusCase, ...] = (
     CorpusCase(
         id="share_of_single_period",
-        kwargs=_share_of_digest_kwargs(_share_of_result(_period_shares(1))),
+        kwargs=_share_of_digest_kwargs(share_of_result(_period_shares(1))),
         render=render_share_of_digest,
     ),
     CorpusCase(
         id="share_of_capped_25_periods",
-        kwargs=_share_of_digest_kwargs(_share_of_result(_period_shares(25))),
+        kwargs=_share_of_digest_kwargs(share_of_result(_period_shares(25))),
         render=render_share_of_digest,
     ),
 )

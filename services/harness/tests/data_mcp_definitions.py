@@ -107,6 +107,21 @@ class SearchStub:
         )
 
 
+class GroupsSearchStub(SearchStub):
+    """`SearchStub` answering a resubmit as dfo-apis#1222 does: a block's
+    `resolved.entity_groups` is served only when the request posts groups beside
+    the identity, and the members alone otherwise."""
+
+    async def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        response = await super().__call__(request)
+        (entry,) = json.loads(request.content)["input"]["entries"]
+        if "entity_groups" in entry or response.status_code != 200:
+            return response
+        envelope = response.json()
+        envelope["parts"][0]["spec"]["resolved"].pop("entity_groups", None)
+        return httpx2.Response(200, json=envelope)
+
+
 @contextmanager
 def search_api(search: SearchStub) -> Iterator[None]:
     """`search` as the Search API data-mcp's tools post to while the block runs.

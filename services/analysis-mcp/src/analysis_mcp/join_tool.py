@@ -180,7 +180,8 @@ async def join(
             default=None,
             description=(
                 "Pins the left side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -190,7 +191,8 @@ async def join(
             default=None,
             description=(
                 "Pins the right side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -358,6 +360,7 @@ async def join(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[left_trace, right_trace],
         digest=lambda: render_join_digest(
             join_keys=result.join_keys,
             result=result,

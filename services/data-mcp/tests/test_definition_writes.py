@@ -195,3 +195,32 @@ def test_a_windowed_identity_is_the_one_dfo_apis_mints_for_the_scoped_seed(
     assert spec_id == answer["minted"]["spec_id"]
     if answer["minted"]["identity"] is not None:
         assert identity == answer["minted"]["identity"]
+
+
+@pytest.mark.parametrize(
+    ("fixture", "start_year", "minted"),
+    [
+        ("resolve_health_spending_broad.json", 2000, "spec_45564d96005936f5ee6d649e84d6df64"),
+        ("resolve_gdp_per_capita_guatemala.json", 1990, "spec_184dd9f8d800d0a2059882c1c381b50f"),
+    ],
+)
+def test_an_identity_over_a_range_with_no_end_year_is_the_one_dfo_apis_serves(
+    fixture: str, start_year: int, minted: str
+) -> None:
+    """A range stating `start_year` alone hashes as dfo-apis hashes `scope.window` without `end_year`.
+
+    Each `minted` id is what dfo-apis at b1bb24896 (dfo-spec-kit adbebda, the
+    commit this repository pins) computes for the fixture's identity under
+    `Scope(window=WindowRange(start_year=start_year))`, by the steps of
+    `datasets_api.kinds.spec_id._served_identity`: `apply_scope_surgery`,
+    whose `window_to_identity` writes no `end_year` key, then
+    `code_index.members.canonical_identity` over the packaged code index,
+    then `spec_registry.recompute_identity(...).spec_id`.
+    """
+    seed = _spec(fixture)["definition"]["identity"]
+    window = {"kind": "range", "start_year": start_year}
+
+    spec_id, identity = windowed_identity(seed, window)
+
+    assert spec_id == minted
+    assert identity["requested_window"] == window

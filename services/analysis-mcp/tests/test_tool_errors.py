@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from analysis_mcp.tool_errors import (
     _DISAMBIGUATION_CANDIDATE_CAP,
     MAX_LABEL_CHARS,
@@ -16,6 +17,7 @@ from analysis_mcp.tool_errors import (
 )
 from common.refusal import internal_error_message
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
+from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
 _TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 
@@ -36,20 +38,58 @@ def test_internal_error_is_do_not_retry() -> None:
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 
-def test_filter_unit_conversion_unsupported_names_the_retries_that_succeed() -> None:
-    """Only unit-string matching fails on a converted frame, so the caller
-    retries without the unit predicate, or fetches one unit with `get_data`."""
+_REFETCH = (
+    "call get_data again with scope.facets binding a single unit, then retry with the new frame_ref"
+)
+_PIN = (
+    "set the unit parameter of the verb that reads this frame_ref to that unit's object, "
+    "as a unit_heterogeneous refusal lists it"
+)
+
+
+@pytest.mark.parametrize(
+    ("actual_type", "held", "select_one"),
+    [
+        ("UnitRequest", "a converted unit", _REFETCH),
+        ("ComposedUnit", "a composed unit", _PIN),
+        ("UnitRequest | ComposedUnit", "converted and composed units", _PIN),
+    ],
+)
+def test_filter_unit_conversion_unsupported_names_the_retries_that_succeed(
+    actual_type: str, held: str, select_one: str
+) -> None:
+    """Only unit-string matching fails on a frame holding a unit object, so
+    the caller retries without the unit predicate. To select one unit it
+    fetches one with `get_data` when every object is a converted unit, and
+    pins one in the next verb when a verb wrote a composed unit."""
     refusal = ToolRefusal.filter_unit_conversion_unsupported(
-        column="unit", predicate_kind="category_match"
+        column="unit", predicate_kind="category_match", actual_type=actual_type
     )
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
+    assert refusal.fix["actual_type"] == actual_type
     assert refusal.message == (
         "A 'category_match' predicate on column 'unit' cannot match this frame's units: "
-        "its unit cells hold a converted unit, and category_match compares unit strings. "
+        f"its unit cells hold {held}, and category_match compares unit strings. "
         "Predicates on value, time_period and role columns still apply to this frame. "
-        "Retry without the unit predicate, or, to select one unit, call get_data again "
-        "with scope.facets binding a single unit, then retry with the new frame_ref."
+        f"Retry without the unit predicate, or, to select one unit, {select_one}."
     )
+
+
+def test_a_composed_candidate_longer_than_the_label_bound_is_cut_and_keeps_its_id() -> None:
+    """A composed unit's text joins two refs of unbounded length, so its
+    candidate label is cut to `MAX_LABEL_CHARS` while `id` stays the whole
+    object a retry pins."""
+    long_ref = "dcid:" + "u" * MAX_LABEL_CHARS
+    unit = ComposedUnit(numerator=long_ref, denominator=StatVarPart(stat_var="dcid:Count_Person"))
+
+    refusal = ToolRefusal.unit_heterogeneous(parameter="unit", units=[unit, "dcid:USDollar"])
+
+    candidate = refusal.fix["disambiguation"]["candidates"][0]
+    assert candidate["label"] == long_ref[:MAX_LABEL_CHARS]
+    assert candidate["id"] == {
+        "numerator": long_ref,
+        "denominator": {"stat_var": "dcid:Count_Person"},
+    }
 
 
 def test_derived_input_unrecoverable_is_do_not_retry() -> None:
@@ -104,6 +144,7 @@ def test_every_other_code_is_correct_and_retry() -> None:
         ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
         ToolErrorCode.MIXED_TIME_GRAIN,
         ToolErrorCode.FRAME_INTEGRITY_FAILED,
+        ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED,
         ToolErrorCode.SERVICE_UNAVAILABLE,
     }
     for code in ToolErrorCode:
@@ -272,30 +313,18 @@ def test_stat_var_unresolved_carries_the_reason() -> None:
     assert refusal.fix["reason"] == "the input frame carries no rows"
 
 
-def test_share_of_grain_mismatch_names_the_filter_repair_when_periods_overlap() -> None:
+def test_share_of_grain_mismatch_names_the_key_and_both_period_lists() -> None:
     refusal = ToolRefusal.share_of_grain_mismatch(
-        numerator_periods=["2020", "2021"],
+        numerator_periods=["2021"],
         denominator_periods=["2020"],
-        numerator_coverage_fraction=0.5,
-        denominator_coverage_fraction=1.0,
-        matched_periods=["2020"],
+        key={"donor": "dcid:FRA"},
     )
-    assert refusal.fix["matched_periods"] == ["2020"]
-    assert "category_match" in refusal.message
-    assert "time_period" in refusal.message
-    assert "['2020']" in refusal.message
-
-
-def test_share_of_grain_mismatch_names_no_repair_when_periods_share_nothing() -> None:
-    refusal = ToolRefusal.share_of_grain_mismatch(
-        numerator_periods=["2020"],
-        denominator_periods=["2021"],
-        numerator_coverage_fraction=0.0,
-        denominator_coverage_fraction=0.0,
-        matched_periods=[],
-    )
-    assert refusal.fix["matched_periods"] == []
-    assert "category_match" not in refusal.message
+    assert refusal.fix == {
+        "numerator_periods": ["2021"],
+        "denominator_periods": ["2020"],
+        "key": {"donor": "dcid:FRA"},
+    }
+    assert "dcid:FRA" in refusal.message
 
 
 def test_share_of_zero_denominator_is_correct_and_retry() -> None:
@@ -303,6 +332,122 @@ def test_share_of_zero_denominator_is_correct_and_retry() -> None:
     assert refusal.code == ToolErrorCode.SHARE_OF_ZERO_DENOMINATOR
     assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
     assert refusal.fix == {"time_period": "2020"}
+
+
+def test_quotient_of_zero_denominator_carries_the_periods_and_the_cell_count() -> None:
+    refusal = ToolRefusal.quotient_of_zero_denominator(time_periods=["2020", "2021"], cell_count=3)
+    assert refusal.code == ToolErrorCode.QUOTIENT_OF_ZERO_DENOMINATOR
+    assert refusal.fix == {"time_periods": ["2020", "2021"], "cell_count": 3}
+    assert "all 3 matched cell(s)" in refusal.message
+    assert "['2020', '2021']" in refusal.message
+
+
+def test_quotient_of_no_key_matched_carries_every_sampled_key_and_names_five() -> None:
+    """`fix` carries the whole sample of each side's keys; the message
+    names the first five of each and how `denominator_by` pairs them."""
+    numerator_keys = [{"recipient": f"dcid:country/N{index}"} for index in range(7)]
+    denominator_keys = [{"observationAbout": "dcid:country/KEN"}]
+
+    refusal = ToolRefusal.quotient_of_no_key_matched(
+        numerator_keys=numerator_keys,
+        denominator_keys=denominator_keys,
+        numerator_key_count=40,
+        denominator_key_count=1,
+    )
+
+    assert refusal.code == ToolErrorCode.QUOTIENT_OF_NO_KEY_MATCHED
+    assert refusal.fix == {
+        "numerator_keys": numerator_keys,
+        "denominator_keys": denominator_keys,
+        "numerator_key_count": 40,
+        "denominator_key_count": 1,
+    }
+    assert "numerator's 40 key(s)" in refusal.message
+    assert "dcid:country/N4" in refusal.message
+    assert "dcid:country/N5" not in refusal.message
+    assert "denominator_by must map each numerator_by column" in refusal.message
+
+
+@pytest.mark.parametrize(
+    ("arguments", "fix", "named"),
+    [
+        ({"reason": "dimensionless"}, {}, "share_of or growth"),
+        (
+            {
+                "reason": "composed",
+                "unit": ComposedUnit(
+                    numerator="dcid:USDollar", denominator=StatVarPart(stat_var="dcid:Count_Person")
+                ),
+            },
+            {
+                "unit": {
+                    "numerator": "dcid:USDollar",
+                    "denominator": {"stat_var": "dcid:Count_Person"},
+                }
+            },
+            "'dcid:USDollar per Count_Person'",
+        ),
+        (
+            {"reason": "operation_stat_var", "stat_var": "dcid:ops_" + "a" * 32},
+            {"stat_var": "dcid:ops_" + "a" * 32},
+            "get_data",
+        ),
+    ],
+    ids=["dimensionless", "composed", "operation_stat_var"],
+)
+def test_quotient_of_side_unit_unsupported_names_the_side_and_each_reasons_retry(
+    arguments: dict, fix: dict[str, object], named: str
+) -> None:
+    refusal = ToolRefusal.quotient_of_side_unit_unsupported(side="denominator", **arguments)
+
+    assert refusal.code == ToolErrorCode.QUOTIENT_OF_SIDE_UNIT_UNSUPPORTED
+    assert refusal.fix == {"side": "denominator", "reason": arguments["reason"], **fix}
+    assert "denominator" in refusal.message
+    assert named in refusal.message
+
+
+@pytest.mark.parametrize(
+    ("arguments", "fix"),
+    [
+        ({"verb": "aggregate"}, {"verb": "aggregate"}),
+        ({"verb": "sum_of", "side": "right"}, {"verb": "sum_of", "side": "right"}),
+        (
+            {"verb": "share_of", "side": "denominator", "sums_a_cell": True},
+            {"verb": "share_of", "side": "denominator"},
+        ),
+    ],
+    ids=["one_input", "sum_of_side", "share_of_side"],
+)
+def test_composed_unit_sum_unsupported_names_the_unit_and_the_way_to_pool(
+    arguments: dict, fix: dict[str, object]
+) -> None:
+    unit = ComposedUnit(numerator="dcid:USDollar", denominator=StatVarPart("dcid:Count_Person"))
+
+    refusal = ToolRefusal.composed_unit_sum_unsupported(unit=unit, **arguments)
+
+    assert refusal.code == ToolErrorCode.COMPOSED_UNIT_SUM_UNSUPPORTED
+    assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
+    assert refusal.fix == {
+        **fix,
+        "unit": {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}},
+    }
+    assert "quotient_of" in refusal.message
+
+
+def test_comparison_periods_disjoint_names_its_sides_by_the_callers_labels() -> None:
+    """`compare` and `sum_of` keep `left`/`right`; `quotient_of` passes its own."""
+    default = ToolRefusal.comparison_periods_disjoint(left_periods=["2020"], right_periods=["2021"])
+    labelled = ToolRefusal.comparison_periods_disjoint(
+        left_periods=["2020"],
+        right_periods=["2021"],
+        left_label="numerator",
+        right_label="denominator",
+    )
+
+    assert default.fix == {"left_periods": ["2020"], "right_periods": ["2021"]}
+    assert "Left side has ['2020']; right side has ['2021']" in default.message
+    assert labelled.fix == {"numerator_periods": ["2020"], "denominator_periods": ["2021"]}
+    assert "Numerator side has ['2020']; denominator side has ['2021']" in labelled.message
 
 
 def test_join_output_collision_names_both_sides_stat_var() -> None:

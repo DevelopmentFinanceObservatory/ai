@@ -117,6 +117,12 @@ async def test_a_turn_with_no_digest_opens_on_the_date_and_the_question(scripted
     ]
 
 
+def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
+    """`focus_component_id` is how a card's "Ask follow up" reaches the
+    model; unexplained, the model may answer about every card."""
+    assert "focus_component_id" in INSTRUCTION
+
+
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
     assert "stating only the figures it gives" in INSTRUCTION
     assert "Never state a\nfigure in a reply to a greeting or small talk" in INSTRUCTION

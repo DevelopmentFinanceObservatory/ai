@@ -23,12 +23,13 @@ import logging
 import re
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 import httpx2
 import pyarrow as pa
 from common.caller import current_writer
-from common.place_type import PLACE_ROLE, type_column
+from common.materialisation import FrameRef, MintRecord
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
@@ -51,11 +52,16 @@ from data_mcp.definition_store import (
     verify_write,
 )
 from data_mcp.errors import UpstreamError, UpstreamTransportError
-from data_mcp.frame_materialisation import materialise_and_register
+from data_mcp.frame_materialisation import (
+    DEFAULT_MINT_OPTIONS,
+    PLACE_TYPE_COLUMNS,
+    materialise_and_register,
+)
 from data_mcp.get_data_digest import (
     BreakdownLevel,
     OperationPollNote,
     UnheldRegionSummary,
+    render_dcids,
     render_get_data_digest,
     statistics_needs_fetch,
 )
@@ -68,7 +74,14 @@ from data_mcp.manifest import (
     strip_manifest,
 )
 from data_mcp.mint_ledger import HeldMint, MintLedger
-from data_mcp.operations import OnPoll, PollUpdate, resolve_operation_response
+from data_mcp.operations import (
+    OnPoll,
+    PollUpdate,
+    QueuedOperation,
+    ResolvedOperation,
+    operation_without_waiting,
+    resolve_operation_response,
+)
 from data_mcp.resolution import (
     Ambiguous,
     InvalidName,
@@ -91,6 +104,7 @@ from data_mcp.tool_errors import (
     EntityCandidate,
     ToolErrorCode,
     ToolRefusal,
+    facet_issues_from,
     from_upstream_error,
     to_tool_result,
 )
@@ -153,11 +167,6 @@ StatVarsReading = Literal["sum", "separate"]
 # `options.groupby.levels` rolls up. A deployment without it serves no `breakdown`.
 _GROUPBY_LEVEL_AXES_FIELD = "groupby_level_axes"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
-
-# What `get_data(place_types=True)` asks dfo-apis for in `options.columns`. A list that names
-# only enrichment columns adds them to every default column, so the decoded
-# `stat_var_<code system>` columns stay beside `observationAbout_type`.
-_PLACE_TYPE_COLUMNS: tuple[str, ...] = (type_column(PLACE_ROLE),)
 
 # No `UpstreamError` backs a definition-store read failure, so there is no
 # call to derive a wait from. Mirrors `search_tool.py`'s constants of the
@@ -746,6 +755,21 @@ async def _fetch_statistics_for_digest(
     return series_stats, False
 
 
+def _mint_json_or_refusal(response: httpx2.Response) -> dict[str, Any] | ToolResult:
+    """The mint response's parsed JSON body, or the refusal for one that does not parse."""
+    try:
+        return response.json()
+    except ValueError as exc:
+        # `httpx2.Response.json()` raises `json.JSONDecodeError` for malformed JSON and
+        # `UnicodeDecodeError` for a body that is invalid UTF-8. Both are `ValueError`
+        # subclasses and neither subclasses the other, so catching `ValueError` covers both.
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail=f"the mint response body could not be parsed as JSON: {exc}"
+            )
+        )
+
+
 async def _mint_payload_or_refusal(
     response: httpx2.Response,
     *,
@@ -778,18 +802,9 @@ async def _mint_payload_or_refusal(
         for `_finish_mint_response` to forward into the digest. A refusal
         `ToolResult` for a non-JSON body or an unresolved/failed operation.
     """
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        # `httpx2.Response.json()` raises `json.JSONDecodeError` for malformed JSON and the
-        # unrelated `UnicodeDecodeError` for a body that isn't valid UTF-8 -- siblings, both
-        # `ValueError` subclasses, neither a subclass of the other, so catching the shared
-        # ancestor is what catches both rather than just the one named explicitly.
-        return to_tool_result(
-            ToolRefusal.upstream_response_unusable(
-                detail=f"the mint response body could not be parsed as JSON: {exc}"
-            )
-        )
+    payload = _mint_json_or_refusal(response)
+    if isinstance(payload, ToolResult):
+        return payload
     if response.status_code != 202:
         return payload, None
     resolved = await resolve_operation_response(
@@ -813,6 +828,7 @@ async def _finish_mint_response(
     *,
     requested_spec_id: str,
     options: Mapping[str, Any],
+    scope: Mapping[str, Any],
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
     unheld_regions: Sequence[UnheldRegionSummary],
@@ -852,6 +868,8 @@ async def _finish_mint_response(
         requested_spec_id: The `spec_id` this call's own request carried, to detect a re-mint.
         options: The mint request's `options`, which name the artifact the frame is
             read from and, through `options.columns`, its frame reference.
+        scope: The mint request's `scope`, kept with `options` in the frame's mint
+            record (`common.materialisation.MintRecord`).
         entity_labels: dcid -> name, forwarded to the digest renderer.
         dropped_roles: Roles silently left unbound, forwarded to the digest
             renderer.
@@ -899,6 +917,7 @@ async def _finish_mint_response(
         settings=settings,
         writer=current_writer(),
         options=options,
+        scope=scope,
         deadline=deadline,
     )
     if outcome.status == "refused":
@@ -1094,7 +1113,7 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `place_types` sets `options.columns` to `_PLACE_TYPE_COLUMNS`, which adds
+    `place_types` sets `options.columns` to `PLACE_TYPE_COLUMNS`, which adds
     `observationAbout_type` to the default columns, and gives the frame a
     `content_version` of its own (`frame_materialisation.frame_ref_for`).
     """
@@ -1113,22 +1132,40 @@ async def _attempt_mint(
             "identity": identity,
         }
 
-    # `layout: "frame"` asks for the bare columns `_frame_from_parquet_bytes` reads, and
-    # dfo-apis stores it in the artifact's `rendering`, so the selection by equal
-    # rendering (`_narrowed_to_rendering`) keeps the frame file apart from long-layout
-    # files minted under the same pair.
-    options: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "frame"}
+    options: dict[str, Any] = dict(DEFAULT_MINT_OPTIONS)
     if breakdown is not None:
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
     if place_types:
-        options["columns"] = list(_PLACE_TYPE_COLUMNS)
+        options["columns"] = list(PLACE_TYPE_COLUMNS)
     request_body = {
         "schema_version": _SCHEMA_VERSION,
         "input": mint_input,
         "options": options,
     }
+
+    def minted(result: ToolResult) -> ToolResult:
+        """A `default_facet_undefined` refusal, from the mint or its poll, naming the
+        spec_id and places this call was minting. The cause and retry flag stay dfo-apis'."""
+        refused = result.structured_content or {}
+        if refused.get("code") != ToolErrorCode.DEFAULT_FACET_UNDEFINED.value:
+            return result
+        entities = wire_scope.get("entities", (identity or {}).get("entities") or {})
+        return to_tool_result(
+            ToolRefusal.default_facet_undefined(
+                issues=facet_issues_from(refused["fix"]),
+                detail=refused["fix"]["detail"],
+                retryable=refused["fix"]["retryable"],
+                spec_id=spec_id,
+                entities=entities,
+                places=_places_named(
+                    [ref for refs in entities.values() for ref in refs], entity_labels
+                ),
+                trace_id=refused.get("trace_id"),
+                capability_version=refused.get("capability_version"),
+            )
+        )
 
     try:
         posted = await _post_mint(
@@ -1142,7 +1179,7 @@ async def _attempt_mint(
             # `definition_not_held` -- "held by neither store nor registry"
             # -- is what this completes.
             return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return to_tool_result(_rebase_entities_role_pointer(from_upstream_error(exc)))
+        return minted(to_tool_result(_rebase_entities_role_pointer(from_upstream_error(exc))))
     if isinstance(posted, ToolRefusal):
         return to_tool_result(posted)
 
@@ -1150,12 +1187,13 @@ async def _attempt_mint(
         posted, client=client, settings=settings, deadline=deadline, on_poll=on_poll
     )
     if isinstance(resolved, ToolResult):
-        return resolved
+        return minted(resolved)
     payload, operation_poll = resolved
     return await _finish_mint_response(
         payload,
         requested_spec_id=spec_id,
         options=options,
+        scope=wire_scope,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,
         unheld_regions=unheld_regions,
@@ -1168,6 +1206,158 @@ async def _attempt_mint(
             else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
         ),
     )
+
+
+@dataclass(frozen=True, kw_only=True)
+class RootMint:
+    """A root frame `mint_recorded_root` confirmed in the materialisation store.
+
+    `frame` is the pair the store holds it under, `dataset` the pair dfo-apis names
+    the materialisation by, and `stat_var_count` the distinct StatVars its rows hold.
+    """
+
+    frame: FrameRef
+    dataset: FrameRef
+    stat_var_count: int
+
+
+async def mint_recorded_root(
+    record: MintRecord, *, deadline: CallDeadline, settings: Settings | None = None
+) -> RootMint | QueuedOperation | ToolResult:
+    """Mint the dataset `record` names again, with the `options` and `scope` it
+    records, and register the current frame of that rendering in the store.
+
+    This is `get_data`'s mint without its model-facing parts. No entity name is
+    resolved, since a recorded scope already holds dcids, and no digest, statistics
+    or resource link is built. The request is `get_data`'s own: `record.dataset
+    .spec_id` with `record.scope`, the stored definition beside it when the
+    definition store holds one, and `record.options` as they stand. It goes through
+    `_post_mint`, so the current `CallBudget` sizes the POST and the mint ledger
+    admits it, and `materialise_and_register` registers the frame and writes the
+    mint record of its current pair.
+
+    It does not wait on a queued mint. A 202 whose operation is unfinished returns
+    the `QueuedOperation` at once (`operations.operation_without_waiting`). The
+    caller sends the same mint again later, and dfo-apis answers with the same
+    operation, or with the manifest once it is done, so a repeat submits nothing new.
+
+    A re-mint under a new identity is not written to the definition store. The
+    returned `dataset.spec_id` then differs from `record.dataset.spec_id`, and the
+    caller decides what that means.
+
+    Args:
+        record: The mint record of the root to mint again.
+        deadline: Bounds every step, as a `get_data` call's deadline does.
+        settings: This service's settings, read from the environment when `None`.
+
+    Returns:
+        A `RootMint` once the store holds the frame. A `QueuedOperation` for a mint
+        dfo-apis queued and has not finished. A refusal `ToolResult` otherwise,
+        which is `service_unavailable` with a wait when the mint succeeded and the
+        frame could not be fetched or stored inside `deadline`.
+    """
+    settings = settings or Settings()
+    client = get_client()
+    posted = await _post_recorded_mint(client, record, settings=settings, deadline=deadline)
+    if isinstance(posted, ToolResult):
+        return posted
+    payload = await _manifest_payload_without_waiting(
+        posted, client=client, settings=settings, deadline=deadline
+    )
+    if isinstance(payload, QueuedOperation | ToolResult):
+        return payload
+    try:
+        manifest = strip_manifest(payload)
+    except ValidationError as exc:
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail="the mint response did not match the manifest shape this service "
+                f"expects: {render_validation_errors(exc)}"
+            )
+        )
+
+    outcome = await materialise_and_register(
+        manifest=_narrowed_to_rendering(manifest, options=record.options),
+        settings=settings,
+        writer=current_writer(),
+        options=record.options,
+        scope=record.scope,
+        deadline=deadline,
+    )
+    if outcome.status == "refused":
+        assert outcome.refusal is not None
+        return to_tool_result(outcome.refusal)
+    if outcome.status == "degraded":
+        return to_tool_result(
+            ToolRefusal.service_unavailable(
+                service="the frame store",
+                detail="the dataset was minted, and its frame could not be fetched and "
+                f"stored inside this call's deadline ({outcome.degraded_reason})",
+                retry_after_s=DEADLINE_RETRY_AFTER_S,
+            )
+        )
+    assert outcome.frame_ref is not None  # set on every outcome but a refusal
+    assert outcome.stat_var_count is not None  # set on every registered outcome
+    return RootMint(
+        frame=outcome.frame_ref,
+        dataset=FrameRef(
+            spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+        ),
+        stat_var_count=outcome.stat_var_count,
+    )
+
+
+async def _post_recorded_mint(
+    client: UpstreamClient, record: MintRecord, *, settings: Settings, deadline: CallDeadline
+) -> httpx2.Response | ToolResult:
+    """POST the mint `record` names, as `_attempt_mint` posts `get_data`'s, with the
+    stored definition beside the `spec_id` when the definition store holds one."""
+    spec_id = record.dataset.spec_id
+    identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
+    if isinstance(identity, ToolResult):
+        return identity
+    mint_input: dict[str, Any] = {"kind": "spec_id", "spec_id": spec_id, "scope": record.scope}
+    if identity is not None:
+        mint_input["definition"] = {
+            "schema_version": _SCHEMA_VERSION,
+            "spec_id": spec_id,
+            "identity": identity,
+        }
+    request_body = {
+        "schema_version": _SCHEMA_VERSION,
+        "input": mint_input,
+        "options": record.options,
+    }
+    try:
+        posted = await _post_mint(
+            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+        )
+    except UpstreamError as exc:
+        if identity is None and exc.code == "spec_not_found":
+            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+        return to_tool_result(from_upstream_error(exc))
+    return to_tool_result(posted) if isinstance(posted, ToolRefusal) else posted
+
+
+async def _manifest_payload_without_waiting(
+    response: httpx2.Response,
+    *,
+    client: UpstreamClient,
+    settings: Settings,
+    deadline: CallDeadline,
+) -> dict[str, Any] | QueuedOperation | ToolResult:
+    """The mint route's manifest payload, or the operation a 202 queued and has not
+    finished. `_mint_payload_or_refusal` for a caller that does not wait."""
+    payload = _mint_json_or_refusal(response)
+    if isinstance(payload, ToolResult) or response.status_code != 202:
+        return payload
+    resolved = await operation_without_waiting(
+        client=client,
+        submit_payload=payload,
+        deadline=deadline,
+        poll_interval_s=settings.operation_poll_interval_s,
+    )
+    return resolved.manifest_payload if isinstance(resolved, ResolvedOperation) else resolved
 
 
 # An operation's status as a Studio user reads it in the Activity feed.
@@ -1198,6 +1388,20 @@ def _report_progress(ctx: Context) -> OnPoll:
         await ctx.report_progress(progress=update.elapsed_s, total=None, message=message)
 
     return on_poll
+
+
+def _places_named(refs: Sequence[str], entity_labels: Mapping[str, str]) -> str:
+    """`refs` for a refusal message, each named by its label, the rest only counted.
+
+    A model repeats this message to the user, so a place this call holds no label
+    for, such as one the spec's identity binds, is counted and never shown as its dcid.
+    """
+    named = [entity_labels[ref] for ref in refs if ref in entity_labels]
+    unnamed = len(refs) - len(named)
+    if not unnamed:
+        return render_dcids(named, {})
+    noun = "place" if unnamed == 1 else "places"
+    return f"{render_dcids(named, {})} and {unnamed} more {noun}" if named else f"{unnamed} {noun}"
 
 
 async def get_data(

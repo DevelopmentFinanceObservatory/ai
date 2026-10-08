@@ -104,6 +104,7 @@ from planner.plan import (
     GrowthRequirement,
     JoinRequirement,
     Period,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ResolvedBy,
@@ -442,8 +443,8 @@ def field_limits_record() -> dict[str, Any]:
     `MAX_ENTITIES` entities, eight predicates and the other fields a
     requirement compares. Twenty-four requirements, each citing all twenty-four
     decisions: eight datasets with `MAX_ENTITIES` entities and an `across`
-    apiece, ten filters with eight predicates apiece, and one of every other kind (aggregate,
-    growth, rank, share_of, comparison, join). Every string is at its limit;
+    apiece, nine filters with eight predicates apiece, and one of every other kind (aggregate,
+    growth, rank, share_of, quotient_of, comparison, join). Every string is at its limit;
     those the seam renders as JSON are made of `ASTRAL_CHAR`, and a predicate
     lists every entity name. Each decision and requirement validates on its
     own. The record as a plan does not: it serialises to far more than
@@ -511,7 +512,7 @@ def field_limits_record() -> dict[str, Any]:
             input_id=f"dataset_{index % 8}",
             predicates=predicates,
         )
-        for index in range(10)
+        for index in range(9)
     ]
     requirements += [
         AggregateRequirement(
@@ -541,6 +542,14 @@ def field_limits_record() -> dict[str, Any]:
             axis=role,
             denominator_scope=DenominatorScope.POOLED,
         ),
+        QuotientRequirement(
+            id="quotient",
+            decision_ids=slots,
+            numerator=RequirementSide(input_id="totals", entity=names[2]),
+            denominator=RequirementSide(input_id="filter_4", entity=names[2]),
+            axis=role,
+            denominator_axis=role,
+        ),
         ComparisonRequirement(
             id="comparison",
             decision_ids=slots,
@@ -564,9 +573,9 @@ def plan_record(
 ) -> dict[str, Any]:
     """The model-authored part of a plan of every kind, dumped, at a chosen size.
 
-    Twenty-four decisions and twenty-four requirements: eight datasets, ten
-    filters, and one each of aggregate, growth, rank, share_of, comparison and
-    join. Requirement `i` cites decision `i`, or all twenty-four when
+    Twenty-four decisions and twenty-four requirements: eight datasets, nine
+    filters, and one each of aggregate, growth, rank, share_of, quotient_of,
+    comparison and join. Requirement `i` cites decision `i`, or all twenty-four when
     `cites_all`. Each decision states `options` short options.
 
     With `chars` given, the record serialises to exactly that many characters
@@ -587,7 +596,7 @@ def plan_record(
             rationale="r",
             # The rank cites this decision, and a population rank needs a
             # decision that fixes it.
-            fixes=DecisionFixes(among=RankAmong.POPULATION) if index == 20 else None,
+            fixes=DecisionFixes(among=RankAmong.POPULATION) if index == 19 else None,
         )
         for index, slot in enumerate(slots)
     ]
@@ -613,26 +622,26 @@ def plan_record(
             input_id=f"dataset_{index % 8}",
             predicates=(EntityIn(names=("Kenya",)),),
         )
-        for index in range(10)
+        for index in range(9)
     ]
     requirements += [
         AggregateRequirement(
             id="totals",
-            decision_ids=cites(18),
+            decision_ids=cites(17),
             input_id="dataset_0",
             reduction=Reduction.SUM,
             group_by=(GroupBy.PERIOD,),
         ),
         GrowthRequirement(
             id="growth",
-            decision_ids=cites(19),
+            decision_ids=cites(18),
             input_id="totals",
             window_start=2016,
             window_end=2020,
         ),
         RankRequirement(
             id="rank",
-            decision_ids=cites(20),
+            decision_ids=cites(19),
             input_id="dataset_1",
             direction=RankDirection.HIGHEST_FIRST,
             among=RankAmong.POPULATION,
@@ -640,9 +649,15 @@ def plan_record(
         ),
         ShareOfRequirement(
             id="share",
-            decision_ids=cites(21),
+            decision_ids=cites(20),
             numerator=RequirementSide(input_id="totals"),
             denominator=RequirementSide(input_id="filter_0"),
+        ),
+        QuotientRequirement(
+            id="quotient",
+            decision_ids=cites(21),
+            numerator=RequirementSide(input_id="totals"),
+            denominator=RequirementSide(input_id="filter_4"),
         ),
         ComparisonRequirement(
             id="comparison",

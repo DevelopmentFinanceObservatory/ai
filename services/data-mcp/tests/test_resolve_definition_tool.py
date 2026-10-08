@@ -138,3 +138,19 @@ async def test_an_answer_whose_definition_does_not_hash_is_refused_and_stores_no
     assert result.structured_content is not None
     assert result.structured_content["code"] == "capability_unavailable"
     assert await store.get(_SPEC["spec_id"], schema_version=1) is None
+
+
+async def test_a_named_group_is_posted_beside_its_identity() -> None:
+    """A Spec whose role was asked for as a set posts that set beside its identity,
+    as Search's `dataset_resubmit` takes it, so the answer names the set again."""
+    posted: list[dict[str, Any]] = []
+    groups = {"observationAbout": {"dcid": "africa", "label": "Africa"}}
+
+    result = await _call(
+        _recorded_answer(posted), _arguments(entity_groups=groups), InMemoryDefinitionStore()
+    )
+
+    assert result.is_error is False
+    (body,) = posted
+    (entry,) = body["input"]["entries"]
+    assert entry["entity_groups"] == groups

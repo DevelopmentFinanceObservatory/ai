@@ -27,6 +27,7 @@ from planner.operations import (
     JoinOperation,
     Operation,
     OperationKind,
+    QuotientOfOperation,
     RankOperation,
     ShareOfOperation,
     Side,
@@ -40,6 +41,7 @@ from planner.plan import (
     FilterRequirement,
     GrowthRequirement,
     JoinRequirement,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
@@ -57,6 +59,7 @@ KIND_OF_REQUIREMENT: Mapping[type, OperationKind] = {
     SumOfRequirement: OperationKind.SUM_OF,
     RankRequirement: OperationKind.RANK,
     ShareOfRequirement: OperationKind.SHARE_OF,
+    QuotientRequirement: OperationKind.QUOTIENT_OF,
     JoinRequirement: OperationKind.JOIN,
     FilterRequirement: OperationKind.FILTER,
 }
@@ -123,6 +126,8 @@ def mismatches(
             found.append("window_end")
         if requirement.change != operation.change:
             found.append("change")
+        if requirement.rolling != operation.rolling:
+            found.append("rolling")
         _bad_input("input", requirement.input_id, operation.input)
     elif isinstance(requirement, RankRequirement):
         assert isinstance(operation, RankOperation)
@@ -142,6 +147,8 @@ def mismatches(
             found.append("per_period")
         if requirement.limit != operation.limit:
             found.append("limit")
+        if requirement.rolling != operation.rolling:
+            found.append("rolling")
         _bad_input("input", requirement.input_id, operation.input)
     elif isinstance(requirement, FilterRequirement):
         assert isinstance(operation, FilterOperation)
@@ -164,6 +171,14 @@ def mismatches(
             found.append("axis")
         if requirement.denominator_scope != operation.denominator_scope:
             found.append("denominator_scope")
+    elif isinstance(requirement, QuotientRequirement):
+        assert isinstance(operation, QuotientOfOperation)
+        _bad_side("numerator", requirement.numerator, operation.numerator)
+        _bad_side("denominator", requirement.denominator, operation.denominator)
+        if requirement.axis != operation.axis:
+            found.append("axis")
+        if requirement.denominator_axis != operation.denominator_axis:
+            found.append("denominator_axis")
     else:
         assert isinstance(requirement, JoinRequirement)
         assert isinstance(operation, JoinOperation)

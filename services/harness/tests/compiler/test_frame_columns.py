@@ -155,6 +155,35 @@ def test_a_two_sided_argument_binds_each_side_against_its_own_frame() -> None:
     }
 
 
+@pytest.mark.parametrize("verb", ["share_of", "quotient_of"])
+def test_a_dividing_verb_binds_each_sides_columns_against_its_own_frame(verb: str) -> None:
+    # `denominator_by` pairs a numerator column with the denominator's, so its
+    # keys take the numerator frame's spelling and its values the other's.
+    population = frame_columns(
+        role_keys=("observationAbout",),
+        axis_by_column={"observationAbout": None},
+        compiled=("observationAbout",),
+    )
+
+    divided = bound_arguments(
+        _analysis(verb),
+        {
+            "numerator_entity": {"origin": "country/DEU"},
+            "denominator_entity": {"observationAbout": "country/KEN"},
+            "numerator_by": ["destination"],
+            "denominator_by": {"destination": "observationAbout"},
+        },
+        frames={"frame_ref": _family(), "denominator_frame_ref": population},
+    )
+
+    assert divided == {
+        "numerator_entity": {"financingProvider": "country/DEU"},
+        "denominator_entity": {"observationAbout": "country/KEN"},
+        "numerator_by": ["financingRecipient"],
+        "denominator_by": {"financingRecipient": "observationAbout"},
+    }
+
+
 def test_a_join_key_needs_one_spelling_on_both_frames() -> None:
     other = frame_columns(
         role_keys=("provider",), axis_by_column={"provider": "origin"}, compiled=("origin",)
@@ -203,7 +232,7 @@ def test_the_prediction_stands_when_the_frame_is_unknown() -> None:
     )
 
 
-@pytest.mark.parametrize("verb", ["growth", "rank", "share_of"])
+@pytest.mark.parametrize("verb", ["growth", "rank", "share_of", "quotient_of", "sum_of"])
 @pytest.mark.parametrize("input_count", [1, 461, None])
 def test_a_verb_reading_one_stat_var_declares_one(verb: str, input_count: int | None) -> None:
     assert bound_stat_var_count(_analysis(verb), {}, input_stat_var_count=input_count) == 1
@@ -247,11 +276,14 @@ def test_a_join_declares_at_most_one_stat_var_per_side(input_count: int | None) 
 
 
 def test_every_analysis_verb_has_a_stat_var_bound() -> None:
+    # `resolve_anchor` implements no operation and returns no frame to bound.
     verbs = [
-        capability.tool for capability in CAPABILITIES if capability.tool.server == "analysis-mcp"
+        capability.tool
+        for capability in CAPABILITIES
+        if capability.tool.server == "analysis-mcp" and capability.implements
     ]
 
-    assert len(verbs) == 8
+    assert len(verbs) == 9
     for verb in verbs:
         bound_stat_var_count(verb, {}, input_stat_var_count=1)
 

@@ -29,6 +29,7 @@ from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_s
 from dfo_frame_grammar import Frame
 from fastmcp import Client
 from fastmcp.tools import ToolResult
+from rolling_support import anchored, second_version
 
 
 @pytest.fixture
@@ -866,3 +867,64 @@ async def test_execution_identity_perturbation_moves_the_content_version(seeded)
         execution_identity=bumped_identity,
     )
     assert moved_content_version != stored_trace.content_version
+
+
+# Rolling overlay ----------------------------------------------------------------
+
+_LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
+_ROOT = "spec_" + "c" * 32
+_ANCHOR_KEY = "rak_" + "e" * 32
+
+
+async def test_a_rolling_rank_computes_its_fixed_twins_rows_under_another_pair(seeded) -> None:
+    store, handles = seeded
+    arguments = {
+        "frame_ref": handles.plain_single_unit,
+        "rank_by": ("reporter",),
+        "aggregation": "sum",
+        "window_start": "2021",
+        "window_end": "2023",
+    }
+    root = handles.plain_single_unit
+    anchor = await anchored(root)
+    wider = await anchored(root, await second_version(store, root))
+    assert anchor.period == "2023"
+    rolling = {
+        "window_start": {**_LATEST, "offset": -2},
+        "window_end": _LATEST,
+        "population": anchor.populations,
+    }
+
+    fixed = await rank(**arguments)
+    rolled = await rank(**arguments, rolling=rolling, anchor_key=anchor.anchor_key)
+    rekeyed = await rank(**arguments, rolling=rolling, anchor_key=wider.anchor_key)
+
+    fixed_frame, fixed_trace = await store.get(FrameRef(**_pair(fixed)))
+    rolled_frame, rolled_trace = await store.get(FrameRef(**_pair(rolled)))
+    assert rolled_frame.table.equals(fixed_frame.table)
+    assert rolled_trace.frame_content_version == fixed_trace.frame_content_version
+    assert rolled_trace.execution_identity == fixed_trace.execution_identity
+    assert rolled_trace.applied_policy == fixed_trace.applied_policy
+    assert _pair(rolled)["spec_id"] != _pair(fixed)["spec_id"]
+    assert _pair(rolled)["content_version"] != _pair(fixed)["content_version"]
+    assert json.loads(rolled_trace.execution_record.content)["parameters"]["rolling"] == rolling
+    assert wider.anchor_key != anchor.anchor_key
+    assert _pair(rekeyed) == _pair(rolled)
+
+
+async def test_a_rolling_bound_on_a_rank_without_a_window_refuses(seeded) -> None:
+    _store, handles = seeded
+    result = await rank(
+        frame_ref=handles.plain_single_unit,
+        rank_by=("reporter",),
+        aggregation="sum",
+        rolling={"window_end": _LATEST, "population": [{"spec_id": _ROOT}]},
+        anchor_key=_ANCHOR_KEY,
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+def _pair(result) -> dict[str, str]:
+    content = result.structured_content
+    return {"spec_id": content["spec_id"], "content_version": content["content_version"]}

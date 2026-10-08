@@ -1,5 +1,6 @@
-"""Place levels: `place_level` keeps one level of place, and `rank`, `aggregate` and
-`share_of` refuse `place_levels_mixed` over a frame whose several places share none.
+"""Place levels: `place_level` keeps one level of place, and `rank`, `aggregate`,
+`share_of` and `quotient_of` refuse `place_levels_mixed` over a frame whose several places
+share none.
 
 The frames carry `observationAbout_type` as `get_data(place_types=true)` registers it: every
 Data Commons `typeOf` sorted and comma-joined, `Place` for Earth, `ProvisionalNode` for a
@@ -19,6 +20,7 @@ from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec, PlaceLevelPredicate
+from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
@@ -251,7 +253,9 @@ def _refused_mixed(result) -> dict[str, object]:
     return content
 
 
-async def test_the_tools_refuse_a_rank_a_total_and_a_share_over_every_level(store) -> None:
+async def test_the_tools_refuse_a_rank_a_total_a_share_and_a_quotient_over_every_level(
+    store,
+) -> None:
     every_place = await _held(store, _frame())
     world = await _held(store, _frame({"Earth": ("Place", 105.0)}))
 
@@ -263,11 +267,13 @@ async def test_the_tools_refuse_a_rank_a_total_and_a_share_over_every_level(stor
         numerator_entity={},
         denominator_entity={},
     )
+    divided = await quotient_of(frame_ref=every_place, denominator_frame_ref=world)
 
     content = _refused_mixed(ranked)
     assert "place_level" in content["message"]
     _refused_mixed(totalled)
     _refused_mixed(shared)
+    _refused_mixed(divided)
 
 
 @pytest.mark.parametrize("places", [_WORLD_AND_COUNTRIES, _INCOME_GROUPS, _UN_REGIONS])
@@ -285,12 +291,14 @@ async def test_the_tools_refuse_places_sharing_a_type_that_names_no_level(
         numerator_entity={},
         denominator_entity={},
     )
+    divided = await quotient_of(frame_ref=held, denominator_frame_ref=world)
 
     content = _refused_mixed(ranked)
     assert "share no level a filter can keep" in content["message"]
     assert "EurostatNUTS1" in content["message"]
     _refused_mixed(totalled)
     _refused_mixed(shared)
+    _refused_mixed(divided)
 
 
 @pytest.mark.parametrize(
@@ -315,10 +323,12 @@ async def test_the_tools_run_over_one_place_or_countries_also_typed_place(
         numerator_entity={},
         denominator_entity={},
     )
+    divided = await quotient_of(frame_ref=held, denominator_frame_ref=world)
 
     assert ranked.is_error is False, ranked.structured_content
     assert totalled.is_error is False, totalled.structured_content
     assert shared.is_error is False, shared.structured_content
+    assert divided.is_error is False, divided.structured_content
 
 
 async def test_a_total_per_place_or_per_type_keeps_the_levels_apart(store) -> None:
@@ -382,3 +392,17 @@ async def test_a_share_keyed_by_place_over_every_level_is_refused(store) -> None
     )
 
     _refused_mixed(shared)
+
+
+async def test_a_quotient_keyed_by_place_over_every_level_is_refused(store) -> None:
+    every_place = await _held(store, _frame())
+    countries = await _held(store, _frame(_countries_only()))
+
+    divided = await quotient_of(
+        frame_ref=every_place,
+        denominator_frame_ref=countries,
+        numerator_by=["observationAbout"],
+        denominator_by={"observationAbout": "observationAbout"},
+    )
+
+    _refused_mixed(divided)

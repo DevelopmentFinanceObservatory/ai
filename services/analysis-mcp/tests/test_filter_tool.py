@@ -26,6 +26,7 @@ from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
 from fastmcp import Client
+from rolling_support import anchored, second_version
 
 
 @pytest.fixture
@@ -231,14 +232,27 @@ async def test_predicate_order_produces_a_byte_identical_refusal(seeded) -> None
     assert first.content == second.content
 
 
-async def test_category_match_on_unit_over_a_converted_frame_refuses_correct_and_retry(
-    seeded,
+@pytest.mark.parametrize(
+    ("unit", "actual_type", "select_one"),
+    [
+        ({"currency": "USD", "prices": "current"}, "UnitRequest", "get_data"),
+        (
+            {"numerator": "USD", "denominator": {"stat_var": "dcid:Count_Person"}},
+            "ComposedUnit",
+            "unit parameter",
+        ),
+    ],
+    ids=["converted", "composed"],
+)
+async def test_category_match_on_unit_over_a_unit_object_frame_refuses_correct_and_retry(
+    seeded, unit: dict[str, object], actual_type: str, select_one: str
 ) -> None:
-    """A converted frame's `unit` cells carry a `grammar.UnitRequest`
-    object, not a plain string, so a `category_match` on `unit` matches no
+    """A `unit` cell holding a `grammar.UnitRequest` or `grammar.ComposedUnit`
+    object is not a plain string, so a `category_match` on `unit` matches no
     row. `filter_unit_conversion_unsupported` says so, and names the retries
-    that succeed: dropping the unit predicate, or fetching one unit. A
-    predicate on any other column filters the same frame."""
+    that succeed: dropping the unit predicate, or selecting one unit by a
+    fetch (converted) or a pin (composed). A predicate on any other column
+    filters the same frame."""
     store, _handles = seeded
     frame = Frame.build(
         role_keys=["reporter"],
@@ -248,7 +262,7 @@ async def test_category_match_on_unit_over_a_converted_frame_refuses_correct_and
                 "reporter": "dcid:USA",
                 "time_period": "2022",
                 "value": 1.0,
-                "unit": {"currency": "USD", "prices": "current"},
+                "unit": unit,
             },
         ],
     )
@@ -260,10 +274,10 @@ async def test_category_match_on_unit_over_a_converted_frame_refuses_correct_and
     assert result.is_error is True
     assert result.structured_content["code"] == "filter_unit_conversion_unsupported"
     assert result.structured_content["retry_mode"] == "correct_and_retry"
-    assert result.structured_content["fix"]["actual_type"] == "UnitRequest"
+    assert result.structured_content["fix"]["actual_type"] == actual_type
     message = result.content[0].text
     assert "Retry without the unit predicate" in message
-    assert "get_data" in message
+    assert select_one in message
 
     kept = await filter_verb(
         frame_ref=custom_ref,
@@ -514,3 +528,96 @@ async def test_execution_identity_perturbation_moves_the_content_version(seeded)
         execution_identity=bumped_identity,
     )
     assert moved_content_version != stored_trace.content_version
+
+
+# Rolling overlay ----------------------------------------------------------------
+
+_LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
+_ROOT = "spec_" + "c" * 32
+_ANCHOR_KEY = "rak_" + "e" * 32
+
+
+async def test_a_rolling_filter_keeps_its_fixed_twins_rows_under_another_pair(seeded) -> None:
+    store, handles = seeded
+    donors = {"kind": "category_match", "column": "reporter", "values": ["dcid:USA", "dcid:FRA"]}
+    since = {"kind": "ordered_threshold", "column": "time_period", "op": "gte", "value": "2022"}
+    rolling_since = {**since, "rolling": {**_LATEST, "offset": -1}}
+    root = handles.plain_single_unit
+    binding = {"reporter": ["dcid:USA", "dcid:FRA"]}
+    anchor = await anchored(root, bindings=binding)
+    wider = await anchored(root, await second_version(store, root), bindings=binding)
+    assert (anchor.period, wider.period) == ("2023", "2023")
+    population = {"population": anchor.populations}
+
+    fixed = await filter_verb(frame_ref=handles.plain_single_unit, predicates=(donors, since))
+    rolled = await filter_verb(
+        frame_ref=handles.plain_single_unit,
+        predicates=(donors, rolling_since),
+        rolling=population,
+        anchor_key=anchor.anchor_key,
+    )
+    rekeyed = await filter_verb(
+        frame_ref=handles.plain_single_unit,
+        predicates=(donors, rolling_since),
+        rolling=population,
+        anchor_key=wider.anchor_key,
+    )
+
+    fixed_frame, fixed_trace = await store.get(FrameRef(**_pair(fixed)))
+    rolled_frame, rolled_trace = await store.get(FrameRef(**_pair(rolled)))
+    assert fixed_frame.table.num_rows > 0
+    assert rolled_frame.table.equals(fixed_frame.table)
+    assert rolled_trace.frame_content_version == fixed_trace.frame_content_version
+    assert rolled_trace.execution_identity == fixed_trace.execution_identity
+    assert rolled_trace.applied_policy == fixed_trace.applied_policy
+    assert _pair(rolled)["spec_id"] != _pair(fixed)["spec_id"]
+    assert _pair(rolled)["content_version"] != _pair(fixed)["content_version"]
+    recorded = json.loads(rolled_trace.execution_record.content)["parameters"]
+    assert rolling_since in recorded["predicates"]
+    assert recorded["rolling"] == {
+        "population": [
+            {"spec_id": root["spec_id"], "bindings": {"reporter": ["dcid:FRA", "dcid:USA"]}}
+        ]
+    }
+    assert wider.anchor_key != anchor.anchor_key
+    assert _pair(rekeyed) == _pair(rolled)
+
+
+@pytest.mark.parametrize(
+    ("predicate", "rolling"),
+    [
+        pytest.param(
+            {
+                "kind": "ordered_threshold",
+                "column": "value",
+                "op": "gte",
+                "value": 1,
+                "rolling": _LATEST,
+            },
+            {"population": [{"spec_id": _ROOT}]},
+            id="rolling-off-time-period",
+        ),
+        pytest.param(
+            {"kind": "ordered_threshold", "column": "time_period", "op": "gte", "value": "2022"},
+            {"population": [{"spec_id": _ROOT}]},
+            id="population-without-a-rolling-predicate",
+        ),
+    ],
+)
+async def test_a_misplaced_rolling_overlay_refuses_op_spec_invalid(
+    seeded, predicate: dict[str, object], rolling: dict[str, object] | None
+) -> None:
+    _store, handles = seeded
+    result = await filter_verb(
+        frame_ref=handles.plain_single_unit,
+        predicates=(predicate,),
+        rolling=rolling,
+        anchor_key=_ANCHOR_KEY,
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+def _pair(result) -> dict[str, str]:
+    content = result.structured_content
+    return {"spec_id": content["spec_id"], "content_version": content["content_version"]}

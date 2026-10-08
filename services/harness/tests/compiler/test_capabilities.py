@@ -43,14 +43,20 @@ async def _live_schemas() -> dict[str, ToolSchema]:
 
 
 async def test_every_pinned_hash_matches_the_live_schema() -> None:
-    # Failing here means a server changed a tool's arguments. Re-read the
-    # schema, check the row's inputs still name the right seams, and re-pin.
+    # Failing here means a server changed a tool's arguments or its declared
+    # output. Re-read the schema, check the row's inputs still name the right
+    # seams, and re-pin. A row pinning no output hash is compared on its
+    # input alone.
     live = await _live_schemas()
 
     stale = [
-        (c.tool.name, c.input_schema_hash, live[c.tool.name].input_schema_hash)
+        (c.tool.name, field, pinned, served)
         for c in CAPABILITIES
-        if live[c.tool.name].input_schema_hash != c.input_schema_hash
+        for field, pinned, served in (
+            ("input", c.input_schema_hash, live[c.tool.name].input_schema_hash),
+            ("output", c.output_schema_hash, live[c.tool.name].output_schema_hash),
+        )
+        if pinned is not None and pinned != served
     ]
 
     assert stale == []

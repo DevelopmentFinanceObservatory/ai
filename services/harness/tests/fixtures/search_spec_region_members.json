@@ -1,0 +1,1080 @@
+{
+  "comment": "One spec block of a `search` answer for \"health expenditure per capita\" at \"Africa\" from a local dfo-apis built from ONEcampaign/dfo-apis#1222 (dev graph), as dfo-website PR #158 records it in `src/lib/search/test/fixtures/region-group.ts`: it resolved `definite` to spec_2d6c84b87a7ea40105fa3380aff345bc with Africa read as its members, so `definition.identity.entities.observationAbout` and `resolved.entities` list Africa's 59 countries and territories and `resolved.entity_groups.observationAbout` names Africa (`africa`, Continent). Kept whole: the identity, entities, groups and coverage. Trimmed: `slot_options`, `entity_options`, `facet_options`, `trace`, `related_measures`, `measure_label_axes`, `measure_axis_values`, `download`, `inapplicable_slots`, `unresolved_slots`.",
+  "spec": {
+    "spec_id": "spec_2d6c84b87a7ea40105fa3380aff345bc",
+    "definition": {
+      "schema_version": 1,
+      "spec_id": "spec_2d6c84b87a7ea40105fa3380aff345bc",
+      "identity": {
+        "identity_version": "spec1",
+        "shape": {
+          "kind": "statvar_schema",
+          "population_type": "EconomicActivity",
+          "measured_property": "amount",
+          "stat_type": "measuredValue",
+          "measurement_denominator": {
+            "ref": "Count_Person"
+          }
+        },
+        "slots": [
+          {
+            "property": "activitySource",
+            "binding": {
+              "state": "value",
+              "ref": "ExpenditureActivity"
+            }
+          },
+          {
+            "property": "expenditureType",
+            "binding": {
+              "state": "value",
+              "ref": "HealthcareExpenditure"
+            }
+          }
+        ],
+        "entities": {
+          "observationAbout": [
+            "country/AGO",
+            "country/ATF",
+            "country/BDI",
+            "country/BEN",
+            "country/BFA",
+            "country/BWA",
+            "country/CAF",
+            "country/CIV",
+            "country/CMR",
+            "country/COD",
+            "country/COG",
+            "country/COM",
+            "country/CPV",
+            "country/DJI",
+            "country/DZA",
+            "country/EGY",
+            "country/ERI",
+            "country/ESH",
+            "country/ETH",
+            "country/GAB",
+            "country/GHA",
+            "country/GIN",
+            "country/GMB",
+            "country/GNB",
+            "country/GNQ",
+            "country/KEN",
+            "country/LBR",
+            "country/LBY",
+            "country/LSO",
+            "country/MAR",
+            "country/MDG",
+            "country/MLI",
+            "country/MOZ",
+            "country/MRT",
+            "country/MUS",
+            "country/MWI",
+            "country/MYT",
+            "country/NAM",
+            "country/NER",
+            "country/NGA",
+            "country/REU",
+            "country/RWA",
+            "country/SDN",
+            "country/SEN",
+            "country/SHN",
+            "country/SLE",
+            "country/SOM",
+            "country/SSD",
+            "country/STP",
+            "country/SWZ",
+            "country/SYC",
+            "country/TCD",
+            "country/TGO",
+            "country/TUN",
+            "country/TZA",
+            "country/UGA",
+            "country/ZAF",
+            "country/ZMB",
+            "country/ZWE"
+          ]
+        },
+        "requested_window": {
+          "kind": "all"
+        }
+      }
+    },
+    "resolved": {
+      "shape": {
+        "shape_id": "economicactivity_amount_measuredvalue_per_count_person",
+        "label": "Healthcare expenditure per person",
+        "population_type": {
+          "dcid": "EconomicActivity",
+          "label": "EconomicActivity"
+        },
+        "measured_property": {
+          "dcid": "amount",
+          "label": "amount"
+        },
+        "stat_type": {
+          "dcid": "measuredValue",
+          "label": "measuredValue"
+        },
+        "measurement_denominator": {
+          "dcid": "Count_Person",
+          "label": "Total population"
+        },
+        "measurement_denominator_unresolved": false,
+        "slot_keys": [
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "activitySource",
+              "label": "activitySource"
+            },
+            "label": "activity source"
+          },
+          {
+            "axis": "how",
+            "property": {
+              "dcid": "expenditureType",
+              "label": "expenditureType"
+            },
+            "label": "expenditure type"
+          },
+          {
+            "axis": "where",
+            "label": "place"
+          },
+          {
+            "axis": "when",
+            "label": "time window"
+          },
+          {
+            "axis": "source",
+            "label": "data source"
+          }
+        ],
+        "member_count": 1,
+        "member_digest": "81a72f68b71e73bfd3585c3aed2ebdc1080288837cbec2dd63e1044a2a0767c4",
+        "refine_supported": true,
+        "data_commons": [
+          {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        ],
+        "upstream": {
+          "source": {
+            "ref": "dc/s/WorldBank",
+            "label": "World Bank"
+          },
+          "data_commons": {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        }
+      },
+      "slots": [
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "activitySource",
+              "label": "activitySource"
+            },
+            "label": "activity source"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "ExpenditureActivity",
+                "label": "ExpenditureActivity"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "how",
+            "property": {
+              "dcid": "expenditureType",
+              "label": "expenditureType"
+            },
+            "label": "expenditure type"
+          },
+          "binding": {
+            "kind": "value",
+            "value": {
+              "ref": {
+                "dcid": "HealthcareExpenditure",
+                "label": "HealthcareExpenditure"
+              },
+              "value_kind": "enum_value"
+            }
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "where",
+            "label": "place"
+          },
+          "binding": {
+            "kind": "set",
+            "values": [
+              {
+                "ref": {
+                  "dcid": "country/AGO",
+                  "label": "Angola"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ATF",
+                  "label": "French Southern Territories"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/BDI",
+                  "label": "Burundi"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/BEN",
+                  "label": "Benin"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/BFA",
+                  "label": "Burkina Faso"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/BWA",
+                  "label": "Botswana"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/CAF",
+                  "label": "Central African Republic"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/CIV",
+                  "label": "Ivory Coast"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/CMR",
+                  "label": "Cameroon"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/COD",
+                  "label": "Democratic Republic of the Congo"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/COG",
+                  "label": "Republic of the Congo"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/COM",
+                  "label": "Comoros"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/CPV",
+                  "label": "Cape Verde"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/DJI",
+                  "label": "Djibouti"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/DZA",
+                  "label": "Algeria"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/EGY",
+                  "label": "Egypt"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ERI",
+                  "label": "Eritrea"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ESH",
+                  "label": "Western Sahara"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ETH",
+                  "label": "Ethiopia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GAB",
+                  "label": "Gabon"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GHA",
+                  "label": "Ghana"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GIN",
+                  "label": "Guinea"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GMB",
+                  "label": "The Gambia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GNB",
+                  "label": "Guinea-Bissau"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/GNQ",
+                  "label": "Equatorial Guinea"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/KEN",
+                  "label": "Kenya"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/LBR",
+                  "label": "Liberia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/LBY",
+                  "label": "Libya"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/LSO",
+                  "label": "Lesotho"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MAR",
+                  "label": "Morocco"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MDG",
+                  "label": "Madagascar"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MLI",
+                  "label": "Mali"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MOZ",
+                  "label": "Mozambique"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MRT",
+                  "label": "Mauritania"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MUS",
+                  "label": "Mauritius"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MWI",
+                  "label": "Malawi"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/MYT",
+                  "label": "Mayotte"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/NAM",
+                  "label": "Namibia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/NER",
+                  "label": "Niger"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/NGA",
+                  "label": "Nigeria"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/REU",
+                  "label": "R\u00e9union"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/RWA",
+                  "label": "Rwanda"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SDN",
+                  "label": "Sudan"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SEN",
+                  "label": "Senegal"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SHN",
+                  "label": "Saint Helena, Ascension and Tristan da Cunha"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SLE",
+                  "label": "Sierra Leone"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SOM",
+                  "label": "Somalia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SSD",
+                  "label": "South Sudan"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/STP",
+                  "label": "S\u00e3o Tom\u00e9 and Pr\u00edncipe"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SWZ",
+                  "label": "Swaziland"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/SYC",
+                  "label": "Seychelles"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/TCD",
+                  "label": "Chad"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/TGO",
+                  "label": "Togo"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/TUN",
+                  "label": "Tunisia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/TZA",
+                  "label": "Tanzania"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/UGA",
+                  "label": "Uganda"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ZAF",
+                  "label": "South Africa"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ZMB",
+                  "label": "Zambia"
+                },
+                "value_kind": "entity"
+              },
+              {
+                "ref": {
+                  "dcid": "country/ZWE",
+                  "label": "Zimbabwe"
+                },
+                "value_kind": "entity"
+              }
+            ]
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "when",
+            "label": "time window"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        },
+        {
+          "key": {
+            "axis": "source",
+            "label": "data source"
+          },
+          "binding": {
+            "kind": "unbound"
+          },
+          "summable": false
+        }
+      ],
+      "stat_vars": {
+        "member_count": 1,
+        "member_count_exact": false,
+        "served_count": 1,
+        "data_date_range": {
+          "start": "2000",
+          "end": "2023"
+        }
+      },
+      "entities": [
+        {
+          "ref": "country/AGO",
+          "label": "Angola",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ATF",
+          "label": "French Southern Territories",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/BDI",
+          "label": "Burundi",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/BEN",
+          "label": "Benin",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/BFA",
+          "label": "Burkina Faso",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/BWA",
+          "label": "Botswana",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/CAF",
+          "label": "Central African Republic",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/CIV",
+          "label": "Ivory Coast",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/CMR",
+          "label": "Cameroon",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/COD",
+          "label": "Democratic Republic of the Congo",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/COG",
+          "label": "Republic of the Congo",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/COM",
+          "label": "Comoros",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/CPV",
+          "label": "Cape Verde",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/DJI",
+          "label": "Djibouti",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/DZA",
+          "label": "Algeria",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/EGY",
+          "label": "Egypt",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ERI",
+          "label": "Eritrea",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ESH",
+          "label": "Western Sahara",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ETH",
+          "label": "Ethiopia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GAB",
+          "label": "Gabon",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GHA",
+          "label": "Ghana",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GIN",
+          "label": "Guinea",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GMB",
+          "label": "The Gambia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GNB",
+          "label": "Guinea-Bissau",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/GNQ",
+          "label": "Equatorial Guinea",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/KEN",
+          "label": "Kenya",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/LBR",
+          "label": "Liberia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/LBY",
+          "label": "Libya",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/LSO",
+          "label": "Lesotho",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MAR",
+          "label": "Morocco",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MDG",
+          "label": "Madagascar",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MLI",
+          "label": "Mali",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MOZ",
+          "label": "Mozambique",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MRT",
+          "label": "Mauritania",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MUS",
+          "label": "Mauritius",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MWI",
+          "label": "Malawi",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/MYT",
+          "label": "Mayotte",
+          "entity_type": "AdministrativeArea1",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/NAM",
+          "label": "Namibia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/NER",
+          "label": "Niger",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/NGA",
+          "label": "Nigeria",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/REU",
+          "label": "R\u00e9union",
+          "entity_type": "AdministrativeArea1",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/RWA",
+          "label": "Rwanda",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SDN",
+          "label": "Sudan",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SEN",
+          "label": "Senegal",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SHN",
+          "label": "Saint Helena, Ascension and Tristan da Cunha",
+          "entity_type": "AdministrativeArea1",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SLE",
+          "label": "Sierra Leone",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SOM",
+          "label": "Somalia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SSD",
+          "label": "South Sudan",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/STP",
+          "label": "S\u00e3o Tom\u00e9 and Pr\u00edncipe",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SWZ",
+          "label": "Swaziland",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/SYC",
+          "label": "Seychelles",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/TCD",
+          "label": "Chad",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/TGO",
+          "label": "Togo",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/TUN",
+          "label": "Tunisia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/TZA",
+          "label": "Tanzania",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/UGA",
+          "label": "Uganda",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ZAF",
+          "label": "South Africa",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ZMB",
+          "label": "Zambia",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        },
+        {
+          "ref": "country/ZWE",
+          "label": "Zimbabwe",
+          "entity_type": "Country",
+          "role": "observationAbout"
+        }
+      ],
+      "entity_groups": {
+        "observationAbout": {
+          "dcid": "africa",
+          "label": "Africa",
+          "entity_type": "Continent"
+        }
+      },
+      "coverage": {
+        "kind": "exact",
+        "has_data": true,
+        "observation_count": 1256,
+        "evidence": "facet_metadata",
+        "dimensions": [
+          {
+            "label": "countries",
+            "count": 54
+          },
+          {
+            "label": "observations",
+            "count": 24
+          },
+          {
+            "label": "variables",
+            "count": 1
+          }
+        ]
+      },
+      "facets": {
+        "provenance": {
+          "basis": "fallback",
+          "ref": "dc/base/WorldDevelopmentIndicators",
+          "label": "World Development Indicators",
+          "source": {
+            "ref": "dc/s/WorldBank",
+            "label": "World Bank"
+          },
+          "data_commons": {
+            "id": "base",
+            "label": "Data Commons by Google"
+          }
+        },
+        "unit": {
+          "basis": "fallback",
+          "ref": "InternationalDollar",
+          "label": "InternationalDollar"
+        }
+      },
+      "rendered_sentence": "Health expenditure per capita in international dollars in the 59 countries and territories in Africa, 2000 to 2023. World Development Indicators.",
+      "confidence": "high",
+      "available_at_place": true
+    }
+  }
+}

@@ -1,0 +1,860 @@
+{
+  "format_version": 1,
+  "identity_version": "ops1",
+  "vectors": [
+    {
+      "name": "growth-fixed-window",
+      "description": "a growth over fixed years, the twin of the rolling growth vectors",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ]
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_e6acf02eddff0a4852cc2ad233bee51d"
+    },
+    {
+      "name": "growth-rolling-end",
+      "description": "the same years with window_end following the latest period of two reporters' series",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_2cdae4ce7e2171dd965e7cf7450fac1c"
+    },
+    {
+      "name": "growth-rolling-end-every-series",
+      "description": "growth-rolling-end with a population that keeps every series of the root",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {}
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_bc18670ee449c7cb05809af0359703e7"
+    },
+    {
+      "name": "growth-rolling-both-ends",
+      "description": "the same years with both bounds rolling, window_start five years behind the latest",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_start": {
+            "anchor": "latest",
+            "offset": -5,
+            "rule": "half1"
+          },
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"},\"window_start\":{\"anchor\":\"latest\",\"offset\":-5,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_86dfa2fef9eaa2e579175cb7626d6b7b"
+    },
+    {
+      "name": "growth-rolling-end-two-roots",
+      "description": "growth-rolling-end in a recipe over two root datasets, one population for each",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_2c26b46b68ffc68ff99b453c1d304134",
+              "bindings": {
+                "recipient": [
+                  "dcid:GHA"
+                ]
+              }
+            },
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"recipient\":[\"dcid:GHA\"]},\"spec_id\":\"spec_2c26b46b68ffc68ff99b453c1d304134\"},{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_ea6d073e8c2d14e5be3db2ca79493914"
+    },
+    {
+      "name": "growth-rolling-population-respelled",
+      "description": "the populations of growth-rolling-end-two-roots listed in another order, one twice, with values repeated and out of order: the hash of growth-rolling-end-two-roots",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_start": null,
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:USA",
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            },
+            {
+              "spec_id": "spec_2c26b46b68ffc68ff99b453c1d304134",
+              "bindings": {
+                "recipient": [
+                  "dcid:GHA"
+                ]
+              }
+            },
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"recipient\":[\"dcid:GHA\"]},\"spec_id\":\"spec_2c26b46b68ffc68ff99b453c1d304134\"},{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_ea6d073e8c2d14e5be3db2ca79493914"
+    },
+    {
+      "name": "rank-fixed-window",
+      "description": "a windowed rank over fixed years",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ],
+        "aggregation": "sum",
+        "window_start": "2019",
+        "window_end": "2024"
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"],\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"rank\"}",
+      "expected_op_spec_hash": "ops_7ad88e9ad50504d1a4414d619197a6fd"
+    },
+    {
+      "name": "rank-rolling-window",
+      "description": "the same rank with both bounds rolling",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ],
+        "aggregation": "sum",
+        "window_start": "2019",
+        "window_end": "2024",
+        "rolling": {
+          "window_start": {
+            "anchor": "latest",
+            "offset": -5,
+            "rule": "half1"
+          },
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"},\"window_start\":{\"anchor\":\"latest\",\"offset\":-5,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"rank\"}",
+      "expected_op_spec_hash": "ops_edecad2396e0701975e893598138204d"
+    },
+    {
+      "name": "filter-fixed-predicates",
+      "description": "a filter with a fixed period threshold among other predicates",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "dcid:FRA",
+              "dcid:USA"
+            ]
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "time_period",
+            "op": "gte",
+            "value": "2019"
+          }
+        ]
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"predicates\":[{\"column\":\"reporter\",\"kind\":\"category_match\",\"values\":[\"dcid:FRA\",\"dcid:USA\"]},{\"column\":\"time_period\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":\"2019\"},{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gt\",\"value\":0}]},\"verb\":\"filter\"}",
+      "expected_op_spec_hash": "ops_67ddd25b6dfa1065f4aabb6cd2154b3d"
+    },
+    {
+      "name": "filter-one-rolling-predicate",
+      "description": "the same filter with the period threshold rolling, five periods behind the latest",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "dcid:FRA",
+              "dcid:USA"
+            ]
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "time_period",
+            "op": "gte",
+            "value": "2019",
+            "rolling": {
+              "anchor": "latest",
+              "offset": -5,
+              "rule": "half1"
+            }
+          }
+        ],
+        "rolling": {
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"predicates\":[{\"column\":\"reporter\",\"kind\":\"category_match\",\"values\":[\"dcid:FRA\",\"dcid:USA\"]},{\"column\":\"time_period\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"rolling\":{\"anchor\":\"latest\",\"offset\":-5,\"rule\":\"half1\"},\"value\":\"2019\"},{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gt\",\"value\":0}],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}]}},\"verb\":\"filter\"}",
+      "expected_op_spec_hash": "ops_b3e68a3ad6b589d1a468cc117d18c68f"
+    },
+    {
+      "name": "growth-rolling-literals-disagree",
+      "description": "both bounds rolling, but 2019 is not five years before 2023",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2023",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_start": {
+            "anchor": "latest",
+            "offset": -5,
+            "rule": "half1"
+          },
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-rolling-offset-above-zero",
+      "description": "an offset after the latest period",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 1,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-rolling-unknown-rule",
+      "description": "a rule the frame grammar does not define",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "third1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-rolling-without-population",
+      "description": "a rolling bound that states no population",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          }
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-population-without-a-rolling-bound",
+      "description": "a population with no rolling bound",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-population-with-a-content-version",
+      "description": "a population naming a dataset version",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288",
+              "bindings": {}
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "rank-rolling-bound-absent",
+      "description": "a rolling bound on a rank that states no window",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "rank",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "rank_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "filter-rolling-off-time-period",
+      "description": "a rolling threshold on the value column",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gt",
+            "value": 0,
+            "rolling": {
+              "anchor": "latest",
+              "offset": 0,
+              "rule": "half1"
+            }
+          }
+        ],
+        "rolling": {
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "filter-rolling-predicate-without-population",
+      "description": "a rolling threshold on a filter that states no population",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "time_period",
+            "op": "gte",
+            "value": "2019",
+            "rolling": {
+              "anchor": "latest",
+              "offset": -5,
+              "rule": "half1"
+            }
+          }
+        ]
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "filter-population-without-a-rolling-predicate",
+      "description": "a population on a filter whose predicates are all fixed",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "ordered_threshold",
+            "column": "time_period",
+            "op": "gte",
+            "value": "2019"
+          }
+        ],
+        "rolling": {
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    },
+    {
+      "name": "growth-rolling-end-country-level",
+      "description": "the rolling end year over a population held to one level of place",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              },
+              "levels": {
+                "observationAbout_type": "Country"
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"change\":\"relative\",\"entity_by\":[\"reporter\"],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"levels\":{\"observationAbout_type\":\"Country\"},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}],\"window_end\":{\"anchor\":\"latest\",\"offset\":0,\"rule\":\"half1\"}},\"unit\":null,\"window_end\":\"2024\",\"window_start\":\"2019\"},\"verb\":\"growth\"}",
+      "expected_op_spec_hash": "ops_1a725096ac4d0b027225b47996e0982b"
+    },
+    {
+      "name": "filter-rolling-predicate-country-level",
+      "description": "a rolling threshold over a population held to one level of place",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "filter",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "predicates": [
+          {
+            "kind": "category_match",
+            "column": "reporter",
+            "values": [
+              "dcid:FRA",
+              "dcid:USA"
+            ]
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "value",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "kind": "ordered_threshold",
+            "column": "time_period",
+            "op": "gte",
+            "value": "2019",
+            "rolling": {
+              "anchor": "latest",
+              "offset": -5,
+              "rule": "half1"
+            }
+          }
+        ],
+        "rolling": {
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              },
+              "levels": {
+                "observationAbout_type": "Country"
+              }
+            }
+          ]
+        }
+      },
+      "expected_canonical": "{\"frame_ref\":{\"content_version\":\"cv_4b825dc642cb6eb9a060e54bf8d69288\",\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"},\"identity_version\":\"ops1\",\"parameters\":{\"predicates\":[{\"column\":\"reporter\",\"kind\":\"category_match\",\"values\":[\"dcid:FRA\",\"dcid:USA\"]},{\"column\":\"time_period\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"rolling\":{\"anchor\":\"latest\",\"offset\":-5,\"rule\":\"half1\"},\"value\":\"2019\"},{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gt\",\"value\":0}],\"rolling\":{\"population\":[{\"bindings\":{\"reporter\":[\"dcid:FRA\",\"dcid:USA\"]},\"levels\":{\"observationAbout_type\":\"Country\"},\"spec_id\":\"spec_e3b0c44298fc1c149afbf4c8996fb924\"}]}},\"verb\":\"filter\"}",
+      "expected_op_spec_hash": "ops_7e2f7052f11d02c0668078437beb154a"
+    },
+    {
+      "name": "growth-population-level-outside-the-vocabulary",
+      "description": "a level that is no level of place",
+      "classification": "negative",
+      "op_spec": {
+        "verb": "growth",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "window_start": "2019",
+        "window_end": "2024",
+        "entity_by": [
+          "reporter"
+        ],
+        "rolling": {
+          "window_end": {
+            "anchor": "latest",
+            "offset": 0,
+            "rule": "half1"
+          },
+          "population": [
+            {
+              "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+              "bindings": {
+                "reporter": [
+                  "dcid:FRA",
+                  "dcid:USA"
+                ]
+              },
+              "levels": {
+                "observationAbout_type": "Region"
+              }
+            }
+          ]
+        }
+      },
+      "expected_failure_kind": "schema_violation"
+    }
+  ]
+}
