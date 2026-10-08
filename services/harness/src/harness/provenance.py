@@ -21,12 +21,12 @@ to one member), so a card counts its indicators from that figure
 declared count says: a summed retrieval's frame holds one family ref that
 stands for every StatVar the sum added up, and so does any frame derived
 from it, so that ref counts as those StatVars, each counted once however
-many carried retrievals hold it (`_carried_stat_var_count`). A `sum_of`'s
-frame holds one ref of its own, which counts as the distinct StatVars of
-the retrievals under its sides. Both writers
-store a manifest with its whole `trace.resolved_stat_vars`, read back
-first when the `get_data` result left a long one out
-(`manifest_with_stat_vars`).
+many carried retrievals hold it (`_carried_stat_var_count`). The frame of a
+verb that writes its own StatVar (`BOTH_SIDES_VERBS`: `sum_of`,
+`quotient_of`, `share_of`) holds that one ref, which counts as the distinct
+StatVars of the retrievals under its sides. Both writers store a manifest
+with its whole `trace.resolved_stat_vars`, read back first when the
+`get_data` result left a long one out (`manifest_with_stat_vars`).
 
 Scoped per conversation (`harness.conversation.current_conversation_id`),
 like `McpExecutor`'s other per-conversation state. Bounded two ways: an LRU
@@ -67,9 +67,74 @@ _MAX_CONVERSATIONS = 256
 
 _FrameKey = tuple[str | None, str | None]
 
-# A `sum_of` result's StatVar ref, mapped to the retrieval frames under its
-# left side and under its right side.
-type SumOfSides = Mapping[str, tuple[tuple[_FrameKey, ...], ...]]
+
+@dataclass(frozen=True, slots=True)
+class OwnStatVar:
+    """How a card names the StatVar a verb writes for its own result:
+    `joiner` goes between the two sides' names, and `description` says what
+    the verb did with them. `equal_sides` goes before the one name of two
+    sides holding the same StatVars, in place of the joined form. dfo-apis
+    words the label of a published frame the same way
+    (`presentation_store.composed_stat_vars`)."""
+
+    joiner: str
+    description: str
+    equal_sides: str
+
+
+@dataclass(frozen=True, slots=True)
+class BothSidesVerb:
+    """A verb whose result carries the StatVars of both frames it reads.
+
+    `second_frame` is the argument it takes its second frame under, absent
+    from a step whose two sides read one frame. `own_stat_var` is set for a
+    verb that writes every result row under `dcid:<its spec_id>`, a ref no
+    graph node describes, which stands for the StatVars under both sides.
+    """
+
+    second_frame: str
+    own_stat_var: OwnStatVar | None = None
+
+
+# The analysis-mcp verbs whose result carries both sides' StatVars, by tool
+# name. `compare`'s right side supplies values only, so it is not here.
+BOTH_SIDES_VERBS: Mapping[str, BothSidesVerb] = {
+    "join": BothSidesVerb(second_frame="right_frame_ref"),
+    "sum_of": BothSidesVerb(
+        second_frame="right_frame_ref",
+        own_stat_var=OwnStatVar(
+            joiner=" plus ",
+            description="The two added together for each year both report.",
+            equal_sides="",
+        ),
+    ),
+    "quotient_of": BothSidesVerb(
+        second_frame="denominator_frame_ref",
+        own_stat_var=OwnStatVar(
+            joiner=" per ",
+            description="The first divided by the second for each year both report.",
+            equal_sides="Ratio of ",
+        ),
+    ),
+    "share_of": BothSidesVerb(
+        second_frame="denominator_frame_ref",
+        own_stat_var=OwnStatVar(
+            joiner=" as a share of ",
+            description="The first as a share of the second, in per cent, for each year both "
+            "report.",
+            equal_sides="Share of ",
+        ),
+    ),
+}
+
+# One part of a verb's side: a retrieval's frame key, or the StatVar ref an
+# earlier verb wrote for its own result, itself a key of `OwnStatVars`.
+type SidePart = _FrameKey | str
+
+# The StatVar ref a verb wrote for its own result (`BothSidesVerb
+# .own_stat_var`), mapped to the verb's tool name and the parts of its first
+# side and of its second.
+type OwnStatVars = Mapping[str, tuple[str, tuple[SidePart, ...], tuple[SidePart, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,11 +170,12 @@ type Lineage = tuple[ProvenanceInput, ...]
 class _Entry:
     """What the store holds for one frame: its lineage, the distinct
     StatVars the frame carries when its producing step declared a count,
-    and the sides of each `sum_of` the frame's run computed."""
+    and the StatVar refs the verbs of the frame's run wrote for their own
+    results."""
 
     lineage: Lineage
     stat_var_count: int | None = None
-    sum_of_sides: SumOfSides | None = None
+    own_stat_vars: OwnStatVars | None = None
 
 
 class ProvenanceStore:
@@ -150,7 +216,7 @@ class ProvenanceStore:
         stat_var_count: int | None = None,
         carried: Sequence[_FrameKey] = (),
         summed: Sequence[Sequence[_FrameKey]] = (),
-        sum_of_sides: SumOfSides | None = None,
+        own_stat_vars: OwnStatVars | None = None,
     ) -> bool:
         """Write the lineage of the frame `(spec_id, content_version)` from the frames in `sources`.
 
@@ -162,10 +228,11 @@ class ProvenanceStore:
         one carries a single family ref standing for the StatVars it sums
         (`summed_stat_var_count`), so the count held with the lineage, and
         read back by `stat_var_count`, counts that ref as those StatVars
-        (`_carried_stat_var_count`). `summed` holds one entry per `sum_of`
-        ref the frame carries, the retrievals among `sources` under that
-        sum, and the count takes that ref as their distinct StatVars. `sum_of_sides` is held for
-        `sum_of_sides` to read back.
+        (`_carried_stat_var_count`). `summed` holds one entry per ref a verb
+        wrote for its own result (a `sum_of`'s, a `quotient_of`'s, a
+        `share_of`'s) that the frame carries, the retrievals among `sources`
+        under that verb's sides, and the count takes that ref as their
+        distinct StatVars. `own_stat_vars` is held for `own_stat_vars` to read back.
 
         The lineage is every `sources` lineage flattened in order, with a
         retrieval that appears twice kept once. All-or-nothing: when any
@@ -199,7 +266,7 @@ class ProvenanceStore:
         self._store(
             conversation=conversation,
             key=(spec_id, content_version),
-            entry=_Entry(tuple(members.values()), stat_var_count, sum_of_sides),
+            entry=_Entry(tuple(members.values()), stat_var_count, own_stat_vars),
         )
         return True
 
@@ -251,15 +318,15 @@ class ProvenanceStore:
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
 
-    def sum_of_sides(
+    def own_stat_vars(
         self, *, conversation: str, spec_id: str | None, content_version: str | None
-    ) -> SumOfSides:
-        """Each `sum_of` result's StatVar ref the run behind the frame
-        `(spec_id, content_version)` computed, with the retrieval frames
-        under its two sides, as `alias` recorded them. Empty when there are
-        none."""
+    ) -> OwnStatVars:
+        """Each StatVar ref a verb of the run behind the frame
+        `(spec_id, content_version)` wrote for its own result, with the
+        verb's tool name and the parts of its first and second side
+        (`SidePart`), as `alias` recorded them. Empty when there are none."""
         entry = self._entry(conversation, (spec_id, content_version))
-        return (entry.sum_of_sides if entry is not None else None) or {}
+        return (entry.own_stat_vars if entry is not None else None) or {}
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""
@@ -402,7 +469,9 @@ def _carried_stat_var_count(
     summed: Sequence[Sequence[ProvenanceInput]] = (),
 ) -> int:
     """The distinct StatVars a frame carries, a summed family's ref and a
-    `sum_of`'s ref each counted as the StatVars it stands for.
+    verb's own ref (a `sum_of`'s, a `quotient_of`'s, a `share_of`'s) each
+    counted as the StatVars it stands for. "Sum" below reads as any of the
+    three verbs.
 
     `declared` counts the frame's distinct refs, one per summed family and
     one per sum, and is the answer when no retrieval in `carried` is summed

@@ -221,20 +221,26 @@ async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_w
     assert reads == [f"/api/datasets/{SPEC_KENYA}/{CONTENT_VERSION}"]
 
 
-def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder() -> None:
+@pytest.mark.parametrize("engine", ["graph", "orchestrator"])
+def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder(
+    engine: str,
+) -> None:
     """`harness.server.create_app` must build ONE `ProvenanceStore` and hand
     it to both `McpExecutor` and `_RecordingSurface` -- two independent
     stores would leave a planned run's manifests unreadable to component
     assembly even with both writers wired."""
     from harness.server import create_app  # noqa: PLC0415 -- isolate this suite's own import cost
 
-    app = create_app(settings=Settings())
+    app = create_app(settings=Settings(studio_engine=engine))
 
     executor = app.state.studio.recorder._executor
     assert isinstance(executor, McpExecutor)
     surface_recorder = app.state.studio.surface_recorder
     assert isinstance(surface_recorder, _RecordingSurface)
     assert surface_recorder._provenance is executor._provenance
+    # On either engine every card is written by this executor, which replays a
+    # card's frame with the refresh's clients and budget.
+    assert executor._rolling_cards._replay == app.state.live_refresh.replay
 
 
 # ---------------------------------------------------------------------------
@@ -993,7 +999,7 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             "stat_var_count": _TERMINAL_FRAMES["join"]["stat_var_count"],
             "carried_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
             "summed_frame_refs": [],
-            "sum_of_sides": {},
+            "own_stat_vars": {},
         }
     ]
 

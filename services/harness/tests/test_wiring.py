@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from compiler.surface import FixtureSurface
+from harness.generative import GeminiDenominatorSplit
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.settings import Settings
 from harness.wiring import build_generative_nodes
@@ -38,6 +39,7 @@ def test_threads_the_given_surface_into_the_planner_seam_and_converse(monkeypatc
 
     assert captured["surface"] is surface
     assert nodes.converse._surface is surface
+    assert isinstance(nodes.denominator_split, GeminiDenominatorSplit)
 
 
 def test_defaults_the_surface_to_none_so_the_seam_builds_its_own(monkeypatch: Any) -> None:

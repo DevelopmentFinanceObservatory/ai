@@ -8,7 +8,13 @@ from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
-from common.materialisation import FrameRef, decode_trace, encode_trace
+from common.materialisation import (
+    ComposedStatVar,
+    FrameRef,
+    composed_stat_vars_of,
+    decode_trace,
+    encode_trace,
+)
 from pydantic import ValidationError
 
 SNAPSHOT_REF = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_" + "b" * 32}
@@ -189,3 +195,41 @@ def test_decode_trace_ignores_a_member_no_field_names() -> None:
 
     assert isinstance(decoded, Trace)
     assert decoded == trace
+
+
+_PER_HEAD = ComposedStatVar(
+    stat_var="dcid:ops_" + "e" * 32,
+    relation="quotient",
+    first=("dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",),
+    second=("dcid:Count_Person",),
+)
+
+
+def test_composed_stat_vars_round_trip_through_the_codec_and_the_common_accessor() -> None:
+    """`composed_stat_vars_of` is how presentation-mcp reads the field, so it
+    must find the list under the name `Trace` stores it by."""
+    trace = _minimal_trace().model_copy(update={"composed_stat_vars": (_PER_HEAD,)})
+
+    record = encode_trace(trace)
+    decoded = decode_trace(record)
+
+    assert (record["kind"], record["kind_version"]) == ("analysis_mcp_trace", 1)
+    assert record["trace"]["composed_stat_vars"] == [
+        {
+            "stat_var": "dcid:ops_" + "e" * 32,
+            "relation": "quotient",
+            "first": ["dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"],
+            "second": ["dcid:Count_Person"],
+        }
+    ]
+    assert composed_stat_vars_of(decoded) == (_PER_HEAD,)
+
+
+def test_decode_trace_reads_a_record_stored_without_composed_stat_vars_as_none() -> None:
+    record = encode_trace(_minimal_trace())
+    del record["trace"]["composed_stat_vars"]
+
+    decoded = decode_trace(record)
+
+    assert isinstance(decoded, Trace)
+    assert composed_stat_vars_of(decoded) == ()

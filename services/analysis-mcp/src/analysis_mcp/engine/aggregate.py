@@ -56,7 +56,8 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    ComposedUnit,
+    UnitCell,
 )
 
 from analysis_mcp.engine.columnar import (
@@ -105,6 +106,29 @@ class UnsupportedAggregationError(Exception):
     def __init__(self, aggregation: str) -> None:
         self.aggregation = aggregation
         super().__init__(f"unsupported aggregation {aggregation!r}; supported: {AGGREGATIONS!r}")
+
+
+class ComposedUnitSumError(Exception):
+    """A sum was asked over values in `unit`, a composed unit. Two figures
+    of the form "X per Y" added together are not a figure per Y, so no verb
+    writes their total under that unit. `aggregate` and `rank` raise it for
+    the `sum` aggregation and `sum_of` for either side, where `side` is
+    `left` or `right`; a mean, max or min over a composed unit computes.
+    `two_sided.sum_side` raises it for a `numerator` or `denominator` side
+    whose (key, period) cell holds more than one row.
+    """
+
+    def __init__(self, unit: ComposedUnit, *, side: str | None = None) -> None:
+        self.unit = unit
+        self.side = side
+        super().__init__(f"a sum over the composed unit {unit!r}")
+
+
+def refuse_sum_over_composed_unit(aggregation: str | None, unit: UnitCell | None) -> None:
+    """Raise `ComposedUnitSumError` when `aggregation` is `sum` and `unit`,
+    the one unit the reduced rows resolved to, is composed."""
+    if aggregation == "sum" and isinstance(unit, ComposedUnit):
+        raise ComposedUnitSumError(unit)
 
 
 class UnknownGroupByColumnError(Exception):
@@ -212,7 +236,7 @@ class AggregateResult:
     """
 
     frame: Frame
-    resolved_unit: str | UnitRequest | None
+    resolved_unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     realised_coverage_fraction: float
@@ -230,7 +254,7 @@ def run_aggregate(
     *,
     group_by: Sequence[str],
     aggregation: str,
-    pinned_unit: str | UnitRequest | None = None,
+    pinned_unit: UnitCell | None = None,
 ) -> AggregateResult:
     """Group `frame`'s rows by `group_by` and reduce each group's `value` with
     `aggregation`. See the module docstring for the coverage and unit/facet
@@ -274,6 +298,7 @@ def run_aggregate(
     table, resolved, exclusions = narrow_and_resolve(
         frame, pinned_unit=pinned_unit, exclude_unitless=True
     )
+    refuse_sum_over_composed_unit(aggregation, resolved.unit)
 
     # Every `group_by` column left after `_DISALLOWED_GROUP_BY_COLUMNS` is
     # stat_var, time_period, or a role, always a plain, non-null string by

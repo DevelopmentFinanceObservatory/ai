@@ -1,10 +1,13 @@
 """Tests for what `harness.graph` says about a summed family of StatVars.
 
 `_carried_retrievals` picks the retrievals whose StatVars a terminal frame
-carries, which the card counts its indicators from, and `_sum_of_sides`
-the retrievals under each side of a sum, which the card names its StatVar by. `_stat_var_totals`
+carries, which the card counts its indicators from, and `_own_stat_vars`
+the retrievals under each side of a sum or a quotient, which the card names
+its StatVar by. `_stat_var_totals`
 writes the sentence `narrate` states for each summed family an answer frame
-carries, and `_with_totals` appends it when a draft leaves it out.
+carries, `_dropped_key_sentences` the one for each step under an answer
+frame that left keys out, and `_with_totals` appends either when a draft
+leaves it out.
 
 The plans are compiled by `compile_plan` against the real tool schemas, over
 the spec blocks recorded from dev dfo-apis in
@@ -32,10 +35,12 @@ from data_mcp.server import mcp as data_mcp
 from executor.outcomes import Accepted, EvidenceRecord, StepRecord
 from harness.conversation import current_conversation_id
 from harness.graph import (
+    _answer_notes,
     _carried_retrievals,
+    _dropped_key_sentences,
     _link_evidence_to_terminal_frames,
+    _own_stat_vars,
     _stat_var_totals,
-    _sum_of_sides,
     _with_totals,
 )
 from harness.provenance import ProvenanceStore
@@ -46,6 +51,8 @@ from planner.operations import (
     FilterOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
+    RankOperation,
     RetrieveOperation,
     ShareOfOperation,
     Side,
@@ -64,6 +71,10 @@ from planner.plan import (
     JoinRequirement,
     Plan,
     PlanStatus,
+    QuotientRequirement,
+    RankAmong,
+    RankDirection,
+    RankRequirement,
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
@@ -505,14 +516,12 @@ KENYA_ROLE_KEYS = ("financingRecipient",)
 KENYA_DIMENSIONS = ({"label": "financingRecipient", "count": 1, "axis": "destination"},)
 
 
-@pytest.mark.parametrize("kind", ["share_of", "compare"])
 async def test_a_summed_family_that_only_supplies_values_gets_no_sentence(
-    schemas: dict[str, ToolSchema], kind: str
+    schemas: dict[str, ToolSchema],
 ) -> None:
-    """A `share_of` denominator and a `compare`'s right side are summed, but
-    the answer frame carries neither's StatVars, so narration states no
-    total for them."""
-    plan = _two_sided(schemas, kind, _single("a", "Grants"), _family("b", "Loans"))
+    """A `compare`'s right side is summed, but the answer frame carries none
+    of its StatVars, so narration states no total for it."""
+    plan = _two_sided(schemas, "compare", _single("a", "Grants"), _family("b", "Loans"))
     assert plan.workflow is not None
     assert plan.workflow.source_of("right_op").stat_var_reading is StatVarReading.SUM
 
@@ -526,10 +535,13 @@ async def test_a_summed_family_that_only_supplies_values_gets_no_sentence(
     assert _stat_var_totals(surface, outcome, plan=plan) == []
 
 
-async def test_two_summed_families_joined_get_one_sentence_each_naming_its_family(
-    schemas: dict[str, ToolSchema],
+@pytest.mark.parametrize("kind", ["join", "share_of"])
+async def test_two_summed_families_on_both_sides_get_one_sentence_each_naming_its_family(
+    schemas: dict[str, ToolSchema], kind: str
 ) -> None:
-    plan = _two_sided(schemas, "join", _family("a", "Grants"), _family("b", "Loans"))
+    """A join and a share carry both sides' StatVars, so each summed side's
+    family gets its own sentence."""
+    plan = _two_sided(schemas, kind, _family("a", "Grants"), _family("b", "Loans"))
 
     surface, outcome = _run(
         plan,
@@ -595,6 +607,159 @@ async def test_a_retrieval_that_summed_nothing_states_nothing(
     assert _stat_var_totals(None, outcome, plan=plan) == []
 
 
+_EAST_AFRICA = ("Kenya", "Uganda", "Tanzania")
+_AMONG = _WHAT.model_copy(
+    update={
+        "slot": "among",
+        "description": "Who the ranking compares.",
+        "options": ("every recipient the source reports", "the three named"),
+        "chosen": "every recipient the source reports",
+        "rationale": "The question asks who received the most.",
+        "fixes": DecisionFixes(among=RankAmong.POPULATION),
+    }
+)
+
+
+def _east_africa(spec_char: str, stat_var: str, role: str, unit_ref: str | None) -> SelectedSource:
+    """A source binding one StatVar for three countries under `role`."""
+    return _single(spec_char, stat_var).model_copy(
+        update={
+            "entities": tuple(
+                ResolvedEntity(role=role, ref=f"country/{name[:3].upper()}", label=name)
+                for name in _EAST_AFRICA
+            ),
+            "unit_ref": unit_ref,
+            "unit_label": "US dollars" if unit_ref else None,
+        }
+    )
+
+
+def _aid_per_head(schemas: Mapping[str, ToolSchema], *, ranked: bool = False) -> Plan:
+    """Aid to three recipients divided by each one's population, the
+    quotient step `per_head` keyed by `recipient` against the population's
+    `country`, and read by the rank `ranked_op` when `ranked`."""
+    period = Period(start=2015, end=2024)
+    aid = _dataset(
+        "aid",
+        [Entity(name=name, role="recipient") for name in _EAST_AFRICA],
+        period,
+        measure="aid received",
+    )
+    population = _dataset(
+        "population",
+        [Entity(name=name, role="country") for name in _EAST_AFRICA],
+        period,
+        measure="population",
+    )
+    keys: dict[str, Any] = {"axis": "recipient", "denominator_axis": "country"}
+    requirements: list[EvidenceRequirement] = [
+        aid,
+        population,
+        QuotientRequirement(
+            id="per_head",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="aid"),
+            denominator=RequirementSide(input_id="population"),
+            **keys,
+        ),
+    ]
+    operations: list[Operation] = [
+        RetrieveOperation(id="aid_op", requirement_id="aid", spec_id="spec_" + "a" * 32),
+        RetrieveOperation(
+            id="population_op", requirement_id="population", spec_id="spec_" + "b" * 32
+        ),
+        QuotientOfOperation(
+            id="per_head",
+            requirement_id="per_head",
+            numerator=Side(input="aid_op"),
+            denominator=Side(input="population_op"),
+            **keys,
+        ),
+    ]
+    if ranked:
+        order: dict[str, Any] = {
+            "direction": RankDirection.HIGHEST_FIRST,
+            "among": RankAmong.POPULATION,
+            "reduction": Reduction.MEAN,
+        }
+        requirements.append(
+            RankRequirement(
+                id="ranked", decision_ids=["measure", "among"], input_id="per_head", **order
+            )
+        )
+        operations.append(
+            RankOperation(id="ranked_op", requirement_id="ranked", input="per_head", **order)
+        )
+    return _compiled(
+        schemas,
+        requirements,
+        operations,
+        terminal=["ranked_op" if ranked else "per_head"],
+        decisions=(_WHAT, _AMONG) if ranked else (_WHAT,),
+        discovered={
+            "aid": _east_africa("a", "Aid", "recipient", "usd"),
+            "population": _east_africa("b", "Population", "country", None),
+        },
+    )
+
+
+def _with_dropped_keys(outcome: Accepted, **dropped: int) -> Accepted:
+    """`outcome` with each named step's record declaring that many dropped keys."""
+    return outcome.model_copy(
+        update={
+            "steps": tuple(
+                record.model_copy(update={"dropped_key_count": dropped.get(record.step_id, 0)})
+                for record in outcome.steps
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("step_id", "count", "stated"),
+    [
+        pytest.param("per_head", 0, (), id="none"),
+        pytest.param("per_head", 1, ("1 recipient entry", "population", "was"), id="one"),
+        pytest.param(
+            "per_head", 1204, ("1,204 recipient entries", "population", "were"), id="several"
+        ),
+        # A step the plan gives no quotient's words for counts plain entries.
+        pytest.param("aid_op", 2, ("2 entries", "were"), id="no-nouns"),
+    ],
+)
+async def test_a_step_that_left_keys_out_states_how_many_in_the_plans_words(
+    schemas: dict[str, ToolSchema], step_id: str, count: int, stated: tuple[str, ...]
+) -> None:
+    plan = _aid_per_head(schemas)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+
+    sentences = _dropped_key_sentences(_with_dropped_keys(outcome, **{step_id: count}), plan=plan)
+
+    assert len(sentences) == bool(count)
+    for sentence in sentences:
+        assert all(words in sentence for words in stated), sentence
+
+
+async def test_a_rank_over_a_quotient_that_left_keys_out_still_says_so(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """The rank's frame is the answer and the quotient under it lost two of
+    its keys: the sentence travels with the family totals, reaches a draft
+    that leaves it out, and is confined to the terminals it sits under."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={"aid_op": 3}, role_keys={})
+    outcome = _with_dropped_keys(outcome, per_head=2)
+
+    notes = _answer_notes(surface, outcome, plan=plan)
+
+    assert len(notes) == 2
+    assert notes[:-1] == _stat_var_totals(surface, outcome, plan=plan)
+    assert "2 recipient entries" in notes[-1]
+    assert notes[-1] in _with_totals("Kenya received the most aid per head.", notes)
+    assert _answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
+    assert _answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+
+
 def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = None) -> WorkflowStep:
     return WorkflowStep(
         id=step_id,
@@ -641,15 +806,62 @@ def test_a_join_or_sum_carries_both_sides_and_a_compare_only_its_left() -> None:
     assert carried("right") == {"right"}
 
 
-def test_a_sums_ref_maps_to_the_retrievals_under_each_side() -> None:
-    """A sum read by an aggregate is named wherever its ref is drawn; a sum of
-    two slices of one frame lists that retrieval on both sides."""
+def test_a_quotient_and_a_share_carry_both_sides() -> None:
+    """A quotient and a share name their denominator's frame under
+    `denominator_frame_ref` and carry its StatVars."""
+    two_frames = {"frame_ref": "left", "denominator_frame_ref": "right"}
+    steps = {
+        step.id: step
+        for step in (
+            _step("left", "get_data"),
+            _step("right", "get_data"),
+            _step("divided", "quotient_of", frame_bindings=two_frames),
+            _step("one_frame", "quotient_of", frame_bindings={"frame_ref": "left"}),
+            _step("yearly", "aggregate", frame_bindings={"frame_ref": "divided"}),
+            _step("shared", "share_of", frame_bindings=two_frames),
+        )
+    }
+
+    def carried(step_id: str) -> frozenset[str]:
+        return _carried_retrievals(
+            step_id, steps_by_id=steps, retrieval_step_ids=frozenset({"left", "right"})
+        )
+
+    assert carried("divided") == {"left", "right"}
+    assert carried("yearly") == {"left", "right"}
+    assert carried("one_frame") == {"left"}
+    assert carried("shared") == {"left", "right"}
+
+
+@pytest.mark.parametrize(
+    ("tool", "second_frame"),
+    [
+        ("sum_of", "right_frame_ref"),
+        ("quotient_of", "denominator_frame_ref"),
+        ("share_of", "denominator_frame_ref"),
+    ],
+)
+def test_a_verbs_own_ref_maps_to_its_tool_and_the_retrievals_under_each_side(
+    tool: str, second_frame: str
+) -> None:
+    """A sum or a quotient read by an aggregate is named wherever its ref is
+    drawn; one over two slices of one frame lists that retrieval on both
+    sides. A side resting on an earlier verb's frame lists that verb's own
+    ref, which the card names by that verb's sides. A side resting on a
+    `compare` names only the compare's left frame."""
     workflow_steps = (
         _step("left", "get_data"),
         _step("right", "get_data"),
-        _step("summed", "sum_of", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}),
+        _step("summed", tool, frame_bindings={"frame_ref": "left", second_frame: "right"}),
         _step("yearly", "aggregate", frame_bindings={"frame_ref": "summed"}),
-        _step("one_frame", "sum_of", frame_bindings={"frame_ref": "left"}),
+        _step("one_frame", tool, frame_bindings={"frame_ref": "left"}),
+        _step("nested", tool, frame_bindings={"frame_ref": "yearly", second_frame: "right"}),
+        _step(
+            "compared", "compare", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}
+        ),
+        _step(
+            "over_compare", tool, frame_bindings={"frame_ref": "compared", second_frame: "right"}
+        ),
     )
     frames = {
         step.id: FrameRef(spec_id=f"spec_{index:032d}", content_version=f"cv_{index:032d}")
@@ -679,18 +891,20 @@ def test_a_sums_ref_maps_to_the_retrievals_under_each_side() -> None:
         results={"yearly": frames["yearly"], "one_frame": frames["one_frame"]},
     )
 
-    sides = _sum_of_sides(
+    sides = _own_stat_vars(
         outcome,
         steps_by_id={step.id: step for step in workflow_steps},
         retrieval_step_ids=frozenset({"left", "right"}),
         step_order={step.id: index for index, step in enumerate(workflow_steps)},
-        memo={},
     )
 
     left, right = (frames[step_id].model_dump() for step_id in ("left", "right"))
+    summed_ref = f"dcid:{frames['summed'].spec_id}"
     assert sides == {
-        f"dcid:{frames['summed'].spec_id}": ([left], [right]),
-        f"dcid:{frames['one_frame'].spec_id}": ([left], [left]),
+        summed_ref: (tool, [left], [right]),
+        f"dcid:{frames['one_frame'].spec_id}": (tool, [left], [left]),
+        f"dcid:{frames['nested'].spec_id}": (tool, [summed_ref], [right]),
+        f"dcid:{frames['over_compare'].spec_id}": (tool, [left], [right]),
     }
 
 
@@ -710,6 +924,13 @@ _ODA_FAMILY = tuple(f"ODA_{index}" for index in range(12))
         # One StatVar retrieved for two places and summed.
         ((("ODA",), None), (("ODA",), None), "summed", 1),
         ((("ODA",), None), (("ODA",), None), "yearly", 1),
+        # A quotient of the family over a singleton, a verb over it, and a
+        # quotient of two slices of the family's one frame.
+        ((_ODA_FAMILY, 12), (("Population",), None), "divided", 13),
+        ((_ODA_FAMILY, 12), (("Population",), None), "divided_yearly", 13),
+        ((_ODA_FAMILY, 12), (("Population",), None), "one_frame_divided", 12),
+        # A share of the family in a singleton.
+        ((_ODA_FAMILY, 12), (("GDP",), None), "shared", 13),
     ],
 )
 def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
@@ -718,8 +939,9 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
     terminal: str,
     counted: int,
 ) -> None:
-    """A sum declares one StatVar of its own; the card counts the distinct
-    StatVars under its two sides, read from each retrieval's trace."""
+    """A sum or a quotient declares one StatVar of its own; the card counts
+    the distinct StatVars under its two sides, read from each retrieval's
+    trace."""
     workflow_steps = (
         _step("left", "get_data"),
         _step("right", "get_data"),
@@ -731,6 +953,18 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
             frame_bindings={"frame_ref": "summed", "right_frame_ref": "right"},
         ),
         _step("one_frame", "sum_of", frame_bindings={"frame_ref": "left"}),
+        _step(
+            "divided",
+            "quotient_of",
+            frame_bindings={"frame_ref": "left", "denominator_frame_ref": "right"},
+        ),
+        _step("divided_yearly", "aggregate", frame_bindings={"frame_ref": "divided"}),
+        _step("one_frame_divided", "quotient_of", frame_bindings={"frame_ref": "left"}),
+        _step(
+            "shared",
+            "share_of",
+            frame_bindings={"frame_ref": "left", "denominator_frame_ref": "right"},
+        ),
     )
     sources = {
         step_id: SelectedSource(

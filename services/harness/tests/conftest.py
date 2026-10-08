@@ -62,6 +62,11 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.conversation import (
+    NO_CONVERSATION,
+    current_conversation_id,
+    current_conversation_key,
+)
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from planner.plan import (
     AggregateRequirement,
@@ -103,6 +108,19 @@ def _reset_mcp_auth_gate() -> Any:
     """
     yield
     mcp_auth.reset()
+
+
+@pytest.fixture(autouse=True)
+def _reset_conversation_identity() -> Any:
+    """Leave no conversation set after a test.
+
+    A test function that is not a coroutine runs in the session's own context,
+    so a `current_conversation_id.set(...)` it makes would name that
+    conversation on every MCP call of the tests after it.
+    """
+    yield
+    current_conversation_id.set(NO_CONVERSATION)
+    current_conversation_key.set(None)
 
 
 @pytest.fixture

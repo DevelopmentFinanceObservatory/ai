@@ -46,11 +46,11 @@
     },
     {
       "id": "growth_capped_25_entities",
-      "digest_chars": 1416
+      "digest_chars": 1451
     },
     {
       "id": "growth_single_entity",
-      "digest_chars": 411
+      "digest_chars": 446
     },
     {
       "id": "join_capped_25_keys",
@@ -69,6 +69,18 @@
       "digest_chars": 468
     },
     {
+      "id": "quotient_of_capped_25_keys",
+      "digest_chars": 1765
+    },
+    {
+      "id": "quotient_of_keyed_dropped_key_and_zero_denominator",
+      "digest_chars": 1132
+    },
+    {
+      "id": "quotient_of_unkeyed_periods_left_out",
+      "digest_chars": 917
+    },
+    {
       "id": "rank_capped_25_entities",
       "digest_chars": 1494
     },
@@ -82,11 +94,11 @@
     },
     {
       "id": "share_of_capped_25_periods",
-      "digest_chars": 1170
+      "digest_chars": 1376
     },
     {
       "id": "share_of_single_period",
-      "digest_chars": 562
+      "digest_chars": 722
     },
     {
       "id": "single_group",

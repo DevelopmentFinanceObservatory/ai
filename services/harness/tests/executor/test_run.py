@@ -1261,6 +1261,46 @@ async def test_a_non_terminal_zero_row_step_does_not_refuse_on_its_own(
     assert outcome.steps[2].row_count == RESULT_FRAME["rows"]
 
 
+@pytest.mark.parametrize(
+    ("declared", "recorded"),
+    [
+        pytest.param({"dropped_key_count": 2}, 2, id="two-keys"),
+        pytest.param({}, 0, id="no-member"),
+        pytest.param({"dropped_key_count": "2"}, 0, id="not-a-number"),
+        pytest.param({"dropped_key_count": True}, 0, id="a-boolean"),
+        pytest.param({"dropped_key_count": -1}, 0, id="negative"),
+    ],
+)
+async def test_a_step_records_the_keys_its_result_declares_it_left_out(
+    declared: dict[str, Any],
+    recorded: int,
+    two_input_plan: PlanFactory,
+    manifest_for: Callable[..., dict[str, Any]],
+    source: Callable[..., SelectedSource],
+    gdp_source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+) -> None:
+    # `get_data`'s manifest never carries the member, so both retrievals
+    # record 0 whatever the quotient declares.
+    plan = two_input_plan(kind="quotient_of")
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={
+            "get_data": [ok(manifest_for(source())), ok(manifest_for(gdp_source()))],
+            "quotient_of": [ok(RESULT_FRAME | declared)],
+        },
+    )
+
+    outcome = await _run(plan, surface=surface, sleep=_Sleeps())
+
+    assert isinstance(outcome, Accepted), outcome
+    assert {step.step_id: step.dropped_key_count for step in outcome.steps} == {
+        "debt": 0,
+        "gdp": 0,
+        "combined": recorded,
+    }
+
+
 async def test_a_declared_shape_differing_from_the_prediction_is_refused(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:

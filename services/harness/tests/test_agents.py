@@ -1,9 +1,9 @@
-"""Tests for `harness.agents`: the planner built with its `translate` tool.
+"""Tests for `harness.agents`: the planner built with translation attached.
 
 Construction, plus one run through a real `Runner` for the rules ADK only
-enforces at run time. Whether the planner's model actually calls `translate`
-at the right moment is a semantic judgement, which is what `harness-pair-v1`
-scores.
+enforces at run time. Whether the planner's model acts on the `translation`
+verdict `propose_plan` returns is a semantic judgement, which is what
+`harness-pair-v1` scores.
 """
 
 from __future__ import annotations
@@ -31,13 +31,15 @@ def _planner() -> LlmAgent:
     return create_planner_with_translator(settings=Settings(), surface=FixtureSurface(schemas=[]))
 
 
-def test_creates_a_planner_carrying_translate_as_its_own_tool() -> None:
-    """Translation is a function tool on the planner, not a second agent."""
+def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of_its_own() -> None:
+    """Translation runs inside `propose_plan`, so the model is declared no `translate` tool."""
     agent = _planner()
 
     assert agent.name == "dfo_planner"
     assert agent.sub_agents == []
-    assert "translate" in {tool.name for tool in agent.tools}  # type: ignore[union-attr]
+    names = {tool.name for tool in agent.tools}  # type: ignore[union-attr]
+    assert "propose_plan" in names
+    assert "translate" not in names
 
 
 async def test_the_pair_runs_as_a_runner_root(
@@ -63,7 +65,7 @@ async def test_the_pair_runs_as_a_runner_root(
     assert events
 
 
-async def test_the_planner_reads_skills_through_the_surface_translate_gets() -> None:
+async def test_the_planner_reads_skills_through_the_surface_translation_gets() -> None:
     surface = FixtureSurface(
         schemas=[],
         responses={"get_skill": ToolCallResult(is_error=False, text="# DFO FAQ\n")},

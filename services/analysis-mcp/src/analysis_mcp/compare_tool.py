@@ -174,6 +174,7 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             axis=exc.axis,
             left_ref=exc.left_ref,
             right_ref=exc.right_ref,
+            stat_vars=exc.stat_vars,
         )
     elif isinstance(exc, CompareNonFiniteResultError):
         refusal = ToolRefusal.non_finite_result(
@@ -261,7 +262,8 @@ async def compare(
             default=None,
             description=(
                 "Pins the left side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -271,7 +273,8 @@ async def compare(
             default=None,
             description=(
                 "Pins the right side's unit: one of a unit_heterogeneous refusal's fix.units values, a "
-                "unit ref or a converted unit's {currency, prices, base_year} object."
+                "unit ref, a converted unit's {currency, prices, base_year} object, or a composed "
+                "unit's {numerator, denominator} object."
             ),
         ),
     ] = None,
@@ -422,6 +425,7 @@ async def compare(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[left_trace, right_trace],
         digest=lambda: render_compare_digest(
             result=result,
             op_spec_hash=op_spec_hash,

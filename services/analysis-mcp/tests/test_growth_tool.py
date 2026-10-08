@@ -28,6 +28,7 @@ from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
 from fastmcp import Client
+from rolling_support import anchored, second_version
 
 
 @pytest.fixture
@@ -409,7 +410,7 @@ async def test_unit_disambiguation_retry_succeeds(seeded) -> None:
         unit="dcid:USDollar",
     )
     assert retried.is_error is False
-    assert "unit: dcid:USDollar" in retried.content[0].text
+    assert "unit: none (a relative change; input in dcid:USDollar)" in retried.content[0].text
 
 
 # Success: one real analyst question end to end, through the registered tool ----
@@ -523,3 +524,156 @@ async def test_execution_identity_perturbation_moves_the_content_version(seeded)
         execution_identity=bumped_identity,
     )
     assert moved_content_version != stored_trace.content_version
+
+
+# Rolling overlay ----------------------------------------------------------------
+
+_LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
+_ROOT = "spec_" + "c" * 32
+_ANCHOR_KEY = "rak_" + "e" * 32
+
+
+async def test_a_rolling_growth_computes_its_fixed_twins_rows_under_another_pair(seeded) -> None:
+    store, handles = seeded
+    arguments = {
+        "frame_ref": handles.time_series_with_gap,
+        "window_start": "2020",
+        "window_end": "2024",
+        "entity_by": ("reporter",),
+    }
+    anchor = await anchored(handles.time_series_with_gap, bindings={"reporter": ["dcid:USA"]})
+    assert anchor.period == "2024"
+    rolling = {
+        "window_start": {**_LATEST, "offset": -4},
+        "window_end": _LATEST,
+        "population": anchor.populations,
+    }
+
+    fixed = await growth(**arguments)
+    rolled = await growth(**arguments, rolling=rolling, anchor_key=anchor.anchor_key)
+
+    fixed_frame, fixed_trace = await store.get(FrameRef(**_pair(fixed)))
+    rolled_frame, rolled_trace = await store.get(FrameRef(**_pair(rolled)))
+    assert rolled_frame.table.equals(fixed_frame.table)
+    assert rolled_trace.frame_content_version == fixed_trace.frame_content_version
+    assert rolled_trace.execution_identity == fixed_trace.execution_identity
+    assert _pair(rolled)["spec_id"] != _pair(fixed)["spec_id"]
+    assert _pair(rolled)["content_version"] != _pair(fixed)["content_version"]
+    # The trace states the periods computed and, in the op-spec, how they roll.
+    assert rolled_trace.applied_policy.detail["window_start"] == "2020"
+    assert rolled_trace.applied_policy.detail["window_end"] == "2024"
+    recorded = json.loads(rolled_trace.execution_record.content)["parameters"]
+    assert (recorded["window_start"], recorded["window_end"]) == ("2020", "2024")
+    assert recorded["rolling"] == rolling
+
+
+async def test_a_rolling_growth_whose_years_disagree_with_its_offsets_refuses(seeded) -> None:
+    _store, handles = seeded
+    result = await growth(
+        frame_ref=handles.time_series_with_gap,
+        window_start="2017",
+        window_end="2020",
+        rolling={
+            "window_start": {**_LATEST, "offset": -2},
+            "window_end": _LATEST,
+            "population": [{"spec_id": _ROOT}],
+        },
+        anchor_key=_ANCHOR_KEY,
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+async def test_the_registered_growth_tool_takes_a_rolling_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryMaterialisationStore()
+    handles = await seed_fixture_store(store)
+
+    async def _stub_build_store(_settings: object) -> InMemoryMaterialisationStore:
+        return store
+
+    monkeypatch.setattr(server_module, "_build_store", _stub_build_store)
+    root = handles.time_series_with_gap
+    arguments = {
+        "frame_ref": root,
+        "window_start": "2017",
+        "window_end": "2024",
+        "entity_by": ["reporter"],
+    }
+    populations = [{"spec_id": root["spec_id"]}]
+
+    async with Client(server_module.mcp) as client:
+        fixed = await client.call_tool("growth", arguments)
+        anchor = await client.call_tool(
+            "resolve_anchor", {"populations": populations, "roots": [root]}
+        )
+        rolled = await client.call_tool(
+            "growth",
+            {
+                **arguments,
+                "rolling": {"window_end": _LATEST, "population": populations},
+                "anchor_key": anchor.structured_content["anchor_key"],
+            },
+        )
+
+    assert anchor.structured_content["period"] == "2024"
+    assert anchor.structured_content["left_out"] == []
+    assert rolled.is_error is False
+    assert rolled.structured_content["rows"] == fixed.structured_content["rows"]
+    assert rolled.structured_content["spec_id"] != fixed.structured_content["spec_id"]
+
+
+async def test_the_anchor_key_is_no_part_of_a_rolling_growths_identity(seeded) -> None:
+    store, handles = seeded
+    root = handles.time_series_with_gap
+    anchor = await anchored(root)
+    wider = await anchored(root, await second_version(store, root))
+    arguments = {
+        "frame_ref": root,
+        "window_start": "2017",
+        "window_end": "2024",
+        "rolling": {"window_end": _LATEST, "population": anchor.populations},
+    }
+
+    first = await growth(**arguments, anchor_key=anchor.anchor_key)
+    second = await growth(**arguments, anchor_key=wider.anchor_key)
+
+    assert wider.anchor_key != anchor.anchor_key
+    assert _pair(first) == _pair(second)
+    _frame, trace = await store.get(FrameRef(**_pair(first)))
+    assert "anchor_key" not in json.loads(trace.execution_record.content)["parameters"]
+
+
+@pytest.mark.parametrize(
+    ("rolling", "anchor_key"),
+    [
+        pytest.param(
+            {"window_end": _LATEST, "population": [{"spec_id": _ROOT}]}, None, id="rolling-no-key"
+        ),
+        pytest.param(None, _ANCHOR_KEY, id="key-on-a-fixed-call"),
+        pytest.param(
+            {"window_end": _LATEST, "population": [{"spec_id": _ROOT}]},
+            "rak_short",
+            id="malformed-key",
+        ),
+    ],
+)
+async def test_an_anchor_key_out_of_place_refuses_op_spec_invalid(
+    seeded, rolling: dict[str, object] | None, anchor_key: str | None
+) -> None:
+    _store, handles = seeded
+    result = await growth(
+        frame_ref=handles.time_series_with_gap,
+        window_start="2017",
+        window_end="2020",
+        rolling=rolling,
+        anchor_key=anchor_key,
+    )
+    assert result.is_error is True
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
+def _pair(result) -> dict[str, str]:
+    content = result.structured_content
+    return {"spec_id": content["spec_id"], "content_version": content["content_version"]}

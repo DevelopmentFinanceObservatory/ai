@@ -71,6 +71,20 @@ _PUBLISH_DECODED_BODY_CEILING_BYTES = 129_000_000
 # time for a small gain on JSON this repetitive.
 _PUBLISH_GZIP_LEVEL = 1
 
+# The `constraint_id` values of the 409 `publish_conflict` dfo-apis answers when a
+# publish carries a recipe that disagrees with the recipes it holds: the pair has a
+# recipe with another normal form or another replay key, or another frame holds
+# this replay key. dfo-apis records the frame before it compares recipes, so the
+# pair is published either way and keeps the recipe dfo-apis already holds for it,
+# if any (`_publish_pair`).
+_RECIPE_CONFLICT_CONSTRAINTS = frozenset(
+    {
+        "recipe_requires_matching_normal_form_hash",
+        "recipe_requires_matching_replay_key",
+        "replay_key_requires_one_frame",
+    }
+)
+
 # Sent only on the publish call (`_ensure_published_pair`'s own POST to
 # `_PUBLISH_ROUTE`) -- the one dfo-apis route this client calls that checks
 # it (`datasets_api.doors.publish`, mirroring the pin door's identical
@@ -219,6 +233,28 @@ async def _gzipped_publish_body(published: PublishBody) -> bytes | Refusal:
             what="compressed",
         )
     return body
+
+
+# What a publish answers when this process was given no principal to publish as.
+_PUBLISH_NOT_CONFIGURED = Refusal(
+    error="publish_not_configured",
+    retry=RetryMode.DO_NOT_RETRY,
+    detail=(
+        "This deployment has no datasets_first_party_principal "
+        "configured, so it cannot publish this frame to the platform."
+    ),
+)
+
+
+def _version_created(response: httpx2.Response) -> bool:
+    """Whether the publish door's answer says this call recorded the version:
+    its `published.created`. An answer that states neither way reads as recorded."""
+    try:
+        body = response.json()
+    except ValueError:
+        return True
+    published = body.get("published") if isinstance(body, Mapping) else None
+    return not isinstance(published, Mapping) or published.get("created") is not False
 
 
 def _row_budget_refusal(exc: RowBudgetExhausted) -> Refusal:
@@ -696,14 +732,7 @@ class PlatformAssembler:
             # own `publish_not_permitted` 403 -- accurate, but generic ("the
             # publish permission is not granted to this caller") next to
             # naming the actual missing setting here.
-            return Refusal(
-                error="publish_not_configured",
-                retry=RetryMode.DO_NOT_RETRY,
-                detail=(
-                    "This deployment has no datasets_first_party_principal "
-                    "configured, so it cannot publish this frame to the platform."
-                ),
-            )
+            return _PUBLISH_NOT_CONFIGURED
 
         # Single-flighted per pair: concurrent first callers for the same
         # pair await the same lock rather than each building a body and
@@ -717,16 +746,69 @@ class PlatformAssembler:
                 # Someone else already won this pair's publish while this
                 # call waited on the lock above.
                 return None
-            return await self._publish_pair(spec_id=spec_id, content_version=content_version)
+            published = await self._publish_pair(spec_id=spec_id, content_version=content_version)
+            return published if isinstance(published, Refusal) else None
 
-    async def _publish_pair(self, *, spec_id: str, content_version: str) -> Refusal | None:
-        """Build and post the publish-door body for `(spec_id, content_version)`,
-        called under `_ensure_published_pair`'s own per-pair lock once it has
-        confirmed a principal is configured and no one else already
-        published this exact pair. Split out from `_ensure_published_pair`
-        only to keep that method's own branch count small; see its docstring
-        for everything this one implements.
+    async def publish_frame(
+        self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any]
+    ) -> bool | Refusal:
+        """Publish the derived frame `{spec_id, content_version}` to dfo-apis
+        with `recipe`, for a caller that writes no component.
+
+        This is the publish `_ensure_published_pair` runs ahead of a component
+        write, with the caller's recipe in the body in place of one built here.
+        It posts whether or not this process has published the pair before,
+        since an earlier publish may have carried no recipe, and dfo-apis
+        answers a repeat with the version it holds. It takes the pair's publish
+        lock, and a success is remembered as `_ensure_published_pair`'s is.
+
+        Returns:
+            `True` when dfo-apis recorded the version with this call, and `False`
+            when it already held it, including when it kept another recipe for
+            the pair (`_RECIPE_CONFLICT_CONSTRAINTS`). A `Refusal` when nothing
+            was published: no principal is configured, the store holds no frame
+            under the pair, the body cannot be built or is over a ceiling, or
+            dfo-apis refused it.
         """
+        if self._publish_principal is None:
+            return _PUBLISH_NOT_CONFIGURED
+        lock = self._publish_locks.setdefault((spec_id, content_version), asyncio.Lock())
+        async with lock:
+            published = await self._publish_pair(
+                spec_id=spec_id, content_version=content_version, recipe=recipe
+            )
+        if published is None:
+            return Refusal(
+                error="request_invalid",
+                retry=RetryMode.DO_NOT_RETRY,
+                detail=(
+                    "Publishing this frame to the platform failed: no frame is held "
+                    f"for {spec_id!r}/{content_version!r}."
+                ),
+            )
+        return published
+
+    async def _publish_pair(
+        self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any] | None = None
+    ) -> bool | Refusal | None:
+        """Build and post the publish-door body for `(spec_id, content_version)`,
+        called under the pair's publish lock once a principal is known to be
+        configured. `_ensure_published_pair` and `publish_frame` are its callers;
+        see their docstrings for what each makes of the answer.
+
+        The body carries `recipe`, or without one the frame's recipe when one
+        can be built (`frame_publish.publish_body_for`). A 409 that names a
+        recipe conflict (`_RECIPE_CONFLICT_CONSTRAINTS`) means the frame is
+        published and dfo-apis kept the recipe it held, so it is logged at
+        warning with the pair and the publish stands.
+
+        Returns:
+            Whether dfo-apis recorded the version with this call (`published
+            .created` of its answer, and `False` on a recipe conflict), `None`
+            when the store holds nothing to publish under the pair, or the
+            `Refusal` of a publish that failed.
+        """
+        created = False
         async with contextlib.AsyncExitStack() as stack:
             try:
                 published = await stack.enter_async_context(
@@ -734,16 +816,17 @@ class PlatformAssembler:
                         spec_id=spec_id,
                         content_version=content_version,
                         max_frame_rows=self._max_frame_rows,
+                        recipe=recipe,
                     )
                 )
             except PublishBodyNotBuildable as exc:
                 if not exc.refuse_locally:
                     # Nothing (yet) to publish from this process's own view of
-                    # the store -- not a publish failure. Proceed to the
-                    # caller's own platform call unmodified and let the
-                    # platform, the one party that knows whether the ref has
-                    # ever resolved anywhere, answer -- honestly `ops_unsupported`
-                    # if it never has.
+                    # the store -- not a publish failure. `_ensure_published_pair`
+                    # proceeds to its caller's own platform call unmodified and
+                    # lets the platform, the one party that knows whether the ref
+                    # has ever resolved anywhere, answer -- honestly
+                    # `ops_unsupported` if it never has.
                     return None
                 return Refusal(
                     error="request_invalid",
@@ -760,7 +843,7 @@ class PlatformAssembler:
             # Inside `publish_body_for`'s block, so the frame's row claim stays held
             # while the encoded body is in memory for the request.
             try:
-                await self.request(
+                response = await self.request(
                     "POST",
                     _PUBLISH_ROUTE,
                     route=_PUBLISH_ROUTE,
@@ -768,20 +851,31 @@ class PlatformAssembler:
                     principal=self._publish_principal,
                     headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
                 )
+                created = _version_created(response)
             except PlatformError as exc:
-                # Honest about which call failed: `_refusal` alone would read
-                # as a refusal of the caller's own request (the create/revise/
-                # describe call), when what actually failed is the publish this
-                # method ran ahead of it. Same code and retry mode either way --
-                # dfo-apis' publish door and its ordinary presentation surface
-                # already share one code vocabulary (`request_invalid`,
-                # `service_unavailable`, ...), just the detail text is reworded.
-                base = self._refusal(exc)
-                return replace(
-                    base, detail=f"Publishing this frame to the platform failed: {base.detail}"
+                if (
+                    exc.code != "publish_conflict"
+                    or exc.constraint_id not in _RECIPE_CONFLICT_CONSTRAINTS
+                ):
+                    # Honest about which call failed: `_refusal` alone would read
+                    # as a refusal of the caller's own request (the create/revise/
+                    # describe call), when what actually failed is the publish this
+                    # method ran ahead of it. Same code and retry mode either way --
+                    # dfo-apis' publish door and its ordinary presentation surface
+                    # already share one code vocabulary (`request_invalid`,
+                    # `service_unavailable`, ...), just the detail text is reworded.
+                    base = self._refusal(exc)
+                    return replace(
+                        base, detail=f"Publishing this frame to the platform failed: {base.detail}"
+                    )
+                logger.warning(
+                    "published %s/%s, and dfo-apis kept another recipe: %s",
+                    spec_id,
+                    content_version,
+                    exc.constraint_id,
                 )
         self._published.add((spec_id, content_version))
-        return None
+        return created
 
     async def request(
         self,

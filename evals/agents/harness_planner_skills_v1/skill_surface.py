@@ -134,7 +134,7 @@ SKILLS: dict[str, FixtureSkill] = {
             files={},
         ),
         FixtureSkill(
-            id="policy-markers",
+            id="oda-policy-markers",
             description=(
                 "Covers OECD DAC policy markers used to classify bilateral ODA in the "
                 "Creditor Reporting System (CRS). Use when the user asks what a policy marker "

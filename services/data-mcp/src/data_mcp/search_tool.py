@@ -2,18 +2,23 @@
 
 A conjunction arrives already split into `parts`, one per variable asked
 for. The door's field names are close to the tool's without matching them
-(`variable`/`time`/`unit`/`source`/`role` versus the wire's `variable_text`/
-`time_text`/`unit_text`/`source_text`/`role_text`), so `to_wire_request`
-translates. A success result puts the digest in `content`, a small
-model-facing answer in `structuredContent`, and the upstream envelope in
-`_meta` (see `data_mcp.search_result`). Rendering the digest and the answer
+(`variable`/`time`/`unit`/`source`/`role`/`dataset` versus the wire's
+`variable_text`/`time_text`/`unit_text`/`source_text`/`role_text`/`provenance`),
+so `to_wire_request` translates. The datasets a part can name are read from the
+door's served request schema at startup (`fetch_declared_datasets`) and listed
+in the tool description (`describe_search`). A success result puts the digest in
+`content`, a small model-facing answer in `structuredContent`, and the upstream
+envelope in `_meta` (see `data_mcp.search_result`). Rendering the digest and the answer
 lives in `data_mcp.digest`; the shared upstream client lives in
 `data_mcp.client_holder`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastmcp.tools import ToolResult
@@ -28,8 +33,10 @@ from data_mcp.errors import UpstreamError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
+logger = logging.getLogger(__name__)
+
 # The deployment's published parsed-door limits.
-_MAX_PARTS = 6
+MAX_PARTS = 6
 _MAX_PART_ENTITIES = 16
 _MAX_VARIABLE_CHARS = 200
 _MAX_ENTITY_TEXT_CHARS = 128
@@ -37,6 +44,7 @@ _MAX_ROLE_CHARS = 64
 _MAX_TIME_CHARS = 100
 _MAX_UNIT_CHARS = 100
 MAX_SOURCE_CHARS = 200
+_MAX_DATASET_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
 
 # The wall-clock budget for one call to the Search API's resolve route, retries
@@ -56,6 +64,11 @@ TIME_FORMS = (
     "latest",
 )
 
+_SCHEMA_ROUTE = "/api/search/schema"
+# Bounds the whole startup read, so an unreachable dfo-apis delays startup by
+# at most this long.
+_SCHEMA_FETCH_TIMEOUT_S = 5.0
+
 
 class SearchEntity(BaseModel):
     """One entity mentioned in a part, with an optional relational phrase."""
@@ -73,10 +86,19 @@ class SearchEntity(BaseModel):
         max_length=_MAX_ROLE_CHARS,
         description=("the relational phrase, matched against a fixed lexicon, e.g. 'from', 'to'"),
     )
+    members: bool | None = Field(
+        default=None,
+        description=(
+            "true when `text` names a set of places (a continent, a subregion, or a group "
+            "such as the European Union) and the ask is for each member on its own: "
+            "'African countries' is {text: 'Africa', members: true}. Leave unset for the "
+            "set as one place: 'Africa' is {text: 'Africa'}"
+        ),
+    )
 
 
 class SearchPart(BaseModel):
-    """One variable ask within the request, with its own entities, time, unit, and source."""
+    """One variable ask within the request, with its own entities, time, unit, source, and dataset."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -125,6 +147,85 @@ class SearchPart(BaseModel):
             ),
         )
     )
+    dataset: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_DATASET_CHARS,
+        description=(
+            "the dcid of a declared table the part asks for, from the list in the tool "
+            "description; leave it out unless the user asks for that table"
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class DeclaredDataset:
+    """One table the parsed door accepts as a part's `provenance`."""
+
+    dcid: str
+    title: str
+    description: str
+    opt_in: bool
+
+
+def declared_datasets(schema: Mapping[str, Any]) -> list[DeclaredDataset]:
+    """Read the declared datasets, in rank order, from the door's served schema document.
+
+    They are the `oneOf` values of the string branch of `ParsedPart.provenance`
+    in the document's `request` schema. A document of another shape raises
+    `LookupError`, `StopIteration` or `TypeError`.
+    """
+    field = schema["request"]["$defs"]["ParsedPart"]["properties"]["provenance"]
+    named = next(branch for branch in field["anyOf"] if branch.get("type") == "string")
+    return [
+        DeclaredDataset(
+            dcid=value["const"],
+            title=value["title"],
+            description=value["description"],
+            opt_in=value["x-opt-in"],
+        )
+        for value in named.get("oneOf", [])
+    ]
+
+
+async def fetch_declared_datasets() -> list[DeclaredDataset] | None:
+    """Read the declared datasets from dfo-apis once, within `_SCHEMA_FETCH_TIMEOUT_S`.
+
+    Returns `None`, and logs a warning, when the schema cannot be read or does
+    not have the expected shape.
+    """
+    try:
+        async with asyncio.timeout(_SCHEMA_FETCH_TIMEOUT_S):
+            response = await get_client().request(
+                "GET",
+                _SCHEMA_ROUTE,
+                route=_SCHEMA_ROUTE,
+                timeout=_SCHEMA_FETCH_TIMEOUT_S,
+                retry=False,
+            )
+        return declared_datasets(response.json())
+    except (TimeoutError, UpstreamError, ValueError, LookupError, StopIteration, TypeError) as exc:
+        logger.warning(
+            "could not read the declared datasets from %s; the search tool lists none: %r",
+            _SCHEMA_ROUTE,
+            exc,
+        )
+        return None
+
+
+def describe_search(base: str, datasets: Sequence[DeclaredDataset] | None) -> str:
+    """The search tool's description: `base` followed by the datasets a part can name."""
+    if not datasets:
+        return f"{base}\n\nNo datasets are listed, so leave `dataset` out."
+    lines = [
+        f"- `{dataset.dcid}`: {dataset.title}. {dataset.description}"
+        + (" Served only when a part names it." if dataset.opt_in else "")
+        for dataset in datasets
+    ]
+    return (
+        f"{base}\n\nSet a part's `dataset` to one of these dcids only when the user asks "
+        "for that table:\n" + "\n".join(lines)
+    )
 
 
 def to_wire_request(parts: Sequence[SearchPart], raw_query: str | None) -> dict[str, Any]:
@@ -155,6 +256,8 @@ def _wire_part(part: SearchPart) -> dict[str, Any]:
         wire["source_text"] = part.source
     if part.open_roles is not None:
         wire["open_roles"] = part.open_roles
+    if part.dataset is not None:
+        wire["provenance"] = part.dataset
     return wire
 
 
@@ -162,6 +265,8 @@ def _wire_entity(entity: SearchEntity) -> dict[str, Any]:
     wire: dict[str, Any] = {"text": entity.text}
     if entity.role is not None:
         wire["role_text"] = entity.role
+    if entity.members:
+        wire["members"] = True
     return wire
 
 
@@ -289,7 +394,7 @@ async def resolve_and_register(
 
 
 async def search(
-    parts: Annotated[list[SearchPart], Field(min_length=1, max_length=_MAX_PARTS)],
+    parts: Annotated[list[SearchPart], Field(min_length=1, max_length=MAX_PARTS)],
     raw_query: Annotated[str | None, Field(min_length=1, max_length=_MAX_RAW_QUERY_CHARS)] = None,
 ) -> ToolResult:
     """Find what data and indicators exist for the user's ask.
@@ -308,11 +413,14 @@ async def search(
 
     Fill `variable` and each entity's `text` with the user's own words. Do not
     translate, normalise, or guess canonical names, and include only the
-    fields the user actually expressed. `role` and `time` are matched
-    against a fixed grammar, not free text: `role` names which side of the
-    flow the entity is on -- a word for where it originates (e.g. donor,
-    provider, creditor, exporter) is "from", a word for where it is
-    directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
+    fields the user actually expressed. An entity that names a set of places
+    keeps the set's name as `text`, with `members: true` when the ask is for
+    each member on its own: "African countries" is `{"text": "Africa",
+    "members": true}`, and "Africa" alone is the region as one place. `role` and
+    `time` are matched against a fixed grammar, not free text: `role` names
+    which side of the flow the entity is on -- a word for where it originates
+    (e.g. donor, provider, creditor, exporter) is "from", a word for where it
+    is directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
     the forms its own description lists. `open_roles` asks for every member
     of a side, as in "which creditors does Nigeria pay", in the same role words.
     A `role_text_not_recognised` or `time_text_not_parsed` warning in the
@@ -323,7 +431,7 @@ async def search(
 
     Args:
         parts: One entry per variable asked about, 1..6.
-        raw_query: The user's original words, verbatim, for tracing.
+        raw_query: The user's original query.
 
     Returns:
         Search's reading of the question. For a question that names data, a

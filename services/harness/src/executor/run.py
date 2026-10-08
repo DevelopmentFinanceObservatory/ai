@@ -87,6 +87,38 @@ family summed. `get_data` and every analysis verb declare their frame's
 other step may declare is bounded by the count of the frame it reads
 (`compiler.frame_columns.bound_stat_var_count`).
 
+A step whose plan states a period against the newest data is rolling
+(`compiler.rolling.is_rolling`): its literal years are the ones the plan read
+from Search, and the run writes them again from the data it retrieved. The
+rolling steps that some step reads together form a group
+(`compiler.rolling.anchor_groups`), and a group stands on one newest period,
+taken over the retrievals its steps rest on. A retrieval no step of the group
+reads has no part in it. Every step of a group runs after every retrieval of
+the group (`_waves`). Once those are in and before the group's first step, the
+run calls analysis-mcp's `resolve_anchor` once for the group, with the
+populations its steps carry, spelled the way the retrieved frames spell their
+columns, and the frames of its retrievals. The answer is the newest year at
+least half of the series of each population hold, and the key of its stored
+resolution. Each of the group's steps has its periods written as that year
+moved by the step's offsets (`compiler.rolling.resolved_arguments`), and the
+key goes with the call. The call takes the path a step's call takes
+(`_Run._call`), reports under the id of the group's first step to run, and its
+tool is part of the surface check. A plan with no rolling step never calls it.
+The outcome carries each group's answer in `anchors`.
+
+A rolled start before the first year its dataset holds is refused
+`ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
+read off the retrieval's own evidence. `resolve_anchor` finding no qualifying
+year, or periods that are no calendar years, stops the run with the tool's
+code and a message for the user. A `rolling_anchor_unresolved` of any other
+detail says the run's own populations, roots, key or periods do not fit
+(`executor.classify.is_anchor_fault`) and stops it as an `internal_error`.
+
+A keyed `quotient_of` leaves out each numerator key it finds no denominator
+for, and its result declares how many (`dropped_key_count`). The step's
+`StepRecord` carries that count, so an answer resting on the step can say
+its population lost members.
+
 Three checks run on what a step's own result declares, in `structured_content`
 rather than the digest prose, which the executor never reads for anything
 load-bearing:
@@ -119,15 +151,19 @@ load-bearing:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import partial
 
 import httpx2
 import pyarrow as pa
 from common.materialisation import FrameRef
+from common.refusal import internal_error_message
+from common.telemetry import current_trace_id
 from compiler.arguments import literal_argument_errors
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.evidence import (
@@ -142,8 +178,17 @@ from compiler.frame_columns import (
     FrameColumns,
     UnboundColumnError,
     bound_arguments,
+    bound_populations,
     bound_role_keys,
     bound_stat_var_count,
+)
+from compiler.rolling import (
+    AnchorGroup,
+    RollingBound,
+    anchor_groups,
+    is_rolling,
+    resolved_arguments,
+    rolling_bounds,
 )
 from compiler.surface import (
     ProgressCallback,
@@ -166,11 +211,19 @@ from data_mcp.series_statistics import (
 from data_mcp.stat_var_list import with_stat_var_list
 from fastmcp.exceptions import ResourceError
 from planner.plan import DatasetRequirement, Plan, PlanStatus, plan_revision
-from planner.workflow import ArtifactKind, EvidenceBinding, SelectedSource, Workflow, WorkflowStep
+from planner.workflow import (
+    ArtifactKind,
+    EvidenceBinding,
+    SelectedSource,
+    ToolId,
+    Workflow,
+    WorkflowStep,
+)
 from pydantic import JsonValue, ValidationError
 
 from executor.artifacts import (
     ArtifactError,
+    declared_dropped_key_count,
     declared_shape,
     extract_frame_ref,
     parse_manifest,
@@ -179,20 +232,25 @@ from executor.artifacts import (
 from executor.classify import (
     BACKOFF_SECONDS,
     FAMILY_NOT_SUMMED,
+    INTERNAL_ERROR,
     MALFORMED_REFUSAL,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
+    ROLLING_ANCHOR_UNRESOLVED,
+    ROLLING_WINDOW_OUTSIDE_DATASET,
     Disposition,
     Jitter,
     ToolFailure,
     candidates_of,
     classify_refusal,
     delay_before_retry,
+    is_anchor_fault,
     jittered_retry_delay,
     parse_tool_failure,
 )
 from executor.outcomes import (
     Accepted,
+    AnchorResult,
     EvidenceRecord,
     MethodChoiceNeeded,
     RediscoveryNeeded,
@@ -228,6 +286,36 @@ _FAMILY_NOT_SUMMED_MESSAGE = (
 _FAMILY_NOT_SUMMED_REMEDY = (
     "Ask for the component series separately, or ask for the total again later."
 )
+
+# The tool that resolves the newest period a run's rolling steps stand on.
+_RESOLVE_ANCHOR = ToolId(server="analysis-mcp", name="resolve_anchor")
+
+# What the user reads when `resolve_anchor` cannot name a newest period, by the
+# tool's code, and what to ask instead.
+_ANCHOR_REFUSAL_MESSAGES = {
+    ROLLING_ANCHOR_UNRESOLVED: (
+        "No recent year is reported by at least half of the series this question reads, "
+        "so there is no latest year to count the period from."
+    ),
+    "rolling_grain_unsupported": (
+        "This data is not reported by calendar year, so a period counted from its latest "
+        "year cannot be worked out."
+    ),
+}
+_NAMED_YEARS_REMEDY = "Ask for the period in named years instead."
+
+# The comparisons under which a rolled period threshold is where a filter's
+# rows start, and how far past the threshold the first year kept is.
+_YEARS_PAST_THRESHOLD = {"gte": 0, "eq": 0, "gt": 1}
+_WINDOW_START = "window_start"
+
+
+def _first_year_kept(bound: RollingBound) -> int | None:
+    """The first year a rolled `bound` keeps, or `None` when it sets no start."""
+    if bound.op is None:
+        return int(bound.period) if bound.bound == _WINDOW_START else None
+    past = _YEARS_PAST_THRESHOLD.get(bound.op)
+    return None if past is None else int(bound.period) + past
 
 
 def step_budget_s(call_timeout_s: float, *, evidence: bool) -> float:
@@ -385,6 +473,19 @@ class _Stopped(Exception):  # noqa: N818 -- a control-flow signal carrying an ou
         self.siblings = siblings
 
 
+@dataclass(frozen=True, slots=True)
+class _Anchored:
+    """The newest period of one group of rolling steps, as the run resolved it.
+
+    `columns` holds the columns of each retrieved frame of the group, by the
+    `spec_id` its retrieval was approved for, which the population of each of
+    the group's steps is spelled against.
+    """
+
+    result: AnchorResult
+    columns: dict[str, list[FrameColumns | None]]
+
+
 def _waves(workflow: Workflow) -> list[tuple[WorkflowStep, ...]]:
     """Group `workflow`'s steps into the dependency levels their bindings state.
 
@@ -393,8 +494,14 @@ def _waves(workflow: Workflow) -> list[tuple[WorkflowStep, ...]]:
     share a level carry no dependency between them and are safe to run
     concurrently; within a level, steps keep the order `workflow.steps`
     gives them.
+
+    A rolling step also runs after every retrieval of its group
+    (`compiler.rolling.anchor_groups`), the ones it binds no frame from
+    included, since the newest period its years are written from is taken over
+    all of them.
     """
     steps_by_id = {step.id: step for step in workflow.steps}
+    roots = {step_id: group.roots for group in anchor_groups(workflow) for step_id in group.steps}
     level_of: dict[str, int] = {}
 
     def level(step_id: str) -> int:
@@ -404,11 +511,9 @@ def _waves(workflow: Workflow) -> list[tuple[WorkflowStep, ...]]:
         assert step is not None, (
             f"a binding names step {step_id!r}, which the workflow does not hold"
         )
-        computed = (
-            0
-            if not step.bindings
-            else 1 + max(level(binding.from_step) for binding in step.bindings.values())
-        )
+        after = [binding.from_step for binding in step.bindings.values()]
+        after.extend(roots.get(step_id, ()))
+        computed = 1 + max(level(earlier) for earlier in after) if after else 0
         level_of[step_id] = computed
         return computed
 
@@ -590,6 +695,7 @@ class _Run:
         self.frames: dict[str, FrameRef] = {}
         self.row_counts: dict[str, int | None] = {}
         self.stat_var_counts: dict[str, int | None] = {}
+        self.dropped_key_counts: dict[str, int] = {}
         # Per step that produced a frame: the role keys its result declared,
         # and the columns of the retrieval it rests on, which the plan's role
         # columns bind to (`compiler.frame_columns`). `None` where the result
@@ -602,10 +708,29 @@ class _Run:
         # these back out in the plan's own step order regardless.
         self.records: dict[str, StepRecord] = {}
         self.evidence_by_step: dict[str, EvidenceRecord] = {}
+        # The groups of rolling steps that each stand on one newest period,
+        # none when no step rolls; each rolling step's group; and each group's
+        # period once the run has resolved it, under every step of the group.
+        self.anchor_groups = anchor_groups(workflow)
+        self.group_of: dict[str, AnchorGroup] = {
+            step_id: group for group in self.anchor_groups for step_id in group.steps
+        }
+        self.anchored: dict[str, _Anchored] = {}
+        self._resolutions: dict[str, _Anchored] = {}
 
     async def execute(self) -> Accepted:
         schemas = await self._surface_as_compiled()
         for wave in _waves(self.workflow):
+            for group in self.anchor_groups:
+                rolling = next((step for step in wave if step.id in group.steps), None)
+                if rolling is None or rolling.id in self.anchored:
+                    continue
+                # Every retrieval of the group is in a wave before this one
+                # (`_waves`), and the wave's steps start only once this returns.
+                try:
+                    await self._resolve_anchor(group, rolling, schemas[_RESOLVE_ANCHOR.name])
+                except _Stopped as stopped:
+                    raise _Stopped(self._restamped(stopped.outcome)) from stopped
             # Each step runs as its own task; `asyncio.gather` copies the
             # calling context per task, so `current_step_id`, set inside
             # `_run_step`, never leaks between concurrent siblings.
@@ -666,6 +791,7 @@ class _Run:
             evidence=self._evidence_so_far(),
             steps=self._completed_so_far(),
             results=answers,
+            anchors=self._anchors_so_far(),
         )
 
     async def _attempt(
@@ -703,15 +829,21 @@ class _Run:
             if step.id in self.evidence_by_step
         )
 
+    def _anchors_so_far(self) -> tuple[AnchorResult, ...]:
+        """Each newest period resolved so far, once, in the order it was resolved."""
+        return tuple(anchored.result for anchored in self._resolutions.values())
+
     def _restamped(
         self, outcome: MethodChoiceNeeded | Refused | RediscoveryNeeded
     ) -> MethodChoiceNeeded | Refused | RediscoveryNeeded:
-        """`outcome` carrying what the run finished: its steps, their evidence
-        and the terminal frames that stand as answers (`_answers`)."""
+        """`outcome` carrying what the run finished: its steps, their evidence,
+        the terminal frames that stand as answers (`_answers`) and the newest
+        periods it resolved."""
         return outcome.model_copy(
             update={
                 "completed": self._completed_so_far(),
                 "evidence": self._evidence_so_far(),
+                "anchors": self._anchors_so_far(),
                 "answers": self._answers(
                     step_id for step_id in self.workflow.terminal_steps if step_id in self.records
                 )[0],
@@ -768,51 +900,262 @@ class _Run:
     # -- before the first call ------------------------------------------------------
 
     async def _surface_as_compiled(self) -> dict[str, ToolSchema]:
-        """Re-read the surface and refuse to run against tools that have changed."""
+        """Re-read the surface and refuse to run against tools that have changed.
+
+        Each step's tool is compared with what the step was compiled against.
+        A workflow with a rolling step also calls `resolve_anchor`, which no
+        step names, so that tool is compared with its row of the capability
+        table, under the first rolling step's id.
+        """
         try:
             schemas = {schema.name: schema for schema in await self.surface.list_tools()}
         except ToolSurfaceUnavailableError as exc:
             raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
         for step in self.workflow.steps:
-            schema = schemas.get(step.tool.name)
-            if schema is None or schema.server != step.tool.server:
+            self._check_as_compiled(
+                schemas.get(step.tool.name),
+                tool=step.tool,
+                input_schema_hash=step.input_schema_hash,
+                output_schema_hash=step.output_schema_hash,
+                implementation_version=step.implementation_version,
+                step_id=step.id,
+            )
+        if self.anchor_groups:
+            rolling = next(step for step in self.workflow.steps if is_rolling(step))
+            capability = self.capabilities.get(_RESOLVE_ANCHOR)
+            if capability is None:
                 raise self._refused(
                     RefusalKind.SURFACE_CHANGED,
-                    f"{step.tool.server} no longer serves {step.tool.name!r}",
-                    step_id=step.id,
+                    f"no capability pins {_RESOLVE_ANCHOR.name!r}, which a plan with a rolling "
+                    "period calls",
+                    step_id=rolling.id,
                 )
-            try:
-                input_hash = schema.input_schema_hash
-                output_hash = schema.output_schema_hash
-            except UnhashableSchemaError as exc:
-                raise self._refused(
-                    RefusalKind.SURFACE_CHANGED,
-                    f"{step.tool.name!r} now declares a schema that cannot be compared with the "
-                    f"one the plan was compiled against: {exc}",
-                    step_id=step.id,
-                ) from exc
-            if input_hash != step.input_schema_hash:
-                raise self._refused(
-                    RefusalKind.SURFACE_CHANGED,
-                    f"{step.tool.name!r} takes different arguments than the plan was compiled "
-                    "against; the plan needs compiling and approving again",
-                    step_id=step.id,
-                )
-            if output_hash != step.output_schema_hash:
-                raise self._refused(
-                    RefusalKind.SURFACE_CHANGED,
-                    f"{step.tool.name!r} declares a different output schema than the plan was "
-                    "compiled against; the plan needs compiling and approving again",
-                    step_id=step.id,
-                )
-            if schema.version != step.implementation_version:
-                raise self._refused(
-                    RefusalKind.SURFACE_CHANGED,
-                    f"{step.tool.name!r} is at version {schema.version!r}, not the "
-                    f"{step.implementation_version!r} the plan was compiled against",
-                    step_id=step.id,
-                )
+            self._check_as_compiled(
+                schemas.get(_RESOLVE_ANCHOR.name),
+                tool=_RESOLVE_ANCHOR,
+                input_schema_hash=capability.input_schema_hash,
+                output_schema_hash=capability.output_schema_hash,
+                implementation_version=capability.implementation_version,
+                step_id=rolling.id,
+            )
         return schemas
+
+    def _check_as_compiled(
+        self,
+        schema: ToolSchema | None,
+        *,
+        tool: ToolId,
+        input_schema_hash: str,
+        output_schema_hash: str | None,
+        implementation_version: str | None,
+        step_id: str,
+    ) -> None:
+        """Refuse `SURFACE_CHANGED` unless `schema` is `tool` as it was pinned."""
+        if schema is None or schema.server != tool.server:
+            raise self._refused(
+                RefusalKind.SURFACE_CHANGED,
+                f"{tool.server} no longer serves {tool.name!r}",
+                step_id=step_id,
+            )
+        try:
+            input_hash = schema.input_schema_hash
+            output_hash = schema.output_schema_hash
+        except UnhashableSchemaError as exc:
+            raise self._refused(
+                RefusalKind.SURFACE_CHANGED,
+                f"{tool.name!r} now declares a schema that cannot be compared with the "
+                f"one the plan was compiled against: {exc}",
+                step_id=step_id,
+            ) from exc
+        if input_hash != input_schema_hash:
+            raise self._refused(
+                RefusalKind.SURFACE_CHANGED,
+                f"{tool.name!r} takes different arguments than the plan was compiled "
+                "against; the plan needs compiling and approving again",
+                step_id=step_id,
+            )
+        if output_hash != output_schema_hash:
+            raise self._refused(
+                RefusalKind.SURFACE_CHANGED,
+                f"{tool.name!r} declares a different output schema than the plan was "
+                "compiled against; the plan needs compiling and approving again",
+                step_id=step_id,
+            )
+        if schema.version != implementation_version:
+            raise self._refused(
+                RefusalKind.SURFACE_CHANGED,
+                f"{tool.name!r} is at version {schema.version!r}, not the "
+                f"{implementation_version!r} the plan was compiled against",
+                step_id=step_id,
+            )
+
+    # -- the newest period ----------------------------------------------------------
+
+    async def _resolve_anchor(
+        self, group: AnchorGroup, step: WorkflowStep, schema: ToolSchema
+    ) -> None:
+        """Resolve the newest period the rolling steps of `group` stand on, once.
+
+        Sends `resolve_anchor` the populations the group's steps carry, with
+        every column spelled the way the retrieved frames spell it
+        (`bound_populations`, the value `_arguments` writes on each of them),
+        and the frame of each retrieval of the group. `step` is the group's
+        first step about to run: the call reports and is refused under its id.
+
+        Writes `self.anchored` for every step of the group.
+        """
+        roots: dict[str, list[FrameColumns | None]] = {}
+        for root in group.roots:
+            roots.setdefault(self.approved_source[root].spec_id, []).append(self.columns.get(root))
+        try:
+            populations = bound_populations(group.population, roots=roots)
+        except UnboundColumnError as exc:
+            raise self._column_unbound(step, exc) from exc
+        # Two retrievals that returned one frame name it once.
+        frames = {
+            (frame.spec_id, frame.content_version): frame.model_dump()
+            for frame in (self.frames[root] for root in group.roots)
+        }
+        arguments: dict[str, JsonValue] = {
+            "populations": populations,
+            "roots": list(frames.values()),
+        }
+        # Groups over the same series and frames, such as two rolling steps
+        # each over the one retrieval, share one resolution.
+        sent = json.dumps({"populations": populations, "roots": sorted(frames)}, sort_keys=True)
+        if (held := self._resolutions.get(sent)) is not None:
+            self.anchored.update(dict.fromkeys(group.steps, held))
+            return
+        self._check_fit(step, _RESOLVE_ANCHOR, arguments, schema)
+        token = current_step_id.set(step.id)
+        try:
+            result, _ = await self._call(step.id, _RESOLVE_ANCHOR, arguments)
+        finally:
+            current_step_id.reset(token)
+        if result.is_error:
+            raise self._stopped_by_anchor_refusal(step, result)
+        try:
+            anchor = AnchorResult.model_validate(result.structured_content)
+        except ValidationError as exc:
+            raise self._refused(
+                RefusalKind.STEP_RESULT_UNUSABLE,
+                f"{_RESOLVE_ANCHOR.name!r} answered with no newest period the run can read: {exc}",
+                step_id=step.id,
+            ) from exc
+        anchored = _Anchored(result=anchor, columns=roots)
+        self._resolutions[sent] = anchored
+        self.anchored.update(dict.fromkeys(group.steps, anchored))
+
+    def _stopped_by_anchor_refusal(self, step: WorkflowStep, result: ToolCallResult) -> _Stopped:
+        """The stop for a `resolve_anchor` call the tool refused.
+
+        A refusal that states a fact of the data keeps its code and carries a
+        message and a `fix.remedy` written for the user, who reads them in the
+        turn's closing text.
+        """
+        failure = parse_tool_failure(result.structured_content or {})
+        if is_anchor_fault(failure):
+            return self._anchor_fault(step, failure)
+        message = _ANCHOR_REFUSAL_MESSAGES.get(failure.code)
+        if message is not None:
+            failure = failure.model_copy(
+                update={"message": message, "fix": failure.fix | {"remedy": _NAMED_YEARS_REMEDY}}
+            )
+        return self._step_refused(step.id, _RESOLVE_ANCHOR, result, failure)
+
+    def _anchor_fault(self, step: WorkflowStep, failure: ToolFailure) -> _Stopped:
+        """The stop for a refusal saying the run's own newest period is not in order.
+
+        The populations, root frames, key and periods a rolling call carries
+        are all the run's own, so the user is told of an internal error and
+        the refusal is logged under the trace id the message quotes.
+        """
+        trace_id = current_trace_id()
+        logger.error(
+            "executor: step %s was refused %s (%s) on the newest period the run resolved "
+            "trace_id=%s",
+            step.id,
+            failure.code,
+            failure.fix.get("detail"),
+            trace_id,
+        )
+        return self._refused(
+            RefusalKind.STEP_REFUSED,
+            f"step {step.id!r} was refused {failure.code!r} on the newest period the run itself "
+            f"resolved: {failure.fix.get('detail')!r}",
+            step_id=step.id,
+            payload=ToolFailure(
+                code=INTERNAL_ERROR,
+                message=internal_error_message(
+                    subject="Working out the latest period", trace_id=trace_id
+                ),
+                retry_mode="do_not_retry",
+                fix={"refusal": failure.model_dump(mode="json")},
+            ),
+        )
+
+    def _check_rolled_start(self, step: WorkflowStep, bounds: Sequence[RollingBound]) -> None:
+        """Refuse `ROLLING_WINDOW_OUTSIDE_DATASET` when `step`'s rolled start is before its data.
+
+        The start is the earliest year a rolled bound keeps (`_first_year_kept`).
+        A dataset's first year is the start of the window its retrieval's
+        evidence recorded, which is read off the retrieved series. A retrieval
+        whose evidence states no window is not compared.
+
+        The refusal's payload is worded for the user and classifies as a
+        stop, since the same plan resolves the same start over the same data.
+        """
+        starts = [year for bound in bounds if (year := _first_year_kept(bound)) is not None]
+        if not starts:
+            return
+        anchor = self.anchored[step.id].result
+        start = min(starts)
+        under = self._retrievals_under(step.id)
+        for root in self.group_of[step.id].roots:
+            evidence = self.evidence_by_step.get(root)
+            if root not in under or evidence is None or evidence.window is None:
+                continue
+            first = evidence.window.start
+            if start >= first:
+                continue
+            binding = self.evidence_bindings[root]
+            requirement = self.requirements[binding.requirement_id]
+            assert isinstance(requirement, DatasetRequirement)
+            name = self.approved_source[root].measure_label or requirement.measure
+            raise self._refused(
+                RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET,
+                f"step {step.id!r} would start in {start}, counted from {anchor.period}, "
+                f"before {first}, the first year {binding.spec_id} holds",
+                step_id=step.id,
+                requirement_id=requirement.id,
+                payload=ToolFailure(
+                    code=ROLLING_WINDOW_OUTSIDE_DATASET,
+                    message=(
+                        f"The data for {name} starts in {first}. The period asked for would "
+                        f"start in {start}, counted back from {anchor.period}, the latest "
+                        "year at least half of its series report."
+                    ),
+                    retry_mode="do_not_retry",
+                    fix={
+                        "remedy": f"Ask for a shorter period, or for named years from {first} on.",
+                        "spec_id": binding.spec_id,
+                        "first_year": first,
+                        "window_start": start,
+                        "anchor": anchor.period,
+                    },
+                ),
+            )
+
+    def _retrievals_under(self, step_id: str) -> frozenset[str]:
+        """The retrieval steps `step_id` rests on, through its bindings."""
+        if step_id in self.evidence_bindings:
+            return frozenset({step_id})
+        return frozenset().union(
+            *(
+                self._retrievals_under(binding.from_step)
+                for binding in self.steps_by_id[step_id].bindings.values()
+            )
+        )
 
     # -- one step -----------------------------------------------------------------------
 
@@ -822,7 +1165,8 @@ class _Run:
         """Call `step`'s tool and return what it produced.
 
         Writes `self.frames[step.id]`, `self.row_counts[step.id]`,
-        `self.stat_var_counts[step.id]`, `self.role_keys[step.id]` and
+        `self.stat_var_counts[step.id]`, `self.dropped_key_counts[step.id]`,
+        `self.role_keys[step.id]` and
         `self.columns[step.id]`. These dicts are keyed by step id, so a step
         running concurrently with its siblings can write them safely. It
         leaves filling `self.records` and `self.evidence_by_step`'s own slots
@@ -847,7 +1191,7 @@ class _Run:
                 try:
                     token = current_step_id.set(step.id)
                     try:
-                        result, attempts = await self._call(step, arguments)
+                        result, attempts = await self._call(step.id, step.tool, arguments)
                     finally:
                         current_step_id.reset(token)
                     if result.is_error:
@@ -865,6 +1209,7 @@ class _Run:
                         row_count=self.row_counts[step.id],
                         role_keys=self.role_keys[step.id],
                         stat_var_count=self.stat_var_counts[step.id],
+                        dropped_key_count=self.dropped_key_counts[step.id],
                     )
                     evidence = (
                         await self._check_evidence(step, result)
@@ -902,7 +1247,8 @@ class _Run:
         """Compare a result's own declared shape against the shape `step` must
         produce, refusing `SHAPE_MISMATCH` on a difference, and record the
         declared row count, role keys and StatVar count for `_answer_refusal`,
-        the steps reading this one and the step's `StepRecord`.
+        the steps reading this one and the step's `StepRecord`, with the keys
+        the result declares it left out (`declared_dropped_key_count`).
 
         `expected_role_keys` is `None` for a retrieval: the role keys and
         StatVar count its result declares are the frame's own, and stand as
@@ -923,6 +1269,7 @@ class _Run:
             ) from exc
         self.row_counts[step.id] = row_count
         self.stat_var_counts[step.id] = stat_var_count
+        self.dropped_key_counts[step.id] = declared_dropped_key_count(result.structured_content)
         self.role_keys[step.id] = role_keys
         binding = step.bindings.get(FRAME_PARAMETER)
         if binding is None:
@@ -1047,7 +1394,14 @@ class _Run:
     def _arguments(self, step: WorkflowStep, schema: ToolSchema) -> dict[str, JsonValue]:
         """The step's literal arguments plus every binding resolved to a frame,
         with every role column they name spelled the way that frame spells it
-        (`compiler.frame_columns.bound_arguments`)."""
+        (`compiler.frame_columns.bound_arguments`).
+
+        A rolling step's population is spelled the way the workflow's
+        retrieved frames spell it, its periods are written from the newest
+        period the run resolved, and that resolution's key is added
+        (`compiler.rolling.resolved_arguments`). A rolled start before the
+        step's data refuses here (`_check_rolled_start`).
+        """
         arguments: dict[str, JsonValue] = dict(step.args)
         for parameter, binding in step.bindings.items():
             frame = self.frames.get(binding.from_step)
@@ -1059,6 +1413,7 @@ class _Run:
                     step_id=step.id,
                 )
             arguments[parameter] = frame.model_dump()
+        anchored = self.anchored.get(step.id)
         try:
             arguments = bound_arguments(
                 step.tool,
@@ -1067,44 +1422,61 @@ class _Run:
                     parameter: self.columns.get(binding.from_step)
                     for parameter, binding in step.bindings.items()
                 },
+                roots=anchored.columns if anchored is not None else None,
             )
         except UnboundColumnError as exc:
             raise self._column_unbound(step, exc) from exc
+        if is_rolling(step):
+            assert anchored is not None, "a rolling step runs once its newest period is resolved"
+            arguments = resolved_arguments(
+                arguments, period=anchored.result.period, anchor_key=anchored.result.anchor_key
+            )
+            self._check_rolled_start(step, rolling_bounds(arguments))
+        self._check_fit(step, step.tool, arguments, schema)
+        return arguments
+
+    def _check_fit(
+        self,
+        step: WorkflowStep,
+        tool: ToolId,
+        arguments: Mapping[str, JsonValue],
+        schema: ToolSchema,
+    ) -> None:
+        """Refuse `BINDING_INVALID` when `arguments` do not fit `tool`'s live schema."""
         problems = literal_argument_errors(arguments=arguments, schema=schema.parameters)
         if problems:
             raise self._refused(
                 RefusalKind.BINDING_INVALID,
-                f"step {step.id!r}'s arguments do not fit {step.tool.name!r}: {problems!r}",
+                f"step {step.id!r}'s arguments do not fit {tool.name!r}: {problems!r}",
                 step_id=step.id,
             )
-        return arguments
 
     async def _call(
-        self, step: WorkflowStep, arguments: Mapping[str, JsonValue]
+        self, step_id: str, tool: ToolId, arguments: Mapping[str, JsonValue]
     ) -> tuple[ToolCallResult, int]:
-        """Call the step's tool, retrying only what the tool or the transport says can be retried.
+        """Call `tool` for step `step_id`, retrying only what the tool or the transport says can be retried.
 
-        Every call hands `on_progress`, bound to this step's id, to the
+        Every call hands `on_progress`, bound to the step's id, to the
         surface. Each answer is reported as it arrives, so the step's line
         stops showing the server's last wait message once the call returns.
         Each retry reports the attempt it is about to make before its delay
         starts.
         """
-        on_progress = partial(self.on_progress, step.id) if self.on_progress is not None else None
+        on_progress = partial(self.on_progress, step_id) if self.on_progress is not None else None
         for attempt in range(MAX_ATTEMPTS_PER_STEP):
             last = attempt + 1 == MAX_ATTEMPTS_PER_STEP
             try:
                 result = await self.surface.call_tool(
-                    tool=step.tool, arguments=arguments, on_progress=on_progress
+                    tool=tool, arguments=arguments, on_progress=on_progress
                 )
             except ToolSurfaceUnavailableError as exc:
-                capability = self.capabilities.get(step.tool)
+                capability = self.capabilities.get(tool)
                 final = last or (
                     capability is not None and not capability.retry_on_transport_failure
                 )
                 if final:
                     raise self._refused(
-                        RefusalKind.TRANSPORT_FAILED, str(exc), step_id=step.id
+                        RefusalKind.TRANSPORT_FAILED, str(exc), step_id=step_id
                     ) from exc
                 await self._before_retry(
                     jittered_retry_delay({}, attempt, jitter=self.jitter), attempt, on_progress
@@ -1150,6 +1522,8 @@ class _Run:
     def _stopped_by_refusal(self, step: WorkflowStep, result: ToolCallResult) -> _Stopped:
         payload = result.structured_content or {}
         failure = parse_tool_failure(payload)
+        if is_anchor_fault(failure):
+            return self._anchor_fault(step, failure)
         disposition = classify_refusal(failure)
         if disposition is Disposition.METHOD_CHOICE:
             return _Stopped(
@@ -1179,17 +1553,25 @@ class _Run:
                 )
             )
         # A rediscovery on a step bound to no evidence would name nothing to
-        # rediscover, so it is a plain stop like any other refusal. The
-        # detail reaches the planner's replan prompt. A refusal's text ends in
-        # its JSON envelope (`common.refusal.refusal_text`), so the detail
-        # takes the structured `message`. A result with no refusal payload,
-        # such as a tool that raised, has only its text, which carries no
-        # envelope.
+        # rediscover, so it is a plain stop like any other refusal.
+        return self._step_refused(step.id, step.tool, result, failure)
+
+    def _step_refused(
+        self, step_id: str, tool: ToolId, result: ToolCallResult, failure: ToolFailure
+    ) -> _Stopped:
+        """The plain stop for a call `tool` refused, carrying `failure` as its payload.
+
+        The detail reaches the planner's replan prompt. A refusal's text ends
+        in its JSON envelope (`common.refusal.refusal_text`), so the detail
+        takes the structured `message`. A result with no refusal payload,
+        such as a tool that raised, has only its text, which carries no
+        envelope.
+        """
         reason = result.text if failure.code == MALFORMED_REFUSAL else failure.message
         return self._refused(
             RefusalKind.STEP_REFUSED,
-            f"{step.tool.name!r} refused: {reason or failure.code}",
-            step_id=step.id,
+            f"{tool.name!r} refused: {reason or failure.code}",
+            step_id=step_id,
             payload=failure,
         )
 

@@ -65,7 +65,7 @@ class DisambiguationCandidate(BaseModel):
     id: Annotated[str, Field(min_length=1)] | dict[str, object] = Field(
         description=(
             "The value a retry would pass to select this candidate: a string, or the "
-            "object a converted unit pins by."
+            "object a converted or composed unit pins by."
         )
     )
     label: str = Field(min_length=1, max_length=MAX_LABEL_CHARS, description="Human-readable name.")

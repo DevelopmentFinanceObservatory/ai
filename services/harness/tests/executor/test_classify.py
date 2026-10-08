@@ -27,6 +27,7 @@ from executor.classify import (
     candidates_of,
     classify_refusal,
     delay_before_retry,
+    is_anchor_fault,
     jittered_retry_delay,
     parse_tool_failure,
     retry_delay,
@@ -129,6 +130,23 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
             {"code": "share_of_key_unmatched", "retry_mode": "correct_and_retry"},
             Disposition.METHOD_CHOICE,
         ),
+        # A quotient that found nothing to divide by, in every matched cell
+        # or for every key, goes to the planner as a share's does.
+        (
+            {"code": "quotient_of_zero_denominator", "retry_mode": "correct_and_retry"},
+            Disposition.METHOD_CHOICE,
+        ),
+        (
+            {"code": "quotient_of_no_key_matched", "retry_mode": "correct_and_retry"},
+            Disposition.METHOD_CHOICE,
+        ),
+        # A side with no unit to compose names a fact about the frame, as
+        # `derived_input_ordinal` does: dividing something else is a
+        # different plan.
+        (
+            {"code": "quotient_of_side_unit_unsupported", "retry_mode": "correct_and_retry"},
+            Disposition.STOP,
+        ),
         ({"code": "role_ambiguous", "retry_mode": "correct_and_retry"}, Disposition.STOP),
         ({"code": "frame_not_held", "retry_mode": "correct_and_retry"}, Disposition.STOP),
         ({"code": "internal_error", "retry_mode": "do_not_retry"}, Disposition.STOP),
@@ -142,6 +160,12 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         # like any other `COMPILER_PROVABLE_CODES` member.
         (
             {"code": "share_of_key_unknown", "retry_mode": "correct_and_retry"},
+            Disposition.STOP,
+        ),
+        # The planner refuses a sum over a quotient, so the engine's refusal
+        # of one stops as a compiler-provable code does.
+        (
+            {"code": "composed_unit_sum_unsupported", "retry_mode": "correct_and_retry"},
             Disposition.STOP,
         ),
         # `derived_input_ordinal`'s own fix names a reason, not a set of
@@ -226,12 +250,16 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         "cross-frame-choice",
         "coverage-choice",
         "share-of-key-unmatched-choice",
+        "quotient-of-zero-denominator-choice",
+        "quotient-of-no-key-matched-choice",
+        "quotient-of-side-unit-unsupported-stop",
         "compiler-provable",
         "genuine-stop",
         "final",
         "rollup-not-summable-final",
         "rollup-not-summable-stop",
         "share-of-key-unknown-stop",
+        "composed-unit-sum-unsupported-stop",
         "derived-input-ordinal-stop",
         "choice-under-final-mode",
         "over-ceiling-rows-choice",
@@ -387,3 +415,29 @@ def _failure(**overrides: object) -> ToolFailure:
     }
     fields.update(overrides)
     return ToolFailure.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    ("payload", "fault"),
+    [
+        # No year is held by half of the series: a fact of the data.
+        (
+            {"code": "rolling_anchor_unresolved", "fix": {"detail": "no_qualifying_period"}},
+            False,
+        ),
+        # Every other detail, and a refusal stating none, says what the run
+        # itself sent does not fit.
+        ({"code": "rolling_anchor_unresolved", "fix": {"detail": "literal_differs"}}, True),
+        ({"code": "rolling_anchor_unresolved", "fix": {"detail": "populations_differ"}}, True),
+        ({"code": "rolling_anchor_unresolved"}, True),
+        ({"code": "rolling_grain_unsupported", "fix": {"detail": "literal_differs"}}, False),
+    ],
+)
+def test_an_unresolved_anchor_is_the_runs_fault_unless_no_period_qualified(
+    payload: dict[str, object], fault: bool
+) -> None:
+    failure = parse_tool_failure({"retry_mode": "correct_and_retry", **payload})
+
+    assert is_anchor_fault(failure) is fault
+    # Either way no replan changes it.
+    assert classify_refusal(failure) is Disposition.STOP

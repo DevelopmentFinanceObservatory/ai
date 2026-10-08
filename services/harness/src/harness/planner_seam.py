@@ -1,13 +1,13 @@
 """The graph's planner seam, backed by the planner agent.
 
-An adapter over `planner.agent.create_planner_agent`, built with its
-`translate` tool by `harness.agents.create_planner_with_translator`: the
+An adapter over `planner.agent.create_planner_agent`, built with
+translation attached by `harness.agents.create_planner_with_translator`: the
 planner runs as a dynamically-scheduled child of the graph's own node,
 through `Context.run_node`, and this module reads what it leaves in session
 state and translates it into `harness.graph.PlannerModel`'s contract.
 
-The planner's own tools settle methodology (`propose_plan`), carry it to a
-compiled workflow (`translate`, whose result is either the compiled outcome
+The planner's own tools settle methodology and carry it to a compiled
+workflow (`propose_plan`, whose `translation` is either the compiled outcome
 or the `Referral` translation stopped on) and declare it ready for the
 user's answer (`submit_plan`). This module never constructs a `Plan` itself.
 
@@ -96,15 +96,18 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from common.telemetry import record_span
+from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
+from planner.operations import OperationKind
 from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
+    OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
@@ -136,7 +139,7 @@ from planner.tool_results import Outcome, ProblemCode
 from translator.discovery import stat_var_count_text
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import ReferralKind
-from translator.tool import TRANSLATE_TOOL_NAME
+from translator.tool import permitted_repair
 
 from harness.agents import create_planner_with_translator
 from harness.graph import (
@@ -164,8 +167,7 @@ logger = logging.getLogger(__name__)
 _MAX_CORRECTIONS = 2
 
 # Insurance against a runaway tool loop inside one agent run. A healthy plan
-# takes well under this many tool calls (skill search, propose, translate,
-# submit).
+# takes well under this many tool calls (skill search, propose, submit).
 _MAX_EVENTS = 60
 
 # Session-state slot marking that this seam has already sent a message in
@@ -416,22 +418,33 @@ _KEEP_SEEDS_SENTENCE = (
 # The run-time refusal codes that mean no operation computes what the refused
 # step was asked to, each with the `unsupported` answer it stands for. A replan
 # entry over one starts with that answer recorded (`_earned_by_refusal`), so a
-# plan may decline the ask it served, as it may after `propose_plan` or
-# `translate` answers `unsupported`. `cross_frame_unit_unbound`: one side of a
-# `share_of`, `compare` or `sum_of` declares no unit while the other does, so
-# no operation combines the two. A source declaring a unit would also clear
-# it, and the decline leaves the planner free to pin one instead. Codes whose
-# `fix` offers a choice (a common unit, a facet, matching periods, a window, a
-# denominator, an entity) are method choices, and a stop
-# (`executor.classify.STOP_CODES`) never replans.
+# plan may decline the ask it served, as it may after `propose_plan` or its
+# translation answers `unsupported`. `cross_frame_unit_unbound`: one side of a
+# `compare` or `sum_of` declares no unit while the other does, so no operation
+# combines the two. A source declaring a unit would also clear it, and the
+# decline leaves the planner free to pin one instead. Codes whose `fix` offers
+# a choice (a common unit, a facet, matching periods, a window, a denominator,
+# an entity) are method choices, and a stop (`executor.classify.STOP_CODES`)
+# never replans.
 _UNSUPPORTED_BY_RUN_TIME_CODE: Mapping[str, UnsupportedOperation] = {
     "cross_frame_unit_unbound": UnsupportedOperation.NO_OPERATION_COVERS,
 }
 
+# The run-time refusal codes a `share_of` step answers for two sides whose
+# units it does not pair. `quotient_of` divides the same two sides, so a replan
+# over one carries the repair translation gives `SHARE_UNITS_DIFFER` and earns
+# no decline.
+_SHARE_UNIT_CODES = frozenset({"cross_frame_unit_unbound", "cross_frame_unit_mismatch"})
+
+# The run-time refusal code a `share_of` or `compare` step answers for two
+# sides that read one measure from two sources. analysis-mcp's message speaks
+# of frames. The repair in plan terms is the planner's.
+_FACET_MISMATCH_CODE = "cross_frame_facet_mismatch"
+
 _NO_SUBMIT_NUDGE = (
-    "You have not called submit_plan. Propose the plan with propose_plan "
-    "(and have it translated with translate, if it is not yet compiled), "
-    "then call submit_plan with the current version."
+    "You have not called submit_plan. Propose the plan with propose_plan, "
+    "which translates it, settle what its `translation` refers back if it did "
+    "not compile, then call submit_plan with the current version."
 )
 
 # The `refused["code"]` `_before_planner_model` stamps on a deadline refusal
@@ -446,18 +459,18 @@ _DEADLINE_REFUSAL_CODE = "planner_deadline_exceeded"
 # succeeds still leaves the planner time to use it before the deadline.
 _NEXT_MODEL_CALL_MARGIN_S = 10.0
 
-# The `refused["code"]` `_track_tool_call` stamps once `translate` answers
+# The `refused["code"]` `_track_tool_call` stamps once a translation answers
 # with an `internal` referral, a fault no correction round repairs, so it
 # ends the entry the way a deadline does, carrying the referral's reference.
 _INTERNAL_REFUSAL_CODE = "translation_internal_failure"
 
-# The `refused["code"]` `_track_tool_call` stamps once `translate` answers
+# The `refused["code"]` `_track_tool_call` stamps once a translation answers
 # with a referral marked `repeated`. The plan failed to translate the way
 # it failed before, unchanged where it failed, so a correction round would
 # translate it a third time to the same stop.
 _REPEATED_REFUSAL_CODE = "translation_repeated"
 
-# The `refused["code"]` `_track_tool_call` stamps once `translate` answers
+# The `refused["code"]` `_track_tool_call` stamps once a translation answers
 # with a referral marked `budget_spent`. A discovery budget is spent and the
 # most recent search that spent it timed out, so translating again in this
 # entry is refused before it searches.
@@ -557,8 +570,8 @@ class _RunTracker:
         self.ready_to_break = False
         self.submitted: dict[str, Any] | None = None
         self.events = 0
-        # The referral the last `translate` response with an `outcome`
-        # answered, or `None` once one of those responses answers something
+        # The referral the last translation with an `outcome` answered,
+        # or `None` once one of those translations answers something
         # other than a referral -- see `_track_tool_call`. `_before_planner_
         # model`'s deadline branch reads this for its own candidates, since
         # the run can hit its deadline on a referral that has not yet
@@ -609,7 +622,7 @@ _active_call: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar
 
 
 class PlannerSeam:
-    """`harness.graph.PlannerModel`, implemented by `src/planner` and its `translate` tool."""
+    """`harness.graph.PlannerModel`, implemented by `src/planner` and the translation it runs."""
 
     def __init__(
         self,
@@ -990,10 +1003,11 @@ class PlannerSeam:
         # guards a direct caller of this seam's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # `UNSUPPORTED_STATE_KEY` and `COMPILE_FAILURES_STATE_KEY` too. The
-        # declines an ask-the-user resume still owes, and the failures it may
-        # repeat, are this entry's own.
-        for key in (UNSUPPORTED_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
+        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY` and
+        # `COMPILE_FAILURES_STATE_KEY` too. The declines an ask-the-user resume
+        # still owes or may make, and the failures it may repeat, are this
+        # entry's own.
+        for key in (UNSUPPORTED_STATE_KEY, OPTIONAL_DECLINES_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
         # `THINKING_SAMPLE_STATE_KEY` needs `PIN_SOURCES_STATE_KEY`'s
@@ -1158,9 +1172,9 @@ class PlannerSeam:
         reach the model for one.
 
         A referral naming pinnable candidates (`tracker.last_referral`,
-        replaced by the outcome of every later `translate` response that
-        carries one -- an `ok` clears it -- and left unchanged by one that
-        carries none, see `_track_tool_call`) becomes the same
+        replaced by the outcome of every later translation that carries one
+        -- an `ok` clears it -- and left unchanged by one that carries none,
+        see `_track_tool_call`) becomes the same
         `adk_request_input` long-running call `planner.agent.ask_user` issues,
         built here from those candidates since the model has run out of time
         to compose it itself.
@@ -1223,7 +1237,8 @@ class PlannerSeam:
         tool_response: dict[str, Any] | None,
     ) -> None:
         """The planner's `after_tool_callback`: progress, then whichever of
-        `submit_plan` / `propose_plan` / `translate` this tool call is, if any.
+        `submit_plan` / `propose_plan` this tool call is, if any, reading the
+        translation an accepted `propose_plan` answers with.
         """
         tracker.events += 1
         if tracker.events > _MAX_EVENTS:
@@ -1258,17 +1273,19 @@ class PlannerSeam:
             # approvable.
             tracker.ready_to_break = True
             tracker.refused = tool_response
-        elif tool.name == TRANSLATE_TOOL_NAME:
-            PlannerSeam._track_translation(tracker, tool_response)
+        elif tool.name == "propose_plan" and isinstance(tool_response, dict):
+            translation = tool_response.get("translation")
+            if isinstance(translation, dict):
+                PlannerSeam._track_translation(tracker, translation)
 
     @staticmethod
     def _track_translation(tracker: _RunTracker, tool_response: dict[str, Any] | None) -> None:
-        """Read one `translate` response: the referral it answered, and
-        whether it ends the entry.
+        """Read one translation, the `translation` of an accepted `propose_plan`:
+        the referral it answered, and whether it ends the entry.
 
-        `last_referral` is written from every response that carries an
-        `outcome`, referral or not: `translate` runs the whole plan, so each
-        outcome-bearing response states what is open across it right now, and
+        `last_referral` is written from every translation that carries an
+        `outcome`, referral or not: translation runs the whole plan, so each
+        outcome-bearing verdict states what is open across it right now, and
         replaces whatever the last one recorded. `ok` means every
         requirement compiled, which clears a referral the same way. A response
         with no `outcome` settles nothing and is left alone.
@@ -1443,7 +1460,7 @@ class PlannerSeam:
 
     @staticmethod
     def _referral_dict(response: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The referral a `translate` response answers with, or `None` for any
+        """The referral a translation answers with, or `None` for any
         other answer. It is the one check `_stalled_referral` and
         `_track_translation`'s own `last_referral` bookkeeping both need, kept
         here so the two never drift apart. A referral is the one answer that
@@ -1488,7 +1505,7 @@ class PlannerSeam:
         second one did not already say. A
         referral marked `repeated` ends the entry instead
         (`_closing_refusal`). A transient referral is never counted: the
-        same plan is worth translating again. The message names what to
+        same plan is worth proposing again. The message names what to
         do per kind (`_STALLED_ACTS`).
 
         Reads `response` defensively. `MAY_CARRY_CANDIDATES`
@@ -1522,7 +1539,7 @@ class PlannerSeam:
         )
         return (
             f"Translation referred {about} back as {kind!r} for the second time with "
-            f"nothing new{have}. {act} -- calling translate again on the same plan "
+            f"nothing new{have}. {act} -- proposing the same plan again "
             "will not converge."
         )
 
@@ -1609,8 +1626,8 @@ class PlannerSeam:
                 f"{cut_user_text(amendment, MAX_QUESTION_CHARS)}\n"
                 "Call propose_plan again with the revised decisions and evidence "
                 "requirements -- the change has to alter what a requirement "
-                "actually states, not only a decision's rationale -- then have "
-                "it translated and compiled again before calling submit_plan.\n"
+                "actually states, not only a decision's rationale -- which has "
+                "it translated and compiled again, then call submit_plan.\n"
             )
         elif refusal:
             refused, kept = _split_seeded(_refused_specs(refusal), seed_of)
@@ -1618,6 +1635,8 @@ class PlannerSeam:
                 _avoid_sentence(refused)
                 + _keep_seeds_sentence(kept)
                 + _earned_decline_sentence(_earned_by_refusal(refusal))
+                + _share_units_repair_sentence(refusal)
+                + _facet_repair_sentence(refusal)
             )
             stop = {key: value for key, value in refusal.items() if key != "computed_asks"}
             ask = (
@@ -1654,12 +1673,12 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     """What a replan's failed run computed: the asks its finished terminal
     steps answer (`harness.graph._computed_asks`), by number, or `None` for
     a plan held to no asks. The new plan runs from the start, so it still
-    answers every ask."""
+    answers every ask. The list of numbers is cut at `MAX_QUESTION_CHARS`."""
     if computed is None:
         return "Executing the approved plan failed, and the new plan runs from the start."
     if not computed:
         return "Executing the approved plan failed before it computed any ask."
-    numbers = ", ".join(str(number) for number in computed)
+    numbers = cut_user_text(", ".join(str(number) for number in computed), MAX_QUESTION_CHARS)
     return (
         f"Executing the approved plan failed after it computed asks {numbers}. The new plan "
         "runs from the start, so it still answers every ask."
@@ -1729,7 +1748,7 @@ def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]
     (selectable=False)`) carry no `spec_id`, since they describe what search
     found nearby rather than a source pinnable without a fresh search, so
     they never appear here. `referral` is `None`, or carries no candidates,
-    for a `translate` response this entry never saw, or one whose kind is
+    for a translation this entry never saw, or one whose kind is
     not among `translator.referral.MAY_CARRY_CANDIDATES`.
     """
     if not isinstance(referral, dict):
@@ -2429,25 +2448,74 @@ def _truncate(text: str, cap: int) -> str:
     return text if len(text) <= cap else text[: cap - 1] + "…"
 
 
+def _stops(refusal: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Each stop in a replan's `refusal`: the primary's, then its `also_stopped` siblings'."""
+    if not isinstance(refusal, dict):
+        return []
+    also_stopped = refusal.get("also_stopped")
+    payloads = [refusal, *(also_stopped if isinstance(also_stopped, list) else ())]
+    return [payload for payload in payloads if isinstance(payload, dict)]
+
+
+def _share_units_refused(stop: dict[str, Any]) -> bool:
+    """Whether `stop` is a `share_of` step refusing its two sides on their units.
+
+    `MethodChoiceNeeded`'s shape (`graph.py`'s `_refusal_shape`) names the
+    refusing step's tool by its name on analysis-mcp, which is the verb.
+    """
+    return stop.get("tool") == OperationKind.SHARE_OF and stop.get("code") in _SHARE_UNIT_CODES
+
+
 def _earned_by_refusal(refusal: dict[str, Any] | None) -> set[UnsupportedOperation]:
     """The declines a replan's `refusal` earns: one per stop in it, the
     primary's or an `also_stopped` sibling's, whose `code` is in
-    `_UNSUPPORTED_BY_RUN_TIME_CODE`.
+    `_UNSUPPORTED_BY_RUN_TIME_CODE`. A `share_of` step's unit refusal earns
+    none (`_share_units_refused`).
 
     Only `MethodChoiceNeeded`'s shape (`graph.py`'s `_refusal_shape`)
     carries a tool's `code` at its top level.
     """
-    if not isinstance(refusal, dict):
-        return set()
-    also_stopped = refusal.get("also_stopped")
-    payloads = [refusal, *(also_stopped if isinstance(also_stopped, list) else ())]
     return {
         _UNSUPPORTED_BY_RUN_TIME_CODE[code]
-        for payload in payloads
-        if isinstance(payload, dict)
-        and isinstance(code := payload.get("code"), str)
+        for stop in _stops(refusal)
+        if isinstance(code := stop.get("code"), str)
         and code in _UNSUPPORTED_BY_RUN_TIME_CODE
+        and not _share_units_refused(stop)
     }
+
+
+def _share_units_repair_sentence(refusal: dict[str, Any] | None) -> str:
+    """The repair a replan's message gives each `share_of` step that refused
+    its sides on their units, as translation gives it for `SHARE_UNITS_DIFFER`.
+    Empty when none did. The list of steps is cut at `MAX_QUESTION_CHARS`, as
+    `_avoid_sentence` cuts its list of specs."""
+    steps = [stop.get("step_id") for stop in _stops(refusal) if _share_units_refused(stop)]
+    if not steps:
+        return ""
+    named = cut_user_text(", ".join(f"{step!r}" for step in steps), MAX_QUESTION_CHARS)
+    return (
+        f" To repair the share {named} refused: "
+        f"{permitted_repair(CompileIssueCode.SHARE_UNITS_DIFFER)}."
+    )
+
+
+def _facet_repair_sentence(refusal: dict[str, Any] | None) -> str:
+    """The repair a replan's message gives each step that refused its sides
+    as one measure read from two sources (`_FACET_MISMATCH_CODE`). Empty when
+    none did. The list of steps is cut at `MAX_QUESTION_CHARS`, as
+    `_share_units_repair_sentence` cuts its own."""
+    steps = [
+        stop.get("step_id") for stop in _stops(refusal) if stop.get("code") == _FACET_MISMATCH_CODE
+    ]
+    if not steps:
+        return ""
+    named = cut_user_text(", ".join(f"{step!r}" for step in steps), MAX_QUESTION_CHARS)
+    return (
+        f" The step {named} read one measure from two sources on its two sides. To repair "
+        "it, give every requirement on that measure the same source, by `source` or "
+        "`source_spec_id`, the one either side already holds, and leave every other "
+        "requirement's source alone."
+    )
 
 
 def _earned_decline_sentence(earned: Collection[UnsupportedOperation]) -> str:

@@ -6,7 +6,7 @@ carries, what kind of number its `value` column holds, whether its rows are
 real observations or a collapsed span, whether a rank limit kept only some
 entities and cut rows out of it, whether its places mix levels, and which
 retrievals it ultimately rests on. `FrameShape`
-states that shape as a value; the nine transforms below compute one verb's
+states that shape as a value; the ten transforms below compute one verb's
 output shape from its input's; `rejects` states, for one verb reading one
 shape, the reason it may not -- reader-facing prose, or `None` when it may.
 
@@ -22,6 +22,10 @@ wants to know whether a step may run calls it before building the step;
 nothing here raises -- a `FrameShape` and a `RoleDimension` are themselves
 unconditionally constructible, since it is `rejects`, not construction, that
 carries every rule a legal plan has to satisfy.
+
+`roles_named` is the single place a role phrase is matched to a role
+dimension: an `axis`, a `denominator_axis`, and the compiler's lookup of the
+column behind either.
 """
 
 from __future__ import annotations
@@ -29,8 +33,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
+from planner.parties import across_party
 from planner.records import (
     DenominatorScope,
     GrowthChange,
@@ -46,13 +51,16 @@ from planner.records import (
 class ValueKind(StrEnum):
     """What kind of number a frame's `value` column holds.
 
-    `MEASURED` is a value in the source's own unit. `RATIO` is dimensionless
-    -- a share or a relative growth. `DIFFERENCE` is a change in the input's
+    `MEASURED` is a value in a unit: the source's own, or for a quotient of
+    two measures the unit the two compose (`FrameShape.composed_unit`).
+    `RATIO` is a ratio of two values, either a share, in per cent
+    (`common.unit_refs.PERCENT_UNIT`), or a relative growth, with no unit.
+    `DIFFERENCE` is a change in the input's
     unit -- an absolute growth. `ORDINAL` is a rank position, or a change in
     one counted in places: no unit, no zero, no ratio. It matches
     analysis-mcp's `DerivedMarker.ordinal`, which every verb carries onward,
-    so `rank`, `share_of` and a relative `growth` refuse it here as
-    analysis-mcp does.
+    so `rank`, `share_of`, `quotient_of` and a relative `growth` refuse it
+    here as analysis-mcp does.
     """
 
     MEASURED = "measured"
@@ -70,22 +78,23 @@ class TimeLabel(StrEnum):
     `SPAN` marks a value that collapsed more than one period into one row,
     which analysis-mcp labels with one ISO 8601 interval such as
     `2018/2022` (or the point, when the collapse covered one period).
-    `growth` refuses a span; `rank`, `share_of`, `compare` and `join` read
-    it as one period, matched by its label; `filter` refuses a year
+    `growth` refuses a span; `rank`, `share_of`, `quotient_of`, `compare` and
+    `join` read it as one period, matched by its label; `filter` refuses a year
     threshold over a span labelled with an interval.
 
     `PICKED` marks one observed year per entity, picked by a `max` or `min`
     over several years: analysis-mcp labels each entity's row with the year
     its extreme fell in, the earliest among ties, so entities carry
     different years. Each row's year is real, so a year threshold `filter`
-    reads it, and `compare` and `join` match it on each entity's own year
-    against a series of years whose period covers the picked frame's. Every
+    reads it, and `compare`, `quotient_of` and `join` match it on each
+    entity's own year against a series of years whose period covers the
+    picked frame's. Every
     reader that sets entities side by side within one year, or follows one
     entity across years, refuses it: `growth`, `rank` in either mode (its
     coverage counts every year of the window, and each entity holds one),
-    an `aggregate` by period, `share_of` (its sides' periods must be equal
-    per key), and a `compare` or `join` against another picked frame, a
-    span, or a series that misses some of the picked years. A `sum` or
+    an `aggregate` by period, `share_of` (`_rejects_picked_share`), and a
+    `compare`, `quotient_of` or `join` against another
+    picked frame, a span, or a series that misses some of the picked years. A `sum` or
     `mean` over it is a `SPAN` whose years are known only at run time. A
     frame over a single year is never `PICKED`: its one year is every
     entity's.
@@ -97,7 +106,7 @@ class TimeLabel(StrEnum):
 
 
 class ShapeVerb(StrEnum):
-    """The eight calculation verbs `rejects` states an *in* rule for.
+    """The nine calculation verbs `rejects` states an *in* rule for.
 
     `get_data` is not among them: it reads nothing upstream, so it has no
     *in* rule to state.
@@ -108,6 +117,7 @@ class ShapeVerb(StrEnum):
     RANK = "rank"
     FILTER = "filter"
     SHARE_OF = "share_of"
+    QUOTIENT_OF = "quotient_of"
     COMPARE = "compare"
     SUM_OF = "sum_of"
     JOIN = "join"
@@ -131,6 +141,9 @@ class RoleDimension:
     `open` marks the dimension a requirement's `across` adds, which holds
     every member of a party nobody named. An aggregate sums it away whatever
     it groups by, and every other verb carries it as it does a named role.
+    `place` marks the dimension holding the places the measure is about:
+    entities named with no role, or an `across` of the place party
+    (`place_role`). A place word names it (`roles_named`).
     """
 
     role: str | None
@@ -138,6 +151,7 @@ class RoleDimension:
     narrowed: bool = False
     breakdown: bool = False
     open: bool = False
+    place: bool = False
 
 
 # The measure count of a family read separately whose source lists none of its
@@ -189,6 +203,16 @@ class FrameShape:
     the frame: that retrieval, read through filters only, since every other
     verb drops the place-type column the compiler asks `get_data` for.
 
+    `composed_unit` is whether the frame's values are in a unit two measures
+    compose, dollars per person: a `quotient_of`'s result, and whatever a
+    later step computes in that same unit, such as an average of it or its
+    absolute change. A step whose result is a share (in per cent) or has no
+    unit (a relative growth or a rank position) clears it. Such a value
+    ranks, grows, averages and compares as any value in a unit does. It neither adds up,
+    in a `sum_of`, under a `sum` reduction or on a `share_of` side summing
+    several rows, nor divides again in a `quotient_of`, and a `compare` or
+    a `share_of` pairs it only with another value in a composed unit.
+
     Time grain is not a field here: every frame this algebra describes is
     annual, and a derived frame inherits its input's grain unchanged.
     """
@@ -205,23 +229,90 @@ class FrameShape:
     unsummable_axes: tuple[str, ...] | None = None
     mixed_levels: bool = False
     place_typed: bool = False
+    composed_unit: bool = False
+
+
+class NamedRole(Protocol):
+    """What `roles_named` reads of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
+
+    @property
+    def role(self) -> str | None: ...
+
+    @property
+    def place(self) -> bool: ...
+
+
+# The phrase a refusal tells the planner to write for a place dimension whose
+# entities state no role.
+PLACE_PHRASE: Final = "country"
+
+
+def place_role(role: str | None) -> bool:
+    """Whether a dimension under `role` holds the places the measure is about.
+
+    `role` is the role its entities state, `None` for entities stating none,
+    or the requirement's `across`. A breakdown's dimension is never one.
+    """
+    return role is None or across_party(role) == "place"
+
+
+def roles_named[R: NamedRole](roles: Sequence[R], phrase: str) -> tuple[R, ...]:
+    """Every dimension of `roles` that `phrase` names.
+
+    A phrase names the dimension whose role it equals, and a place word
+    (`planner.parties.across_party`: "country", "countries", "place") names
+    a side's place dimension, which states no role for a phrase to equal.
+    One result is a selection. None, or several, is a refusal each caller
+    words for its own side (`_names_no_role`).
+    """
+    place_word = across_party(phrase) == "place"
+    return tuple(role for role in roles if role.role == phrase or (place_word and role.place))
+
+
+def role_named[R: NamedRole](roles: Sequence[R], phrase: str) -> R | None:
+    """The one dimension of `roles` that `phrase` names, or `None` when it names none or several."""
+    named = roles_named(roles, phrase)
+    return named[0] if len(named) == 1 else None
+
+
+def axis_phrases(roles: Sequence[NamedRole]) -> list[str]:
+    """The phrases that name each of `roles`, for a refusal to list: its role, or the place word."""
+    return sorted({PLACE_PHRASE if role.role is None else role.role for role in roles})
+
+
+def _names_no_role(
+    field: str, phrase: str, side: str, roles: Sequence[RoleDimension]
+) -> str | None:
+    """Why `phrase`, stated as `field`, selects no one dimension of `side`'s `roles`, or `None`."""
+    named = roles_named(roles, phrase)
+    if len(named) == 1:
+        return None
+    if not named:
+        return (
+            f"{field} {phrase!r} does not name a role {side} carries; roles are "
+            f"{axis_phrases(roles)!r}"
+        )
+    held = " and ".join(
+        "the places named with no role" if role.role is None else repr(role.role) for role in named
+    )
+    return (
+        f"{field} {phrase!r} names more than one dimension {side} carries, {held}; name "
+        "that side's places one way, all with no role or all in `across`"
+    )
 
 
 def _select_role(roles: Sequence[RoleDimension], axis: str | None) -> RoleDimension | None:
     """Return the role dimension `axis` names, or the lone one when `axis` is `None` and `roles` has one.
 
-    Returns `None` when `axis` names nothing in `roles`, or when `axis` is
-    `None` and `roles` holds more than one dimension -- either way, the
-    caller's own `rejects` check is what turns that into a refusal; this
-    helper only resolves the selection once a caller already knows it is
-    legal.
+    Returns `None` when `axis` names no one dimension of `roles`
+    (`role_named`), or when `axis` is `None` and `roles` holds more than one
+    dimension -- either way, the caller's own `rejects` check is what turns
+    that into a refusal; this helper only resolves the selection once a
+    caller already knows it is legal.
     """
     if axis is None:
         return roles[0] if len(roles) == 1 else None
-    for role in roles:
-        if role.role == axis:
-            return role
-    return None
+    return role_named(roles, axis)
 
 
 def _intersection(left: Period | None, right: Period | None) -> Period | None:
@@ -281,7 +372,7 @@ def _merged_roots(
     return tuple(sorted(set(left) | set(right)))
 
 
-# --- The nine transforms ---------------------------------------------------
+# --- The ten transforms ----------------------------------------------------
 
 
 def retrieved(
@@ -381,6 +472,7 @@ def aggregated(
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
         mixed_levels=shape.mixed_levels and by_entity,
+        composed_unit=shape.composed_unit,
     )
 
 
@@ -393,6 +485,8 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
     dimensionless `RATIO`; an absolute change reads as a `DIFFERENCE` in the input's own unit, or in percentage
     points when the input was a `RATIO`. An absolute change over an
     `ORDINAL` input is a count of places and stays `ORDINAL`.
+    An absolute change stays in its input's unit, a composed one included;
+    a relative change has none.
     """
     if change is GrowthChange.RELATIVE:
         value = ValueKind.RATIO
@@ -412,6 +506,7 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
         mixed_levels=shape.mixed_levels,
+        composed_unit=shape.composed_unit and change is GrowthChange.ABSOLUTE,
     )
 
 
@@ -463,6 +558,7 @@ def ranked(
             and _spans_years(period),
             limited=limited,
             roots=shape.roots,
+            composed_unit=shape.composed_unit and limit is not None,
         )
     return FrameShape(
         roles=roles,
@@ -475,6 +571,7 @@ def ranked(
         limited=limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        composed_unit=shape.composed_unit,
     )
 
 
@@ -559,7 +656,8 @@ def filtered(
     since the primitives here cannot tell which single dimension it
     resolved against, it narrows every role dimension the input carries;
     `EntityIn.role` is what disambiguates when a shape carries more than
-    one, and stating it narrows that dimension alone. Each matching
+    one, and stating it narrows the dimension it names (`roles_named`)
+    alone, a place word naming the place dimension. Each matching
     dimension is marked `narrowed=True` and every other field is kept.
     `period` and `pins_one_year` are `year_filter`'s reading of the filter's
     predicates against `shape.period`: its `period` and `leaves_one_year`. A filter keeps `cut_per_period` only while `period`
@@ -569,10 +667,15 @@ def filtered(
     `keeps_one_level` (a `PlaceLevel` predicate) leaves its places at one
     level; every filter keeps the place-type column its input carries.
     """
-    narrowed = set(narrowed_roles)
-    narrows_every_role = None in narrowed
+    narrows_every_role = None in narrowed_roles
+    named = [
+        role
+        for phrase in narrowed_roles
+        if phrase is not None
+        for role in roles_named(shape.roles, phrase)
+    ]
     roles = tuple(
-        replace(role, narrowed=True) if narrows_every_role or role.role in narrowed else role
+        replace(role, narrowed=True) if narrows_every_role or role in named else role
         for role in shape.roles
     )
     picked_one_year = shape.time is TimeLabel.PICKED and not _spans_years(period)
@@ -589,6 +692,7 @@ def filtered(
         unsummable_axes=shape.unsummable_axes,
         mixed_levels=shape.mixed_levels and not keeps_one_level,
         place_typed=shape.place_typed,
+        composed_unit=shape.composed_unit,
     )
 
 
@@ -599,7 +703,7 @@ def shared(
     axis: str | None,
     scope: DenominatorScope | None,
 ) -> FrameShape:
-    """The shape `share_of` produces: the numerator's own axis role alone, a `RATIO`.
+    """The shape `share_of` produces, a `RATIO` in per cent with the numerator's own axis role alone.
 
     Only the numerator's side decides the output's role dimension -- the one
     narrow-lineage rule every non-terminal verb here follows, so which
@@ -608,11 +712,15 @@ def shared(
     by one total per period, and analysis-mcp's `run_share_of` refuses a
     per-axis call outright at the first numerator key the denominator has no
     group for. So the output is `limited` exactly when the numerator is.
-    `run_share_of` writes one row per numerator key per period, and each
-    key's periods must equal its denominator's, so the output holds one row
-    per entity exactly when the numerator does: a share of each entity's
-    total over 2018-2022 is one ratio per entity, which a rank reads with
-    no reduction. `scope` takes no part in this shape; it is accepted for
+    `run_share_of` writes one row per numerator key per period it shares
+    with its denominator, and refuses a key sharing none, so the output
+    holds one row per entity whenever the numerator does: a share of each
+    entity's total over 2018-2022 is one ratio per entity, which a rank
+    reads with no reduction. It can also hold one row per entity when only
+    the denominator does, such as a yearly series over a denominator
+    filtered to one year; `one_row_per_entity` reads the numerator alone,
+    and `period`, the intersection of both sides' periods, then names the
+    one year. `scope` takes no part in this shape; it is accepted for
     symmetry with `rejects`, which does read it.
     """
     axis_role = _select_role(numerator.roles, axis) if axis is not None else None
@@ -630,8 +738,50 @@ def shared(
     )
 
 
+def quotiented(
+    numerator: FrameShape,
+    denominator: FrameShape,
+    *,
+    axis: str | None,
+    denominator_axis: str | None,
+) -> FrameShape:
+    """The shape `quotient_of` produces: the numerator's own axis role alone, in a composed unit.
+
+    Only the numerator's side decides the output's role dimension, under the
+    numerator's own phrase, as for `shared`; the denominator's phrase names
+    no column of the result. analysis-mcp's `run_quotient_of` writes one row
+    per numerator key per period both sides report, so the output holds one
+    row per entity when either side does, and its period is the years both
+    cover. It drops a key the denominator has no group for and says so in
+    its result, which does not make the output `limited`: only a rank
+    `limit` upstream does, on the numerator, or on a denominator keyed by
+    `denominator_axis`, whose missing entities take their numerator rows
+    with them. A side a per-period limit cut leaves the same gaps in each
+    quotient's series.
+    """
+    axis_role = _select_role(numerator.roles, axis) if axis is not None else None
+    roles = (axis_role,) if axis_role is not None else ()
+    period = _intersection(numerator.period, denominator.period)
+    return FrameShape(
+        roles=roles,
+        measures=1,
+        value=ValueKind.MEASURED,
+        time=_merged_time(numerator, denominator),
+        period=period,
+        one_row_per_entity=numerator.one_row_per_entity or denominator.one_row_per_entity,
+        cut_per_period=(numerator.cut_per_period or denominator.cut_per_period)
+        and _spans_years(period),
+        limited=numerator.limited or (denominator_axis is not None and denominator.limited),
+        roots=_merged_roots(numerator.roots, denominator.roots),
+        composed_unit=True,
+    )
+
+
 def compared(left: FrameShape, right: FrameShape) -> FrameShape:
-    """The shape `compare` produces. Terminal by contract; stated for completeness."""
+    """The shape `compare` produces. Terminal by contract; stated for completeness.
+
+    The difference is in the two sides' one unit, composed when theirs is.
+    """
     return FrameShape(
         roles=(),
         measures=1,
@@ -642,6 +792,7 @@ def compared(left: FrameShape, right: FrameShape) -> FrameShape:
         cut_per_period=False,
         limited=left.limited or right.limited,
         roots=_merged_roots(left.roots, right.roots),
+        composed_unit=left.composed_unit and right.composed_unit,
     )
 
 
@@ -761,7 +912,7 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     """Why `shape` has no role an aggregate's group by entity or breakdown keeps, or `None`.
 
     A frame with no role dimension that rests on two retrievals, a
-    `sum_of`'s or an unkeyed `share_of`'s, holds one series, so a group by
+    `sum_of`'s or an unkeyed `share_of`'s or `quotient_of`'s, holds one series, so a group by
     entity reduces that series whole: a total over a span of two sources'
     yearly sum. A group by entity keeps only the parties a requirement
     names, so over a frame whose every party is open it would keep none.
@@ -787,10 +938,38 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     return None
 
 
+def _rejects_summed_rate(step: str, shape: FrameShape, reduction: Reduction | None) -> str | None:
+    """Why `step` may not reduce `shape` by `reduction`, or `None` when it may.
+
+    A sum of values in a composed unit is no value in it: two countries'
+    dollars per person, or two years' of one country, add up to no
+    per-person figure, and analysis-mcp would write the total under the
+    composed unit all the same. A `mean`, a `max` and a `min` each stay a
+    figure in that unit. One figure pooled across entities divides the two
+    measures' totals across them; nothing pools across periods, since a
+    population summed over years is no population.
+    """
+    if reduction is not Reduction.SUM or not shape.composed_unit:
+        return None
+    return (
+        f"{step} with reduction 'sum' adds values in one unit, and this input's are per-unit "
+        "figures from a quotient_of, which add up to no figure in that unit; take a mean, "
+        "max or min, or for one figure pooled across entities total each measure across "
+        "them first and divide the two totals"
+    )
+
+
 def _rejects_aggregate(
-    shape: FrameShape, *, by_entity: bool, by_period: bool = False, by_breakdown: bool = False
+    shape: FrameShape,
+    *,
+    by_entity: bool,
+    by_period: bool = False,
+    by_breakdown: bool = False,
+    reduction: Reduction | None = None,
 ) -> str | None:
-    several = _several_measures("aggregate", shape)
+    several = _several_measures("aggregate", shape) or _rejects_summed_rate(
+        "an aggregate", shape, reduction
+    )
     if several is not None:
         return several
     if missing := _missing_group_roles(shape, by_entity=by_entity, by_breakdown=by_breakdown):
@@ -865,16 +1044,14 @@ def _rejects_rank_axis(shape: FrameShape, axis: str | None) -> str | None:
     """Return why `axis` cannot select a role dimension of `shape`, or `None` when it can."""
     if not shape.roles:
         return "rank needs at least one role dimension to rank entities on"
-    known = {role.role for role in shape.roles}
     if axis is None:
         if len(shape.roles) > 1:
-            names = sorted(name for name in known if name is not None)
-            return f"rank over more than one role needs axis naming which one; roles are {names!r}"
+            return (
+                "rank over more than one role needs axis naming which one; roles are "
+                f"{axis_phrases(shape.roles)!r}"
+            )
         return None
-    if axis not in known:
-        names = sorted(name for name in known if name is not None)
-        return f"axis {axis!r} does not name a role this input carries; roles are {names!r}"
-    return None
+    return _names_no_role("axis", axis, "this input", shape.roles)
 
 
 def _rejects_rank_rows(shape: FrameShape) -> str | None:
@@ -962,9 +1139,11 @@ def _rejects_rank(
     among: RankAmong | None = None,
     window: Period | None = None,
     per_period: bool = False,
+    reduction: Reduction | None = None,
 ) -> str | None:
     reason = (
         _several_measures("rank", shape)
+        or _rejects_summed_rate("a rank", shape, reduction)
         or _mixed_levels("a rank", shape)
         or _rejects_rank_rows(shape)
         or _rejects_rank_axis(shape, axis)
@@ -1011,7 +1190,7 @@ def _rejects_filter(
 def _rejects_paired_periods(verb: str, shape: FrameShape, other: FrameShape | None) -> str | None:
     """Return why `verb`'s two sides share no period label, or `None` when they may.
 
-    `share_of`, `compare` and `join` match rows on the `time_period` string,
+    `share_of`, `quotient_of`, `compare` and `join` match rows on the `time_period` string,
     so a span such as `2018/2022` matches only the same span. Against single
     years, or against a span over other years, analysis-mcp refuses
     (`share_of_grain_mismatch`, `comparison_periods_disjoint`) or, for a
@@ -1122,40 +1301,92 @@ def _labels_a_span(shape: FrameShape) -> bool:
     return shape.time is TimeLabel.SPAN and _spans_years(shape.period)
 
 
+def _rejects_one_sided_rate(verb: str, shape: FrameShape, other: FrameShape | None) -> str | None:
+    """Why `verb` may not pair a side in a composed unit with one that is not, or `None` when it may.
+
+    analysis-mcp pairs two sides only when their units are equal
+    (`cross_frame_unit_mismatch`), and a composed unit equals no source's
+    own unit, no share's per cent and no unit-less side.
+    """
+    if other is None or shape.composed_unit is other.composed_unit:
+        return None
+    return (
+        f"{verb} pairs two sides in one unit, and one side's values come from a quotient_of, "
+        "whose composed unit pairs only with another quotient in the same unit; read both "
+        "sides from the quotient, or neither"
+    )
+
+
+def _rejects_pooled_rate(
+    shape: FrameShape, *, axis: str | None, scope: DenominatorScope | None, other: FrameShape
+) -> str | None:
+    """Why a share_of adds per-unit figures on one of its sides, or `None` when it adds none.
+
+    `shape` is the numerator, keyed by `axis`, and `other` the denominator,
+    keyed by `axis` too when `scope` divides per axis. analysis-mcp sums
+    each side's rows per key and period and refuses a side in a composed
+    unit whose sum reads more than one row
+    (`composed_unit_sum_unsupported`). A side reads one row where it is
+    keyed by its role dimension or carries none. Left un-keyed, the members
+    of an open dimension or the codes of a breakdown are summed, and no
+    `entity` narrows either. A dimension of named entities left un-keyed is
+    the compiler's to count (`entity_required`, `share_axis_required`).
+    """
+    sides = (
+        ("numerator", shape, axis),
+        ("denominator", other, axis if scope is DenominatorScope.PER_AXIS else None),
+    )
+    for side, side_shape, keyed in sides:
+        if not side_shape.composed_unit:
+            continue
+        key = role_named(side_shape.roles, keyed) if keyed is not None else None
+        summed = [
+            role for role in side_shape.roles if role is not key and (role.open or role.breakdown)
+        ]
+        if summed:
+            return (
+                f"share_of sums each side per period, and its {side} holds one per-unit "
+                f"figure from a quotient_of per {axis_phrases(summed)!r}, which add up to no "
+                "figure in that unit; key the share on that role with a per-axis denominator, "
+                "take their mean, max or min with an aggregate first, or for one figure pooled "
+                "across them total each measure first and divide the two totals"
+            )
+    return None
+
+
 def _rejects_share_of_axis(
     shape: FrameShape, *, axis: str | None, scope: DenominatorScope | None, other: FrameShape | None
 ) -> str | None:
     """Return why `axis` cannot key a share_of reading `shape` (paired with `other`), or `None`."""
     if axis is None:
         return None
-    own = {role.role for role in shape.roles}
-    if axis not in own:
-        names = sorted(name for name in own if name is not None)
-        return f"axis {axis!r} does not name a role this side carries; roles are {names!r}"
-    if scope is DenominatorScope.PER_AXIS and other is not None:
-        counterpart = {role.role for role in other.roles}
-        if axis not in counterpart:
-            return (
-                f"axis {axis!r} does not name a role the other side carries, so a per-axis "
-                "share has no counterpart to divide by"
-            )
-    return None
+    reason = _names_no_role("axis", axis, "this side", shape.roles)
+    if reason is None and scope is DenominatorScope.PER_AXIS and other is not None:
+        reason = _names_no_role("axis", axis, "the other side", other.roles)
+        if reason is not None:
+            return f"{reason}, so a per-axis share has no counterpart to divide by"
+    return reason
 
 
 def _rejects_picked_share(shape: FrameShape, other: FrameShape | None) -> str | None:
     """Return why `share_of` refuses a `PICKED` side, either one, or `None` when neither is.
 
-    analysis-mcp's `run_share_of` refuses `share_of_grain_mismatch` unless
-    each key's numerator periods equal its denominator periods. A picked
-    side holds one year per entity, which equals the other side's periods
-    only by chance, whether that side is a series, a pooled total or
-    another picked frame.
+    analysis-mcp's `run_share_of` divides each key over the periods both
+    sides report, so a picked side would run, and the result would answer
+    another question. A side summed across entities (a pooled denominator,
+    an un-keyed numerator) adds each entity's value at the year its own max
+    or min fell in, so a year's total holds only the entities whose extreme
+    fell there. A keyed share gives each entity's share in the year its
+    measure peaked, which is not its largest share. The max or min of the
+    shares over every year answers both readings, so every picked side is
+    refused with that order.
     """
     if TimeLabel.PICKED not in (shape.time, other.time if other is not None else None):
         return None
     return (
-        "share_of needs each entity's years to be the same on both sides, and one side holds "
-        "each entity's max or min at the year it fell in, one year per entity; compute the "
+        "share_of divides each entity by the other side in the same year, and one side holds "
+        "each entity's max or min at the year it fell in, one year per entity, so the share "
+        "would be the one in that year, not the largest or smallest share; compute the "
         "share_of over every year, then take the max or min of the shares"
     )
 
@@ -1173,6 +1404,7 @@ def _rejects_share_of(
         or _mixed_levels("a share", shape)
         or _rejects_picked_share(shape, other)
         or _rejects_paired_periods("share_of", shape, other)
+        or _rejects_one_sided_rate("share_of", shape, other)
     )
     if reason is not None:
         return reason
@@ -1202,8 +1434,9 @@ def _rejects_share_of(
             else "read the share_of's side from the frame that rank reads, keeping its entity"
         )
         return (
-            "a share_of per entity needs each entity's periods on both sides to match, and "
-            f"{_CUT_PER_PERIOD}; {order}"
+            "a share_of per entity divides each entity over the periods both sides report, and "
+            f"{_CUT_PER_PERIOD}, so its shares would cover only the periods it made the cut; "
+            f"{order}"
         )
     # Only a numerator descending from the same limited frame is sure to hold
     # nothing the limit dropped, and it would divide each entity's value by
@@ -1215,20 +1448,91 @@ def _rejects_share_of(
             "the call at the first numerator entity the limit dropped; compute the share_of "
             f"over the unlimited denominator, then rank the shares with the limit{by_share}"
         )
-    return _rejects_share_of_axis(shape, axis=axis, scope=scope, other=other)
+    reason = _rejects_share_of_axis(shape, axis=axis, scope=scope, other=other)
+    if reason is None and other is not None:
+        reason = _rejects_pooled_rate(shape, axis=axis, scope=scope, other=other)
+    return reason
+
+
+# What a side `quotient_of` refuses holds, by its value kind. analysis-mcp
+# refuses each (`quotient_of_side_unit_unsupported`, `derived_input_ordinal`),
+# and a side in a composed unit with them (`_no_quotient_part`): none is an
+# amount in a unit of its own to compose into the result's.
+_NO_QUOTIENT_PART: Final = {
+    ValueKind.RATIO: "a share or a relative growth, a ratio already",
+    ValueKind.ORDINAL: "a rank position, which has no unit",
+}
+
+
+def _no_quotient_part(shape: FrameShape) -> str | None:
+    """What `shape` holds that no `quotient_of` divides, or `None` when it has a unit of its own."""
+    if shape.composed_unit:
+        return "a quotient already, or a figure computed from one, in a unit two measures compose"
+    return _NO_QUOTIENT_PART.get(shape.value)
+
+
+def _rejects_quotient_of_axis(
+    shape: FrameShape, *, axis: str | None, denominator_axis: str | None, other: FrameShape | None
+) -> str | None:
+    """Return why a quotient_of's keys name no role of its sides, or `None` when they do.
+
+    `shape` is the numerator, looked up under `axis`, and `other` the
+    denominator, looked up under `denominator_axis`, its own phrase for the
+    same entities. With `axis` alone every key divides by the denominator's
+    one total, and the denominator's roles are not read.
+    """
+    if axis is None:
+        return None
+    reason = _names_no_role("axis", axis, "the numerator", shape.roles)
+    if reason is None and denominator_axis is not None and other is not None:
+        reason = _names_no_role(
+            "denominator_axis", denominator_axis, "the denominator", other.roles
+        )
+        if reason is not None:
+            return f"{reason}, so no key has a counterpart to divide by"
+    return reason
+
+
+def _rejects_quotient_of(
+    shape: FrameShape,
+    *,
+    axis: str | None = None,
+    denominator_axis: str | None = None,
+    other: FrameShape | None = None,
+) -> str | None:
+    reason = (
+        _several_measures("quotient_of", shape)
+        or _mixed_levels("a quotient", shape)
+        or _rejects_paired_periods("quotient_of", shape, other)
+    )
+    if reason is not None:
+        return reason
+    if (held := _no_quotient_part(shape)) is not None:
+        return (
+            "quotient_of divides one measured value by another, and this side holds "
+            f"{held}; divide the measured series it was computed from"
+        )
+    return _rejects_quotient_of_axis(
+        shape, axis=axis, denominator_axis=denominator_axis, other=other
+    )
 
 
 def _rejects_compare(shape: FrameShape, *, other: FrameShape | None = None) -> str | None:
-    return _several_measures("compare", shape) or _rejects_paired_periods("compare", shape, other)
+    return (
+        _several_measures("compare", shape)
+        or _rejects_paired_periods("compare", shape, other)
+        or _rejects_one_sided_rate("compare", shape, other)
+    )
 
 
 def _rejects_sum_of(shape: FrameShape, *, other: FrameShape | None = None) -> str | None:
     reason = _several_measures("sum_of", shape) or _rejects_paired_periods("sum_of", shape, other)
     if reason is not None:
         return reason
-    if shape.value in (ValueKind.RATIO, ValueKind.ORDINAL):
+    if shape.composed_unit or shape.value in (ValueKind.RATIO, ValueKind.ORDINAL):
+        held = "per-unit figure from a quotient_of" if shape.composed_unit else shape.value.value
         return (
-            f"sum_of adds two values in one unit, and this side holds a {shape.value.value}, "
+            f"sum_of adds two values in one unit, and this side holds a {held}, "
             "which does not add up; sum the measured series first, then compute on the total"
         )
     if other is not None and other.value is not shape.value:
@@ -1249,6 +1553,7 @@ _REJECT_RULES: dict[ShapeVerb, Callable[..., str | None]] = {
     ShapeVerb.RANK: _rejects_rank,
     ShapeVerb.FILTER: _rejects_filter,
     ShapeVerb.SHARE_OF: _rejects_share_of,
+    ShapeVerb.QUOTIENT_OF: _rejects_quotient_of,
     ShapeVerb.COMPARE: _rejects_compare,
     ShapeVerb.SUM_OF: _rejects_sum_of,
     ShapeVerb.JOIN: _rejects_join,
@@ -1260,20 +1565,22 @@ def rejects(verb: ShapeVerb, shape: FrameShape, **options: object) -> str | None
 
     The single place every verb's *in* rule is written, so `planner.plan`
     and `compiler.shapes` share one answer to "may this step read that
-    shape". A two-sided verb (`share_of`, `compare`, `sum_of`, `join`) is called once
-    per side, with that side as `shape`; its cross-side checks (the period
-    labels both sides match on, and `share_of`'s axis) take the counterpart
-    as the `other` keyword and read the same regardless of which side is
-    passed as which.
+    shape". A two-sided verb (`share_of`, `quotient_of`, `compare`, `sum_of`,
+    `join`) is called once per side, with that side as `shape`; its
+    cross-side checks take the counterpart as the `other` keyword. The
+    period labels both sides match on read the same regardless of which
+    side is passed as which; the axis of a `share_of` or a `quotient_of` is
+    stated on the numerator's call, with the denominator as `other`.
 
     Args:
         verb: Which verb's rule to check.
         shape: The candidate input shape.
         options: The verb's own options -- see each rule function for which
-            it reads (`by_entity`/`by_period`/`by_breakdown` for aggregate, `change` for
-            growth, `axis`/`among`/`window`/`per_period` for rank,
+            it reads (`by_entity`/`by_period`/`by_breakdown`/`reduction` for aggregate,
+            `change` for growth, `axis`/`among`/`window`/`per_period`/`reduction` for rank,
             `axis`/`scope`/`other`/`entity` for share_of, where `entity` is
-            the one entity the side passed as `shape` narrows to, and
+            the one entity the side passed as `shape` narrows to,
+            `axis`/`denominator_axis`/`other` for quotient_of, and
             `other` for compare, sum_of and join), and `place_level` and
             `period_threshold` for filter, whether it states a
             `PlaceLevel` and a `PeriodThreshold`.

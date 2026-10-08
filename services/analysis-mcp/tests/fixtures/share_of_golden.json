@@ -18,13 +18,13 @@
       "time_period": "2022",
       "numerator_value": 55303000000.0,
       "denominator_value": 25130000000000.0,
-      "share": 0.002200676482292081
+      "percent": 0.22006764822920813
     },
     {
       "time_period": "2023",
       "numerator_value": 63575000000.0,
       "denominator_value": 26486000000000.0,
-      "share": 0.002400324699841426
+      "percent": 0.24003246998414257
     }
   ]
 }

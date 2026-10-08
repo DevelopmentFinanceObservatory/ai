@@ -41,11 +41,18 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    ComposedUnit,
+    UnitCell,
 )
 
+from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.columnar import distinct, frame_from_columns, repeated
-from analysis_mcp.engine.common import Exclusions, FacetSelection, facet_columns
+from analysis_mcp.engine.common import (
+    Exclusions,
+    FacetSelection,
+    agreed_facets,
+    facet_columns,
+)
 from analysis_mcp.engine.compare import (
     CompareNonFiniteResultError,
     SideSlice,
@@ -83,7 +90,7 @@ class SumOfResult:
     stat_var: str
     left_stat_vars: tuple[str, ...]
     right_stat_vars: tuple[str, ...]
-    unit: str | UnitRequest | None
+    unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     left_facet_selections: tuple[FacetSelection, ...]
     right_facet_selections: tuple[FacetSelection, ...]
@@ -98,34 +105,6 @@ class SumOfResult:
     exclusions: Exclusions = field(default_factory=Exclusions)
 
 
-def _shared_facets(
-    left: Sequence[FacetSelection], right: Sequence[FacetSelection]
-) -> tuple[tuple[FacetSelection, ...], tuple[str, ...]]:
-    """The facet selections both sides declare with the same value, and a
-    warning for every axis the result leaves unbound because the sides
-    disagree on it or only one side declares it."""
-    left_map = {selection.axis: selection.ref for selection in left}
-    right_map = {selection.axis: selection.ref for selection in right}
-    shared: list[FacetSelection] = []
-    warnings: list[str] = []
-    for axis in dict.fromkeys((*left_map, *right_map)):
-        left_ref, right_ref = left_map.get(axis), right_map.get(axis)
-        if left_ref == right_ref:
-            shared.append(FacetSelection(axis=axis, ref=cast("str", left_ref)))
-        elif left_ref is not None and right_ref is not None:
-            warnings.append(
-                f"facet {axis!r} differs between the sides (left {left_ref!r}, right "
-                f"{right_ref!r}); the sum carries no value for this axis."
-            )
-        else:
-            side, ref = ("left", left_ref) if left_ref is not None else ("right", right_ref)
-            warnings.append(
-                f"facet {axis!r} is declared only on the {side} side ({ref!r}); the sum "
-                "carries no value for this axis."
-            )
-    return tuple(shared), tuple(warnings)
-
-
 def run_sum_of(
     left_frame: Frame,
     right_frame: Frame,
@@ -133,14 +112,16 @@ def run_sum_of(
     stat_var: str,
     left_entity: Mapping[str, str],
     right_entity: Mapping[str, str],
-    left_pinned_unit: str | UnitRequest | None = None,
-    right_pinned_unit: str | UnitRequest | None = None,
+    left_pinned_unit: UnitCell | None = None,
+    right_pinned_unit: UnitCell | None = None,
 ) -> SumOfResult:
     """Add `left_frame`'s (narrowed by `left_entity`) and `right_frame`'s
     (narrowed by `right_entity`) single-entity series over their
     intersected periods, labelling every result row `stat_var`. See the
     module docstring for the facet policy and `analysis_mcp.engine.compare`
-    for the refusals the pairing raises.
+    for the refusals the pairing raises. A side whose resolved unit is
+    composed raises `ComposedUnitSumError`, after the pairing's own unit
+    rules.
     """
     left, right = slice_pair(
         left_frame,
@@ -150,11 +131,14 @@ def run_sum_of(
         left_pinned_unit=left_pinned_unit,
         right_pinned_unit=right_pinned_unit,
     )
+    for side, side_slice in (("left", left), ("right", right)):
+        if isinstance(side_slice.unit, ComposedUnit):
+            raise ComposedUnitSumError(side_slice.unit, side=side)
     shared_facets: tuple[FacetSelection, ...] = ()
     facet_warnings: tuple[str, ...] = ()
     if left.populated and right.populated:
-        shared_facets, facet_warnings = _shared_facets(
-            left.facet_selections, right.facet_selections
+        shared_facets, facet_warnings = agreed_facets(
+            left.facet_selections, right.facet_selections, sides=("left", "right"), result="sum"
         )
 
     alignment = align_periods(left, right, left_frame=left_frame, right_frame=right_frame)

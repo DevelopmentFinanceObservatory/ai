@@ -88,6 +88,56 @@
       "expected_op_spec_hash": "ops_3ccfa76a9cffa5bea6fe67f400077ab7"
     },
     {
+      "name": "aggregate-composed-unit-pin-order-a",
+      "description": "aggregate pinned to a composed unit, a converted unit over a StatVar part",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [],
+        "aggregation": "sum",
+        "unit": {
+          "numerator": {
+            "currency": "EUR",
+            "prices": "constant",
+            "base_year": 2020
+          },
+          "denominator": {
+            "stat_var": "dcid:Count_Person"
+          }
+        }
+      },
+      "expected_op_spec_hash": "ops_d103ef841f5bda750923220458d90e1c"
+    },
+    {
+      "name": "aggregate-composed-unit-pin-order-b",
+      "description": "the same composed pin with its members and its numerator's members in another order; matches order-a",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "aggregate",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "group_by": [],
+        "aggregation": "sum",
+        "unit": {
+          "denominator": {
+            "stat_var": "dcid:Count_Person"
+          },
+          "numerator": {
+            "base_year": 2020,
+            "prices": "constant",
+            "currency": "EUR"
+          }
+        }
+      },
+      "expected_op_spec_hash": "ops_d103ef841f5bda750923220458d90e1c"
+    },
+    {
       "name": "filter-ordered-threshold",
       "description": "filter with a single ordered_threshold predicate",
       "classification": "positive",
@@ -370,6 +420,29 @@
       "expected_op_spec_hash": "ops_293419959ce9704d6fa2281f67fd1446"
     },
     {
+      "name": "quotient-of-keyed-two-frames",
+      "description": "quotient_of dividing one frame by another, keyed by recipient and paired by name with the denominator's observationAbout",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "quotient_of",
+        "frame_ref": {
+          "spec_id": "spec_e3b0c44298fc1c149afbf4c8996fb924",
+          "content_version": "cv_4b825dc642cb6eb9a060e54bf8d69288"
+        },
+        "denominator_frame_ref": {
+          "spec_id": "spec_11111111111111111111111111111111",
+          "content_version": "cv_22222222222222222222222222222222"
+        },
+        "numerator_by": [
+          "recipient"
+        ],
+        "denominator_by": {
+          "recipient": "observationAbout"
+        }
+      },
+      "expected_op_spec_hash": "ops_3be552e176b1f83c647e7c755b407728"
+    },
+    {
       "name": "join-two-frames",
       "description": "join always needs two genuinely distinct frames -- right_frame_ref is required, not defaulted (join's own parameters landed in #38b)",
       "classification": "positive",
@@ -446,7 +519,7 @@
     },
     {
       "name": "unknown-verb-refused-at-parse",
-      "description": "a verb outside the closed set of seven refuses before minting is ever reached",
+      "description": "a verb outside the closed set refuses before minting is ever reached",
       "classification": "negative",
       "op_spec": {
         "verb": "delete",

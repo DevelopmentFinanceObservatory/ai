@@ -11,6 +11,7 @@ so its three tools mount whatever listens on the platform's address.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import re
@@ -60,6 +61,7 @@ from fastmcp.tools.base import ToolResult
 from fastmcp.utilities.lifespan import combine_lifespans
 from harness import combined_mcp
 from harness.combined_mcp import (
+    COMBINED_MCP_INSTRUCTIONS,
     HARNESS_ONLY_TOOLS,
     build_combined_mcp,
     children_start_once,
@@ -440,6 +442,68 @@ async def test_the_presentation_tools_are_listed_with_their_view(
         "describe_frame": None,
         "describe_component": view,
     }
+
+
+@REVISIONS
+async def test_every_listed_tool_has_a_title_and_explicit_annotations(
+    mode: str,
+    revision: str,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        tools = await client.list_tools()
+
+    for tool in tools:
+        assert tool.title, tool.name
+        assert tool.annotations is not None, tool.name
+        for hint in ("read_only_hint", "destructive_hint", "open_world_hint"):
+            assert isinstance(getattr(tool.annotations, hint), bool), (tool.name, hint)
+    assert {t.name for t in tools if t.annotations.read_only_hint is False} == {"write_component"}
+    assert {t.name for t in tools if t.annotations.open_world_hint} == {"write_component"}
+
+
+@REVISIONS
+async def test_the_combined_server_announces_its_instructions_and_the_harness_version(
+    mode: str,
+    revision: str,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    app = create_app(settings=Settings(mcp_api_token=TOKEN))
+
+    async with (
+        running_lifespan(app),
+        Client(mounted_mcp_transport(app, COMBINED, token=TOKEN), mode=mode) as client,
+    ):
+        assert client.protocol_version == revision
+        if mode == "legacy":
+            # The initialize result carries both.
+            instructions = client.instructions
+            server_info = client.server_info
+            assert server_info is not None
+            version = server_info.version
+        else:
+            # The 2026-07-28 revision has no initialize. `server/discover` carries the
+            # instructions, and every result's `_meta` carries the server info.
+            discovered = await client.session.send_discover(revision)
+            instructions = discovered["instructions"]
+            version = discovered["_meta"][_SERVER_INFO]["version"]
+        listed = {tool.name for tool in await client.list_tools()}
+
+    assert instructions == COMBINED_MCP_INSTRUCTIONS
+    assert version == importlib.metadata.version("harness")
+    named = set(re.findall(r"`(\w+)`", instructions))
+    assert named == listed, (
+        f"named but not listed: {sorted(named - listed)}; "
+        f"listed but not named: {sorted(listed - named)}"
+    )
 
 
 async def _through_each(

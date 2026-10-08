@@ -20,6 +20,7 @@ from planner.operations import (
     GrowthOperation,
     JoinOperation,
     Operation,
+    QuotientOfOperation,
     RankOperation,
     RetrieveOperation,
     ShareOfOperation,
@@ -40,6 +41,7 @@ from planner.plan import (
     JoinRequirement,
     Period,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ShareOfRequirement,
@@ -60,6 +62,8 @@ from planner.records import (
     RankAmong,
     RankDirection,
     Reduction,
+    RelativePeriod,
+    RollingWindow,
     StatVarReading,
     ValueThreshold,
 )
@@ -96,8 +100,8 @@ def _population_decision(decision: DecisionFactory, **overrides: object) -> Deci
 # Mirrors `tests/planner/test_plan.py::_every_kind_plan`: `dataset_a` feeds
 # `totals_a` (aggregate), which feeds `growth_a` (growth) and `rank_a` (rank);
 # `dataset_b` feeds `filtered_b` (filter); `joined` (join), `share_a`
-# (share_of), `comparison_a` (comparison) and `sum_a` (sum_of) each read
-# `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
+# (share_of), `quotient_a` (quotient_of), `comparison_a` (comparison) and
+# `sum_a` (sum_of) each read `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
 # workflow step id, so the same id names one thing throughout a row.
 
 _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
@@ -108,6 +112,7 @@ _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
     SumOfRequirement: "sum_a",
     RankRequirement: "rank_a",
     ShareOfRequirement: "share_a",
+    QuotientRequirement: "quotient_a",
     JoinRequirement: "joined",
     FilterRequirement: "filtered_b",
 }
@@ -165,6 +170,12 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         numerator=RequirementSide(input_id="totals_a"),
         denominator=RequirementSide(input_id="filtered_b"),
     )
+    quotient_a = QuotientRequirement(
+        id="quotient_a",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="totals_a"),
+        denominator=RequirementSide(input_id="filtered_b"),
+    )
     comparison_a = ComparisonRequirement(
         id="comparison_a",
         decision_ids=["measure"],
@@ -186,6 +197,7 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         rank_a,
         joined,
         share_a,
+        quotient_a,
         comparison_a,
         sum_a,
     ]
@@ -242,6 +254,12 @@ def _every_kind_translation() -> Translation:
                 numerator=Side(input="totals_a"),
                 denominator=Side(input="filtered_b"),
             ),
+            QuotientOfOperation(
+                id="quotient_a",
+                requirement_id="quotient_a",
+                numerator=Side(input="totals_a"),
+                denominator=Side(input="filtered_b"),
+            ),
             CompareOperation(
                 id="comparison_a",
                 requirement_id="comparison_a",
@@ -255,7 +273,15 @@ def _every_kind_translation() -> Translation:
                 right=Side(input="filtered_b"),
             ),
         ],
-        terminal=["growth_a", "rank_a", "joined", "share_a", "comparison_a", "sum_a"],
+        terminal=[
+            "growth_a",
+            "rank_a",
+            "joined",
+            "share_a",
+            "quotient_a",
+            "comparison_a",
+            "sum_a",
+        ],
     )
 
 
@@ -290,6 +316,7 @@ def _every_kind_workflow() -> Workflow:
             _step("rank_a", tool="rank", from_steps=("dataset_a",)),
             _step("joined", tool="join", from_steps=("filtered_b", "totals_a")),
             _step("share_a", tool="share_of", from_steps=("totals_a", "filtered_b")),
+            _step("quotient_a", tool="quotient_of", from_steps=("totals_a", "filtered_b")),
             _step("comparison_a", tool="compare", from_steps=("totals_a", "filtered_b")),
             _step("sum_a", tool="sum_of", from_steps=("totals_a", "filtered_b")),
         ],
@@ -301,7 +328,15 @@ def _every_kind_workflow() -> Workflow:
             EvidenceBinding(requirement_id="dataset_a", step_id="dataset_a", spec_id=_SPEC_A),
             EvidenceBinding(requirement_id="dataset_b", step_id="dataset_b", spec_id=_SPEC_B),
         ],
-        terminal_steps=["growth_a", "rank_a", "joined", "share_a", "comparison_a", "sum_a"],
+        terminal_steps=[
+            "growth_a",
+            "rank_a",
+            "joined",
+            "share_a",
+            "quotient_a",
+            "comparison_a",
+            "sum_a",
+        ],
     )
 
 
@@ -981,6 +1016,79 @@ def test_a_pooled_share_over_another_dataset_names_its_measure_not_the_shares_ax
     assert sentence == expected
 
 
+@pytest.mark.parametrize(
+    ("numerator_role", "axis", "denominator_axis", "label", "sentence"),
+    [
+        pytest.param(
+            "country",
+            None,
+            None,
+            "Divide GDP by population",
+            "GDP divided by population, at each period both report.",
+            id="one-figure",
+        ),
+        pytest.param(
+            "recipient",
+            "recipient",
+            "country",
+            "Divide GDP by population per recipient",
+            "GDP per recipient, each divided by its own population, at each period both report.",
+            id="keyed-by-counterpart",
+        ),
+        pytest.param(
+            "recipient",
+            "recipient",
+            None,
+            "Divide GDP by population per recipient",
+            "GDP per recipient, each divided by population, at each period both report.",
+            id="keyed-over-one-total",
+        ),
+    ],
+)
+def test_a_quotient_names_both_measures_and_whose_denominator_each_entity_divides_by(
+    decision: DecisionFactory,
+    numerator_role: str,
+    axis: str | None,
+    denominator_axis: str | None,
+    label: str,
+    sentence: str,
+) -> None:
+    plan = Plan(
+        question="q",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="gdp",
+                decision_ids=["measure"],
+                measure="GDP",
+                entities=[Entity(name="Kenya", role=numerator_role)],
+                period=Period(start=2015, end=2024),
+            ),
+            DatasetRequirement(
+                id="population",
+                decision_ids=["measure"],
+                measure="population",
+                entities=[Entity(name="Kenya", role="country")],
+                period=Period(start=2015, end=2024),
+            ),
+            QuotientRequirement(
+                id="quotient",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="gdp"),
+                denominator=RequirementSide(input_id="population"),
+                axis=axis,
+                denominator_axis=denominator_axis,
+            ),
+        ],
+    )
+
+    quotient = plan.requirement("quotient")
+    row = next(row for row in requirement_rows(plan) if row["id"] == "quotient")
+
+    assert _label(quotient, plan) == label
+    assert row["sentence"] == sentence
+
+
 def _pooled_recipient_share_sentence(
     decision: DecisionFactory,
     denominator_steps: list[EvidenceRequirement],
@@ -1137,6 +1245,24 @@ def _per_debtor_share(numerator_id: str) -> ShareOfRequirement:
             ],
             "share of the total of external debt service paid",
             id="share-of-a-total",
+        ),
+        pytest.param(
+            [
+                _debt(),
+                _debt("revenue", "government revenue"),
+                _total("debt", GroupBy.ENTITY, GroupBy.PERIOD),
+                QuotientRequirement(
+                    id="quotient",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="total"),
+                    denominator=RequirementSide(input_id="revenue"),
+                    axis="debtor",
+                    denominator_axis="debtor",
+                ),
+                _top_five("quotient", per_period=True),
+            ],
+            "the total of external debt service paid divided by government revenue",
+            id="quotient-of-a-total",
         ),
         pytest.param(
             [
@@ -1945,4 +2071,67 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
     assert dataset_row["sentence"] == (
         "Retrieves external debt service paid for Kenya, 2015-2024, broken down by sector, "
         "each code rolled up to the top level of its hierarchy."
+    )
+
+
+def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
+    decision: DecisionFactory,
+) -> None:
+    """The years stay as the plan read them, and each sentence says which of
+    them move: the whole span, one end of it, or a threshold's year."""
+    latest = RelativePeriod(offset=0)
+    plan = Plan(
+        question="How has Kenya's debt service grown?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="debt",
+                decision_ids=["measure"],
+                measure="external debt service paid",
+                entities=[Entity(name="Kenya", role="debtor")],
+                period=Period(start=2015, end=2024),
+                period_end_open=True,
+            ),
+            GrowthRequirement(
+                id="last_five",
+                input_id="debt",
+                window_start=2019,
+                window_end=2024,
+                rolling=RollingWindow(window_start=RelativePeriod(offset=-5), window_end=latest),
+            ),
+            GrowthRequirement(
+                id="since",
+                input_id="debt",
+                window_start=2015,
+                window_end=2024,
+                rolling=RollingWindow(window_end=latest),
+            ),
+            GrowthRequirement(id="fixed", input_id="debt", window_start=2015, window_end=2020),
+            FilterRequirement(
+                id="newest",
+                input_id="debt",
+                predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
+            ),
+        ],
+    )
+
+    sentences = {str(row["id"]): row["sentence"] for row in requirement_rows(plan)}
+
+    measure = "external debt service paid"
+    assert sentences == {
+        "debt": f"Retrieves {measure} for Kenya, 2015-2024, following the newest year.",
+        "last_five": (
+            f"The change in {measure} from 2019 to 2024, following the newest year, read as "
+            "a percentage change."
+        ),
+        "since": (
+            f"The change in {measure} from 2015 to 2024, the end following the newest year, "
+            "read as a percentage change."
+        ),
+        "fixed": f"The change in {measure} from 2015 to 2020, read as a percentage change.",
+        "newest": "Keeps rows where the year is exactly 2024, following the newest year.",
+    }
+    assert (
+        _label(plan.requirement("last_five"), plan)
+        == f"Growth in {measure}, 2019-2024, following the newest year"
     )

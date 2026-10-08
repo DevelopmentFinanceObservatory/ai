@@ -632,5 +632,211 @@
       "status": "pending_approval",
       "approved_revision": null
     }
+  },
+  "growth": {
+    "revision": "d7c706057fb64450792bf50ad96134284dd4f9faa6fa9f36a4838f8e43b4acac",
+    "requirement_revisions": {
+      "debt_service": "0838a4f6e2f4b731b2c1a992aca2f0dfc25c00df1bc5aaa03e52da2c756f1c3f"
+    },
+    "plan": {
+      "question": "how much did Kenya's and Ghana's debt service grow since 2015?",
+      "answer_mode": "computed",
+      "decisions": [],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "debt_service",
+          "decision_ids": [],
+          "measure": "external debt service paid",
+          "entities": [
+            {
+              "name": "Kenya",
+              "role": null
+            },
+            {
+              "name": "Ghana",
+              "role": null
+            }
+          ],
+          "across": null,
+          "period": {
+            "start": 2010,
+            "end": 2024
+          },
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_spec_id": null,
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null,
+          "breakdown": null
+        },
+        {
+          "kind": "filter",
+          "id": "recent",
+          "decision_ids": [],
+          "input_id": "debt_service",
+          "predicates": [
+            {
+              "kind": "period_threshold",
+              "op": "gte",
+              "year": 2015
+            }
+          ]
+        },
+        {
+          "kind": "growth",
+          "id": "growth",
+          "decision_ids": [],
+          "input_id": "recent",
+          "window_start": 2015,
+          "window_end": 2024,
+          "change": "relative"
+        }
+      ],
+      "declined": [],
+      "asks": [],
+      "answered": [],
+      "translation": {
+        "operations": [
+          {
+            "kind": "retrieve",
+            "id": "debt_service",
+            "requirement_id": "debt_service",
+            "spec_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          {
+            "kind": "filter",
+            "id": "recent",
+            "requirement_id": "recent",
+            "input": "debt_service",
+            "predicates": [
+              {
+                "kind": "period_threshold",
+                "op": "gte",
+                "year": 2015
+              }
+            ]
+          },
+          {
+            "kind": "growth",
+            "id": "growth",
+            "requirement_id": "growth",
+            "input": "recent",
+            "window_start": 2015,
+            "window_end": 2024,
+            "change": "relative"
+          }
+        ],
+        "terminal": [
+          "growth"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "debt_service",
+            "operation_id": "debt_service",
+            "tool": {
+              "server": "data-mcp",
+              "name": "get_data"
+            },
+            "args": {
+              "spec_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "bindings": {},
+            "implementation_version": null,
+            "input_schema_hash": "hash",
+            "output_schema_hash": null,
+            "expected_role_keys": []
+          },
+          {
+            "id": "recent",
+            "operation_id": "recent",
+            "tool": {
+              "server": "analysis-mcp",
+              "name": "filter"
+            },
+            "args": {},
+            "bindings": {
+              "frame_ref": {
+                "from_step": "debt_service",
+                "output": "frame_ref"
+              }
+            },
+            "implementation_version": null,
+            "input_schema_hash": "hash",
+            "output_schema_hash": null,
+            "expected_role_keys": []
+          },
+          {
+            "id": "growth",
+            "operation_id": "growth",
+            "tool": {
+              "server": "analysis-mcp",
+              "name": "growth"
+            },
+            "args": {},
+            "bindings": {
+              "frame_ref": {
+                "from_step": "recent",
+                "output": "frame_ref"
+              }
+            },
+            "implementation_version": null,
+            "input_schema_hash": "hash",
+            "output_schema_hash": null,
+            "expected_role_keys": []
+          }
+        ],
+        "sources": [
+          {
+            "spec_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sentence": "external debt service paid",
+            "searched_as": null,
+            "confidence": null,
+            "has_data": true,
+            "measure_label": null,
+            "stat_var_member_count": null,
+            "stat_var_member_count_exact": null,
+            "served_count": null,
+            "shape_member_count": null,
+            "shape_member_digest": null,
+            "entities": [],
+            "open_entity_axes": null,
+            "unit_ref": null,
+            "unit_label": null,
+            "unit_per_series": null,
+            "provenance_ref": null,
+            "provenance_label": null,
+            "coverage_kind": null,
+            "coverage_window": null,
+            "identity": null,
+            "definition": null,
+            "open_axes": [],
+            "slot_codes": null,
+            "stat_var_reading": null,
+            "stat_var_reading_set_by": null
+          }
+        ],
+        "evidence_bindings": [
+          {
+            "requirement_id": "debt_service",
+            "step_id": "debt_service",
+            "spec_id": "spec_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "terminal_steps": [
+          "growth"
+        ],
+        "warnings": []
+      },
+      "version": 1,
+      "previous_version": null,
+      "status": "pending_approval",
+      "approved_revision": null
+    }
   }
 }

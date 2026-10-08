@@ -38,6 +38,34 @@ class RefusalKind(StrEnum):
     EMPTY_ANSWER = "empty_answer"
     SHAPE_MISMATCH = "shape_mismatch"
     COLUMN_UNBOUND = "column_unbound"
+    ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+
+
+class LeftOutSeries(StrictModel):
+    """One series counted for the newest period that holds no value at it.
+
+    `root` indexes the populations `resolve_anchor` was sent, in their
+    canonical order, and `coordinates` is the series' value in each of its
+    columns.
+    """
+
+    root: int
+    coordinates: dict[str, str]
+
+
+class AnchorResult(StrictModel):
+    """The newest period one group of a run's rolling steps stands on, as
+    `resolve_anchor` answered it (`compiler.rolling.anchor_groups`).
+
+    `anchor_key` names the stored resolution every rolling call of the group
+    was sent, `period` is the newest period held by at least half of the
+    series of each population, and `left_out` the series that hold no value
+    at it.
+    """
+
+    anchor_key: str
+    period: str
+    left_out: tuple[LeftOutSeries, ...] = ()
 
 
 class StepRecord(StrictModel):
@@ -48,7 +76,10 @@ class StepRecord(StrictModel):
     declared in its own `structured_content`, or `None` when it declared
     none. `get_data`, whose structured result is a `Manifest`, declares no
     `rows`, and declares `role_keys` and `stat_var_count` whenever it read
-    the frame.
+    the frame. `dropped_key_count` is how many keys the call declared it left
+    out of its result (`executor.artifacts.declared_dropped_key_count`), 0
+    for every call but a keyed `quotient_of` that found some numerator keys
+    no denominator.
     """
 
     step_id: Identifier
@@ -59,6 +90,7 @@ class StepRecord(StrictModel):
     row_count: int | None = None
     role_keys: tuple[str, ...] | None = None
     stat_var_count: int | None = None
+    dropped_key_count: int = Field(default=0, ge=0)
 
 
 class EvidenceRecord(StrictModel):
@@ -80,13 +112,20 @@ class EvidenceRecord(StrictModel):
 
 
 class Accepted(StrictModel):
-    """Every step ran and every requirement is met."""
+    """Every step ran and every requirement is met.
+
+    `anchors` holds each newest period the run's rolling steps were written
+    from, in the order resolved, one for each group of rolling steps
+    (`compiler.rolling.anchor_groups`), with groups over the same series and
+    frames sharing one. Empty when no step rolls.
+    """
 
     kind: Literal["accepted"] = "accepted"
     revision: str
     evidence: tuple[EvidenceRecord, ...]
     steps: tuple[StepRecord, ...]
     results: dict[str, FrameRef]
+    anchors: tuple[AnchorResult, ...] = ()
 
 
 class MethodChoiceNeeded(StrictModel):
@@ -99,7 +138,8 @@ class MethodChoiceNeeded(StrictModel):
     and the evidence their retrievals recorded, in the plan's own step order.
     `answers` holds, by step id, each finished terminal step's frame that
     passed the answer check an accepted run applies (`executor.run._Run.
-    _answer_refusal`).
+    _answer_refusal`). `anchors` holds the newest period of each group of
+    rolling steps the run resolved before it stopped.
     """
 
     kind: Literal["method_choice_needed"] = "method_choice_needed"
@@ -112,6 +152,7 @@ class MethodChoiceNeeded(StrictModel):
     completed: tuple[StepRecord, ...]
     evidence: tuple[EvidenceRecord, ...] = ()
     answers: dict[str, FrameRef] = Field(default_factory=dict)
+    anchors: tuple[AnchorResult, ...] = ()
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 
@@ -124,7 +165,8 @@ class Refused(StrictModel):
     and the evidence their retrievals recorded, in the plan's own step order.
     `answers` holds, by step id, each finished terminal step's frame that
     passed the answer check an accepted run applies (`executor.run._Run.
-    _answer_refusal`).
+    _answer_refusal`). `anchors` holds the newest period of each group of
+    rolling steps the run resolved before it stopped.
     """
 
     kind: Literal["refused"] = "refused"
@@ -138,6 +180,7 @@ class Refused(StrictModel):
     completed: tuple[StepRecord, ...] = ()
     evidence: tuple[EvidenceRecord, ...] = ()
     answers: dict[str, FrameRef] = Field(default_factory=dict)
+    anchors: tuple[AnchorResult, ...] = ()
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 
@@ -155,7 +198,8 @@ class RediscoveryNeeded(StrictModel):
     and the evidence their retrievals recorded, in the plan's own step order.
     `answers` holds, by step id, each finished terminal step's frame that
     passed the answer check an accepted run applies (`executor.run._Run.
-    _answer_refusal`).
+    _answer_refusal`). `anchors` holds the newest period of each group of
+    rolling steps the run resolved before it stopped.
     """
 
     kind: Literal["rediscovery_needed"] = "rediscovery_needed"
@@ -168,6 +212,7 @@ class RediscoveryNeeded(StrictModel):
     completed: tuple[StepRecord, ...]
     evidence: tuple[EvidenceRecord, ...] = ()
     answers: dict[str, FrameRef] = Field(default_factory=dict)
+    anchors: tuple[AnchorResult, ...] = ()
     also_stopped: tuple[MethodChoiceNeeded | Refused | RediscoveryNeeded, ...] = ()
 
 

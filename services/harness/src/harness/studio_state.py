@@ -490,12 +490,13 @@ class ConversationState:
         ordered: list[str] = []
         if self.composition is not None:
             ordered = [block.component_id for block in self.composition.blocks]
-        if focus and focus in self.components and focus not in ordered:
-            ordered.append(focus)
         # Bounded: the newest blocks win on a very large canvas, and
         # `_digest_block` cuts each block's fields, so the digest stays within
-        # `CANVAS_DIGEST_MAX_BYTES` however long the conversation runs.
+        # `CANVAS_DIGEST_MAX_BYTES` however long the conversation runs. The
+        # focus card is kept whatever its age, in place of the oldest.
         ordered = ordered[-_DIGEST_BLOCK_CAP:]
+        if focus and focus in self.components and focus not in ordered:
+            ordered = [*ordered, focus][-_DIGEST_BLOCK_CAP:]
         blocks = [
             _digest_block(cid, self.components[cid]) for cid in ordered if cid in self.components
         ]
@@ -1967,9 +1968,9 @@ def _turn_identities(
         except ValueError:
             continue
         if source.identity is not None:
-            found[spec_id] = RecordedIdentity(identity=source.identity)
+            found[spec_id] = RecordedIdentity(identity=source.identity, groups=source.groups)
     found.update(
-        (source.spec_id, RecordedIdentity(identity=source.identity))
+        (source.spec_id, RecordedIdentity(identity=source.identity, groups=source.groups))
         for plan in plans
         for source in plan.sources
         if source.identity is not None

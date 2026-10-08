@@ -13,27 +13,51 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
+from common.recipe import build_recipe
+from common.row_budget import RowBudget
 from compiler.compile import compile_plan
 from compiler.sources import member_digest
-from compiler.surface import McpSurface, ToolSurfaceUnavailableError
+from compiler.surface import (
+    McpSurface,
+    ProgressCallback,
+    ToolCallResult,
+    ToolSchema,
+    ToolSurfaceUnavailableError,
+)
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.client import UpstreamClient
+from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from data_mcp.settings import Settings as DataMcpSettings
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
-from harness.provenance import data_artifact
+from harness.graph import (
+    ORCHESTRATOR_FRAMES_KEY,
+    _link_evidence_to_terminal_frames,
+    frame_id_for,
+    register_frames,
+)
+from harness.mcp_client import McpExecutor
+from harness.mcp_deadlines import McpTimeoutPolicy
+from harness.orchestrator_tools import build_orchestrator_tools
+from harness.provenance import ProvenanceStore, data_artifact
+from harness.recipe_replay import Pending, Replayed, replay_recipe
+from harness.recipe_replay import Refused as ReplayRefused
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
+from harness.studio_translate import _RecordingSurface
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -66,13 +90,20 @@ from planner.records import (
     EntityIn,
     GrowthChange,
     Period,
+    PeriodThreshold,
     PlaceLevel,
     PlaceType,
     RankAmong,
     RankDirection,
+    RelativePeriod,
+    RollingWindow,
 )
 from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from translator.mechanical import build_translation
+
+from .replay_support import FakeApis
+from .resolved_revision import resolved_revision
 
 SPEC_ID = "spec_" + "5" * 32
 CONTENT_VERSION = "cv_" + "6" * 32
@@ -616,8 +647,8 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
     assert finished.status is PlanStatus.COMPLETED
     assert [step.step_id for step in outcome.steps] == ["health", "total", "health_share", "ranked"]
     rank_digest = outcome.steps[-1].digest
-    assert "#1 donor=country/FRA" in rank_digest
-    assert "0.75" in rank_digest
+    # France's share of its own total, 0.75, in per cent.
+    assert "#1 donor=country/FRA: 75 [" in rank_digest
 
 
 RANK_IDENTITY: dict[str, Any] = {
@@ -1101,6 +1132,695 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     assert rank_step.row_count == 3
     assert "limit 3 (kept 3 of 6 ranked entities)" in rank_step.digest
     assert "beyond_limit (ranked beyond the limit): 3 row(s)" in rank_step.digest
+
+
+ROLLING_SPEC = "spec_" + "9" * 32
+ROLLING_YEARS = range(2015, 2025)
+
+
+def _rolling_last_years(*, reporting_2024: int) -> dict[str, int]:
+    """Each donor's last reported year: 2024 for the first `reporting_2024`, 2023 for the rest."""
+    return {
+        donor.ref: 2024 if position < reporting_2024 else 2023
+        for position, donor in enumerate(TOP_DONORS)
+    }
+
+
+def _rolling_parquet_bytes(last_years: Mapping[str, int]) -> bytes:
+    """One row a year for each donor, from 2015 through its last reported year."""
+    rows = [
+        (ref, str(year), 10.0 * (position + 1) + (year - 2015))
+        for position, (ref, last) in enumerate(last_years.items())
+        for year in ROLLING_YEARS
+        if year <= last
+    ]
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:OdaDisbursed"] * len(rows), type=pa.string()),
+            "donor": pa.array([row[0] for row in rows], type=pa.string()),
+            "time_period": pa.array([row[1] for row in rows], type=pa.string()),
+            "value": pa.array([row[2] for row in rows], type=pa.float64()),
+            "unit": pa.array(["USD"] * len(rows), type=pa.string()),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def _rolling_mint_response(last_years: Mapping[str, int], content_version: str) -> dict[str, Any]:
+    parquet = _rolling_parquet_bytes(last_years)
+    return {
+        "schema_version": 1,
+        "definition": {
+            "schema_version": 1,
+            "spec_id": ROLLING_SPEC,
+            "identity": TOP_DONOR_IDENTITY,
+        },
+        "content_version": content_version,
+        "coverage": {
+            "rows": sum(last - 2014 for last in last_years.values()),
+            "dimensions": [{"label": "years", "count": len(ROLLING_YEARS)}],
+        },
+        "citation": {"text": "OECD DAC", "sources": []},
+        "trace": {"graph_revision": "g1", "facets": []},
+        "warnings": [],
+        "artifacts": [
+            {
+                "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
+                "bytes": len(parquet),
+                "media_type": "application/vnd.apache.parquet",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "tier": "working",
+                "url": "https://signed.example/should-not-be-fetched",
+                "url_expires_at": "2026-08-11T00:15:00+00:00",
+            }
+        ],
+        "statistics": [
+            {
+                "stat_var": "dcid:OdaDisbursed",
+                "entities": [{"role": "donor", "ref": ref}],
+                "facet": {"unit": "USD"},
+                "observations": last - 2014,
+                "first": {"value": 10.0, "period": "2015"},
+                "latest": {"value": 20.0, "period": str(last)},
+                "minimum": {"value": 10.0, "period": "2015"},
+                "maximum": {"value": 20.0, "period": str(last)},
+            }
+            for ref, last in last_years.items()
+        ],
+    }
+
+
+def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
+    """`retrieve -> filter(the last five years) -> growth(over them)`, both planned against 2024."""
+    source = SelectedSource(
+        spec_id=ROLLING_SPEC,
+        sentence="ODA disbursed by six DAC donors, 2015 to 2024",
+        has_data=True,
+        served_count=1,
+        shape_member_digest=member_digest(["OdaDisbursed"]),
+        entities=TOP_DONORS,
+        unit_ref="USD",
+        unit_label="US dollars",
+        coverage_window=Period(start=2015, end=2024),
+        identity=TOP_DONOR_IDENTITY,
+    )
+    since = (PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5)),)
+    window: dict[str, Any] = {
+        "window_start": 2019,
+        "window_end": 2024,
+        "rolling": RollingWindow(
+            window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+        ),
+    }
+    draft = Plan(
+        question="How has each donor's ODA changed over the last five years?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_disbursed",
+                decision_ids=["measure"],
+                measure="ODA disbursed",
+                entities=[Entity(name=donor.label, role="donor") for donor in TOP_DONORS],
+                period=Period(start=2015, end=2024),
+                period_end_open=True,
+            ),
+            FilterRequirement(
+                id="recent_years",
+                decision_ids=["measure"],
+                input_id="oda_disbursed",
+                predicates=since,
+            ),
+            GrowthRequirement(
+                id="recent_growth", decision_ids=["measure"], input_id="recent_years", **window
+            ),
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(
+        operations=[
+            RetrieveOperation(id="oda", requirement_id="oda_disbursed", spec_id=ROLLING_SPEC),
+            FilterOperation(
+                id="recent", requirement_id="recent_years", input="oda", predicates=since
+            ),
+            GrowthOperation(id="change", requirement_id="recent_growth", input="recent", **window),
+        ],
+        terminal=["change"],
+    )
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas=schemas,
+        discovered={"oda_disbursed": source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+
+
+class _CountingSurface:
+    """A surface that passes every call through and keeps each call's tool and arguments."""
+
+    def __init__(self, surface: McpSurface) -> None:
+        self._surface = surface
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def list_tools(self) -> list[ToolSchema]:
+        return await self._surface.list_tools()
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        self.calls.append((tool.name, dict(arguments)))
+        return await self._surface.call_tool(
+            tool=tool, arguments=arguments, on_progress=on_progress
+        )
+
+
+@pytest.fixture
+def run_rolling_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+) -> Callable[..., Any]:
+    """Return a coroutine function running the rolling plan twice over one version of its data.
+
+    `reporting_2024` donors of six report 2024 in the version served under
+    `content_version`. Returns the first run's outcome, the recipe of its
+    final frame, the second run's outcome, and every call both runs made.
+    """
+
+    async def _run(
+        *, reporting_2024: int, content_version: str
+    ) -> tuple[Accepted, dict[str, Any], Accepted, list[tuple[str, dict[str, Any]]]]:
+        last_years = _rolling_last_years(reporting_2024=reporting_2024)
+
+        async def fake_fetch(**_kwargs: Any) -> bytes:
+            return _rolling_parquet_bytes(last_years)
+
+        monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+        mint_response = _register_statistics(
+            _stats_registry, _rolling_mint_response(last_years, content_version)
+        )
+
+        def mint_handler(request: httpx2.Request) -> httpx2.Response:
+            if request.url.path == "/api/datasets":
+                return httpx2.Response(200, json=mint_response)
+            raise AssertionError(f"unexpected call to {request.url.path}")
+
+        client_holder.set_client(
+            UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
+        )
+        app = create_app(settings=Settings(mcp_api_token="test-token"))
+        async with running_lifespan(app):
+            surface = _CountingSurface(
+                McpSurface(
+                    sources={
+                        "data-mcp": mounted_mcp_transport(
+                            app, f"{DATA_MCP_MOUNT_PATH}/mcp", token="test-token"
+                        ),
+                        "analysis-mcp": mounted_mcp_transport(
+                            app, f"{ANALYSIS_MCP_MOUNT_PATH}/mcp", token="test-token"
+                        ),
+                    }
+                )
+            )
+            schemas = {schema.name: schema for schema in await surface.list_tools()}
+            _, outcome = await execute_approved_plan(
+                _rolling_approved_plan(decision, schemas), surface=surface
+            )
+            assert isinstance(outcome, Accepted), outcome
+            recipe = await build_recipe(outcome.results["change"], store=get_frame_store())
+            _, again = await execute_approved_plan(
+                _rolling_approved_plan(decision, schemas), surface=surface
+            )
+            assert isinstance(again, Accepted), again
+        return outcome, recipe, again, surface.calls
+
+    return _run
+
+
+async def test_a_rolling_plan_runs_from_the_newest_year_half_of_the_series_hold(
+    run_rolling_plan: Callable[..., Any],
+) -> None:
+    """The plan states 2019 to 2024. The run takes the newest year at least half
+    of the retrieved series hold, writes the filter's and the growth's years
+    from it, and analysis-mcp accepts both calls against the stored resolution,
+    which the final frame's recipe then names."""
+    # Two of six donors report 2024, so the newest year half of them hold is 2023.
+    outcome, recipe, again, calls = await run_rolling_plan(
+        reporting_2024=2, content_version="cv_" + "a" * 32
+    )
+
+    assert [name for name, _ in calls[:4]] == ["get_data", "resolve_anchor", "filter", "growth"]
+    (_, kept), (_, growth) = calls[2:4]
+    assert [predicate["value"] for predicate in kept["predicates"]] == ["2018"]
+    assert (growth["window_start"], growth["window_end"]) == ("2018", "2023")
+    (anchor,) = outcome.anchors
+    assert (anchor.period, anchor.left_out) == ("2023", ())
+    assert recipe["anchor"]["period"] == "2023"
+    # A second run of the plan over the same frames resolves once more, to the
+    # same stored resolution, and so to the same final frame.
+    assert [name for name, _ in calls].count("resolve_anchor") == 2
+    assert again.anchors == outcome.anchors
+    assert again.results == outcome.results
+
+    # Three of six report 2024 in the next version: 2024 stands, the three
+    # donors without it are named, and the final frame is another pair.
+    later, later_recipe, _, later_calls = await run_rolling_plan(
+        reporting_2024=3, content_version="cv_" + "b" * 32
+    )
+
+    _, later_growth = later_calls[3]
+    assert (later_growth["window_start"], later_growth["window_end"]) == ("2019", "2024")
+    (later_anchor,) = later.anchors
+    assert later_anchor.period == later_recipe["anchor"]["period"] == "2024"
+    assert sorted(series.coordinates["donor"] for series in later_anchor.left_out) == sorted(
+        donor.ref for donor in TOP_DONORS[3:]
+    )
+    assert later_anchor.anchor_key != anchor.anchor_key
+    assert later.results["change"] != outcome.results["change"]
+
+
+# --- the cards of a rolling plan, drawn by the orchestrator's make_charts --------
+
+_GROWTH_TITLE = "ODA growth over the last five years"
+# The run's frame covers 2018 to 2023, and the frame of the two donors 2019 to 2024.
+_RUN_YEARS_TITLE = "ODA growth, 2018-2023"
+_YEAR_TITLE = "ODA growth to 2024"
+
+
+class _Platform:
+    """Every MCP client `McpExecutor` holds, as one stand-in. `get_data` goes to
+    the mounted data-mcp. The presentation tools answer from the store and keep
+    what was written: `describe_frame` gives the view of the frame the store
+    holds, `write_component` stores the intent and answers with a resolved
+    revision on the frame the intent names, and `describe_component` reads the
+    stored intent back."""
+
+    def __init__(self, surface: McpSurface) -> None:
+        self._surface = surface
+        self.writes: list[dict[str, Any]] = []
+        self.stored: dict[str, dict[str, Any]] = {}
+
+    async def __aenter__(self) -> _Platform:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def call_tool(self, tool: str, arguments: dict[str, Any], **_: Any) -> SimpleNamespace:
+        if tool == "get_data":
+            result = await self._surface.call_tool(
+                tool=ToolId(server="data-mcp", name="get_data"), arguments=arguments
+            )
+            return self._result(result.structured_content or {}, is_error=result.is_error)
+        if tool == "describe_frame":
+            return self._result(await self._view(arguments["frame_ref"]))
+        if tool == "describe_component":
+            component_id = arguments["component_id"]
+            return self._result(
+                {
+                    "component_id": component_id,
+                    "revision": 1,
+                    "stored_intent": self.stored[component_id],
+                }
+            )
+        assert tool == "write_component", tool
+        self.writes.append(arguments)
+        intent = arguments["intent"]
+        component_id = arguments.get("component_id") or f"cmp_{len(self.stored) + 1}"
+        self.stored[component_id] = {**self.stored.get(component_id, {}), **intent}
+        stored = self.stored[component_id]
+        envelope = resolved_revision(
+            stored["type"], component_id=component_id, frame_ref=stored["frame_ref"]
+        )
+        return self._result(
+            {"component_id": component_id, "revision": 1, "fact_summary": {}},
+            meta={RESOLVED_PAYLOAD_META_KEY: envelope},
+        )
+
+    @staticmethod
+    def _result(
+        body: Mapping[str, Any], *, is_error: bool = False, meta: dict[str, Any] | None = None
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=is_error, structured_content=dict(body), content=[], meta=meta
+        )
+
+    @staticmethod
+    async def _view(frame_ref: Mapping[str, Any]) -> dict[str, Any]:
+        held = await get_frame_store().get(FrameRef.model_validate(frame_ref))
+        assert held is not None
+        donors = sorted(set(held[0].table.column("donor").to_pylist()))
+        return {
+            "dimensions": [
+                {"name": "stat_var", "plural": False, "values": ["dcid:OdaDisbursed"]},
+                {"name": "donor", "plural": True, "values": donors, "total_count": len(donors)},
+            ]
+        }
+
+    def created(self) -> list[dict[str, Any]]:
+        """The intent of every create the platform received."""
+        return [write["intent"] for write in self.writes if "component_id" not in write]
+
+
+@dataclass
+class _Studio:
+    """The orchestrator's tools over a real `McpExecutor`, after one run of the
+    rolling plan: the run's final frame under its chart id, the platform
+    stand-in, and each replay's populations and analysis calls."""
+
+    tools: dict[str, Any]
+    context: SimpleNamespace
+    executor: McpExecutor
+    platform: _Platform
+    run_frame: dict[str, Any]
+    replays: list[Sequence[Mapping[str, Any]]]
+    replay_calls: list[str]
+    pending: list[bool]
+    closed_end: list[int]
+
+    async def charts(self, *charts: dict[str, Any]) -> list[dict[str, Any]]:
+        drawn = await self.tools["make_charts"](list(charts), self.context)
+        return drawn["charts"]
+
+    def chart(self, donors: Sequence[str], *, title: str = _GROWTH_TITLE, **members: Any) -> Any:
+        return {
+            "frame": frame_id_for(self.run_frame),
+            "type": "bar_chart",
+            "title": title,
+            "select_json": json.dumps({"donor": list(donors)}),
+            **members,
+        }
+
+    async def newest_year(self, frame_ref: Mapping[str, Any]) -> str:
+        recipe = await build_recipe(FrameRef.model_validate(frame_ref), store=get_frame_store())
+        return recipe["anchor"]["period"]
+
+
+@pytest.fixture
+async def studio(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+) -> AsyncIterator[_Studio]:
+    """The orchestrator's tools after the rolling plan ran on the mounted services.
+
+    Two of six donors report 2024, so the run's newest year is 2023. The executor
+    is the deployed `McpExecutor` with `_Platform` for its clients, and its
+    `card_replay` runs `replay_recipe` over the mounted analysis-mcp and
+    data-mcp's own mint, publishing to a fake dfo-apis.
+    """
+    last_years = _rolling_last_years(reporting_2024=2)
+
+    async def fake_fetch(**_kwargs: Any) -> bytes:
+        return _rolling_parquet_bytes(last_years)
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    mint_response = _register_statistics(
+        _stats_registry, _rolling_mint_response(last_years, "cv_" + "a" * 32)
+    )
+
+    closed_end: list[int] = []
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path != "/api/datasets":
+            raise AssertionError(f"unexpected call to {request.url.path}")
+        if not closed_end:
+            return httpx2.Response(200, json=mint_response)
+        # The same data under a definition that ends at a stated year.
+        window = {"kind": "range", "start_year": 2015, "end_year": closed_end[0]}
+        identity = {**TOP_DONOR_IDENTITY, "requested_window": window}
+        definition = {**mint_response["definition"], "identity": identity}
+        return httpx2.Response(200, json={**mint_response, "definition": definition})
+
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
+    )
+    apis = FakeApis()
+    assembler = apis.assembler()
+    replays: list[Sequence[Mapping[str, Any]]] = []
+    replay_calls: list[str] = []
+    pending: list[bool] = []
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    async with running_lifespan(app):
+        surface = McpSurface(
+            sources={
+                "data-mcp": mounted_mcp_transport(
+                    app, f"{DATA_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+                "analysis-mcp": mounted_mcp_transport(
+                    app, f"{ANALYSIS_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+            }
+        )
+
+        async def analysis(*, name: str, arguments: Mapping[str, object]) -> ToolCallResult:
+            replay_calls.append(name)
+            return await surface.call_tool(
+                tool=ToolId(server="analysis-mcp", name=name), arguments=arguments
+            )
+
+        async def card_replay(
+            recipe: Mapping[str, Any],
+            *,
+            deadline: CallDeadline,
+            populations: Sequence[Mapping[str, Any]],
+        ) -> Replayed | Pending | ReplayRefused:
+            replays.append(populations)
+            if pending:
+                return Pending(retry_after_s=1.5, reason="mint_queued")
+            async with apis.client() as client:
+                return await replay_recipe(
+                    recipe,
+                    deadline=deadline,
+                    call_tool=analysis,
+                    store=get_frame_store(),
+                    apis=client,
+                    publish=assembler.publish_frame,
+                    row_budget=RowBudget(max_rows=100_000),
+                    populations=populations,
+                )
+
+        platform = _Platform(surface)
+        monkeypatch.setattr(
+            McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
+        )
+        provenance = ProvenanceStore()
+        executor = McpExecutor(settings=Settings(), provenance=provenance, card_replay=card_replay)
+        # The plan's steps run as the Studio runs them, so the final frame has
+        # the provenance a card on it must cite.
+        recording = _RecordingSurface(surface, provenance=provenance)
+        schemas = {schema.name: schema for schema in await surface.list_tools()}
+        plan = _rolling_approved_plan(decision, schemas)
+        _, outcome = await execute_approved_plan(plan, surface=recording)
+        assert isinstance(outcome, Accepted), outcome
+        assert plan.workflow is not None
+        _link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
+        run_frame = outcome.results["change"].model_dump()
+
+        # `plan_done` lists a plan's final frames to the agent this way.
+        described = await executor(tool="describe_frame", args={"frame_ref": run_frame})
+        frames: dict[str, Any] = {}
+        register_frames(frames, [(run_frame, described["view"])])
+        tools = build_orchestrator_tools(resolver=_no_search, executor=executor)
+        yield _Studio(
+            tools={tool.__name__: tool for tool in tools},
+            context=SimpleNamespace(
+                state={"surface": "studio", ORCHESTRATOR_FRAMES_KEY: frames},
+                invocation_id="inv_1",
+            ),
+            executor=executor,
+            platform=platform,
+            run_frame=run_frame,
+            replays=replays,
+            replay_calls=replay_calls,
+            pending=pending,
+            closed_end=closed_end,
+        )
+        await assembler.aclose()
+
+
+async def _no_search(**_kwargs: Any) -> dict[str, Any]:
+    raise AssertionError("these tests search for nothing")
+
+
+async def test_charts_of_two_donors_are_drawn_on_a_frame_of_their_own_latest_year(
+    studio: _Studio,
+) -> None:
+    """The run takes 2023, the newest year half of the six donors hold. The
+    charts draw the two donors that report 2024, so the recipe is replayed once
+    over those two and both charts stand on the frame that ends in 2024. The
+    chart titled with years is refused and the agent is told why."""
+    usa, germany = (donor.ref for donor in TOP_DONORS[:2])
+    frame_view = studio.context.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(studio.run_frame)]
+
+    chart, table, titled = await studio.charts(
+        studio.chart([usa, germany]),
+        studio.chart([usa, germany], type="table", title="ODA growth by donor"),
+        studio.chart([usa, germany], title=_YEAR_TITLE),
+    )
+
+    # The agent reads that the frame rolls in the view it charts from.
+    assert frame_view["view"]["rolling"] is True
+    assert "facts" in chart
+    assert "facts" in table
+    # 2024 is the newest year of the two donors' frame, not of the run's.
+    assert sorted(titled) == ["error", "title"]
+    assert "names 2024" in titled["error"]
+    # One replay for the two charts' one selection, with the rolling steps run once.
+    assert studio.replays == [
+        [{"spec_id": ROLLING_SPEC, "bindings": {"donor": sorted([usa, germany])}}]
+    ]
+    assert studio.replay_calls == ["resolve_anchor", "filter", "growth"]
+    first, second = studio.platform.created()
+    assert first["frame_ref"] == second["frame_ref"] != studio.run_frame
+    assert await studio.newest_year(studio.run_frame) == "2023"
+    assert await studio.newest_year(first["frame_ref"]) == "2024"
+    # No chart states a period, so each shows whatever its frame holds.
+    assert [sorted(intent) for intent in (first, second)] == [
+        ["frame_ref", "select", "title", "type"]
+    ] * 2
+
+
+async def test_charts_of_the_plans_own_donors_are_drawn_on_the_runs_frame(
+    studio: _Studio,
+) -> None:
+    (drawn,) = await studio.charts(studio.chart([donor.ref for donor in TOP_DONORS]))
+
+    assert "facts" in drawn
+    assert studio.replays == []
+    assert [intent["frame_ref"] for intent in studio.platform.created()] == [studio.run_frame]
+
+
+async def test_a_replay_still_pending_draws_no_chart_on_the_runs_frame(studio: _Studio) -> None:
+    usa, germany = (donor.ref for donor in TOP_DONORS[:2])
+    studio.pending.append(True)
+
+    chart, table = await studio.charts(
+        studio.chart([usa, germany]), studio.chart([usa, germany], type="table")
+    )
+
+    assert [sorted(drawn) for drawn in (chart, table)] == [["error", "title"]] * 2
+    assert "Asking again shortly may work" in chart["error"]
+    assert studio.platform.writes == []
+    # The second chart of the same series waits out the first one's refusal.
+    assert len(studio.replays) == 1
+
+
+async def test_a_revise_to_other_donors_is_refused_and_its_card_rebuilt_on_their_frame(
+    studio: _Studio,
+) -> None:
+    """The Edit Card route's two writes, at the executor every route shares: a
+    revise that selects other series is refused, and the same card written as a
+    new one lands on the frame of those series, after one replay."""
+    usa, germany = (donor.ref for donor in TOP_DONORS[:2])
+    await studio.charts(studio.chart([donor.ref for donor in TOP_DONORS]))
+    stored = studio.platform.stored["cmp_1"]
+
+    async def revise(patch: dict[str, Any]) -> dict[str, Any]:
+        return await studio.executor(
+            tool="write_component", args={"component_id": "cmp_1", "intent": patch}
+        )
+
+    retitled = await revise({"title": "How each donor's ODA changed"})
+    year = await revise({"title": _RUN_YEARS_TITLE})
+    narrowed = await revise({"select": {"donor": [usa, germany]}})
+    rebuilt = await studio.executor(
+        tool="write_component",
+        args={"intent": {**stored, "select": {"donor": [usa, germany]}}},
+    )
+
+    assert retitled["outcome"] == "ok"
+    assert year["refusal"]["code"] == "title_quotes_rolling_period"
+    assert narrowed["refusal"]["code"] == "rolling_select_needs_new_frame"
+    assert rebuilt["outcome"] == "ok"
+    assert len(studio.replays) == 1
+    # Of the two refused revises nothing reached the platform.
+    assert [write.get("component_id") for write in studio.platform.writes] == [
+        None,
+        "cmp_1",
+        None,
+    ]
+    moved = studio.platform.created()[-1]["frame_ref"]
+    assert await studio.newest_year(moved) == "2024"
+    assert rebuilt["component"]["provenance"]["inputs"][0] == moved
+
+
+async def test_a_chart_of_fetched_data_counts_its_period_back_from_the_latest_data(
+    studio: _Studio,
+) -> None:
+    """No plan: the agent fetches a dataset and charts it. `latest_periods`
+    writes a relative window, whose card may name no year, and a chart of every
+    period the frame covers may."""
+    fetched = await studio.tools["fetch"](ROLLING_SPEC, studio.context)
+    (frame,) = fetched["frames"]
+    usa = TOP_DONORS[0].ref
+
+    def chart(title: str, **members: Any) -> dict[str, Any]:
+        return {
+            "frame": frame["frame"],
+            "type": "line_chart",
+            "title": title,
+            "select_json": json.dumps({"donor": usa}),
+            **members,
+        }
+
+    moving, titled, fixed = await studio.charts(
+        chart("US ODA over the last five years", latest_periods=5),
+        chart("US ODA, 2020-2024", latest_periods=5),
+        chart("US ODA, 2015-2024"),
+    )
+
+    assert "rolling" not in frame["view"]
+    assert "facts" in moving
+    assert "facts" in fixed
+    assert sorted(titled) == ["error", "title"]
+    assert "names 2024" in titled["error"]
+    # The platform resolves a relative window as it stores the card, so the
+    # titled chart was stored before its title could be judged, and not drawn.
+    relative, _, whole = studio.platform.created()
+    assert relative["window"] == {
+        "start": {"anchor": "latest", "offset": -4},
+        "end": {"anchor": "latest", "offset": 0},
+    }
+    assert relative["frame_ref"]["spec_id"] == ROLLING_SPEC
+    assert "window" not in whole
+    assert studio.replays == []
+
+
+async def test_a_chart_counting_back_on_data_fetched_to_a_stated_end_year_is_refused(
+    studio: _Studio,
+) -> None:
+    """A definition that ends at 2024 is rebuilt over the same years for good, so
+    a chart counting back from the latest data on it could never move. The agent
+    is told to fetch with an open end; a chart of the whole frame is drawn."""
+    studio.closed_end.append(2024)
+    fetched = await studio.tools["fetch"](ROLLING_SPEC, studio.context)
+    (frame,) = fetched["frames"]
+    chart = {
+        "frame": frame["frame"],
+        "type": "line_chart",
+        "title": "US ODA",
+        "select_json": json.dumps({"donor": TOP_DONORS[0].ref}),
+    }
+
+    moving, whole = await studio.charts({**chart, "latest_periods": 5}, chart)
+
+    assert sorted(moving) == ["error", "title"]
+    assert '{"kind": "range", "start_year": Y}' in moving["error"]
+    assert "facts" in whole
+    assert [("window" in intent) for intent in studio.platform.created()] == [False]
 
 
 async def test_a_surface_reading_the_mounted_services_without_the_token_is_refused(

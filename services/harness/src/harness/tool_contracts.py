@@ -30,6 +30,13 @@ _PRESENTATION_TOOLS = frozenset({"describe_frame", "write_component", "describe_
 REFUSAL_ORIGIN_SERVICE = "service"
 REFUSAL_ORIGIN_HARNESS = "harness"
 
+# The `no_data.reason` search gives a part that asks for a measure divided by
+# a denominator (a per-head figure) when no series is published in that form.
+DENOMINATOR_NOT_AVAILABLE = "denominator_not_available"
+
+# The `no_data.reason` search gives a part whose unit phrase it could not read.
+UNIT_NOT_RESOLVED = "unit_not_resolved"
+
 # The platform states warning severities as info/warning/degraded; the wire
 # vocabulary is info/warn/degraded. Anything unrecognised maps to "warn" --
 # an unknown severity reads as a caution.
@@ -565,4 +572,11 @@ def _part_digest(envelope: dict[str, Any], part: dict[str, Any], count: int) -> 
     }
 
 
-__all__ = ["ResolverError", "chosen_part", "graph_envelope", "reading_facts"]
+__all__ = [
+    "DENOMINATOR_NOT_AVAILABLE",
+    "UNIT_NOT_RESOLVED",
+    "ResolverError",
+    "chosen_part",
+    "graph_envelope",
+    "reading_facts",
+]

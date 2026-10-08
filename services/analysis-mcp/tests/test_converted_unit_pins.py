@@ -1,9 +1,10 @@
-"""A converted unit as a verb's unit pin, called through the MCP server.
+"""A converted or composed unit as a verb's unit pin, called through the MCP
+server.
 
-Each frame here mixes two converted units, so every verb refuses it
-unpinned as `unit_heterogeneous`. The refusal's `fix["units"]` lists each
-unit in the form the pin parameter accepts, and passing one back verbatim
-resolves the call in one further call (issue #276).
+Each frame here mixes two converted units or two composed units, so every
+verb refuses it unpinned as `unit_heterogeneous`. The refusal's
+`fix["units"]` lists each unit in the form the pin parameter accepts, and
+passing one back verbatim resolves the call in one further call (issue #276).
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from fastmcp import Client
 
 EUR_CONSTANT = {"currency": "EUR", "prices": "constant", "base_year": 2020}
 USD_CURRENT = {"currency": "USD", "prices": "current"}
+EUR_PER_KM = {"numerator": EUR_CONSTANT, "denominator": "dcid:SquareKilometer"}
+USD_PER_PERSON = {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}}
 STAT_VAR = "dcid:ConvertedStatVar"
 OTHER_STAT_VAR = "dcid:OtherConvertedStatVar"
 
@@ -49,12 +52,24 @@ def _minimal_trace() -> Trace:
     )
 
 
+@pytest.fixture(
+    params=[(EUR_CONSTANT, USD_CURRENT), (EUR_PER_KM, USD_PER_PERSON)],
+    ids=["converted", "composed"],
+)
+def units(request: pytest.FixtureRequest) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The two units a mixed frame holds, in the order a refusal lists them."""
+    return request.param
+
+
 async def _seed_mixed(
-    store: InMemoryMaterialisationStore, *, stat_var: str = STAT_VAR
+    store: InMemoryMaterialisationStore,
+    units: tuple[dict[str, Any], dict[str, Any]],
+    *,
+    stat_var: str = STAT_VAR,
 ) -> dict[str, str]:
     """A two-donor, two-year frame holding every row once in each of
-    `EUR_CONSTANT` and `USD_CURRENT`, the shape `get_data` returns when a
-    definition's members convert into different units."""
+    `units`, the shape `get_data` returns when a definition's members
+    convert into different units."""
     frame = Frame.build(
         role_keys=["donor"],
         rows=[
@@ -65,7 +80,7 @@ async def _seed_mixed(
                 "value": value * scale,
                 "unit": unit,
             }
-            for unit, scale in ((EUR_CONSTANT, 1.0), (USD_CURRENT, 2.0))
+            for unit, scale in zip(units, (1.0, 2.0), strict=True)
             for donor, base in (("dcid:DonorA", 10.0), ("dcid:DonorB", 20.0))
             for year, value in (("2020", base), ("2021", base * 1.5))
         ],
@@ -94,9 +109,24 @@ async def _call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return result.structured_content
 
 
-async def _arguments(verb: str, store: InMemoryMaterialisationStore) -> dict[str, Any]:
-    """Arguments for `verb` over mixed frames, without any unit pin."""
-    frame_ref = await _seed_mixed(store)
+_DONOR_A = {"donor": "dcid:DonorA"}
+_DONOR_B = {"donor": "dcid:DonorB"}
+# The entity bindings of each verb that reads two slices of one frame.
+_ENTITY_ARGUMENTS = {
+    "compare": {"left_entity": _DONOR_A, "right_entity": _DONOR_B},
+    "sum_of": {"left_entity": _DONOR_A, "right_entity": _DONOR_B},
+    "share_of": {"numerator_entity": _DONOR_A},
+    "quotient_of": {"numerator_entity": _DONOR_A, "denominator_entity": _DONOR_B},
+}
+
+
+async def _arguments(
+    verb: str,
+    store: InMemoryMaterialisationStore,
+    units: tuple[dict[str, Any], dict[str, Any]] = (EUR_CONSTANT, USD_CURRENT),
+) -> dict[str, Any]:
+    """Arguments for `verb` over frames mixing `units`, without any unit pin."""
+    frame_ref = await _seed_mixed(store, units)
     if verb == "aggregate":
         return {"frame_ref": frame_ref, "aggregation": "sum", "group_by": ["donor"]}
     if verb == "rank":
@@ -108,17 +138,11 @@ async def _arguments(verb: str, store: InMemoryMaterialisationStore) -> dict[str
             "window_end": "2021",
             "entity_by": ["donor"],
         }
-    if verb == "compare":
-        return {
-            "frame_ref": frame_ref,
-            "left_entity": {"donor": "dcid:DonorA"},
-            "right_entity": {"donor": "dcid:DonorB"},
-        }
-    if verb == "share_of":
-        return {"frame_ref": frame_ref, "numerator_entity": {"donor": "dcid:DonorA"}}
+    if verb in _ENTITY_ARGUMENTS:
+        return {"frame_ref": frame_ref, **_ENTITY_ARGUMENTS[verb]}
     return {
         "frame_ref": frame_ref,
-        "right_frame_ref": await _seed_mixed(store, stat_var=OTHER_STAT_VAR),
+        "right_frame_ref": await _seed_mixed(store, units, stat_var=OTHER_STAT_VAR),
     }
 
 
@@ -128,39 +152,45 @@ PIN_PARAMETERS = {
     "rank": ("unit",),
     "growth": ("unit",),
     "compare": ("left_unit", "right_unit"),
+    "sum_of": ("left_unit", "right_unit"),
     "share_of": ("numerator_unit", "denominator_unit"),
+    "quotient_of": ("numerator_unit", "denominator_unit"),
     "join": ("left_unit", "right_unit"),
 }
 
 
 @pytest.mark.parametrize("verb", PIN_PARAMETERS)
-async def test_a_mixed_converted_frame_resolves_by_pinning_a_refusal_candidate(
-    verb: str, store: InMemoryMaterialisationStore
+async def test_a_mixed_frame_resolves_by_pinning_a_refusal_candidate(
+    verb: str,
+    store: InMemoryMaterialisationStore,
+    units: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
-    arguments = await _arguments(verb, store)
+    arguments = await _arguments(verb, store, units)
 
     refusal = await _call(verb, arguments)
 
     assert refusal["code"] == "unit_heterogeneous"
-    assert refusal["fix"]["units"] == [EUR_CONSTANT, USD_CURRENT]
+    assert refusal["fix"]["units"] == list(units)
 
     await _assert_pin_resolves(
-        verb, arguments, refusal["fix"]["units"][1], store=store, expected=USD_CURRENT
+        verb, arguments, refusal["fix"]["units"][1], store=store, expected=units[1]
     )
 
 
 @pytest.mark.parametrize("verb", PIN_PARAMETERS)
 async def test_a_refusal_candidate_id_passed_back_as_the_pin_resolves_the_frame(
-    verb: str, store: InMemoryMaterialisationStore
+    verb: str,
+    store: InMemoryMaterialisationStore,
+    units: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
-    arguments = await _arguments(verb, store)
+    arguments = await _arguments(verb, store, units)
 
     refusal = await _call(verb, arguments)
 
     assert refusal["code"] == "unit_heterogeneous"
     candidate = refusal["fix"]["disambiguation"]["candidates"][0]
-    assert candidate["id"] == EUR_CONSTANT
-    await _assert_pin_resolves(verb, arguments, candidate["id"], store=store, expected=EUR_CONSTANT)
+    assert candidate["id"] == units[0]
+    await _assert_pin_resolves(verb, arguments, candidate["id"], store=store, expected=units[0])
 
 
 async def _assert_pin_resolves(
@@ -172,9 +202,37 @@ async def _assert_pin_resolves(
     expected: dict[str, object],
 ) -> None:
     """Retry `verb` with every unit-pin parameter set to `pin`, and check the
-    call succeeds and its stored trace resolved to `expected`."""
-    result = await _call(verb, {**arguments, **dict.fromkeys(PIN_PARAMETERS[verb], pin)})
+    call succeeds and its stored trace resolved to `expected`. `quotient_of`
+    writes the two pinned sides as one composed unit, and refuses a pin that
+    is composed already, and `share_of` resolves to per cent with the pin
+    recorded as its numerator's unit. A verb that sums refuses a composed
+    pin too:
+    `sum_of` on its left side, `aggregate` and `rank` until they take a
+    mean, and `share_of` on its two-donor denominator until that side reads
+    one donor."""
+    arguments = {**arguments, **dict.fromkeys(PIN_PARAMETERS[verb], pin)}
+    result = await _call(verb, arguments)
 
+    if "numerator" in expected and verb in ("aggregate", "rank", "sum_of"):
+        assert result["code"] == "composed_unit_sum_unsupported"
+        assert result["retry_mode"] == "correct_and_retry"
+        side = {"side": "left"} if verb == "sum_of" else {}
+        assert result["fix"] == {"verb": verb, "unit": expected, **side}
+        if verb == "sum_of":
+            return
+        result = await _call(verb, {**arguments, "aggregation": "mean"})
+
+    if "numerator" in expected and verb == "share_of":
+        assert result["code"] == "composed_unit_sum_unsupported"
+        assert result["fix"] == {"verb": verb, "unit": expected, "side": "denominator"}
+        result = await _call(verb, {**arguments, "denominator_entity": _DONOR_A})
+
+    if verb == "quotient_of":
+        if "numerator" in expected:
+            assert result["code"] == "quotient_of_side_unit_unsupported"
+            assert result["fix"]["reason"] == "composed"
+            return
+        expected = {"numerator": expected, "denominator": expected}
     assert "code" not in result, result
     held = await store.get(
         FrameRef(spec_id=result["spec_id"], content_version=result["content_version"])
@@ -182,7 +240,14 @@ async def _assert_pin_resolves(
     assert held is not None
     _frame, trace = held
     assert isinstance(trace, Trace)
-    assert trace.model_dump(mode="json")["applied_policy"]["resolved_unit"] == expected
+    applied_policy = trace.model_dump(mode="json")["applied_policy"]
+    if verb == "share_of":
+        # A share is in per cent whatever its sides' unit; the pinned unit
+        # is the numerator's.
+        assert applied_policy["resolved_unit"] == "Percent"
+        assert applied_policy["detail"]["numerator_resolved_unit"] == expected
+        return
+    assert applied_policy["resolved_unit"] == expected
 
 
 async def test_a_converted_pin_absent_from_the_frame_refuses_with_pinnable_candidates(
@@ -202,6 +267,51 @@ async def test_a_converted_pin_absent_from_the_frame_refuses_with_pinnable_candi
         '{"currency": "EUR", "prices": "constant", "base_year": 2020}, '
         '{"currency": "USD", "prices": "current"}.'
     )
+
+
+async def test_every_unit_pin_advertises_a_composed_unit_as_a_refusal_s_object() -> None:
+    """Each pin's input schema states the converted object's members beside
+    the ref string. A composed unit is copied from a refusal, so the schema
+    admits an object for it and spells out none of its members."""
+    async with Client(server_module.mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    for verb, parameters in PIN_PARAMETERS.items():
+        for parameter in parameters:
+            forms = tools[verb].input_schema["properties"][parameter]["anyOf"]
+            converted, composed = [form for form in forms if form["type"] == "object"]
+            assert converted["required"] == ["currency", "prices"]
+            assert converted["additionalProperties"] is False
+            assert composed.keys() == {"type", "description"}
+            assert "unit_heterogeneous" in composed["description"]
+
+
+async def test_a_malformed_composed_pin_is_refused_before_any_engine_runs(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    arguments = await _arguments("aggregate", store, (EUR_PER_KM, USD_PER_PERSON))
+
+    async with Client(server_module.mcp) as client:
+        result = await client.call_tool(
+            "aggregate",
+            {**arguments, "unit": {"numerator": "dcid:USDollar", "denominator": EUR_PER_KM}},
+            raise_on_error=False,
+        )
+
+    assert result.is_error is True
+
+
+async def test_a_composed_pin_absent_from_the_frame_refuses_with_pinnable_candidates(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    arguments = await _arguments("aggregate", store, (EUR_PER_KM, USD_PER_PERSON))
+    absent = {"numerator": "dcid:USDollar", "denominator": "dcid:SquareKilometer"}
+
+    refusal = await _call("aggregate", {**arguments, "unit": absent})
+
+    assert refusal["code"] == "unit_heterogeneous"
+    assert refusal["fix"]["pinned_unit"] == absent
+    assert refusal["fix"]["units"] == [EUR_PER_KM, USD_PER_PERSON]
 
 
 async def test_a_malformed_converted_pin_is_refused_before_any_engine_runs(

@@ -6,7 +6,7 @@ with the alternatives it considered and who resolved it, and the
 for a calculation the plan states -- the series a retrieved result rests on,
 stated in fields code can check a retrieved frame against -- and every
 calculation is itself a typed requirement (aggregate, growth, comparison,
-rank, share of, join, filter), citing the decisions that fixed it, if any
+rank, share of, quotient of, join, filter), citing the decisions that fixed it, if any
 were weighed, and naming the requirements it reads. Once a plan states
 requirements, every decision has to be cited by at least one of them, which
 is how the plan shows what each decision is for.
@@ -46,10 +46,11 @@ import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, NamedTuple, Protocol
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
+from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from pydantic import Field, ValidationError, field_validator, model_validator
 
@@ -65,6 +66,7 @@ from planner.records import (
     GroupBy,
     GrowthChange,
     Identifier,
+    OpenPeriodFault,
     Period,
     PeriodThreshold,
     PlaceLevel,
@@ -73,12 +75,16 @@ from planner.records import (
     RankDirection,
     RankLimit,
     Reduction,
+    RollingIssue,
+    RollingPlanError,
+    RollingWindow,
     SpecId,
     StatVarReading,
     StrictModel,
     TaggedModel,
     TitlelessEnum,
     Year,
+    check_rolling_window,
     warn_left_out,
 )
 from planner.shapes import (
@@ -90,15 +96,18 @@ from planner.shapes import (
     filtered,
     grown,
     joined,
+    place_role,
+    quotiented,
     ranked,
     retrieved,
+    role_named,
     shared,
     summed_sides,
     windowed_years,
     year_filter,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import SelectedSource, Workflow
+from planner.workflow import ResolvedGroup, SelectedSource, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +122,19 @@ PLAN_STATE_KEY = "planner:plan"
 PLAN_ROUNDS_STATE_KEY = "planner:rounds"
 
 # The session-state slot holding the `UnsupportedOperation` of every
-# `unsupported` answer `propose_plan` or `translate` gave in the planner's
-# current entry, each of which the recorded plan has to decline. Cleared with
-# `PLAN_ROUNDS_STATE_KEY` when an entry starts, so an ask-the-user resume
-# inside one entry keeps it.
+# `unsupported` answer `propose_plan` or its `translation` gave in the
+# planner's current entry, each of which the recorded plan has to decline.
+# Cleared with `PLAN_ROUNDS_STATE_KEY` when an entry starts, so an
+# ask-the-user resume inside one entry keeps it.
 UNSUPPORTED_STATE_KEY = "planner:unsupported"
+
+# The session-state slot holding the `UnsupportedOperation` of every decline
+# earned in the planner's current entry that the recorded plan may make but
+# need not: a translation that refers a requirement back as unmeetable
+# (`translator.tool._earned_decline`) earns one. It holds for the rest of the
+# entry, whatever later plans change, and no plan owes it. Cleared and kept
+# with `UNSUPPORTED_STATE_KEY`.
+OPTIONAL_DECLINES_STATE_KEY = "planner:optional_declines"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
@@ -174,6 +191,13 @@ DROPPED_SEEDS_STATE_KEY = "planner:dropped_seeds"
 # no drop of a seed takes it. Each is stored whole, its identity included.
 # Unset until a plan pins such a copy.
 WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
+
+# The session-state slot holding what `planner.agent.propose_plan` read about
+# every year a pinned dataset holds, by the pin's spec_id, as its first year and
+# its rows, or null when Search's answer over no window stated no first year.
+# One read answers every requirement and every later proposal of the turn that
+# pins the dataset. Unset until a start that follows the newest data needs one.
+FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 
 # The session-state slot holding the outputs the user asked for, as a JSON
 # list of strings numbered by position, at most `MAX_PLAN_ASKS` of at most
@@ -649,6 +673,14 @@ class DatasetRequirement(TaggedModel):
         ),
     )
     period: Period = Field(description="The years an acceptable result has to cover.")
+    period_end_open: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        description=(
+            "Set when the period follows the newest data: the dataset is retrieved with no "
+            "end year, so later years reach it. `period` still states the years. Needs a "
+            "pinned `source_spec_id`."
+        ),
+    )
     frequency: Literal["annual"] = Field(
         default="annual",
         description="How often an acceptable result is observed; annual is the only frequency this plan states.",
@@ -846,6 +878,22 @@ class AggregateRequirement(TaggedModel):
     )
 
 
+_ROLLING_WINDOW_DESCRIPTION = (
+    "Set when the window follows the newest data: which ends are relative and how far back "
+    "each sits. `window_start` and `window_end` still state the years. Needs "
+    "`period_end_open` on the dataset requirement read."
+)
+
+
+def _years_disagree(requirement_id: str, fault: str) -> RollingPlanError:
+    """`RollingIssue.YEARS_DISAGREE` for `fault`, naming the requirement."""
+    return RollingPlanError(
+        RollingIssue.YEARS_DISAGREE,
+        f"{requirement_id!r}: {fault}",
+        requirement_ids=[requirement_id],
+    )
+
+
 class GrowthRequirement(TaggedModel):
     """The growth of `input_id`'s value from `window_start` to `window_end`."""
 
@@ -872,6 +920,9 @@ class GrowthRequirement(TaggedModel):
             "'absolute' reads a difference in the input's own unit."
         ),
     )
+    rolling: Annotated[RollingWindow | None, HASHED_WHEN_SET] = Field(
+        default=None, description=_ROLLING_WINDOW_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _window_ends_after_it_starts(self) -> GrowthRequirement:
@@ -879,6 +930,16 @@ class GrowthRequirement(TaggedModel):
             raise ValueError(
                 f"growth window must end after it starts; got {self.window_start}-{self.window_end}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _rolling_agrees_with_the_years(self) -> GrowthRequirement:
+        check_rolling_window(
+            self.rolling,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            error=functools.partial(_years_disagree, self.id),
+        )
         return self
 
 
@@ -1005,6 +1066,9 @@ class RankRequirement(TaggedModel):
             "ranked."
         ),
     )
+    rolling: Annotated[RollingWindow | None, HASHED_WHEN_SET] = Field(
+        default=None, description=_ROLLING_WINDOW_DESCRIPTION
+    )
 
     @model_validator(mode="after")
     def _window_is_paired_and_ordered(self) -> RankRequirement:
@@ -1018,6 +1082,16 @@ class RankRequirement(TaggedModel):
             raise ValueError(
                 f"rank window must end after it starts; got {self.window_start}-{self.window_end}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _rolling_agrees_with_the_years(self) -> RankRequirement:
+        check_rolling_window(
+            self.rolling,
+            window_start=self.window_start,
+            window_end=self.window_end,
+            error=functools.partial(_years_disagree, self.id),
+        )
         return self
 
 
@@ -1070,6 +1144,65 @@ class ShareOfRequirement(TaggedModel):
             raise ValueError(
                 "denominator_scope is stated exactly when axis is: an un-keyed share has one "
                 "denominator value and the question does not arise, a keyed share must state it"
+            )
+        return self
+
+
+class QuotientRequirement(TaggedModel):
+    """One measure divided by another, at each period both report.
+
+    For a per-head, per-capita or "divide one by the other" figure, in the
+    unit the two compose.
+    """
+
+    kind: Literal["quotient_of"] = Field(
+        default="quotient_of", description="Tags this requirement as a quotient_of."
+    )
+    id: Identifier = Field(
+        description="This requirement's name; unique within a plan, so a calculation can cite it."
+    )
+    decision_ids: tuple[Identifier, ...] = Field(
+        default=(),
+        max_length=MAX_PLAN_DECISIONS,
+        description="The decisions that fixed this requirement's fields.",
+    )
+    numerator: RequirementSide = Field(description="The side that is divided.")
+    denominator: RequirementSide = Field(description="The side `numerator` is divided by.")
+    axis: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "The numerator's role dimension to compute one quotient per entity on, rather "
+            "than one figure overall. Alone, every entity divides by the denominator's one "
+            "total."
+        ),
+    )
+    denominator_axis: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "The denominator's name for the same entities, so each divides by its own "
+            "counterpart: the role they state there, or 'country' where they state none."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _sides_differ(self) -> QuotientRequirement:
+        if (self.numerator.input_id, self.numerator.entity) == (
+            self.denominator.input_id,
+            self.denominator.entity,
+        ):
+            raise ValueError("a quotient_of's numerator and denominator must differ")
+        return self
+
+    @model_validator(mode="after")
+    def _denominator_axis_needs_an_axis(self) -> QuotientRequirement:
+        if self.denominator_axis is not None and self.axis is None:
+            raise ValueError(
+                "denominator_axis names the denominator's role for the entities axis keys the "
+                "numerator by, so it is stated only with axis"
             )
         return self
 
@@ -1136,6 +1269,29 @@ class FilterRequirement(TaggedModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _rolling_thresholds_share_a_newest_year(self) -> FilterRequirement:
+        """Reject rolling thresholds whose years stand for different newest years.
+
+        Raises:
+            RollingPlanError: `RollingIssue.YEARS_DISAGREE`, naming this filter.
+        """
+        implied = sorted(
+            {
+                predicate.rolling.latest_implied_by(predicate.year)
+                for predicate in self.predicates
+                if isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
+            }
+        )
+        if len(implied) > 1:
+            raise RollingPlanError(
+                RollingIssue.YEARS_DISAGREE,
+                f"{self.id!r}: its rolling thresholds stand for different newest years "
+                f"({implied!r}); state the years their offsets give under one newest year",
+                requirement_ids=[self.id],
+            )
+        return self
+
 
 DerivedRequirement = (
     AggregateRequirement
@@ -1144,6 +1300,7 @@ DerivedRequirement = (
     | SumOfRequirement
     | RankRequirement
     | ShareOfRequirement
+    | QuotientRequirement
     | JoinRequirement
     | FilterRequirement
 )
@@ -1166,7 +1323,7 @@ def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
     """Return the requirement ids `requirement` reads.
 
     Empty for a dataset requirement, which reads nothing upstream. A
-    comparison, sum_of or share_of reads both its sides; a join reads its
+    comparison, sum_of, share_of or quotient_of reads both its sides; a join reads its
     left and right id; every other derived requirement reads its one
     `input_id`.
     """
@@ -1174,7 +1331,7 @@ def inputs_of(requirement: EvidenceRequirement) -> tuple[Identifier, ...]:
         return ()
     if isinstance(requirement, ComparisonRequirement | SumOfRequirement):
         return (requirement.left.input_id, requirement.right.input_id)
-    if isinstance(requirement, ShareOfRequirement):
+    if isinstance(requirement, ShareOfRequirement | QuotientRequirement):
         return (requirement.numerator.input_id, requirement.denominator.input_id)
     if isinstance(requirement, JoinRequirement):
         return (requirement.left_id, requirement.right_id)
@@ -1223,8 +1380,8 @@ MAX_DECLINE_ASK_CHARS = 300
 class UnsupportedOperation(TitlelessEnum):
     """An ask the system cannot answer, as an `unsupported` answer names it.
 
-    `propose_plan` names one in `detail.operation`; `translate` names one as
-    the `kind` of a referral whose outcome is `unsupported`.
+    `propose_plan` names one in `detail.operation`; its `translation` names
+    one as the `kind` of a referral whose outcome is `unsupported`.
     """
 
     # Any calculation over a `comparison` or `join` result: both are terminal,
@@ -1370,6 +1527,7 @@ _READER_PHRASES = {
     "growth": "a growth rate",
     "rank": "a ranking",
     "share_of": "a share",
+    "quotient_of": "a quotient",
     "sum_of": "a sum",
     "filter": "a filter",
     "comparison": "a comparison",
@@ -1388,7 +1546,7 @@ class AnswerMode(TitlelessEnum):
     dataset requirement, unread by anything else, is itself the answer, its
     frame carrying one series per entity for a chart to draw. `computed`
     answers a question that asks for a figure the series does not state on
-    its own -- a difference, growth, share, rank or total -- so every dataset
+    its own -- a difference, growth, share, quotient, rank or total -- so every dataset
     requirement has to feed a calculation; one left unread would leave the
     plan without the figure the question asked for. Either way, `answered`
     may name a dataset requirement a calculation reads.
@@ -1411,7 +1569,9 @@ def _check_requirement_graph(
     under `planner.shapes.rejects`: a side's entity or a rank axis names a
     role the shape it reads actually carries, a growth window fits that
     shape's own period, and a rank without a reduction leaves one value per
-    entity to rank on.
+    entity to rank on. A period that follows the newest data rests only on
+    dataset requirements stating `period_end_open`
+    (`_check_rolling_reads_open_periods`).
 
     Under `AnswerMode.SERIES`, a dataset requirement left unread by every
     other requirement is legal: it is the answer. Under `AnswerMode.COMPUTED`,
@@ -1453,6 +1613,103 @@ def _check_requirement_graph(
                 f"requirements: {unread_datasets!r}"
             )
     _build_shapes(requirements_by_id)
+    _check_rolling_reads_open_periods(requirements_by_id)
+
+
+def rolls(requirement: EvidenceRequirement) -> bool:
+    """Whether a period `requirement` states follows the newest data."""
+    if isinstance(requirement, GrowthRequirement | RankRequirement):
+        return requirement.rolling is not None
+    if isinstance(requirement, FilterRequirement):
+        return any(
+            isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
+            for predicate in requirement.predicates
+        )
+    return False
+
+
+# The comparisons under which a threshold's year is the earliest year kept.
+_LOWER_BOUND_OPS = frozenset({"gt", "gte", "eq"})
+
+
+def rolls_from_its_start(requirement: EvidenceRequirement) -> bool:
+    """Whether the earliest year `requirement` reads follows the newest data.
+
+    A growth or a rank whose `rolling` names `window_start`, and a filter
+    whose rolling threshold keeps the years at or after it. Such a
+    requirement can read a year earlier than its dataset's stated period,
+    once the newest year the data holds sits behind the one the plan read.
+    """
+    if isinstance(requirement, GrowthRequirement | RankRequirement):
+        return requirement.rolling is not None and requirement.rolling.window_start is not None
+    if isinstance(requirement, FilterRequirement):
+        return any(
+            isinstance(predicate, PeriodThreshold)
+            and predicate.rolling is not None
+            and predicate.op in _LOWER_BOUND_OPS
+            for predicate in requirement.predicates
+        )
+    return False
+
+
+def dataset_roots(
+    requirements_by_id: Mapping[str, EvidenceRequirement], requirement_id: str
+) -> frozenset[str]:
+    """The ids of the dataset requirements `requirement_id`'s result rests on, itself included."""
+    requirement = requirements_by_id[requirement_id]
+    if isinstance(requirement, DatasetRequirement):
+        return frozenset({requirement_id})
+    return frozenset().union(
+        *(dataset_roots(requirements_by_id, input_id) for input_id in inputs_of(requirement))
+    )
+
+
+def rolling_readers(
+    requirements_by_id: Mapping[str, EvidenceRequirement], dataset_id: str
+) -> list[EvidenceRequirement]:
+    """The requirements stating a period that follows the newest data, among those resting on `dataset_id`."""
+    return [
+        requirement
+        for requirement in requirements_by_id.values()
+        if rolls(requirement) and dataset_id in dataset_roots(requirements_by_id, requirement.id)
+    ]
+
+
+def _check_rolling_reads_open_periods(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject a period that follows the newest data over a dataset retrieved with a closed end.
+
+    A dataset retrieved over fixed years never holds a later one, so a
+    relative period over it would stop moving at the plan's own end year.
+
+    Raises:
+        RollingPlanError: `RollingIssue.NEEDS_OPEN_PERIOD`, naming the dataset
+            requirements to state `period_end_open` on.
+    """
+    fixed_end = {
+        requirement.id
+        for requirement in requirements_by_id.values()
+        if isinstance(requirement, DatasetRequirement) and not requirement.period_end_open
+    }
+    closed: set[str] = set()
+    readers: list[str] = []
+    for requirement in requirements_by_id.values():
+        if not rolls(requirement):
+            continue
+        unopened = dataset_roots(requirements_by_id, requirement.id) & fixed_end
+        if unopened:
+            closed |= unopened
+            readers.append(requirement.id)
+    if closed:
+        raise RollingPlanError(
+            RollingIssue.NEEDS_OPEN_PERIOD,
+            f"{sorted(readers)!r} state a period that follows the newest data, over "
+            f"{sorted(closed)!r}, retrieved with a fixed end year; state `period_end_open` "
+            "on those dataset requirements, or drop `rolling` for fixed years",
+            requirement_ids=sorted(closed),
+            fault=OpenPeriodFault.DATASET_CLOSED,
+        )
 
 
 def frame_shapes(requirements: Iterable[EvidenceRequirement]) -> dict[str, FrameShape]:
@@ -1514,9 +1771,17 @@ def _dataset_shape(requirement: DatasetRequirement) -> FrameShape:
     role_names = sorted(
         {entity.role for entity in requirement.entities}, key=lambda role: (role is None, role)
     )
-    roles = tuple(RoleDimension(role=name, requirement_id=requirement.id) for name in role_names)
+    roles = tuple(
+        RoleDimension(role=name, requirement_id=requirement.id, place=place_role(name))
+        for name in role_names
+    )
     if requirement.across is not None:
-        across = RoleDimension(role=requirement.across, requirement_id=requirement.id, open=True)
+        across = RoleDimension(
+            role=requirement.across,
+            requirement_id=requirement.id,
+            open=True,
+            place=place_role(requirement.across),
+        )
         roles = (*roles, across)
     if requirement.breakdown is not None:
         breakdown = RoleDimension(
@@ -1546,6 +1811,7 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        reduction=requirement.reduction,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -1580,11 +1846,12 @@ def _selected_role(roles: Sequence[RoleDimension], axis: str | None) -> RoleDime
 
     `shapes.rejects` is what proves `axis` (or the lone role, when `axis` is
     `None`) resolves to exactly one dimension of `roles`; this only repeats
-    that resolution, to read a field off the one it finds.
+    that resolution (`shapes.role_named`), to read a field off the one it
+    finds.
     """
-    if axis is None:
-        return roles[0]
-    return next(role for role in roles if role.role == axis)
+    selected = roles[0] if axis is None else role_named(roles, axis)
+    assert selected is not None
+    return selected
 
 
 def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameShape:
@@ -1600,6 +1867,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         among=requirement.among,
         window=window,
         per_period=requirement.per_period,
+        reduction=requirement.reduction,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -1765,6 +2033,46 @@ def _share_of_shape(
     )
 
 
+def _quotient_of_shape(
+    requirement: QuotientRequirement,
+    shapes_by_id: dict[str, FrameShape],
+    requirements_by_id: dict[str, EvidenceRequirement],
+) -> FrameShape:
+    numerator_shape = shapes_by_id[requirement.numerator.input_id]
+    denominator_shape = shapes_by_id[requirement.denominator.input_id]
+    _check_side_entity_is_named(
+        requirement.id, "numerator", requirement.numerator, numerator_shape, requirements_by_id
+    )
+    _check_side_entity_is_named(
+        requirement.id,
+        "denominator",
+        requirement.denominator,
+        denominator_shape,
+        requirements_by_id,
+    )
+    # As for a share_of, the denominator's own *in* rule is checked with no
+    # axis, and the numerator's call states both, with the denominator passed
+    # as `other` for the periods and for `denominator_axis`.
+    reason = shape_rejects(ShapeVerb.QUOTIENT_OF, denominator_shape)
+    if reason is not None:
+        raise ValueError(f"{requirement.id!r}: {reason}")
+    reason = shape_rejects(
+        ShapeVerb.QUOTIENT_OF,
+        numerator_shape,
+        axis=requirement.axis,
+        denominator_axis=requirement.denominator_axis,
+        other=denominator_shape,
+    )
+    if reason is not None:
+        raise ValueError(f"{requirement.id!r}: {reason}")
+    return quotiented(
+        numerator_shape,
+        denominator_shape,
+        axis=requirement.axis,
+        denominator_axis=requirement.denominator_axis,
+    )
+
+
 def _comparison_shape(
     requirement: ComparisonRequirement,
     shapes_by_id: dict[str, FrameShape],
@@ -1835,6 +2143,8 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
         return _filter_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, ShareOfRequirement):
         return _share_of_shape(requirement, shapes_by_id, requirements_by_id)
+    if isinstance(requirement, QuotientRequirement):
+        return _quotient_of_shape(requirement, shapes_by_id, requirements_by_id)
     if isinstance(requirement, ComparisonRequirement):
         return _comparison_shape(requirement, shapes_by_id, requirements_by_id)
     if isinstance(requirement, SumOfRequirement):
@@ -2684,6 +2994,7 @@ def windowed_copy(seed: SeededSource, window: Mapping[str, Any]) -> SeededSource
             sentence=seed.source.sentence,
             has_data=None,
             identity=identity,
+            groups=seed.source.groups,
         ),
         windowed_from=seed.source.spec_id,
     )
@@ -2845,38 +3156,166 @@ def seed_of(item: SeededSource) -> str:
     return item.windowed_from or item.source.spec_id
 
 
-def period_window(period: Period) -> dict[str, object]:
-    """`period` as an identity's `requested_window`."""
+def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
+    """`period` as an identity's `requested_window`.
+
+    With `end_open` the range states `start_year` alone, the form dfo-apis
+    ends at the current year at every mint
+    (`datasets_api.adapter.window_to_identity` writes no `end_year` key
+    either), so the definition reaches years published after the plan.
+    """
+    if end_open:
+        return open_window(period.start)
     return {"kind": "range", "start_year": period.start, "end_year": period.end}
+
+
+def open_window(start_year: int) -> dict[str, object]:
+    """The `requested_window` from `start_year` with no end year."""
+    return {"kind": "range", "start_year": start_year}
+
+
+def retrieves_period(window: object, requirement: DatasetRequirement) -> bool:
+    """Whether `window`, an identity's `requested_window`, is one `requirement` is retrieved over.
+
+    A closed requirement is retrieved over its `period` exactly. One stating
+    `period_end_open` is retrieved over a range with no end year that
+    starts no later than its period (`planner.agent._window_pins` starts it
+    at the period's start or at the first year the dataset holds).
+    """
+    if not requirement.period_end_open:
+        return window == period_window(requirement.period)
+    if not isinstance(window, Mapping) or window.get("kind") != "range" or "end_year" in window:
+        return False
+    start = window.get("start_year")
+    return isinstance(start, int) and start <= requirement.period.start
+
+
+class FullHistory(NamedTuple):
+    """The first year a dataset holds, and the rows of every year it holds when Search counted them."""
+
+    first_year: int
+    rows: int | None
+
+
+def _whole_year(value: object) -> int | None:
+    """`value` as a year when it is one: an integer, or the text of one."""
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def full_history(block: Mapping[str, Any]) -> FullHistory | None:
+    """What Search's answer `block` states about every year its dataset holds.
+
+    Only an answer for a definition over no window (`requested_window` of
+    kind `all`) states it: any other answer reads the years inside the
+    window it was asked for. The first year is `resolved.download.window`'s,
+    the first year of the points a mint writes, or else
+    `resolved.stat_vars.data_date_range`'s, as `harness.tool_contracts`
+    reads the `window` the planner is shown. The rows are
+    `resolved.download.rows`, which counts through any projection years the
+    definition holds, so they bound the rows of the same years retrieved up
+    to the current one. `None` when the answer is over a window or states no
+    first year.
+    """
+    definition = block.get("definition")
+    identity = definition.get("identity") if isinstance(definition, Mapping) else None
+    requested = identity.get("requested_window") if isinstance(identity, Mapping) else None
+    if not isinstance(requested, Mapping) or requested.get("kind") != "all":
+        return None
+    resolved = block.get("resolved")
+    if not isinstance(resolved, Mapping):
+        return None
+    download = resolved.get("download")
+    download = download if isinstance(download, Mapping) else {}
+    window = download.get("window")
+    first_year = _whole_year(window.get("start_year")) if isinstance(window, Mapping) else None
+    if first_year is None:
+        stat_vars = resolved.get("stat_vars")
+        dates = stat_vars.get("data_date_range") if isinstance(stat_vars, Mapping) else None
+        first_year = _whole_year(dates.get("start")) if isinstance(dates, Mapping) else None
+    if first_year is None:
+        return None
+    rows = download.get("rows")
+    counted = isinstance(rows, int) and not isinstance(rows, bool)
+    return FullHistory(first_year=first_year, rows=rows if counted else None)
 
 
 class RecordedDefinition(Protocol):
     """A dataset's definition as a search in the conversation recorded it (`recorded_identity`).
 
-    `identity` is the identity document its spec_id hashes from.
+    `identity` is the identity document its spec_id hashes from, and
+    `groups` the sets a role's places were asked for as.
     """
 
     @property
     def identity(self) -> Mapping[str, Any]: ...
 
+    @property
+    def groups(self) -> tuple[ResolvedGroup, ...]: ...
+
 
 class WindowedPin(StrictModel):
-    """A pinned dataset whose identity is on record, copied over a requirement's period.
+    """A pinned dataset whose identity is on record, copied over a requirement's window.
 
     `spec_id` and `identity` are the recorded identity of `windowed_from`
-    over that period (`data_mcp.definition_writes.windowed_identity`), the
-    ones `get_data`'s `scope.window` would mint (`windowed_pin`).
+    over that window (`data_mcp.definition_writes.windowed_identity`), the
+    ones `get_data`'s `scope.window` would mint (`windowed_pin`). The window
+    is the requirement's period, or a range with no end year for a
+    requirement stating `period_end_open`. `groups` are the sets its places
+    were asked for as, posted again beside the copy.
     """
 
     spec_id: SpecId
     identity: dict[str, Any]
     windowed_from: SpecId
+    groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
 
 
-def windowed_pin(spec_id: str, recorded: RecordedDefinition, period: Period) -> WindowedPin:
-    """The dataset `spec_id`, whose definition is `recorded`, over `period` in place of its own years."""
-    copy_id, copied = windowed_identity(recorded.identity, period_window(period))
-    return WindowedPin(spec_id=copy_id, identity=copied, windowed_from=spec_id)
+def full_histories(state: SessionState) -> dict[str, FullHistory | None]:
+    """What `FULL_HISTORIES_STATE_KEY` holds, by spec_id; empty when unset.
+
+    A spec_id held with `None` was read, and its answer stated no first year.
+    """
+    stored = state.get(FULL_HISTORIES_STATE_KEY) or {}
+    return {
+        spec_id: None if raw is None else FullHistory(raw["first_year"], raw["rows"])
+        for spec_id, raw in stored.items()
+    }
+
+
+def save_full_history(state: SessionState, spec_id: str, history: FullHistory | None) -> None:
+    """Record `history` as what a read of the dataset `spec_id` over no window stated."""
+    stored = dict(state.get(FULL_HISTORIES_STATE_KEY) or {})
+    stored[spec_id] = None if history is None else history._asdict()
+    state[FULL_HISTORIES_STATE_KEY] = stored
+
+
+def shown_identity(spec_id: str, source: PinSource) -> Mapping[str, Any] | None:
+    """The identity the block the planner was shown for `spec_id` carries, when it hashes to it."""
+    block = source.spec_block(spec_id)
+    definition = block.get("definition") if block is not None else None
+    identity = definition.get("identity") if isinstance(definition, Mapping) else None
+    if not isinstance(identity, Mapping):
+        return None
+    try:
+        hashed = spec_id_for(canonicalize(identity))
+    except rfc8785.CanonicalizationError:
+        return None
+    return identity if hashed == spec_id else None
+
+
+def windowed_pin(
+    spec_id: str, recorded: RecordedDefinition, window: Mapping[str, Any]
+) -> WindowedPin:
+    """The dataset `spec_id`, whose definition is `recorded`, over `window` in place of its own years."""
+    copy_id, copied = windowed_identity(recorded.identity, window)
+    return WindowedPin(
+        spec_id=copy_id, identity=copied, windowed_from=spec_id, groups=recorded.groups
+    )
 
 
 def windowed_pins(state: SessionState) -> dict[str, WindowedPin]:
@@ -3112,6 +3551,20 @@ def record_unsupported(state: SessionState, operation: UnsupportedOperation) -> 
     state[UNSUPPORTED_STATE_KEY] = sorted(code.value for code in recorded)
 
 
+def load_optional_declines(state: SessionState) -> frozenset[UnsupportedOperation]:
+    """Return every decline the planner's current entry earned without requiring it."""
+    return frozenset(
+        UnsupportedOperation(code) for code in state.get(OPTIONAL_DECLINES_STATE_KEY) or ()
+    )
+
+
+def record_optional_decline(state: SessionState, operation: UnsupportedOperation) -> None:
+    """Add `operation` to the declines the planner's current entry earned without requiring."""
+    recorded = load_optional_declines(state) | {operation}
+    state[OPTIONAL_DECLINES_STATE_KEY] = sorted(code.value for code in recorded)
+
+
 def clear_unsupported(state: SessionState) -> None:
-    """Forget the `unsupported` answers, as a new planner entry starts."""
+    """Forget the `unsupported` answers and optional declines, as a new planner entry starts."""
     state[UNSUPPORTED_STATE_KEY] = []
+    state[OPTIONAL_DECLINES_STATE_KEY] = []

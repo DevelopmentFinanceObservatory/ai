@@ -27,6 +27,7 @@ from digest_corpus import (
     FRAME_PAIRS,
     GROWTH_CASES,
     JOIN_CASES,
+    QUOTIENT_OF_CASES,
     RANK_CASES,
     SHARE_OF_CASES,
     SUM_OF_CASES,
@@ -44,6 +45,7 @@ _ALL_CASES = (
     + tuple(RANK_CASES)
     + tuple(SHARE_OF_CASES)
     + tuple(SUM_OF_CASES)
+    + tuple(QUOTIENT_OF_CASES)
     + tuple(JOIN_CASES)
     + tuple(FILTER_CASES)
 )

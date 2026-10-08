@@ -1,15 +1,16 @@
-"""Builds the planner with the `translate` tool attached.
+"""Builds the planner with translation attached.
 
 The planner and translation live in their own modules and know nothing about
-each other's construction: `planner.agent` takes a `translate` tool to attach
-and the tool surface it reads skills through, `translator.tool` takes the same
-surface to discover on and compile against. This is where those two halves
-meet, which keeps the dependency arrow pointing one way: `harness` may import
-both packages, and neither imports `harness`.
+each other's construction: `planner.agent` takes a translation to run and the
+tool surface it reads skills through, `translator.tool` takes the same surface
+to discover on and compile against. This is where those two halves meet,
+which keeps the dependency arrow pointing one way: `harness` may import both
+packages, and neither imports `harness`.
 
-`translate` is one of the planner's own function tools, so the plan travels
-through session state alone: `propose_plan` records it, and `translate` reads
-it back and answers with one typed outcome. No model runs inside it.
+`propose_plan` runs translation on every plan it records, so the plan travels
+through session state alone: `propose_plan` records it, and translation reads
+it back and answers with one typed verdict, which `propose_plan` returns under
+`translation`. No model runs inside it.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from compiler.surface import McpSurface, ToolSurface
 from google.adk.agents import LlmAgent
 from planner.agent import create_planner_agent
 from planner.settings import AgentSettings
-from translator.tool import build_translate_tool
+from translator.tool import build_translate
 
 from harness.conversation import current_conversation_caller
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -27,7 +28,7 @@ from harness.settings import Settings
 
 
 def build_tool_surface(*, settings: Settings) -> McpSurface:
-    """Build the surface `translate` discovers on, the compiler checks against,
+    """Build the surface translation discovers on, the compiler checks against,
     and the planner reads skills through.
 
     Covers data-mcp and analysis-mcp, over the same URLs `harness.mcp_client`
@@ -67,14 +68,14 @@ def create_planner_with_translator(
     question_fixed: bool = False,
     prefix_cache: PrefixCache | None = None,
 ) -> LlmAgent:
-    """Build the planner agent with the `translate` tool attached.
+    """Build the planner agent with translation attached to `propose_plan`.
 
     Args:
         settings: The harness service's settings, read for the MCP URLs the
             default surface covers.
         agent_settings: The model the planner runs on. Defaults to reading the
             environment, the same way the deployed service does.
-        surface: The tool surface `translate` discovers on and compiles
+        surface: The tool surface translation discovers on and compiles
             against, and the planner's `get_skill` and `get_skill_file` call
             data-mcp through. Tests pin one here so the planner builds without
             a reachable MCP server.
@@ -88,14 +89,14 @@ def create_planner_with_translator(
         prefix_cache: Passed straight through to `create_planner_agent`.
 
     Returns:
-        The planner `LlmAgent`, carrying `translate` among its tools. It is
-        a `chat` agent, so it can serve as a `Runner`'s root.
+        The planner `LlmAgent`, whose `propose_plan` translates each plan it
+        records. It is a `chat` agent, so it can serve as a `Runner`'s root.
     """
     resolved_agent_settings = agent_settings if agent_settings is not None else AgentSettings()
     resolved_surface = surface if surface is not None else build_tool_surface(settings=settings)
     return create_planner_agent(
         model_name=resolved_agent_settings.planner_model_name,
-        translate=build_translate_tool(surface=resolved_surface),
+        translate=build_translate(surface=resolved_surface),
         surface=resolved_surface,
         question_fixed=question_fixed,
         prefix_cache=prefix_cache,

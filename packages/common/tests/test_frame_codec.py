@@ -1,4 +1,4 @@
-"""Round-trip tests for `frame_to_parquet_bytes` and its two decoders: a
+"""Round-trip tests for `frame_to_parquet_bytes` and two of its decoders: a
 `Frame`'s own canonical bytes survive a trip through Parquet unchanged, the
 verified decoder wraps only the canonical schema, and the validating decoder
 refuses what `Frame.build` refuses.
@@ -135,6 +135,7 @@ def test_validating_decoder_refuses_a_duplicate_grain_the_verified_decoder_trust
         pytest.param({"currency": "USD", "prices": "constant", "base_year": "2015"}, id="str-year"),
         pytest.param(5, id="number"),
         pytest.param("", id="empty-ref"),
+        pytest.param({"numerator": "dcid:USDollar"}, id="composed-without-a-denominator"),
     ],
 )
 def test_earlier_layout_unit_refuses_as_frame_build_does(unit: object) -> None:

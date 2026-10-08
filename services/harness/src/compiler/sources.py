@@ -30,6 +30,7 @@ from planner.workflow import (
     OpenEntityAxis,
     ReadingSetBy,
     ResolvedEntity,
+    ResolvedGroup,
     SelectedSource,
 )
 from pydantic import JsonValue
@@ -144,7 +145,8 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
 
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, the label,
-    size and digest of the binding its `shape` states, entities, the entity
+    size and digest of the binding its `shape` states, entities and the named
+    sets whose members it binds, the entity
     axes it leaves open, unit (or that it varies per series), provenance, the
     axes its family varies along -- and the identity document of its
     `definition` sidecar when the envelope carries one. A `shape` without
@@ -179,6 +181,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_count=_count(shape.get("member_count")),
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
+            groups=_groups(_mapping(resolved.get("entity_groups"))),
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -537,6 +540,34 @@ def _entity(entity: Mapping[str, object]) -> ResolvedEntity:
     if role is None or ref is None:
         raise ValueError(f"a resolved entity lacks its role or ref: {dict(entity)!r}")
     return ResolvedEntity(role=role, ref=ref, label=_text(entity.get("label")) or ref)
+
+
+def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
+    """The named sets `resolved.entity_groups` states, each keyed by the role column its members fill.
+
+    A group stating no name names nothing a requirement can ask for, so it is
+    left out rather than failing the block.
+    """
+    found = []
+    for role, raw in groups.items():
+        group = _mapping(raw)
+        if (label := _text(group.get("label"))) is not None:
+            found.append(ResolvedGroup(role=role, label=label, ref=_text(group.get("dcid"))))
+    return tuple(found)
+
+
+def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
+    """The named sets a spec block's `resolved.entity_groups` states (`SelectedSource.groups`)."""
+    return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
+
+
+def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
+    """`groups` as `resolved.entity_groups` states them, keyed by role column,
+    for a resubmit to post beside the identity they stand for (`_groups`)."""
+    return {
+        group.role: {"label": group.label, **({"dcid": group.ref} if group.ref else {})}
+        for group in groups
+    }
 
 
 def _sources(blocks: Sequence[Mapping[str, object]]) -> tuple[SelectedSource, ...]:

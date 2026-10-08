@@ -81,6 +81,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Annotated, Any, Literal, Protocol, cast
 
+import httpx2
 from analysis_mcp import digest as analysis_digest
 from common.materialisation import FrameRef
 from common.telemetry import record_event, record_span
@@ -88,6 +89,7 @@ from compiler.evidence import errors
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.surface import ProgressCallback, ProgressReport, ToolSurface
 from data_mcp import get_data_digest
+from data_mcp.search_tool import MAX_PARTS
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
@@ -122,14 +124,17 @@ from google.adk.workflow import START, Edge, Workflow, node
 from google.adk.workflow._errors import NodeInterruptedError
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
+from mcp import MCPError
 from planner.plan import (
     ASKS_STATE_KEY,
     DROPPED_SEEDS_STATE_KEY,
     SEEDED_SOURCES_STATE_KEY,
     SEEDS_STATE_KEY,
+    DatasetRequirement,
     Decision,
     EvidenceRequirement,
     PlanStatus,
+    QuotientRequirement,
     ResolvedBy,
     SeededSource,
     dropped_seeds,
@@ -153,7 +158,7 @@ from translator.discovery import (
 from harness import plan_display
 from harness.depth import DepthSignal, decide_depth
 from harness.depth_hints import DepthHintExtractor
-from harness.provenance import summed_stat_var_count
+from harness.provenance import BOTH_SIDES_VERBS, summed_stat_var_count
 from harness.seeds import (
     NO_OPERATIONS_ON_DOWNLOAD,
     ONE_DATASET_PER_DOWNLOAD,
@@ -179,8 +184,11 @@ from harness.seeds import (
     unplanned_seeds_text,
 )
 from harness.tool_contracts import (
+    DENOMINATOR_NOT_AVAILABLE,
     REFUSAL_ORIGIN_HARNESS,
     REFUSAL_ORIGIN_SERVICE,
+    UNIT_NOT_RESOLVED,
+    ResolverError,
     harness_refusal,
     platform_trace_id_of,
 )
@@ -618,6 +626,11 @@ class GraphState(BaseModel):
     # `part_digests`), kept apart from `resolve_envelope`, which the planner
     # reads. See `probe`.
     part_digests: str | None = None
+    # Whether `probe` has searched again for a part search refused for its
+    # denominator or its unit (`split_denominators`). It does so once for
+    # each question `converse` drafts: `clarify` clears it when a free-text
+    # answer sends the question back to be drafted again.
+    denominator_split_tried: bool = False
     canvas_digest: str | None = None
     conversation_digest: str | None = None
     # The window a window anaphor in this turn's question should resolve
@@ -674,6 +687,7 @@ PER_TURN_STATE_KEYS: tuple[str, ...] = (
     "revises",
     "resolve_envelope",
     "part_digests",
+    "denominator_split_tried",
     "spec_id",
     "spec_id_wide",
     "spec_id_elected",
@@ -853,6 +867,22 @@ class RefusalModel(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class DenominatorSplitModel(Protocol):
+    """Names the two measured variables whose division gives a search part
+    that search refused for its denominator (a per-head figure with no such
+    series). `part` is the refused part as converse drafted it and `message`
+    what search said of it. Returns `{"measure": str, "measure_unit": str |
+    None, "denominator": str, "denominator_unit": str | None,
+    "denominator_entities": list[int], "denominator_keeps_roles": bool}`,
+    where `denominator_entities` are positions in `part`'s entities. `probe` builds the two search parts
+    from `part` and that draft (`_measure_and_denominator`), so no draft
+    changes an entity or the time."""
+
+    async def __call__(
+        self, *, question: str, part: dict[str, Any], message: str
+    ) -> dict[str, Any]: ...
+
+
 class PlannerModel(Protocol):
     """Drafts (or redrafts) a compiled plan from the resolve envelope.
 
@@ -963,13 +993,15 @@ class GenerativeNodes:
     and `refusal` left `None` keep that node's scripted stand-in: the
     feature is absent. `planner` left `None` means the graph cannot reach
     its `planner` node at all -- the node raises rather than drafting a
-    different kind of plan."""
+    different kind of plan. `denominator_split` left `None` means `probe`
+    searches once, and a part refused for its denominator closes the turn."""
 
     converse: ConverseModel | None = None
     planner: PlannerModel | None = None
     compose: ComposeModel | None = None
     narrate: NarrateModel | None = None
     refusal: RefusalModel | None = None
+    denominator_split: DenominatorSplitModel | None = None
 
 
 # Closed vocabulary for a describe_frame refusal, bucketed by retry_mode so
@@ -1566,6 +1598,131 @@ def _without_dropped_datasets(ctx: Context, envelope: dict[str, Any]) -> dict[st
     }
 
 
+# What a `Resolver` raises when a search gives no answer: `ResolverError` for
+# one the tool refused or answered without an envelope, and the MCP client's
+# own errors for a call that ran past its deadline or lost its transport.
+_SEARCH_FAILURES = (ResolverError, MCPError, httpx2.TransportError)
+
+
+def _refused_for(
+    envelope: Mapping[str, Any], parts: Sequence[Mapping[str, Any]], reason: str
+) -> list[int]:
+    """The positions of the search parts `envelope` answered `no_data` with
+    `reason`, the `no_data.reason` code a part digest carries. None when the
+    digests do not line up with `parts` one to one, since a position then
+    names no part."""
+    digests = envelope.get("part_digests") or []
+    if len(digests) != len(parts):
+        return []
+    return [index for index, digest in enumerate(digests) if digest.get("reason") == reason]
+
+
+def _unit_in_variable(part: Mapping[str, Any]) -> dict[str, Any]:
+    """`part` with its unit phrase moved to the end of its variable text."""
+    folded = {key: value for key, value in part.items() if key != "unit"}
+    folded["variable"] = f"{part.get('variable')} {part['unit']}"
+    return folded
+
+
+def _measure_and_denominator(
+    part: Mapping[str, Any], draft: Mapping[str, Any]
+) -> list[dict[str, Any]] | None:
+    """The two search parts whose division gives `part`, from a
+    `DenominatorSplitModel` draft.
+
+    The draft supplies each side's variable text and unit, which of
+    `part`'s entities the denominator is about, by position, and whether
+    they keep their roles. Everything else is `part`'s: the measure takes
+    its entities, roles and time unchanged, and the denominator the
+    entities at the drafted positions, in `part`'s order, and the same
+    time, with each role kept or left out as the draft says.
+
+    `None` when the draft names no variable for a side, or when `part`
+    has entities and the draft's positions are none, repeated, or outside
+    the list."""
+    entities = list(part.get("entities") or [])
+    drafted = draft.get("denominator_entities")
+    chosen: list[int] = drafted if isinstance(drafted, list) else []
+    if entities and not (
+        chosen
+        and all(type(at) is int and 0 <= at < len(entities) for at in chosen)
+        and len(set(chosen)) == len(chosen)
+    ):
+        return None
+    sides: list[dict[str, Any]] = []
+    for side in ("measure", "denominator"):
+        variable = draft.get(side)
+        if not isinstance(variable, str) or not variable.strip():
+            return None
+        built: dict[str, Any] = {"variable": variable.strip()}
+        if entities and side == "measure":
+            built["entities"] = [dict(entity) for entity in entities]
+        elif entities:
+            keeps_roles = draft.get("denominator_keeps_roles") is True
+            built["entities"] = [
+                {key: value for key, value in entities[at].items() if keeps_roles or key != "role"}
+                for at in sorted(chosen)
+            ]
+        if time := part.get("time"):
+            built["time"] = time
+        unit = draft.get(f"{side}_unit")
+        if isinstance(unit, str) and unit.strip():
+            built["unit"] = unit.strip()
+        sides.append(built)
+    return sides
+
+
+def _split_search(
+    parts: Sequence[dict[str, Any]], drafts: Mapping[int, Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], list[int]] | None:
+    """The search parts that put a measure and its denominator in place of
+    each part `drafts` has a `DenominatorSplitModel` draft for, by position
+    in `parts`, and where that search holds the parts built, in its order.
+
+    Each pair stands where its part stood (`_measure_and_denominator`). A
+    built part equal to one already in the search, or to a part of `parts`
+    no draft replaces, is not added, so parts that share a denominator hold
+    it at one position.
+
+    `None`, with the reason logged, when a draft builds no pair or the
+    search would hold more than `MAX_PARTS` parts, the most `search` takes."""
+    untouched = [part for index, part in enumerate(parts) if index not in drafts]
+    search_parts: list[dict[str, Any]] = []
+    built: list[dict[str, Any]] = []
+    for index, part in enumerate(parts):
+        if index not in drafts:
+            search_parts.append(part)
+            continue
+        pair = _measure_and_denominator(part, drafts[index])
+        if pair is None:
+            logger.info(
+                "a denominator split names no variable for a side or no usable "
+                "entity positions, so the refusal stands: part=%s draft=%s",
+                json.dumps(part),
+                json.dumps(drafts[index]),
+            )
+            return None
+        built.extend(pair)
+        search_parts.extend(
+            side for side in pair if side not in search_parts and side not in untouched
+        )
+    if len(search_parts) > MAX_PARTS:
+        logger.info(
+            "a denominator split makes %d parts and search takes %d, so the "
+            "refusal stands: parts=%s",
+            len(search_parts),
+            MAX_PARTS,
+            json.dumps(search_parts),
+        )
+        return None
+    return search_parts, sorted({search_parts.index(side) for side in built})
+
+
+def _resolves(digest: Mapping[str, Any]) -> bool:
+    """Whether a part digest names a dataset or offers a choice of them."""
+    return digest.get("status") == "definite" or bool(digest.get("candidates"))
+
+
 def _refusal_shape(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
     """One outcome's own identity and diagnosis, with no `also_stopped` of its own."""
     if isinstance(outcome, MethodChoiceNeeded):
@@ -1637,12 +1794,20 @@ def _upstream_retrievals(
     return result
 
 
-# The argument `join` and `sum_of` take their right side's frame under
-# (`compiler.compile._join_arguments`, `_two_sided_arguments`).
-_RIGHT_PARAMETER = "right_frame_ref"
+def _carried_frame_parameters(step: WorkflowStep) -> list[str]:
+    """The arguments naming the frames whose StatVars `step`'s frame carries:
+    `FRAME_PARAMETER`, and the second frame's for a verb that carries both
+    sides (`harness.provenance.BOTH_SIDES_VERBS`)."""
+    names = [FRAME_PARAMETER]
+    if (verb := BOTH_SIDES_VERBS.get(step.tool.name)) is not None:
+        names.append(verb.second_frame)
+    return names
 
-# The verbs whose frame carries the StatVars of both sides.
-_CARRIES_BOTH_SIDES = frozenset({"join", "sum_of"})
+
+def _writes_own_stat_var(step: WorkflowStep) -> bool:
+    """Whether `step`'s verb writes its result under a StatVar of its own."""
+    verb = BOTH_SIDES_VERBS.get(step.tool.name)
+    return verb is not None and verb.own_stat_var is not None
 
 
 def _carried_retrievals(
@@ -1654,22 +1819,19 @@ def _carried_retrievals(
     """The retrieval step ids whose StatVars `step_id`'s frame carries.
 
     A verb writes the StatVars of the frame bound to `FRAME_PARAMETER`, and
-    `join` also those of its right side. `sum_of` writes a StatVar of its
-    own that stands for both sides' StatVars, so it carries both too.
-    `compare`'s right side and `share_of`'s denominator supply values only,
-    so a frame resting on them carries none of their StatVars. A subset of
-    `_upstream_retrievals`.
+    `join` also those of its right side. `sum_of`, `quotient_of` and
+    `share_of` each write a StatVar of their own that stands for both sides'
+    StatVars, so they carry both too (`_carried_frame_parameters`).
+    `compare`'s right side supplies values only, so a frame resting on it
+    carries none of its StatVars. A subset of `_upstream_retrievals`.
     """
     if step_id in retrieval_step_ids:
         return frozenset({step_id})
     step = steps_by_id.get(step_id)
     if step is None:
         return frozenset()
-    names = [FRAME_PARAMETER]
-    if step.tool.name in _CARRIES_BOTH_SIDES:
-        names.append(_RIGHT_PARAMETER)
     carried: set[str] = set()
-    for name in names:
+    for name in _carried_frame_parameters(step):
         if (binding := step.bindings.get(name)) is not None:
             carried |= _carried_retrievals(
                 binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
@@ -1683,32 +1845,31 @@ def _carried_parts(
     steps_by_id: dict[str, WorkflowStep],
     retrieval_step_ids: frozenset[str],
 ) -> tuple[frozenset[str], frozenset[str]]:
-    """The retrieval steps and the `sum_of` steps whose StatVars `step_id`'s frame carries.
+    """The retrieval steps, and the steps writing a StatVar of their own,
+    whose StatVars `step_id`'s frame carries.
 
-    The walk `_carried_retrievals` takes, stopping at each `sum_of`: the
-    frame carries a sum's one StatVar, which stands for every StatVar
-    under its sides, in place of the retrievals beneath it.
+    The walk `_carried_retrievals` takes, stopping at each `sum_of`,
+    `quotient_of` or `share_of` (`_writes_own_stat_var`). The frame carries
+    that step's one StatVar, which stands for every StatVar under its sides,
+    in place of the retrievals beneath it.
     """
     if step_id in retrieval_step_ids:
         return frozenset({step_id}), frozenset()
     step = steps_by_id.get(step_id)
     if step is None:
         return frozenset(), frozenset()
-    if step.tool.name == "sum_of":
+    if _writes_own_stat_var(step):
         return frozenset(), frozenset({step_id})
-    names = [FRAME_PARAMETER]
-    if step.tool.name in _CARRIES_BOTH_SIDES:
-        names.append(_RIGHT_PARAMETER)
     retrievals: set[str] = set()
-    sums: set[str] = set()
-    for name in names:
+    writers: set[str] = set()
+    for name in _carried_frame_parameters(step):
         if (binding := step.bindings.get(name)) is not None:
-            found, summed = _carried_parts(
+            found, written = _carried_parts(
                 binding.from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
             )
             retrievals |= found
-            sums |= summed
-    return frozenset(retrievals), frozenset(sums)
+            writers |= written
+    return frozenset(retrievals), frozenset(writers)
 
 
 def _ran(outcome: RunOutcome) -> tuple[StepRecord, ...]:
@@ -1756,9 +1917,11 @@ def _link_evidence_to_terminal_frames(
     indicators from, and the retrievals and sums whose StatVars the frame
     carries (`_carried_parts`), each sum with the retrievals under it, so a
     summed family's ref counts as the StatVars it sums and a sum's ref as the
-    distinct StatVars under its sides. Each `sum_of` step's own StatVar ref goes with every link,
-    beside the retrievals under each of its sides (`_sum_of_sides`), so the
-    card can name that ref by what it adds wherever it is drawn.
+    distinct StatVars under its sides, and a quotient's ref the same way.
+    Each `sum_of`, `quotient_of` or `share_of` step's own StatVar ref goes
+    with every link, beside its tool name and the parts of each of its sides
+    (`_own_stat_vars`), so the card can name that ref by what it adds or
+    divides wherever it is drawn.
 
     All-or-nothing: a frame with no retrieval under it (a workflow defect,
     never a valid one), or one whose retrieval has no `EvidenceRecord`, is
@@ -1775,14 +1938,13 @@ def _link_evidence_to_terminal_frames(
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     stat_var_counts = {record.step_id: record.stat_var_count for record in _ran(outcome)}
-    memo: dict[str, frozenset[str]] = {}
-    sum_of_sides = _sum_of_sides(
+    own_stat_vars = _own_stat_vars(
         outcome,
         steps_by_id=steps_by_id,
         retrieval_step_ids=retrieval_step_ids,
         step_order=step_order,
-        memo=memo,
     )
+    memo: dict[str, frozenset[str]] = {}
     for step_id, frame_ref in _answer_frames(outcome).items():
         sources = sorted(
             _upstream_retrievals(
@@ -1802,7 +1964,7 @@ def _link_evidence_to_terminal_frames(
                 unrecorded or "no retrieval feeds it",
             )
             continue
-        carried, sums = _carried_parts(
+        carried, writers = _carried_parts(
             step_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
         )
         link(
@@ -1824,55 +1986,60 @@ def _link_evidence_to_terminal_frames(
                 ]
                 for under in (
                     _carried_retrievals(
-                        summed, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+                        writer, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
                     )
-                    for summed in sorted(sums, key=step_order.__getitem__)
+                    for writer in sorted(writers, key=step_order.__getitem__)
                 )
             ],
-            sum_of_sides=sum_of_sides,
+            own_stat_vars=own_stat_vars,
         )
 
 
-def _sum_of_sides(
+def _own_stat_vars(
     outcome: RunOutcome,
     *,
     steps_by_id: dict[str, WorkflowStep],
     retrieval_step_ids: frozenset[str],
     step_order: dict[str, int],
-    memo: dict[str, frozenset[str]],
-) -> dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
-    """Each `sum_of` step's StatVar ref, with the retrieval frames under its left and right side.
+) -> dict[str, tuple[str, list[dict[str, Any] | str], list[dict[str, Any] | str]]]:
+    """Each StatVar ref a step wrote for its own result (`_writes_own_stat_var`),
+    with the step's tool name and the parts of its first and second side.
 
-    analysis-mcp writes a sum's rows under `dcid:<its spec_id>`, a ref no
-    graph node describes. A side that reads its left frame again names no
-    `right_frame_ref`, so both sides list the same retrievals.
+    analysis-mcp writes a sum's, a quotient's or a share's rows under
+    `dcid:<its spec_id>`, a ref no graph node describes. A side's parts are
+    what its frame carries (`_carried_parts`), in workflow order: a
+    retrieval as its frame ref, and an earlier sum, quotient or share as the
+    ref it wrote, which the card names by that verb's own sides. A share of
+    two quotients therefore lists one quotient's ref on each side. A step
+    whose second side reads its first frame again names no second frame, so
+    both sides list the same parts.
     """
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    sides: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
-    for record in _ran(outcome):
-        step = steps_by_id.get(record.step_id)
-        if step is None or step.tool.name != "sum_of":
-            continue
-        left = step.bindings[FRAME_PARAMETER]
-        right = step.bindings.get(_RIGHT_PARAMETER, left)
-        left_refs, right_refs = (
-            [
-                evidence_by_step[source].frame_ref.model_dump()
-                for source in sorted(
-                    _upstream_retrievals(
-                        binding.from_step,
-                        steps_by_id=steps_by_id,
-                        retrieval_step_ids=retrieval_step_ids,
-                        memo=memo,
-                    ),
-                    key=lambda source: step_order[source],
-                )
-                if source in evidence_by_step
-            ]
-            for binding in (left, right)
+    written_by_step = {
+        record.step_id: f"dcid:{record.frame_ref.spec_id}"
+        for record in _ran(outcome)
+        if (step := steps_by_id.get(record.step_id)) is not None and _writes_own_stat_var(step)
+    }
+
+    def side_parts(from_step: str) -> list[dict[str, Any] | str]:
+        retrievals, writers = _carried_parts(
+            from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
         )
-        sides[f"dcid:{record.frame_ref.spec_id}"] = (left_refs, right_refs)
-    return sides
+        parts: list[dict[str, Any] | str] = []
+        for part in sorted(retrievals | writers, key=step_order.__getitem__):
+            if part in evidence_by_step:
+                parts.append(evidence_by_step[part].frame_ref.model_dump())
+            elif part in written_by_step:
+                parts.append(written_by_step[part])
+        return parts
+
+    written: dict[str, tuple[str, list[dict[str, Any] | str], list[dict[str, Any] | str]]] = {}
+    for step_id, ref in written_by_step.items():
+        step = steps_by_id[step_id]
+        left = step.bindings[FRAME_PARAMETER]
+        right = step.bindings.get(BOTH_SIDES_VERBS[step.tool.name].second_frame, left)
+        written[ref] = (step.tool.name, side_parts(left.from_step), side_parts(right.from_step))
+    return written
 
 
 # The flow axis a recipient's role column sits on (`get_data`'s coverage
@@ -1892,10 +2059,9 @@ def _stat_var_totals(
 
     Walks the retrievals whose StatVars each answer frame carries
     (`_carried_retrievals`, the walk the card counts its indicators by), so
-    a `compare`'s right side or a `share_of` denominator gets no sentence. A
-    retrieval is summed when its recorded `get_data` result
-    (`_RecordingSurface.retrieval_manifest`, looked up via `getattr` like
-    `link_evidence`) names the StatVars dfo-apis added into the family total
+    a `compare`'s right side gets no sentence. A retrieval is summed when
+    its recorded `get_data` result (`_RecordingSurface.retrieval_manifest`,
+    looked up via `getattr` like `link_evidence`) names the StatVars dfo-apis added into the family total
     (`summed_stat_var_count`). The sentence names the family, states that
     count and who set the reading (`_reading_set_by`), and says when the
     figures add up recipients the question did not name
@@ -1940,6 +2106,122 @@ def _stat_var_totals(
             if sentence not in sentences:
                 sentences.append(sentence)
     return sentences
+
+
+def _answer_notes(
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """The sentences `narrate` states whatever its draft says, over every
+    answer frame (`_answer_frames`) or only those of `terminals`: one per
+    summed family (`_stat_var_totals`), then one per step that left keys out
+    (`_dropped_key_sentences`)."""
+    return [
+        *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
+        *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
+    ]
+
+
+def _dropped_key_sentences(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One sentence per step under an answer frame that left keys out of its
+    result (`StepRecord.dropped_key_count`), over every answer frame
+    (`_answer_frames`) or only those of `terminals`.
+
+    A keyed `quotient_of` drops each numerator key it has nothing to divide
+    by, and every step reading its frame, a `rank` among them, works over
+    the keys that remain. So the walk covers every step an answer frame
+    rests on (`_upstream_steps`), in the plan's step order. Identical
+    sentences are stated once.
+    """
+    workflow = plan.workflow
+    if workflow is None:
+        return []
+    dropped = {
+        record.step_id: record.dropped_key_count
+        for record in _ran(outcome)
+        if record.dropped_key_count
+    }
+    if not dropped:
+        return []
+    steps_by_id = {step.id: step for step in workflow.steps}
+    sentences: list[str] = []
+    for terminal_id in _answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
+        under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
+        for step_id, count in dropped.items():
+            if step_id not in under:
+                continue
+            sentence = _dropped_key_sentence(count, *_dropped_key_nouns(step_id, plan))
+            if sentence not in sentences:
+                sentences.append(sentence)
+    return sentences
+
+
+def _upstream_steps(step_id: str, *, steps_by_id: dict[str, WorkflowStep]) -> frozenset[str]:
+    """`step_id` and every step that transitively feeds it, via `WorkflowStep.bindings`."""
+    found: set[str] = set()
+    pending = [step_id]
+    while pending:
+        current = pending.pop()
+        if current in found:
+            continue
+        found.add(current)
+        if (step := steps_by_id.get(current)) is not None:
+            pending.extend(binding.from_step for binding in step.bindings.values())
+    return frozenset(found)
+
+
+def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str | None]:
+    """The plan's own words for the keys step `step_id` divides and for what
+    it divides them by: the quotient requirement's `axis`, and the measure
+    of the dataset requirement under its denominator. `None` for either the
+    plan does not state.
+
+    A step carries out the operation it is named for (`WorkflowStep.id`),
+    and that operation names its requirement.
+    """
+    operations = plan.translation.operations if plan.translation is not None else ()
+    requirement_id = next(
+        (operation.requirement_id for operation in operations if operation.id == step_id), None
+    )
+    requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    requirement = requirements.get(requirement_id or "")
+    if not isinstance(requirement, QuotientRequirement):
+        return None, None
+    divisor = requirements.get(requirement.denominator.input_id)
+    # A denominator read through a filter or an aggregate keeps its
+    # dataset's measure.
+    while divisor is not None and not isinstance(divisor, DatasetRequirement):
+        divisor = requirements.get(getattr(divisor, "input_id", None) or "")
+    return requirement.axis, divisor.measure if divisor is not None else None
+
+
+def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> str:
+    """The sentence for `count` keys a quotient left out: how many, of which
+    role when the plan names one (`axis`), and that each had nothing to
+    divide by, named by its measure when the plan states one (`divisor`).
+
+    A key is left out when the denominator holds no entry for it, none in a
+    period the key reports, or only zeros where it does, and the one wording
+    is true of all three.
+
+    The role phrase is the planner's own word and is not inflected: it
+    qualifies "entry" or "entries", which carries the number.
+    """
+    noun = "entry" if count == 1 else "entries"
+    subject = f"{count:,} {axis} {noun}" if axis else f"{count:,} {noun}"
+    lacked = f"no {divisor} figure to divide by" if divisor else "no figure to divide by"
+    verb = "was" if count == 1 else "were"
+    return f"{subject} had {lacked} and {verb} left out."
 
 
 def _family_name(manifest: Mapping[str, Any], source: SelectedSource | None) -> str:
@@ -2177,7 +2459,8 @@ def _kept_asks(
 ) -> dict[str, Any]:
     """`kept` with each ask `outcome`'s run computed (`_computed_asks`) set to
     that run's answer frames for it: per answering step its id, tool, frame
-    ref and digest, the family totals those frames carry, and for an ask
+    ref and digest, the notes on how those frames were computed
+    (`_answer_notes`: family totals and keys left out), and for an ask
     `plan` answers in part, the part not computed with its reason, as
     `_ask_status` reports it. A plan call's asks are fixed (`plan_start`), so
     an ask's number names the same ask in every plan the call runs."""
@@ -2198,7 +2481,7 @@ def _kept_asks(
                 }
                 for step in steps
             ],
-            "totals": _stat_var_totals(tool_surface, outcome, plan=plan, terminals=steps),
+            "totals": _answer_notes(tool_surface, outcome, plan=plan, terminals=steps),
         }
         if row["declined"] is not None:
             kept[str(number)]["not_computed"] = {
@@ -2300,9 +2583,10 @@ def _with_remedy(text: str, failed_step: dict[str, Any] | None) -> str:
 
 
 def _with_totals(text: str, totals: list[str]) -> str:
-    """`text` with each `_stat_var_totals` sentence it does not already state
+    """`text` with each `_answer_notes` sentence it does not already state
     appended verbatim, the guarantee `_with_remedy` gives a failed step's
-    remedy: a reader is told the figure is a total whatever the draft says."""
+    remedy: a reader is told the figure is a total, or that keys were left
+    out of it, whatever the draft says."""
     for sentence in totals:
         if sentence not in text:
             text = f"{text} {sentence}" if text else sentence
@@ -2763,8 +3047,176 @@ def create_root_workflow(
         ctx.state["resolve_envelope"] = json.dumps(envelope)
         yield Event(output=envelope, route="seeded")
 
+    async def split_denominators(
+        ctx: Context, parts: list[dict[str, Any]], envelope: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Search again for the parts `envelope` refused for their denominator.
+
+        The triggers are reason codes alone (`_refused_for`). A part refused
+        as `DENOMINATOR_NOT_AVAILABLE` is searched as two, its measure and
+        its denominator: the `denominator_split` seam names them, the parts
+        are built from the refused part (`_measure_and_denominator`), and
+        one search resolves `parts` with each pair in its part's place,
+        under the question as the user asked it. A built part equal to one
+        already in that search, or to a part of `parts` no split replaces,
+        is not added: several measures per head of one population share one
+        denominator part (`_split_search`). When the search would still hold
+        more than `MAX_PARTS` parts, the most `search` takes, it is not made.
+
+        A part that states a unit and is refused as `UNIT_NOT_RESOLVED` may
+        hold a per-head phrase as its unit. Search decides: one search asks
+        for those parts with the unit phrase moved into the variable
+        (`_unit_in_variable`). When search refuses every one of them for its
+        denominator, each is split too, from the part as first drafted and
+        that answer's message, so a currency stated beside the phrase stays
+        the measure's unit. Any other outcome discards the search, so a
+        unit search could not read is never dropped or read as something
+        else.
+
+        Both searches are attempts to recover a refusal `probe` already
+        holds. One that search refuses or that does not complete
+        (`_SEARCH_FAILURES`) is logged and makes no further search.
+
+        Nothing is searched again on a turn that would not plan the two
+        sources: the depth policy is asked what a definite answer with the
+        split's parts would get on this turn, and `none`, which goes to
+        `fetch` and retrieves the first part alone, leaves the refusal
+        standing. That is every turn on the `download` surface.
+
+        All of it runs once for each question `converse` drafts
+        (`GraphState.denominator_split_tried`): at most two searches and one
+        model call per refused part beyond the first search, and at most
+        `MAX_CLARIFY_ROUNDS` redrafts a turn.
+
+        `None` when no search was made beyond the first. Otherwise `probed`,
+        the variables searched with their unit moved in; `replaced`, the
+        variables of the parts split; `searched_as`, how many parts stand
+        for them in the split's search; `parts`, the variable of each of
+        those and its status in the answer, in the search's order; and
+        `kept`, whether every one of them resolves (`_resolves`), with that
+        answer as `envelope` and the parts searched as `search_parts` when
+        it is. `replaced` is empty and `searched_as` zero when no split was
+        searched, and `parts` is empty when none was answered part for
+        part."""
+        refused = _refused_for(envelope, parts, DENOMINATOR_NOT_AVAILABLE)
+        unread = [
+            index
+            for index in _refused_for(envelope, parts, UNIT_NOT_RESOLVED)
+            if parts[index].get("unit")
+        ]
+        planned = decide_depth(
+            status="definite",
+            choice_points=0,
+            degraded=False,
+            part_count=len(parts) + len(refused) + len(unread),
+            surface=ctx.state.get("surface") or surface,
+            depth_hint=ctx.state.get("depth_hint"),
+        )
+        if (
+            not (refused or unread)
+            or models.denominator_split is None
+            or ctx.state.get("denominator_split_tried")
+            or planned.depth == "none"
+        ):
+            return None
+        ctx.state["denominator_split_tried"] = True
+        question = str(ctx.state.get("question", ""))
+        digests = envelope["part_digests"]
+        messages = {index: str(digests[index].get("message") or "") for index in refused}
+        outcome: dict[str, Any] = {
+            "probed": [],
+            "replaced": [],
+            "searched_as": 0,
+            "parts": [],
+            "kept": False,
+        }
+
+        async def search_again(asked: list[dict[str, Any]]) -> dict[str, Any] | None:
+            try:
+                return await resolver(question=question, parts=asked)
+            except _SEARCH_FAILURES:
+                logger.warning(
+                    "a search for a part refused for its denominator or its unit "
+                    "failed, so the refusal stands: parts=%s",
+                    json.dumps(asked),
+                    exc_info=True,
+                )
+                return None
+
+        if unread:
+            moved = [
+                _unit_in_variable(part) if index in unread else part
+                for index, part in enumerate(parts)
+            ]
+            outcome["probed"] = [moved[index]["variable"] for index in unread]
+            logger.info("searching again with the unit in the variable: %s", outcome["probed"])
+            probed = await search_again(moved)
+            if probed is None:
+                messages = {}
+            elif set(unread) <= set(_refused_for(probed, moved, DENOMINATOR_NOT_AVAILABLE)):
+                answered = probed["part_digests"]
+                messages.update(
+                    {index: str(answered[index].get("message") or "") for index in unread}
+                )
+        if not messages:
+            return outcome
+        split_at = sorted(messages)
+        drafts = await asyncio.gather(
+            *(
+                models.denominator_split(
+                    question=question, part=parts[index], message=messages[index]
+                )
+                for index in split_at
+            )
+        )
+        split = _split_search(parts, dict(zip(split_at, drafts, strict=True)))
+        if split is None:
+            return outcome if outcome["probed"] else None
+        search_parts, positions = split
+        outcome["replaced"] = [str(parts[index].get("variable")) for index in split_at]
+        outcome["searched_as"] = len(positions)
+        logger.info(
+            "searching again for parts refused for their denominator: replaced=%s parts=%s",
+            json.dumps([parts[index] for index in split_at]),
+            json.dumps([search_parts[at] for at in positions]),
+        )
+        again = await search_again(search_parts)
+        if again is None:
+            return outcome
+        found = again.get("part_digests") or []
+        if len(found) != len(search_parts):
+            logger.info(
+                "the search of a denominator split answered %d parts for the %d asked, "
+                "so the refusal stands: parts=%s",
+                len(found),
+                len(search_parts),
+                json.dumps(search_parts),
+            )
+            return outcome
+        outcome["parts"] = [
+            {"variable": search_parts[at].get("variable"), "status": found[at].get("status")}
+            for at in positions
+        ]
+        outcome["kept"] = all(_resolves(found[at]) for at in positions)
+        if outcome["kept"]:
+            outcome["envelope"] = again
+            outcome["search_parts"] = search_parts
+        return outcome
+
     async def probe(ctx: Context, node_input: Any) -> Any:
         """Resolve the question via the injected resolver (data-mcp search).
+
+        A part search refused for its denominator, a per-head figure with no
+        such series, is searched once more as two parts, the measure and its
+        denominator (`split_denominators`), and so is one whose unit holds
+        the per-head phrase. Parts that share a denominator are searched
+        with it once. When every such part resolves, that search's answer
+        is the turn's, `search_parts` holds the parts it asked, and the turn
+        goes on as a question that named each measure does. Otherwise the
+        first answer stands, as it does when that search fails or would ask
+        more parts than `search` takes. Either way the output says so under
+        `denominator_split`, which the Activity feed reads and
+        `resolve_envelope`, the planner's reading, does not carry.
 
         A reading of a dataset the turn dropped is taken out of the answer
         (`_without_dropped_datasets`)."""
@@ -2778,6 +3230,10 @@ def create_root_workflow(
             wide=bool(ctx.state.get("spec_id_wide", False)),
             **({"parts": parts} if parts else {}),
         )
+        split = await split_denominators(ctx, parts or [], envelope)
+        if split is not None and split["kept"]:
+            envelope = split.pop("envelope")
+            ctx.state["search_parts"] = json.dumps(split.pop("search_parts"))
         envelope = _without_dropped_datasets(ctx, envelope)
         # An election survives only while the envelope still names the id
         # `clarify` set: a fresh probe with no clarify carries no election
@@ -2829,7 +3285,10 @@ def create_root_workflow(
         ctx.state["part_digests"] = json.dumps(part_digests)
         envelope = {key: value for key, value in envelope.items() if key != "part_digests"}
         ctx.state["resolve_envelope"] = json.dumps(envelope)
-        return {**envelope, "part_digests": part_digests}
+        output = {**envelope, "part_digests": part_digests}
+        if split is not None:
+            output["denominator_split"] = split
+        return output
 
     def route_status(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
         """Branch on the resolve outcome. Output and route ride one event."""
@@ -2902,6 +3361,7 @@ def create_root_workflow(
                 ctx.state["spec_id_elected"] = False
                 ctx.state["spec_id_elected_label"] = None
                 ctx.state["search_parts"] = None
+                ctx.state["denominator_split_tried"] = False
                 ctx.state["question"] = (
                     f"{ctx.state.get('question', '')} -- {answer['text']}".strip(" -")
                 )
@@ -3485,7 +3945,7 @@ def create_root_workflow(
                     ],
                     "plan_version": finished.version,
                     "step_summaries": [step.digest for step in outcome.steps if step.digest],
-                    "stat_var_totals": _stat_var_totals(tool_surface, outcome, plan=finished),
+                    "stat_var_totals": _answer_notes(tool_surface, outcome, plan=finished),
                 },
                 route="ok",
             )
@@ -3540,7 +4000,7 @@ def create_root_workflow(
                 ],
                 "plan_version": finished.version,
                 "step_summaries": [step.digest for step in completed if step.digest],
-                "stat_var_totals": _stat_var_totals(tool_surface, outcome, plan=finished),
+                "stat_var_totals": _answer_notes(tool_surface, outcome, plan=finished),
                 "failed_step": _failed_step(outcome),
             },
             route="ok",
@@ -3746,7 +4206,8 @@ def create_root_workflow(
                     "components_created": len(fact_summaries),
                     "step_summaries": node_input.get("step_summaries", []),
                     # one sentence per summed family the answer rests on:
-                    # how many StatVars it totals and who set the reading;
+                    # how many StatVars it totals and who set the reading,
+                    # and one per step that left keys out of its result;
                     # appended by code below when the draft leaves it out
                     "stat_var_totals": node_input.get("stat_var_totals", []),
                     "frame_views": node_input.get("frame_views", []),
@@ -3903,7 +4364,8 @@ def create_root_workflow(
         the final-step frames, described and registered under ids it can
         chart (never an intermediate step's, the rule `compose` applies; on
         a stopped plan, each terminal step that finished before the stop),
-        the step summaries, the family totals, what failed, each cut, and
+        the step summaries, the notes on how the figures were computed
+        (`totals`, `_answer_notes`), what failed, each cut, and
         each ask the brief listed with its outputs' status or its decline
         (`_ask_status`), then the plan record
         (`harness.turn_records.PlanRecord`). A step refused
@@ -3914,7 +4376,7 @@ def create_root_workflow(
         a run stopped, each ask that run did not compute but an earlier run
         of the call did is listed from that earlier run's kept frames
         (`ORCHESTRATOR_KEPT_ASKS_KEY`), marked `earlier_plan`, with their
-        step summaries and family totals, and an ask that earlier run
+        step summaries and those notes, and an ask that earlier run
         computed in part with the part not computed and its reason."""
         kept: dict[str, Any] = ctx.state.get(ORCHESTRATOR_KEPT_ASKS_KEY) or {}
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
@@ -3940,7 +4402,7 @@ def create_root_workflow(
 
         async def earlier(number: int, ask: str) -> dict[str, Any]:
             """Ask `number` as an earlier run of this plan call computed it,
-            from its kept frames, adding their summaries and totals."""
+            from its kept frames, adding their summaries and notes."""
             entry = kept[str(number)]
             summaries.extend(step["digest"] for step in entry["steps"] if step["digest"])
             totals.extend(total for total in entry["totals"] if total not in totals)
@@ -3960,8 +4422,8 @@ def create_root_workflow(
             return status
 
         def listing(asks: list[dict[str, Any]] | None) -> dict[str, Any]:
-            """The frames, summaries, totals and asks the agent reads, the
-            described frames registered under their ids."""
+            """The frames, summaries, computation notes (`totals`) and asks
+            the agent reads, the described frames registered under their ids."""
             result: dict[str, Any] = {
                 "frames": register_frames(frames, described),
                 "step_summaries": [

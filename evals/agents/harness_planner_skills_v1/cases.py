@@ -91,17 +91,17 @@ CASES = (
             "does that compare with its net disbursements?"
         ),
         spec_ids=(_spec("1"),),
-        skills=("oda-dac1", "oda-measures", "policy-markers"),
+        skills=("oda-dac1", "oda-measures", "oda-policy-markers"),
         required=("oda-measures",),
-        forbidden=("policy-markers",),
+        forbidden=("oda-policy-markers",),
     ),
     Case(
         eval_id="oda-gni-target",
         question="Which DAC members met the 0.7% ODA/GNI target in 2023?",
         spec_ids=(_spec("2"),),
-        skills=("oda-dac1", "oda-concepts", "policy-markers"),
+        skills=("oda-dac1", "oda-concepts", "oda-policy-markers"),
         required=("oda-concepts",),
-        forbidden=("policy-markers",),
+        forbidden=("oda-policy-markers",),
     ),
     Case(
         eval_id="gender-marker-share",
@@ -110,8 +110,8 @@ CASES = (
             "principal objective?"
         ),
         spec_ids=(_spec("3"),),
-        skills=("oda-crs", "policy-markers", "oda-dac2a"),
-        required=("policy-markers",),
+        skills=("oda-crs", "oda-policy-markers", "oda-dac2a"),
+        required=("oda-policy-markers",),
         # DAC2A carries no policy marker, and the share's denominator is the
         # UK's screened CRS activities, so it has nothing to add here.
         forbidden=("oda-dac2a",),
@@ -123,9 +123,9 @@ CASES = (
             "using the CRS purpose codes, broken down by donor?"
         ),
         spec_ids=(_spec("4"),),
-        skills=("oda-crs", "oda-dac2a", "policy-markers"),
+        skills=("oda-crs", "oda-dac2a", "oda-policy-markers"),
         required=("oda-crs",),
-        forbidden=("policy-markers",),
+        forbidden=("oda-policy-markers",),
     ),
     Case(
         eval_id="grant-equivalent-and-purpose-codes",
@@ -134,17 +134,17 @@ CASES = (
             "bilateral aid that went to health, by CRS purpose code."
         ),
         spec_ids=(_spec("5"), _spec("6")),
-        skills=("oda-crs", "oda-measures", "oda-dac1", "policy-markers"),
+        skills=("oda-crs", "oda-measures", "oda-dac1", "oda-policy-markers"),
         required=("oda-crs", "oda-measures"),
-        forbidden=("policy-markers",),
+        forbidden=("oda-policy-markers",),
     ),
     Case(
         eval_id="population-needs-no-skill",
         question="What was Nigeria's total population in 2020?",
         spec_ids=(_spec("7"),),
-        skills=("policy-markers", "oda-dac2a"),
+        skills=("oda-policy-markers", "oda-dac2a"),
         required=(),
-        forbidden=("policy-markers", "oda-dac2a"),
+        forbidden=("oda-policy-markers", "oda-dac2a"),
     ),
 )
 

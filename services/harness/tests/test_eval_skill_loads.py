@@ -51,14 +51,14 @@ def _turn(calls: list[genai_types.FunctionCall]) -> Invocation:
         ([], [], [], 0.0),
         (
             ["oda-crs"],
-            ["policy-markers"],
-            [_skill("policy-markers"), _skill("oda-crs"), _PLAN],
+            ["oda-policy-markers"],
+            [_skill("oda-policy-markers"), _skill("oda-crs"), _PLAN],
             0.0,
         ),
         (
             ["oda-crs"],
-            ["policy-markers"],
-            [_skill("oda-crs"), _PLAN, _skill("policy-markers")],
+            ["oda-policy-markers"],
+            [_skill("oda-crs"), _PLAN, _skill("oda-policy-markers")],
             1.0,
         ),
     ],

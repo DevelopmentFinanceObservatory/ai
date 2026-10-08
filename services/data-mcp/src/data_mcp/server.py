@@ -21,7 +21,9 @@ from common.materialisation import aclose_store as aclose_frame_store
 from common.materialisation import install_store_if_unset
 from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddleware
 from common.telemetry import init_telemetry
+from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
+from fastmcp.tools import Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -77,8 +79,9 @@ def _build_store(settings: Settings) -> DefinitionStore:
 
 @asynccontextmanager
 async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
-    """Builds the definition store on startup; closes it, the upstream client, and the
-    shared frame materialisation store on shutdown.
+    """Builds the definition store and lists the declared datasets in the search tool's
+    description on startup; closes the store, the upstream client, and the shared frame
+    materialisation store on shutdown.
 
     This lifespan, not `main()`, is what actually runs in production: the
     harness mounts this app's ASGI sub-app via `combine_lifespans` and never
@@ -105,6 +108,9 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
             bucket_name=settings.frame_store_bucket,
             verify_content_version_on_read=settings.frame_store_verify_content_version,
         )
+    _search.description = search_tool.describe_search(
+        _SEARCH_DESCRIPTION, await search_tool.fetch_declared_datasets()
+    )
     try:
         yield
     finally:
@@ -132,12 +138,38 @@ async def healthz(_request: Request) -> JSONResponse:
 # schema on every call is a risk left untaken here. `resolve_definition` is
 # the harness's: the combined server outside clients reach leaves it out
 # (`harness.combined_mcp`).
-mcp.tool(search_tool.search, version="1")
-mcp.tool(get_data, version="1")
-mcp.tool(describe, version="1")
-mcp.tool(get_skill, version="1")
-mcp.tool(get_skill_file, version="1")
-mcp.tool(sources, version="1")
+# `search` is held as a `Tool` so the lifespan can list the declared datasets
+# in its description, read from dfo-apis at startup. Until then, and when that
+# read fails, the description lists none.
+_search = Tool.from_function(
+    search_tool.search,
+    version="1",
+    title="Search DFO data",
+    annotations=READ_ONLY_CATALOGUE,
+)
+_SEARCH_DESCRIPTION = _search.description or ""
+_search.description = search_tool.describe_search(_SEARCH_DESCRIPTION, None)
+mcp.add_tool(_search)
+mcp.tool(get_data, version="1", title="Get data", annotations=READ_ONLY_CATALOGUE)
+mcp.tool(
+    describe,
+    version="1",
+    title="Explain a data identifier",
+    annotations=READ_ONLY_CATALOGUE,
+)
+mcp.tool(get_skill, version="1", title="Load a skill", annotations=READ_ONLY_CATALOGUE)
+mcp.tool(
+    get_skill_file,
+    version="1",
+    title="Read a skill file",
+    annotations=READ_ONLY_CATALOGUE,
+)
+mcp.tool(
+    sources,
+    version="1",
+    title="List data sources",
+    annotations=READ_ONLY_CATALOGUE,
+)
 mcp.tool(resolve_definition, version="1")
 
 # A templated resource, not a tool -- it surfaces only via

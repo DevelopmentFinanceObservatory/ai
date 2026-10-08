@@ -27,6 +27,7 @@ from pydantic import Field
 from analysis_mcp.digest import render_rank_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    ComposedUnitSumError,
     NonFiniteAggregateResultError,
     UnsupportedAggregationError,
 )
@@ -55,7 +56,15 @@ from analysis_mcp.frame_ref_resolution import (
     resolve_input_frame,
 )
 from analysis_mcp.identity import canonicalize_op_spec
-from analysis_mcp.op_spec import MAX_RANK_LIMIT, PinnedUnit, RankOpSpec
+from analysis_mcp.op_spec import (
+    ANCHOR_KEY_PATTERN,
+    MAX_RANK_LIMIT,
+    PinnedUnit,
+    RankOpSpec,
+    WindowRolling,
+    with_anchor_key,
+)
+from analysis_mcp.rolling_tool import anchored_input
 from analysis_mcp.settings import Settings
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
@@ -79,6 +88,7 @@ if TYPE_CHECKING:
 # `share_of`.
 _EngineError = (
     UnsupportedAggregationError
+    | ComposedUnitSumError
     | UnknownEntityColumnError
     | StatVarUnresolvedError
     | UnitNotPresentError
@@ -135,6 +145,8 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         )
     elif isinstance(exc, PlaceLevelsMixedError):
         refusal = ToolRefusal.place_levels_mixed(column=exc.column, types=list(exc.types))
+    elif isinstance(exc, ComposedUnitSumError):
+        refusal = ToolRefusal.composed_unit_sum_unsupported(verb="rank", unit=exc.unit)
     else:
         refusal = ToolRefusal.non_finite_result(
             group_key=exc.group_key, aggregation=exc.aggregation
@@ -218,8 +230,9 @@ async def rank(
             default=None,
             description=(
                 "Pins the unit to rank over, when the input frame carries more than "
-                "one: a unit ref, or a converted unit as its {currency, prices, base_year} "
-                "object. Retry with one of a unit_heterogeneous refusal's fix.units values."
+                "one: a unit ref, a converted unit as its {currency, prices, base_year} "
+                "object, or a composed unit as its {numerator, denominator} object. "
+                "Retry with one of a unit_heterogeneous refusal's fix.units values."
             ),
         ),
     ] = None,
@@ -261,6 +274,34 @@ async def rank(
             ),
         ),
     ] = None,
+    rolling: Annotated[
+        WindowRolling | None,
+        Field(
+            default=None,
+            description=(
+                "Marks window_start, window_end, or both as following the latest period of "
+                "the data: {window_end: {anchor: 'latest', offset: 0, rule: 'half1'}}, with "
+                "offset counting whole years back from the latest. The window's years stay "
+                "literal and are what is computed; two rolling bounds must be the same latest "
+                "year at their offsets. population is required: one {spec_id, bindings} for "
+                "each root dataset of the question, bindings narrowing its series as {column: "
+                "[values]}; the latest period is taken over those series. Left None, the "
+                "window is fixed."
+            ),
+        ),
+    ] = None,
+    anchor_key: Annotated[
+        str | None,
+        Field(
+            default=None,
+            pattern=ANCHOR_KEY_PATTERN,
+            description=(
+                "The handle of the stored record of the latest period this call's rolling "
+                "periods were written from: rak_ and 32 hex digits. Required when the call "
+                "is rolling and refused when it is not. It is no part of the result's identity."
+            ),
+        ),
+    ] = None,
 ) -> ToolResult:
     """Rank entities identified by `rank_by`, optionally reducing each
     entity's own rows with `aggregation` first.
@@ -298,6 +339,13 @@ async def rank(
     ordinal marker. Coverage and the floor check cover every ranked entity,
     and the rows left out are reported as a `beyond_limit` exclusion.
 
+    `rolling` records that a window year follows the latest period of the
+    data. The call ranks over the literal years it is given, as a fixed call
+    does, and the result's {spec_id, content_version} pair differs from the
+    fixed call's. Such a call runs only when the record `anchor_key` names
+    covers it (`rolling_tool.anchored_input`), and refuses
+    `rolling_anchor_unresolved` otherwise.
+
     Args:
         frame_ref: The {spec_id, content_version} pair naming the input frame.
         rank_by: Column names identifying each ranked entity.
@@ -309,6 +357,9 @@ async def rank(
         per_period: Rank each period on its own; with no limit, the output's value is the
             rank position.
         limit: Keep only the entities ranked at this position or better.
+        rolling: Which window years follow the latest period, and the
+            populations that period is taken over.
+        anchor_key: The handle of the stored latest period, set on a rolling call.
 
     Returns:
         A digest: each entity's rank, value, and coverage, the resolved
@@ -317,16 +368,20 @@ async def rank(
         machine-readable fix.
     """
     op_spec = build_op_spec_or_refusal(
-        lambda: RankOpSpec(
-            frame_ref=frame_ref,
-            rank_by=tuple(rank_by),
-            aggregation=aggregation,
-            window_start=window_start,
-            window_end=window_end,
-            unit=unit,
-            ascending=ascending,
-            per_period=per_period,
-            limit=limit,
+        lambda: with_anchor_key(
+            RankOpSpec(
+                frame_ref=frame_ref,
+                rank_by=tuple(rank_by),
+                aggregation=aggregation,
+                window_start=window_start,
+                window_end=window_end,
+                unit=unit,
+                ascending=ascending,
+                per_period=per_period,
+                limit=limit,
+                rolling=rolling,
+            ),
+            anchor_key,
         )
     )
     if isinstance(op_spec, ToolResult):
@@ -339,7 +394,9 @@ async def rank(
         op_spec.rank_by,
         op_spec.frame_ref,
         description="rank_by",
-        resolve=lambda ref: _resolve_measured_frame(ref, settings=settings),
+        resolve=lambda ref: anchored_input(
+            op_spec, anchor_key, _resolve_measured_frame(ref, settings=settings)
+        ),
     )
     if isinstance(prelude, ToolResult):
         return prelude
@@ -360,6 +417,7 @@ async def rank(
         )
     except (
         UnsupportedAggregationError,
+        ComposedUnitSumError,
         UnknownEntityColumnError,
         StatVarUnresolvedError,
         UnitNotPresentError,
@@ -462,6 +520,7 @@ async def rank(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
+        input_traces=[input_trace],
         digest=lambda: render_rank_digest(
             rank_by=rank_by,
             result=result,

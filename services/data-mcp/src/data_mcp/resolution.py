@@ -27,10 +27,6 @@ _RESOLVE_ROUTE = f"{GRAPH_PREFIX}/resolve"
 _MAX_TEXTS_PER_REQUEST = 25
 _MAX_NAME_CHARS = 200
 
-# The door constrains matching to exactly these three types. `NotHeld.is_region` relies on
-# this being the complete set: anything other than an individual country is a region.
-_REGION_ENTITY_TYPES = frozenset({"geo.subregion", "geo.continent"})
-
 
 @dataclass(frozen=True, kw_only=True)
 class ResolvedEntity:
@@ -129,19 +125,6 @@ class NotHeld:
     name: str
     entity_type: str
 
-    @property
-    def is_region(self) -> bool:
-        """Whether this is a region whose members are entirely unheld, not one unheld entity.
-
-        The wire's `not_held` status carries only `name` and `entity_type`, collapsing two
-        different facts onto one status: an individual entity resolvekit knows but the graph
-        doesn't hold (`entity_type == "geo.country"`), and a region whose members are ALL
-        unheld, which the door reports as `not_held` rather than `resolved_region` with an
-        empty `members` list. The door's constraint to {geo.country, geo.subregion,
-        geo.continent} is what makes `entity_type` alone enough to tell the two apart.
-        """
-        return self.entity_type in _REGION_ENTITY_TYPES
-
 
 @dataclass(frozen=True, kw_only=True)
 class OutOfScope:
@@ -174,23 +157,26 @@ ResolutionOutcome = (
 )
 
 
-def _outcome_from_result(result: Mapping[str, Any]) -> ResolutionOutcome:
-    """Translate one wire result (one of six `status` variants) into a `ResolutionOutcome`."""
+def _outcome_from_result(result: Mapping[str, Any], text: str) -> ResolutionOutcome:
+    """Translate one wire result (one of six `status` variants) for `text` into a `ResolutionOutcome`.
+
+    The wire is dfo-apis's `graph_api.resolve_models`. A region's and a group's members are
+    both graph nodes the door read, so both map to `ResolvedRegion` with nothing unheld.
+    """
     status = result["status"]
     if status == "resolved":
         entity = result["entity"]
         return ResolvedEntity(
             dcid=entity["dcid"], name=entity["name"], entity_type=entity["entity_type"]
         )
-    if status == "resolved_region":
-        region = result["region"]
+    if status in ("resolved_region", "resolved_group"):
+        # A region is its own node. A group may have none, and is then named by its text.
+        node = result["region"] if status == "resolved_region" else result["entity"]
         return ResolvedRegion(
-            name=region["name"],
-            entity_type=region["entity_type"],
+            name=node["name"] if node is not None else text,
+            entity_type=node["entity_type"] if node is not None else "group",
             members=[RegionMember(dcid=m["dcid"], name=m["name"]) for m in result["members"]],
-            members_not_held=[
-                UnheldRegionMember(name=m["name"]) for m in result["members_not_held"]
-            ],
+            members_not_held=[],
         )
     if status == "ambiguous":
         return Ambiguous(
@@ -199,16 +185,17 @@ def _outcome_from_result(result: Mapping[str, Any]) -> ResolutionOutcome:
                     dcid=c["dcid"],
                     name=c["name"],
                     entity_type=c["entity_type"],
-                    parent=c["parent"],
+                    parent=c.get("parent"),
                 )
                 for c in result["candidates"]
             ],
-            truncated=result["truncated"],
+            truncated=result.get("truncated", False),
         )
     if status == "not_found":
-        return NotFound(near_matches=[NearMatch(name=m["name"]) for m in result["near_matches"]])
+        return NotFound(near_matches=[NearMatch(name=name) for name in result["near_matches"]])
     if status == "not_held":
-        return NotHeld(name=result["name"], entity_type=result["entity_type"])
+        # The door names no type for an entity it does not hold.
+        return NotHeld(name=result["name"], entity_type="entity")
     if status == "out_of_scope":
         return OutOfScope(
             name=result["name"], entity_type=result["entity_type"], dcid=result.get("dcid")
@@ -292,7 +279,7 @@ async def resolve_entities(
             # than a silently truncated or misaligned zip -- the one failure mode that
             # would attribute one name's result to another.
             for stripped, result in zip(chunk, results, strict=True):
-                outcomes_by_stripped[stripped] = _outcome_from_result(result)
+                outcomes_by_stripped[stripped] = _outcome_from_result(result, stripped)
 
     resolved: dict[str, dict[str, ResolutionOutcome]] = {}
     for role, names in scope.items():

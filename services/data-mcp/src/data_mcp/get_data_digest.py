@@ -281,7 +281,8 @@ def render_get_data_digest(
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
     sections.extend(_warning_lines(shown_coverage))
     sections.append(_frame_reference_line(frame_ref))
-    sections.append(_citation_line(manifest.citation))
+    if manifest.citation.text or manifest.citation.sources:
+        sections.append(_citation_line(manifest.citation))
     sections.extend(
         _statistics_sections(
             manifest.series_count,
@@ -370,7 +371,7 @@ def _acknowledgement_line(
     if isinstance(entities, Mapping):
         for role, dcids in entities.items():
             if isinstance(dcids, list) and dcids:
-                pieces.append(f"{role} {_render_dcids(dcids, entity_labels)}")
+                pieces.append(f"{role} {render_dcids(dcids, entity_labels)}")
     open_roles = identity.get("open_roles")
     if isinstance(open_roles, list):
         axis_labels = {dim.axis: dim.label for dim in coverage.dimensions if dim.axis}
@@ -391,7 +392,7 @@ def _acknowledgement_line(
     return f"{line}, with its StatVars summed into one total series per {grain}."
 
 
-def _render_dcids(dcids: Sequence[Any], entity_labels: Mapping[str, str]) -> str:
+def render_dcids(dcids: Sequence[Any], entity_labels: Mapping[str, str]) -> str:
     names = [dcid if not isinstance(dcid, str) else entity_labels.get(dcid, dcid) for dcid in dcids]
     return _joined_with_cap([str(name) for name in names], _ACKNOWLEDGEMENT_ENTITY_CAP)
 
@@ -462,6 +463,8 @@ def _frame_reference_line(frame_ref: FrameRef) -> str:
 
 def _citation_line(citation: CitationModel) -> str:
     labels = _joined_with_cap([source.label for source in citation.sources], _CITATION_SOURCE_CAP)
+    if not citation.text:
+        return f"Source: {labels}."
     return f"Source: {citation.text} ({labels})." if labels else f"Source: {citation.text}."
 
 

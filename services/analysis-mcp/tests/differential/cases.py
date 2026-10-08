@@ -806,13 +806,14 @@ def rank_cases(rng: random.Random) -> list[Case]:
 
 
 def share_of_cases(rng: random.Random) -> list[Case]:
-    """`run_share_of(numerator, denominator, numerator_entity=,
+    """`run_share_of(numerator, denominator, stat_var=, numerator_entity=,
     denominator_entity=, numerator_by=, denominator_by=,
     numerator_pinned_unit=, denominator_pinned_unit=)`."""
     cases = []
 
     def share(name: str, frames: Sequence[Spec], **params: Any) -> None:
         arguments: dict[str, Any] = {
+            "stat_var": "dcid:ops_" + "c" * 32,
             "numerator_entity": {"donor": DONORS[0]},
             "denominator_entity": {},
             "numerator_by": [],

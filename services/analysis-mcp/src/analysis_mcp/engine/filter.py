@@ -27,12 +27,13 @@ ordinary way to narrow a heterogeneous-unit frame down to one unit (see
 never resolves or refuses on unit/facet heterogeneity at all. This is a
 deliberate exemption for filter.
 
-A *converted* frame is one whose `unit` cells carry a `grammar.UnitRequest`
-object rather than a plain string (see `_unit_cells_include_unit_request`).
-A `category_match` on its `unit` refuses (`FilterUnitConversionUnsupportedError`),
-since the predicate's values are unit strings. Every other predicate filters
-a converted frame like any other, and a kept row carries its `UnitRequest`
-into the output unchanged.
+A `unit` cell that is not a ref holds an object: a `grammar.UnitRequest` in
+a *converted* frame, a `grammar.ComposedUnit` in the output of a verb that
+divides one frame by another (see `_unit_object_types`). A `category_match`
+on `unit` refuses (`FilterUnitConversionUnsupportedError`) over a frame
+holding either, since the predicate's values are unit strings. Every other
+predicate filters such a frame like any other, and a kept row carries its
+unit object into the output unchanged.
 
 An empty result after filtering is valid. `dfo_frame_grammar.frame.
 Frame.build`'s own docstring says plainly that "an empty `rows` iterable
@@ -61,12 +62,12 @@ so the type is knowable without looking at a single cell, the same way
 `AGGREGATIONS` is a closed set checked without looking at data.
 
 `unit` is the one exception. Its own declared type is
-`str | dfo_frame_grammar.grammar.UnitRequest | None` (a converted frame's
-`unit` cell can carry a `UnitRequest` object, per the
+`dfo_frame_grammar.grammar.UnitCell | None` (a `unit` cell can carry a
+`UnitRequest` or `ComposedUnit` object, per the
 `_DISALLOWED_GROUP_BY_COLUMNS` comment in `engine/aggregate.py`), so a
 `category_match` predicate on `unit` is checked against what this
 particular frame's rows actually carry rather than against a schema-level
-type (see `_unit_cells_include_unit_request`).
+type (see `_unit_object_types`).
 
 Checking once, up front, means a `None` cell on a nullable column (`unit`,
 a facet axis) is treated as a valid value at match time rather than as a
@@ -97,7 +98,7 @@ from dfo_frame_grammar.grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
-    UnitRequest,
+    UnitCell,
 )
 
 from analysis_mcp.engine.columnar import frame_from_columns
@@ -165,25 +166,26 @@ class FilterPredicateValueTypeMismatchError(Exception):
 
 class FilterUnitConversionUnsupportedError(Exception):
     """A `category_match` predicate targets `unit`, and this particular
-    frame's own `unit` cells carry a `grammar.UnitRequest` object rather
-    than a plain string or `None` -- a converted frame (see the module
-    docstring's own note on this limit, and `_unit_cells_include_unit_
-    request`).
+    frame's own `unit` cells carry a `grammar.UnitRequest` or
+    `grammar.ComposedUnit` object rather than a plain string or `None` (see
+    the module docstring's own note on this limit, and
+    `_unit_object_types`). `actual_type` names the object types the cells
+    carry, joined by `" | "`.
 
     Distinct from `FilterPredicateTypeMismatchError`, which names the wrong
     predicate kind or column. Here the kind and column are legal, but
     `category_match`'s `values` is a closed set of plain strings, which never
-    matches a `UnitRequest` cell. Predicates on every other column still
-    apply to this frame.
+    matches a unit object. Predicates on every other column still apply to
+    this frame.
     """
 
-    def __init__(self, *, column: str, predicate_kind: str) -> None:
+    def __init__(self, *, column: str, predicate_kind: str, actual_type: str) -> None:
         self.column = column
         self.predicate_kind = predicate_kind
-        self.actual_type = "UnitRequest"
+        self.actual_type = actual_type
         super().__init__(
             f"predicate kind {predicate_kind!r} on column {column!r} cannot match: this "
-            "frame's own unit cells carry a UnitRequest object, not a plain string"
+            f"frame's own unit cells carry a {actual_type} object, not a plain string"
         )
 
 
@@ -197,7 +199,7 @@ class FilterRowSummary:
 
     row_key: tuple[tuple[str, str], ...]
     value: float
-    unit: str | UnitRequest | None
+    unit: UnitCell | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -232,16 +234,17 @@ _THRESHOLD_KERNELS = {
 
 def _declared_cell_type(column: str) -> str:
     """`column`'s own declared cell type. Accurate for every column
-    including `unit` (`str | UnitRequest | None`), but for `unit` this is
-    only a *legality* check. Whether a `category_match` predicate on `unit`
-    is actually safe against this frame depends on its rows' own cells
-    rather than this declared type (see `_unit_cells_include_unit_request`)."""
+    including `unit` (`str | UnitRequest | ComposedUnit | None`), but for
+    `unit` this is only a *legality* check. Whether a `category_match`
+    predicate on `unit` is actually safe against this frame depends on its
+    rows' own cells rather than this declared type (see
+    `_unit_object_types`)."""
     if column == VALUE_COLUMN:
         return "float"
     if column == STATUS_COLUMN:
         return "NoneType"
     if column == UNIT_COLUMN:
-        return "str | UnitRequest | None"
+        return "str | UnitRequest | ComposedUnit | None"
     if column in FACET_IDENTITY_COLUMNS:
         return "str | None"
     if column == TIME_PERIOD_COLUMN:
@@ -268,20 +271,32 @@ def _predicate_kind_matches_column_type(*, column: str, kind: str) -> bool:
     return column != VALUE_COLUMN
 
 
-def _unit_cells_include_unit_request(table: pa.Table) -> bool:
-    """Whether any row's own `unit` cell holds a `grammar.UnitRequest`
-    object rather than a plain string or `None` -- the shape a converted
-    frame's `unit` column carries, as the struct's `request` field. A
-    `category_match` predicate's own `values` is a closed set of plain
-    strings, so it can never legitimately match a `UnitRequest` cell;
-    without this check, such a predicate would silently drop every row
-    carrying one instead of refusing (`FilterUnitConversionUnsupportedError`'s
-    own docstring). Every row is inspected -- the verdict is "does any row
-    carry one", not "what does the first row carry" -- so it does not
-    depend on row order.
+def _unit_object_types(table: pa.Table) -> str | None:
+    """The object types `table`'s `unit` cells carry beside refs and nulls,
+    joined by `" | "`: `"UnitRequest"` for a cell whose struct holds a
+    `request`, `"ComposedUnit"` for any other cell with no `ref`. `None`
+    when every cell is a ref or null. A `category_match` predicate's own
+    `values` is a closed set of plain strings, so it can never legitimately
+    match a unit object; without this check, such a predicate would silently
+    drop every row carrying one instead of refusing
+    (`FilterUnitConversionUnsupportedError`'s own docstring). Every row is
+    inspected -- the verdict is "does any row carry one", not "what does the
+    first row carry" -- so it does not depend on row order.
     """
-    requests = array_kernel("struct_field", table.column(UNIT_COLUMN).combine_chunks(), "request")
-    return bool(scalar_kernel("any", array_kernel("is_valid", requests)).as_py())
+    column = table.column(UNIT_COLUMN).combine_chunks()
+    is_request = array_kernel("is_valid", array_kernel("struct_field", column, "request"))
+    is_object = array_kernel(
+        "and",
+        array_kernel("is_valid", column),
+        array_kernel("is_null", array_kernel("struct_field", column, "ref")),
+    )
+    is_composed = array_kernel("and_not", is_object, is_request)
+    held = [
+        name
+        for name, mask in (("UnitRequest", is_request), ("ComposedUnit", is_composed))
+        if scalar_kernel("any", mask).as_py()
+    ]
+    return " | ".join(held) or None
 
 
 def _validate_predicate_types(
@@ -306,7 +321,7 @@ def _validate_predicate_types(
     `ordered_threshold` on `time_period` refuses as an `"interval"` type
     mismatch.
     """
-    unit_carries_unit_request: bool | None = None
+    unit_checked = False
     for predicate in predicates:
         if (
             span is not None
@@ -336,11 +351,13 @@ def _validate_predicate_types(
                     column=predicate.column, actual_type="interval", expected_type="point"
                 )
         if predicate.column == UNIT_COLUMN and predicate.kind == "category_match":
-            if unit_carries_unit_request is None:
-                unit_carries_unit_request = _unit_cells_include_unit_request(frame.table)
-            if unit_carries_unit_request:
+            unit_object_types = None if unit_checked else _unit_object_types(frame.table)
+            unit_checked = True
+            if unit_object_types is not None:
                 raise FilterUnitConversionUnsupportedError(
-                    column=UNIT_COLUMN, predicate_kind=predicate.kind
+                    column=UNIT_COLUMN,
+                    predicate_kind=predicate.kind,
+                    actual_type=unit_object_types,
                 )
 
 
@@ -350,7 +367,7 @@ def _predicate_mask(table: pa.Table, predicate: Predicate) -> pa.Array:
     row is reached, so an `ordered_threshold` predicate's own operand
     already matches its column's own type (`float` against `value`, `str`
     against `time_period`). A `category_match` on `unit` reads the ref of
-    each cell, since no cell carries a `UnitRequest` by then.
+    each cell, since every cell is a ref or null by then.
     """
     column = table.column(predicate.column).combine_chunks()
     if predicate.kind == "ordered_threshold":

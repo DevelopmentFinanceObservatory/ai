@@ -1,7 +1,7 @@
 """Text projection tests, one per catalogue member, the bounds, and escaping.
 
 Inputs are dfo-spec-kit's catalogue fixtures (`stub_assembler.resolved_revision`).
-Each member's projection is pinned whole in `fixtures/projection/<member>.txt`,
+Each fixture's projection is pinned whole in `fixtures/projection/<fixture>.txt`,
 a `.txt` so the Markdown formatter leaves it byte-exact. The bound tests
 build the largest payloads the catalogue admits, with four-byte characters
 and Markdown-active characters in every string, and hold the projection to
@@ -16,21 +16,27 @@ from typing import Any
 
 import pytest
 from presentation_mcp.projection import (
+    MAX_CELL_CHARS,
     MAX_PROJECTION_BYTES,
     MAX_ROWS,
     MAX_TEXT_CHARS,
+    MAX_UNITS_BYTES,
     MAX_VALUE_COLUMNS,
     PROJECTION_CUT_NOTICE,
     ROWLESS_NOTICE,
     delta_projection,
     describe,
+    shared_unit,
     text_projection,
+    unit_text,
     warning_texts,
 )
 
 from .stub_assembler import resolved_revision
 
 MEMBERS = ("line_chart", "bar_chart", "table", "stat_card", "note_narration", "source_card")
+# The catalogue's payloads whose unit is a quotient of two measures.
+COMPOSED_UNIT_PAYLOADS = ("stat_card_composed_unit", "table_composed_unit")
 _GOLDEN = Path(__file__).parent / "fixtures" / "projection"
 
 # Four bytes in UTF-8, so a clipped string is as large in bytes as it gets.
@@ -41,7 +47,7 @@ def _wide(length: int) -> str:
     return _WIDE * length
 
 
-@pytest.mark.parametrize("member", MEMBERS)
+@pytest.mark.parametrize("member", [*MEMBERS, *COMPOSED_UNIT_PAYLOADS])
 def test_each_member_projects_to_its_pinned_markdown(member: str) -> None:
     envelope = resolved_revision(member)
 
@@ -171,6 +177,86 @@ def test_units_that_differ_are_named_per_series() -> None:
     ) in projection
 
 
+_PER_HEAD = {
+    "numerator": "US Dollar",
+    "denominator": {"stat_var": "dcid:Count_Person", "label": "Total population"},
+}
+_CONSTANT_EUR = {"currency": "EUR", "prices": "constant", "base_year": 2020}
+
+
+@pytest.mark.parametrize(
+    ("unit", "text"),
+    [
+        (None, ""),
+        ("US Dollar", "US Dollar"),
+        (
+            "Metric tonnes of carbon dioxide\nequivalent",
+            "Metric tonnes of carbon dioxide equivalent",
+        ),
+        (
+            {"currency": "USD", "magnitude": "millions", "prices": "current"},
+            "USD millions, current prices",
+        ),
+        (_PER_HEAD, "US Dollar per Total population"),
+        (
+            {"numerator": _CONSTANT_EUR, "denominator": "Square Kilometer"},
+            "EUR, constant 2020 prices per Square Kilometer",
+        ),
+        (
+            {"numerator": "Tonne", "denominator": _CONSTANT_EUR},
+            "Tonne per EUR, constant 2020 prices",
+        ),
+    ],
+    ids=[
+        "none",
+        "string",
+        "long-string",
+        "structured",
+        "per-stat-var",
+        "structured-per",
+        "per-structured",
+    ],
+)
+def test_unit_text_words_every_unit_form_whole_on_one_line(unit: object, text: str) -> None:
+    assert unit_text(unit) == text
+
+
+@pytest.mark.parametrize(
+    ("units", "shared"),
+    [
+        ([], None),
+        ([_PER_HEAD, dict(_PER_HEAD)], "US Dollar per Total population"),
+        ([_PER_HEAD, {**_PER_HEAD, "denominator": "Square Kilometer"}], None),
+        (["x" * MAX_CELL_CHARS + "a", "x" * MAX_CELL_CHARS + "b"], None),
+        ([{"currency": "USD", "magnitude": "units"}, {"currency": "USD"}], "USD"),
+        ([_PER_HEAD, "US Dollar"], None),
+    ],
+    ids=[
+        "no-entry",
+        "equal",
+        "denominators-differ",
+        "differ-past-a-cell",
+        "read-alike",
+        "composed-beside-a-ref",
+    ],
+)
+def test_shared_unit_compares_units_by_their_words(units: list[object], shared: str | None) -> None:
+    assert shared_unit(units) == shared
+
+
+def test_a_table_row_keeps_its_unit_whole_and_clips_its_other_cells() -> None:
+    envelope = resolved_revision("table")
+    rows = envelope["component"]["rows"]
+    key = next(iter(rows[0]["dimensions"]))
+    rows[0]["dimensions"][key] = "y" * (MAX_CELL_CHARS + 1)
+    rows[0]["unit"] = {**_PER_HEAD, "numerator": _CONSTANT_EUR}
+
+    projection = text_projection(envelope)
+
+    assert "| EUR, constant 2020 prices per Total population |" in projection
+    assert f"| {'y' * (MAX_CELL_CHARS - 1)}… |" in projection
+
+
 def test_warnings_and_a_partial_period_reach_the_footer() -> None:
     envelope = resolved_revision("line_chart")
     envelope["provenance"]["freshness"]["partial_period"] = True
@@ -298,8 +384,9 @@ def test_an_entity_bar_chart_whose_bars_differ_in_unit_is_bounded(series: int) -
 
     assert len(projection.encode()) <= MAX_PROJECTION_BYTES
     units = next(line for line in projection.splitlines() if line.startswith("Units: "))
-    assert units.count("; ") == MAX_ROWS - 1
-    assert f"of {series} bars" in projection
+    assert len(units.encode()) <= MAX_UNITS_BYTES
+    assert units.endswith(f": 1{_wide(199)}.")
+    assert f"{MAX_ROWS} of {series} bars and the units of 2 of {MAX_ROWS} bars" in projection
     assert projection.splitlines()[-1].startswith("Source: ")
 
 

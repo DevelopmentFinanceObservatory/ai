@@ -7,6 +7,10 @@ validation (the website's Better Auth) plugs in HERE later -- `principal_for`
 is the only place a token is ever read, so swapping the check never touches
 a route.
 
+`POST /api/studio/refresh` is the one studio route that does not go through
+`principal_for`. It takes the live-refresh principal alone
+(`live_refresh_admits`), and that value opens no other route.
+
 The returned principal is a stable derivation of the token: it becomes the
 ADK session `user_id`, and session ids must not embed credentials. Two
 requests with the same token always land on the
@@ -44,8 +48,9 @@ def principal_for(authorization: str | None, *, settings: Settings) -> str:
             detail="the bearer token is empty",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if settings.studio_api_token is not None and not secrets.compare_digest(
-        token, settings.studio_api_token
+    if live_refresh_admits(authorization, settings=settings) or (
+        settings.studio_api_token is not None
+        and not secrets.compare_digest(token, settings.studio_api_token)
     ):
         raise HTTPException(
             status_code=401,
@@ -53,3 +58,22 @@ def principal_for(authorization: str | None, *, settings: Settings) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return "u_" + hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def live_refresh_admits(authorization: str | None, *, settings: Settings) -> bool:
+    """Whether `authorization` is `Bearer <LIVE_REFRESH_PRINCIPAL>`.
+
+    False for every header while `settings.live_refresh_principal` is unset, so
+    the refresh route is closed until the secret is mounted. The value is
+    compared in constant time, as bytes, so a non-ASCII header is refused
+    without raising.
+    """
+    principal = settings.live_refresh_principal
+    if (
+        principal is None
+        or authorization is None
+        or not authorization.lower().startswith(_BEARER_PREFIX)
+    ):
+        return False
+    token = authorization[len(_BEARER_PREFIX) :].strip()
+    return secrets.compare_digest(token.encode(), principal.encode())

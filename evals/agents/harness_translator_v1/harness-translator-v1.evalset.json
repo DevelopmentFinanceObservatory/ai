@@ -1,11 +1,11 @@
 {
   "eval_set_id": "harness-translator-v1",
   "name": "harness-translator-v1",
-  "description": "Eleven translation cases: which operation carries a requirement out, that a source comes from discovery, when a plan is referred back rather than compiled, and which of a rank's or a share_of's fields (among, axis, per_period, denominator_scope, change) an operation repeats from the plan. Each case seeds the session with the DRAFT plan the planner leaves behind, through session_input.state, and states in tool_responses the outcome the translator's core reaches on it: the compiled steps and selected sources for a mapping case, or the referral's kind and requirement for a referral case. Discovery runs against the canned data-mcp stand-in in discovery_stub.py, whose search answers are fixed per ask. Translation runs no model, so no agent scores this set: services/harness/tests/test_eval_outcomes.py drives every case through the translator's core functions and checks each outcome with outcome_metric.matches_subset.",
+  "description": "Twelve translation cases: which operation carries a requirement out, that a source comes from discovery, when a plan is referred back rather than compiled, and which of a rank's or a share_of's fields (among, axis, per_period, denominator_scope, change) an operation repeats from the plan. Each case seeds the session with the DRAFT plan the planner leaves behind, through session_input.state, and states in tool_responses the outcome the translator's core reaches on it: the compiled steps and selected sources for a mapping case, or the referral's kind and requirement for a referral case. Discovery runs against the canned data-mcp stand-in in discovery_stub.py, whose search answers are fixed per ask. Translation runs no model, so no agent scores this set: services/harness/tests/test_eval_outcomes.py drives every case through the translator's core functions and checks each outcome with outcome_metric.matches_subset.",
   "eval_cases": [
     {
       "eval_id": "maps-an-annual-total-onto-aggregate",
-      "note": "The seeded plan asks for one figure per year, and states that as an explicit aggregate requirement citing the time_grain decision. `translate` discovers the debt-service source, retrieves it once, and compiles an aggregate over it grouped by period entirely as code, in one call; the workflow_outcome metric pins that exact shape. No trajectory expectation: `translate` takes no arguments on a clean run, so there is no model-authored prose for IN_ORDER matching to compare.",
+      "note": "The seeded plan asks for one figure per year, and states that as an explicit aggregate requirement citing the time_grain decision. Translation discovers the debt-service source, retrieves it once, and compiles an aggregate over it grouped by period entirely as code, in one pass; the workflow_outcome metric pins that exact shape. No trajectory expectation: translation takes no arguments on a clean run, so there is no model-authored prose for IN_ORDER matching to compare.",
       "session_input": {
         "app_name": "harness_translator_v1",
         "user_id": "eval-user",
@@ -27,7 +27,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -74,7 +74,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -121,7 +121,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -145,13 +145,13 @@
       ]
     },
     {
-      "eval_id": "refers-a-per-head-figure-with-a-unit-less-denominator",
-      "note": "The seeded plan divides Kenya's debt service, in US dollars, by its population, a count whose source declares no unit, as a share_of. analysis-mcp's share_of refuses a unit-less side against a side in a unit (cross_frame_unit_unbound), so the compiler refuses the pair before approval with frame_unit_unbound. The correct outcome is a referral: no_operation_covers naming the share_of requirement, which the planner declines. A population source that declared the numerator's unit would clear it, but the canned discovery offers none.",
+      "eval_id": "maps-a-per-head-figure-with-a-unit-less-denominator",
+      "note": "The seeded plan asks for Kenya's debt service, in US dollars, per head of population, a count whose source declares no unit, and states that as a quotient_of requirement citing the normalisation decision. analysis-mcp's quotient_of divides one measure by another in any two units and composes the result's unit from both, so the compiler accepts the pair: one retrieval per source and one quotient_of over them, and workflow_outcome pins that shape. test_eval_outcomes.py also drives the share_of form of the same plan, which the compiler refers back to the planner as share_units_differ.",
       "session_input": {
         "app_name": "harness_translator_v1",
         "user_id": "eval-user",
         "state": {
-          "planner:plan": "{\"question\":\"How does Kenya's debt service compare per head of population?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"normalisation\",\"description\":\"How to express the figure so it is comparable across countries.\",\"options\":[\"per head of population\",\"share of government revenue\"],\"chosen\":\"per head of population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for a per-head figure.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":null}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"share_of\",\"id\":\"debt_service_per_head\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null}}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+          "planner:plan": "{\"question\":\"How does Kenya's debt service compare per head of population?\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\",\"fixes\":null},{\"slot\":\"normalisation\",\"description\":\"How to express the figure so it is comparable across countries.\",\"options\":[\"per head of population\",\"share of government revenue\"],\"chosen\":\"per head of population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for a per-head figure.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":null}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"quotient_of\",\"id\":\"debt_service_per_head\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null},\"axis\":null,\"denominator_axis\":null}],\"declined\":[],\"asks\":[],\"answered\":[],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
         }
       },
       "conversation": [
@@ -168,13 +168,81 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
-                  "outcome": "referred",
-                  "referral": {
-                    "kind": "no_operation_covers",
-                    "requirement_id": "debt_service_per_head"
-                  }
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.quotient_of"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+                    },
+                    {
+                      "spec_id": "spec_99999999999999999999999999999999"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "maps-a-keyed-per-head-figure-onto-quotient_of",
+      "note": "The seeded plan asks for official development assistance received by three named recipients, each per head of its own population, and states that as a quotient_of requirement keyed by the numerator's recipient role (axis) and the denominator's country role (denominator_axis). The compiler writes numerator_by and denominator_by from the columns each source resolves; workflow_outcome pins the two retrievals and the one quotient_of.",
+      "session_input": {
+        "app_name": "harness_translator_v1",
+        "user_id": "eval-user",
+        "state": {
+          "planner:plan": "{\"question\":\"How much official development assistance did Kenya, Uganda and Tanzania each receive per head of population?\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as aid received.\",\"options\":[\"official development assistance received\",\"aid commitments\"],\"chosen\":\"official development assistance received\",\"resolved_by\":\"planner_default\",\"rationale\":\"Received assistance is what actually arrived.\",\"fixes\":null},{\"slot\":\"normalisation\",\"description\":\"Whether each recipient's aid is divided by its own population or a pooled one.\",\"options\":[\"each recipient's aid per head of its own population\",\"pooled per head\"],\"chosen\":\"each recipient's aid per head of its own population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for each recipient's own per-head figure.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"aid_received\",\"decision_ids\":[\"measure\",\"normalisation\"],\"measure\":\"official development assistance received\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"recipient\"},{\"name\":\"Uganda\",\"role\":\"recipient\"},{\"name\":\"Tanzania\",\"role\":\"recipient\"}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":null},{\"name\":\"Uganda\",\"role\":null},{\"name\":\"Tanzania\",\"role\":null}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"quotient_of\",\"id\":\"aid_per_head\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"aid_received\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null},\"axis\":\"recipient\",\"denominator_axis\":\"country\"}],\"declined\":[],\"asks\":[],\"answered\":[],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "translate",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Translate the current plan. Its decisions and evidence requirements are settled."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_responses": [
+              {
+                "name": "translation",
+                "response": {
+                  "outcome": "ok",
+                  "steps": [
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "data-mcp.get_data"
+                    },
+                    {
+                      "tool": "analysis-mcp.quotient_of"
+                    }
+                  ],
+                  "sources": [
+                    {
+                      "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    },
+                    {
+                      "spec_id": "spec_99999999999999999999999999999999"
+                    }
+                  ]
                 }
               }
             ]
@@ -206,7 +274,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "referred",
                   "referral": {
@@ -244,7 +312,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "referred",
                   "referral": {
@@ -281,7 +349,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -330,7 +398,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -376,7 +444,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -405,7 +473,7 @@
         "app_name": "harness_translator_v1",
         "user_id": "eval-user",
         "state": {
-          "planner:plan": "{\"question\":\"What is Kenya's and Ghana's debt service as a share of their own population, each?\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\"},{\"slot\":\"normalisation\",\"description\":\"Whether each country's debt service is shared against its own population or a pooled one.\",\"options\":[\"per head of population overall\",\"each country's own share of its own population\"],\"chosen\":\"each country's own share of its own population\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for each country's own figure, not a pooled one.\"}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"normalisation\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"dataset\",\"id\":\"population\",\"decision_ids\":[\"normalisation\"],\"measure\":\"total population\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":null,\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"}},{\"kind\":\"share_of\",\"id\":\"debt_share\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"population\",\"entity\":null},\"axis\":\"debtor\",\"denominator_scope\":\"per_axis\"}],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
+          "planner:plan": "{\"question\":\"What is Kenya's and Ghana's debt service as a share of their own exports, each?\",\"answer_mode\":\"series\",\"decisions\":[{\"slot\":\"measure\",\"description\":\"What to count as Kenya's debt spending.\",\"options\":[\"annual debt service paid\",\"total debt stock outstanding\"],\"chosen\":\"annual debt service paid\",\"resolved_by\":\"planner_default\",\"rationale\":\"Debt service is what is actually paid out in a year.\",\"fixes\":null},{\"slot\":\"normalisation\",\"description\":\"Whether each country's debt service is shared against its own exports or pooled exports.\",\"options\":[\"share of its own exports\",\"share of pooled exports\"],\"chosen\":\"share of its own exports\",\"resolved_by\":\"user\",\"rationale\":\"The user asked for each country's own figure, not a pooled one.\",\"fixes\":null}],\"evidence_requirements\":[{\"kind\":\"dataset\",\"id\":\"annual_debt_service\",\"decision_ids\":[\"measure\",\"normalisation\"],\"measure\":\"external debt service paid\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"dataset\",\"id\":\"exports\",\"decision_ids\":[\"normalisation\"],\"measure\":\"exports of goods and services\",\"entities\":[{\"name\":\"Kenya\",\"role\":\"debtor\"},{\"name\":\"Ghana\",\"role\":\"debtor\"}],\"across\":null,\"period\":{\"start\":2015,\"end\":2024},\"frequency\":\"annual\",\"unit\":{\"currency\":\"USD\",\"prices\":\"current\",\"base_year\":null},\"source\":null,\"source_spec_id\":null,\"coverage\":{\"on_missing\":\"report_gaps\"},\"stat_vars\":null,\"breakdown\":null},{\"kind\":\"share_of\",\"id\":\"debt_share\",\"decision_ids\":[\"normalisation\"],\"numerator\":{\"input_id\":\"annual_debt_service\",\"entity\":null},\"denominator\":{\"input_id\":\"exports\",\"entity\":null},\"axis\":\"debtor\",\"denominator_scope\":\"per_axis\"}],\"declined\":[],\"asks\":[],\"answered\":[],\"translation\":null,\"workflow\":null,\"version\":1,\"previous_version\":null,\"status\":\"draft\",\"approved_revision\":null}"
         }
       },
       "conversation": [
@@ -422,7 +490,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [
@@ -441,7 +509,7 @@
                       "spec_id": "spec_dddddddddddddddddddddddddddddddd"
                     },
                     {
-                      "spec_id": "spec_99999999999999999999999999999999"
+                      "spec_id": "spec_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     }
                   ]
                 }
@@ -474,7 +542,7 @@
           "intermediate_data": {
             "tool_responses": [
               {
-                "name": "translate",
+                "name": "translation",
                 "response": {
                   "outcome": "ok",
                   "steps": [

@@ -20,7 +20,6 @@ from data_mcp.resolution import (
     RegionMember,
     ResolvedEntity,
     ResolvedRegion,
-    UnheldRegionMember,
     resolve_entities,
 )
 
@@ -66,61 +65,109 @@ async def test_resolved_status_maps_to_resolved_entity() -> None:
     assert outcome == ResolvedEntity(dcid="country/FRA", name="France", entity_type="geo.country")
 
 
-async def test_resolved_region_status_preserves_held_and_unheld_members() -> None:
+async def test_resolved_region_status_maps_its_members() -> None:
+    """The door's region carries `members` only: every member it lists is a graph node."""
     payload = {
         "results": [
             {
                 "status": "resolved_region",
-                "region": {"name": "Sub-Saharan Africa", "entity_type": "geo.subregion"},
-                "members": [{"dcid": "country/KEN", "name": "Kenya"}],
-                "members_not_held": [{"name": "Chad", "entity_type": "geo.country"}],
-                "confidence": 0.8,
+                "region": {
+                    "dcid": "africa",
+                    "name": "Africa",
+                    "entity_type": "Continent",
+                    "kind": "continent",
+                },
+                "members": [
+                    {"dcid": "country/AGO", "name": "Angola"},
+                    {"dcid": "country/KEN", "name": "Kenya"},
+                ],
             }
         ]
     }
 
-    outcomes = await _resolve(_json_handler(payload), {"recipient": ["Sub-Saharan Africa"]})
+    outcomes = await _resolve(_json_handler(payload), {"observationAbout": ["Africa"]})
 
-    outcome = outcomes["recipient"]["Sub-Saharan Africa"]
-    assert isinstance(outcome, ResolvedRegion)
-    assert outcome.name == "Sub-Saharan Africa"
-    assert outcome.entity_type == "geo.subregion"
-    assert outcome.members == [RegionMember(dcid="country/KEN", name="Kenya")]
-    assert outcome.members_not_held == [UnheldRegionMember(name="Chad")]
+    assert outcomes["observationAbout"]["Africa"] == ResolvedRegion(
+        name="Africa",
+        entity_type="Continent",
+        members=[
+            RegionMember(dcid="country/AGO", name="Angola"),
+            RegionMember(dcid="country/KEN", name="Kenya"),
+        ],
+        members_not_held=[],
+    )
 
 
-async def test_ambiguous_status_preserves_candidates_and_parent_field() -> None:
+async def test_resolved_group_status_maps_to_its_members() -> None:
+    """A group with no node of its own is named by the text that asked for it."""
+    payload = {
+        "results": [
+            {
+                "status": "resolved_group",
+                "entity": None,
+                "members": [
+                    {
+                        "dcid": "country/CAN",
+                        "name": "Canada",
+                        "entity_type": "Country",
+                        "kind": "country",
+                    },
+                    {
+                        "dcid": "country/DEU",
+                        "name": "Germany",
+                        "entity_type": "Country",
+                        "kind": "country",
+                    },
+                ],
+            }
+        ]
+    }
+
+    outcomes = await _resolve(_json_handler(payload), {"observationAbout": ["G7"]})
+
+    assert outcomes["observationAbout"]["G7"] == ResolvedRegion(
+        name="G7",
+        entity_type="group",
+        members=[
+            RegionMember(dcid="country/CAN", name="Canada"),
+            RegionMember(dcid="country/DEU", name="Germany"),
+        ],
+        members_not_held=[],
+    )
+
+
+async def test_ambiguous_status_preserves_candidates() -> None:
     payload = {
         "results": [
             {
                 "status": "ambiguous",
                 "candidates": [
                     {
-                        "dcid": "geoId/13",
-                        "name": "Georgia",
-                        "entity_type": "geo.country",
-                        "parent": None,
+                        "dcid": "country/COD",
+                        "name": "Congo [DRC]",
+                        "entity_type": "Country",
+                        "kind": "country",
                     },
                     {
-                        "dcid": "country/GEO",
-                        "name": "Georgia",
-                        "entity_type": "geo.country",
-                        "parent": "continent/AS",
+                        "dcid": "country/COG",
+                        "name": "Congo [Republic]",
+                        "entity_type": "Country",
+                        "kind": "country",
                     },
                 ],
-                "truncated": False,
             }
         ]
     }
 
-    outcomes = await _resolve(_json_handler(payload), {"recipient": ["Georgia"]})
+    outcomes = await _resolve(_json_handler(payload), {"recipient": ["Congo"]})
 
-    outcome = outcomes["recipient"]["Georgia"]
+    outcome = outcomes["recipient"]["Congo"]
     assert isinstance(outcome, Ambiguous)
     assert outcome.truncated is False
-    assert len(outcome.candidates) == 2
-    assert outcome.candidates[0].parent is None
-    assert outcome.candidates[1].parent == "continent/AS"
+    assert [(c.dcid, c.name, c.parent) for c in outcome.candidates] == [
+        ("country/COD", "Congo [DRC]", None),
+        ("country/COG", "Congo [Republic]", None),
+    ]
 
 
 async def test_not_found_with_near_matches_signals_a_probable_misspelling() -> None:
@@ -128,14 +175,7 @@ async def test_not_found_with_near_matches_signals_a_probable_misspelling() -> N
         "results": [
             {
                 "status": "not_found",
-                "near_matches": [
-                    {
-                        "name": "France",
-                        "entity_type": "geo.country",
-                        "dcid": "country/FRA",
-                        "confidence": 0.6,
-                    }
-                ],
+                "near_matches": ["France"],
             }
         ]
     }
@@ -159,26 +199,12 @@ async def test_not_found_with_no_near_matches_signals_nonsense() -> None:
     assert outcome.near_matches == []
 
 
-async def test_not_held_individual_entity_is_not_a_region() -> None:
-    payload = {"results": [{"status": "not_held", "name": "Andorra", "entity_type": "geo.country"}]}
+async def test_not_held_maps_to_not_held() -> None:
+    payload = {"results": [{"status": "not_held", "name": "Andorra", "dcid": "country/AND"}]}
 
     outcomes = await _resolve(_json_handler(payload), {"donor": ["Andorra"]})
 
-    outcome = outcomes["donor"]["Andorra"]
-    assert isinstance(outcome, NotHeld)
-    assert outcome.is_region is False
-
-
-async def test_not_held_region_with_all_members_unheld_is_a_region() -> None:
-    payload = {
-        "results": [{"status": "not_held", "name": "Micronesia", "entity_type": "geo.subregion"}]
-    }
-
-    outcomes = await _resolve(_json_handler(payload), {"recipient": ["Micronesia"]})
-
-    outcome = outcomes["recipient"]["Micronesia"]
-    assert isinstance(outcome, NotHeld)
-    assert outcome.is_region is True
+    assert outcomes["donor"]["Andorra"] == NotHeld(name="Andorra", entity_type="entity")
 
 
 async def test_out_of_scope_with_a_held_dcid_preserves_it() -> None:

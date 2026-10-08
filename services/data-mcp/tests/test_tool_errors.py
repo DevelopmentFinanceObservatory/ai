@@ -214,6 +214,8 @@ async def test_facet_not_available_maps_through_a_real_parse() -> None:
                 "axis": "unit",
                 "alternatives": [{"ref": "USD", "label": "US Dollar"}],
                 "truncated": False,
+                "code": None,
+                "detail": None,
             }
         ],
         "detail": "because",
@@ -274,7 +276,9 @@ async def test_facet_not_available_keeps_the_axis_when_no_alternatives_exist() -
         422, code="facet_not_available", retryable=False, pointer="/input/facets/unit"
     )
     assert refusal.code == ToolErrorCode.FACET_NOT_AVAILABLE
-    assert refusal.fix["issues"] == [{"axis": "unit", "alternatives": [], "truncated": False}]
+    assert refusal.fix["issues"] == [
+        {"axis": "unit", "alternatives": [], "truncated": False, "code": None, "detail": None}
+    ]
     # Search refuses an unmatched unit with no dataset or family in play, so the
     # message states the axis and the missing alternatives and nothing else.
     assert refusal.message == (
@@ -287,9 +291,21 @@ async def test_default_facet_undefined_maps_with_the_narrowed_contract() -> None
         422, code="default_facet_undefined", retryable=False, issues=[{"axis": "provenance"}]
     )
     assert refusal.code == ToolErrorCode.DEFAULT_FACET_UNDEFINED
-    # Only `axes` reaches `fix` — `DefaultFacetUndefinedError` takes no
+    # No `alternatives` reach `fix` — `DefaultFacetUndefinedError` takes no
     # `alternatives` parameter at all (`src/materialise/errors.py`).
-    assert refusal.fix == {"axes": ["provenance"]}
+    assert refusal.fix == {
+        "issues": [
+            {
+                "axis": "provenance",
+                "alternatives": [],
+                "truncated": False,
+                "code": None,
+                "detail": None,
+            }
+        ],
+        "detail": "because",
+        "retryable": False,
+    }
 
 
 async def test_default_facet_undefined_aggregates_multiple_axes() -> None:
@@ -300,7 +316,90 @@ async def test_default_facet_undefined_aggregates_multiple_axes() -> None:
         issues=[{"axis": "provenance"}, {"axis": "unit"}],
     )
     assert refusal.code == ToolErrorCode.DEFAULT_FACET_UNDEFINED
-    assert refusal.fix == {"axes": ["provenance", "unit"]}
+    assert [i["axis"] for i in refusal.fix["issues"]] == ["provenance", "unit"]
+
+
+async def test_default_facet_undefined_relays_the_apis_refusal_without_a_cause_of_its_own() -> None:
+    """The API's detail, axes and retryable ride in `fix` as sent; the message
+    says only that the platform refused, with no cause or advice of data-mcp's own."""
+    refusal = await _refusal_from(
+        422,
+        code="default_facet_undefined",
+        retryable=False,
+        detail="one or more facet axes could not be resolved",
+        issues=[{"axis": "provenance"}, {"axis": "measurementMethod"}, {"axis": "unit"}],
+    )
+    assert [i["axis"] for i in refusal.fix["issues"]] == [
+        "provenance",
+        "measurementMethod",
+        "unit",
+    ]
+    assert refusal.fix["detail"] == "one or more facet axes could not be resolved"
+    assert refusal.fix["retryable"] is False
+    assert refusal.trace_id == "trace-1"
+    assert refusal.message == "The platform refused the requested data."
+
+
+async def test_each_facet_issue_keeps_its_own_code_and_detail() -> None:
+    """dfo-apis#1221 sends each issue's own code and detail. Both facet refusals keep
+    them, so a multi-axis refusal says why on each axis."""
+    issues = [
+        {
+            "pointer": "/facets/unit",
+            "axis": "unit",
+            "alternatives": [{"ref": "USDollar", "label": "US Dollar"}],
+            "truncated": False,
+            "code": "facet_not_available",
+            "detail": "facet axis 'unit' bound to 'Euro' has no observations",
+        },
+        {
+            "pointer": "/facets/provenance",
+            "axis": "provenance",
+            "code": "default_facet_undefined",
+            "detail": (
+                "facet axis 'provenance' is unbound, no default policy is declared, "
+                "and no probed candidate has any observations"
+            ),
+        },
+    ]
+    for code in ("default_facet_undefined", "facet_not_available"):
+        refusal = await _refusal_from(422, code=code, retryable=False, issues=issues)
+        assert [(i["axis"], i["code"], i["detail"]) for i in refusal.fix["issues"]] == [
+            (i["axis"], i["code"], i["detail"]) for i in issues
+        ]
+
+
+async def test_default_facet_undefined_asks_for_a_change_only_when_an_issue_lists_values() -> None:
+    """`retryable: false` means the same request fails again. A bound unit that emptied
+    the pool lists the units that work, so the refusal asks for that change; with no
+    listed values it stops."""
+    with_values = await _refusal_from(
+        422,
+        code="default_facet_undefined",
+        retryable=False,
+        issues=[{"axis": "unit", "alternatives": [{"ref": "USDollar", "label": "US Dollar"}]}],
+    )
+    assert with_values.retry_mode is RetryMode.CORRECT_AND_RETRY
+    without = await _refusal_from(
+        422, code="default_facet_undefined", retryable=False, issues=[{"axis": "unit"}]
+    )
+    assert without.retry_mode is RetryMode.DO_NOT_RETRY
+
+
+@pytest.mark.parametrize(
+    ("retryable", "mode"),
+    # `retryable` says whether the same request might succeed (dfo-apis
+    # `dfo_platform/problem.py`), so `true` waits and repeats; it never asks for a change.
+    [(False, RetryMode.DO_NOT_RETRY), (True, RetryMode.RETRY_AFTER_DELAY)],
+)
+async def test_default_facet_undefined_takes_its_retry_mode_from_the_api(
+    retryable: bool, mode: RetryMode
+) -> None:
+    refusal = await _refusal_from(
+        422, code="default_facet_undefined", retryable=retryable, issues=[{"axis": "unit"}]
+    )
+    assert refusal.retry_mode is mode
+    assert refusal.fix["retryable"] is retryable
 
 
 async def test_over_ceiling_carries_detail_verbatim() -> None:
@@ -595,7 +694,7 @@ async def test_a_malformed_issue_is_skipped_and_the_objects_beside_it_are_read()
         retryable=False,
         issues=["unit", {"axis": "provenance"}, {"axis": None}],
     )
-    assert refusal.fix == {"axes": ["provenance"]}
+    assert [i["axis"] for i in refusal.fix["issues"]] == ["provenance", None]
 
 
 async def test_facet_alternatives_that_are_not_objects_are_skipped() -> None:
@@ -606,7 +705,13 @@ async def test_facet_alternatives_that_are_not_objects_are_skipped() -> None:
         issues=[{"axis": "unit", "alternatives": ["USD", {"ref": "EUR", "label": "Euro"}]}],
     )
     assert refusal.fix["issues"] == [
-        {"axis": "unit", "alternatives": [{"ref": "EUR", "label": "Euro"}], "truncated": False}
+        {
+            "axis": "unit",
+            "alternatives": [{"ref": "EUR", "label": "Euro"}],
+            "truncated": False,
+            "code": None,
+            "detail": None,
+        }
     ]
 
 
@@ -1417,7 +1522,10 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ),
             {"issues", "detail"},
         ),
-        (ToolRefusal.default_facet_undefined(axes=["country"]), {"axes"}),
+        (
+            ToolRefusal.default_facet_undefined(issues=[], detail=None, retryable=False),
+            {"issues", "detail", "retryable"},
+        ),
         (
             ToolRefusal.over_ceiling(detail="5000 rows, 200 countries", ceiling_kind="rows"),
             {"detail", "ceiling_kind"},

@@ -153,6 +153,32 @@ def test_a_pinned_source_not_found_may_carry_candidates_but_need_not(
     )
 
 
+def test_an_unmeetable_requirement_carries_candidates_only_for_a_stated_source_not_found(
+    source: SourceFactory,
+) -> None:
+    found = (source(),)
+
+    assert (
+        Referral(
+            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+            reason="r",
+            requirement_id="a",
+            candidates=found,
+            source_mismatch=True,
+        ).candidates
+        == found
+    )
+    with pytest.raises(ValidationError, match="carries candidates only for a stated source"):
+        Referral(
+            kind=ReferralKind.REQUIREMENT_UNMEETABLE,
+            reason="r",
+            requirement_id="a",
+            candidates=found,
+        )
+    with pytest.raises(ValidationError, match="never marked source_mismatch"):
+        Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", source_mismatch=True)
+
+
 def test_a_referral_gives_a_reason() -> None:
     with pytest.raises(ValidationError, match="at least 1 character"):
         Referral(kind=ReferralKind.DISCOVERY_BUDGET_EXHAUSTED, reason="")

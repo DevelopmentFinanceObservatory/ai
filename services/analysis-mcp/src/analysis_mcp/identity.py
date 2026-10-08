@@ -52,6 +52,7 @@ from analysis_mcp.op_spec import (
     FilterOpSpec,
     GrowthOpSpec,
     JoinOpSpec,
+    QuotientOfOpSpec,
     RankOpSpec,
     ShareOfOpSpec,
     SumOfOpSpec,
@@ -66,6 +67,7 @@ OpSpecVariant = (
     | JoinOpSpec
     | FilterOpSpec
     | SumOfOpSpec
+    | QuotientOfOpSpec
 )
 
 OP_SPEC_IDENTITY_VERSION = "ops1"
@@ -161,8 +163,8 @@ def _normalise_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
 
     `AggregateOpSpec.group_by`, `FilterOpSpec.predicates`,
     `GrowthOpSpec.entity_by`, `RankOpSpec.rank_by`, `JoinOpSpec.join_keys`,
-    and `ShareOfOpSpec.numerator_by` are the only array members any verb's
-    parameters carry -- each named explicitly here rather than walked
+    and `ShareOfOpSpec`'s and `QuotientOfOpSpec`'s `numerator_by` are the only
+    array members any verb's parameters carry -- each named explicitly here rather than walked
     generically, the same named-fields-only discipline
     `dfo_frame_grammar`'s preimage builder uses for
     `source_revisions`/`facets`. `numerator_by` names a *set* of grouping
@@ -170,10 +172,10 @@ def _normalise_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
     pairing with `denominator_by` is carried by column *name*, not by
     either field's position, so sorting `numerator_by` here changes no
     pairing (see `ShareOfOpSpec`'s own docstring). `CompareOpSpec`'s and
-    `SumOfOpSpec`'s `left_entity`/`right_entity` and `ShareOfOpSpec.numerator_entity`/
-    `denominator_entity`/`denominator_by` need no entry here: all five are
-    JSON objects, not arrays, and JCS already sorts object members on its
-    own.
+    `SumOfOpSpec`'s `left_entity`/`right_entity` and `ShareOfOpSpec`'s and
+    `QuotientOfOpSpec`'s `numerator_entity`/`denominator_entity`/
+    `denominator_by` need no entry here: all five are JSON objects, not
+    arrays, and JCS already sorts object members on its own.
     """
     normalised = dict(parameters)
     if "group_by" in normalised:

@@ -26,6 +26,7 @@ from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from planner.plan import (
     SeededSource,
 )
+from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -479,7 +480,13 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
     """The part Search resolves `taken`'s identity to now (`translator.discovery.resolve_definition`)."""
     spec = taken.seed.spec
     return await resolve_definition(
-        surface, spec_id=spec.spec_id, identity=spec.definition.identity
+        surface,
+        spec_id=spec.spec_id,
+        identity=spec.definition.identity,
+        groups=tuple(
+            ResolvedGroup(role=role, label=group.label, ref=group.dcid)
+            for role, group in (spec.entity_groups or {}).items()
+        ),
     )
 
 

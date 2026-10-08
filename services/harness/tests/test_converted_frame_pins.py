@@ -32,6 +32,7 @@ from common.materialisation import (
     MaterialisationTrace,
     set_store,
 )
+from common.unit_refs import PERCENT_UNIT
 from data_mcp.frame_materialisation import _frame_from_parquet_bytes
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import UnitRequest
@@ -149,6 +150,16 @@ def _verb_arguments(verb: str, frame_ref: dict[str, str], pin: object) -> dict[s
     }
 
 
+def _resolved_input_unit(verb: str, trace: dict[str, Any]) -> object:
+    """The unit `verb` resolved its input in. A share states its own result in
+    per cent and records each side's resolved unit in the policy detail."""
+    policy = trace["applied_policy"]
+    if verb == "share_of":
+        assert policy["resolved_unit"] == PERCENT_UNIT
+        return policy["detail"]["numerator_resolved_unit"]
+    return policy["resolved_unit"]
+
+
 def test_a_converted_unit_text_cell_decodes_to_its_request() -> None:
     frame = _frame_from_parquet_bytes(_artifact(_UNIT_TEXT["USD_CONSTANT_2024"]))
 
@@ -175,13 +186,13 @@ async def test_a_converted_pin_resolves_a_converted_frame(
 
     frame, trace = await _held(store, await _call(verb, _verb_arguments(verb, frame_ref, pin)))
 
-    assert trace["applied_policy"]["resolved_unit"] == pin
+    assert _resolved_input_unit(verb, trace) == pin
     values = frame.table.column("value").to_pylist()
     if verb == "share_of":
         years = frame.table.column("time_period").to_pylist()
         assert dict(zip(years, values, strict=True)) == {
             year: pytest.approx(
-                _VALUES[_KENYA, year] / (_VALUES[_KENYA, year] + _VALUES[_SENEGAL, year])
+                100 * _VALUES[_KENYA, year] / (_VALUES[_KENYA, year] + _VALUES[_SENEGAL, year])
             )
             for year in ("2022", "2023", "2024")
         }
@@ -219,7 +230,7 @@ async def test_a_ref_unit_frame_resolves_its_ref_pin(
         store, await _call(verb, _verb_arguments(verb, frame_ref, "CurrencyUSD"))
     )
 
-    assert trace["applied_policy"]["resolved_unit"] == "CurrencyUSD"
+    assert _resolved_input_unit(verb, trace) == "CurrencyUSD"
 
 
 async def test_a_converted_pin_on_a_ref_unit_frame_refuses_unit_heterogeneous(

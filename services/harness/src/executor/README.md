@@ -89,6 +89,8 @@ at most its verb's bound (`compiler.frame_columns.bound_stat_var_count`):
 | `aggregate` grouping by `stat_var` | runs                                                                | its input's count      |
 | `aggregate` otherwise              | refuses `stat_var_unresolved`                                       | 1                      |
 | `growth`, `rank`, `share_of`       | refuses `stat_var_unresolved`                                       | 1                      |
+| `quotient_of`                      | refuses `stat_var_unresolved`                                       | 1                      |
+| `sum_of`                           | runs                                                                | 1                      |
 | `join`                             | refuses `stat_var_unresolved`                                       | 2                      |
 
 A count outside the bound is `shape_mismatch`. A `get_data` asked to sum its
@@ -98,6 +100,35 @@ and remedy written for the user and spends no replan. A verb that refuses a
 several-StatVar input stops the run with its own refusal. An input whose count
 is unknown (a `get_data` call that did not read the frame) leaves a `filter`,
 `compare` or grouped `aggregate` with the lower bound alone.
+
+**A rolling step's years are written from the data the run retrieved.** A
+`growth`, `rank` or `filter` step that states a period against the newest data
+carries the tool's `rolling` argument beside the years the plan read from
+Search (`compiler.rolling.is_rolling`). The rolling steps that some step reads
+together form a group (`compiler.rolling.anchor_groups`), and a group stands on
+one newest period, taken over the retrievals its steps rest on. A retrieval no
+step of the group reads has no part in it. Every step of a group runs after
+every retrieval of the group. Once those are in, the run calls analysis-mcp's
+`resolve_anchor` once for the group, with the populations its steps carry,
+spelled the way the retrieved frames spell their columns, and the frames of its
+retrievals. The answer is the newest year at least half of the series of each
+population hold, and the key of its stored resolution. Each step of the group
+is then sent that year moved by its offsets, with the key. The outcome carries
+each group's answer in `anchors`: the key, the year, and the series that hold
+no value at it. The call takes the path a step's call takes, under the id of
+the group's first step to run, and `resolve_anchor` is part of the surface
+check, compared with its row of the capability table. A plan with no rolling
+step never calls it.
+
+| Stop                                                                                    | Reported as                                                                               |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `resolve_anchor` finds no year half of the series hold (`rolling_anchor_unresolved`)    | `step_refused` with the tool's code, a message for the user and a `fix.remedy`            |
+| `resolve_anchor` finds periods that are no calendar years (`rolling_grain_unsupported`) | the same                                                                                  |
+| A rolled start is before the first year its retrieval's evidence records                | `rolling_window_outside_dataset`, before the step's call, with a payload of the same code |
+| Any other `rolling_anchor_unresolved`, from `resolve_anchor` or a rolling verb          | `step_refused` with an `internal_error` payload; the refusal is logged and kept in `fix`  |
+
+Each of these carries a payload that classifies as a stop, so the turn closes
+on it and spends no replan.
 
 **Results are read as the values they were declared to be.** A step's frame
 reference is read the way its capability says (`Extract`), never from digest
@@ -162,15 +193,17 @@ the rest of the step's budget. A step that runs past its own budget is
 `transport_failed`.
 
 A `correct_and_retry` refusal is never corrected here either, and
-`classify.py` places every code both servers can send. Eleven whose `fix` is a
+`classify.py` places every code both servers can send. Fourteen whose `fix` is a
 set of alternatives -- which unit, which facet, which entity, which window,
 which denominator -- are `MethodChoiceNeeded`, with the candidates attached
-for the planner to settle with the user. Six more are stops **because the
+for the planner to settle with the user. Nine more are stops **because the
 compiler already rules them out**: it writes every column list from the
 source's own roles, validates each argument against the live schema, checks
 the capability implements the kind, reports a join with no common key itself,
 and writes the predicates. One of those arriving is a compiler bug, not a
-choice for the user. Every remaining refusal is `step_refused`. A stop keeps
+choice for the user. `quotient_of_side_unit_unsupported` is a stop of the other
+kind. Its `fix` names the side and why it has no unit to compose, and dividing
+something else is a different plan. Every remaining refusal is `step_refused`. A stop keeps
 the refusal's own `fix` on `Refused.payload` either way -- what it withholds
 is an action, not the alternatives.
 

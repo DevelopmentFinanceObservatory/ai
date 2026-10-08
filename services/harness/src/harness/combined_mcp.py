@@ -80,6 +80,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from importlib import metadata
 from typing import Any, override
 
 from analysis_mcp.server import healthz as analysis_healthz
@@ -134,6 +135,23 @@ logger = logging.getLogger(__name__)
 
 COMBINED_MCP_NAME = "dfo"
 
+# What a client reads when it connects, before it lists a tool. It names every
+# tool the combined server lists.
+COMBINED_MCP_INSTRUCTIONS = (
+    "The Development Finance Observatory serves development-finance data, such as aid, "
+    "debt and economic indicators. `search` turns a data question into dataset "
+    "definitions, each identified by a spec_id, and `get_data` fetches one as a frame, "
+    "with its source. `sources` lists what DFO holds and how a dataset is made; "
+    "`describe` explains graph ids read from a result. The analysis tools "
+    "(`aggregate`, `compare`, `growth`, `rank`, `share_of`, `filter`, `join`, `sum_of`, "
+    "`quotient_of`) take frames and return a new frame, and `resolve_anchor` finds the "
+    "latest period a rolling `growth`, `rank` or `filter` call counts from. "
+    "`describe_frame` summarises a frame, and "
+    "`write_component` turns a frame into a chart, table or card, which "
+    "`describe_component` reads back. A `search` result can list skills: `get_skill` "
+    "loads one, and `get_skill_file` reads a file it lists."
+)
+
 # data-mcp's `resolve_definition`, which resolves each Search result a Studio
 # turn starts from, and a seed's identity over a plan's years, again through
 # Search and stores its definition. The harness calls it at `DATA_MCP_URL`
@@ -150,7 +168,10 @@ _IN_FLIGHT_RETRY_AFTER_S = 5.0
 _SKILLS_READ_LIMIT_S = 10.0
 
 # Each mounted child with its own `/healthz` handler, which the parent's
-# `/healthz` calls in process.
+# `/healthz` calls in process. An outside client's `write_component` reaches
+# presentation-mcp here directly, so it does not pass the rules for a card whose
+# period follows the latest data, which `harness.mcp_client.McpExecutor` applies
+# to the Studio's own writes (`harness.rolling_cards`).
 _CHILDREN: tuple[tuple[FastMCP, Callable[[Request], Awaitable[Response]]], ...] = (
     (data_mcp, data_healthz),
     (analysis_mcp, analysis_healthz),
@@ -194,7 +215,12 @@ def build_combined_mcp(
     it started without the platform's tools, which it does only with
     `PRESENTATION_RELEASE_REQUIRED` false; otherwise it fails startup.
     """
-    combined = _CombinedMCP(name=COMBINED_MCP_NAME, auth=BearerTokenVerifier())
+    combined = _CombinedMCP(
+        name=COMBINED_MCP_NAME,
+        instructions=COMBINED_MCP_INSTRUCTIONS,
+        version=metadata.version("harness"),
+        auth=BearerTokenVerifier(),
+    )
     for child, _ in _CHILDREN:
         combined.mount(child)
     combined.disable(names=set(HARNESS_ONLY_TOOLS), components={"tool"})

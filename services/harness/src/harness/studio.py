@@ -906,6 +906,26 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     # 409, not a bare 500.
                     conversation = await studio.store.load(principal, body.conversation_id)
                     assert conversation is not None
+            if (
+                body.component_ref is not None
+                and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
+                and body.component_ref.component_id not in conversation.components
+            ):
+                # A follow-up about a card this conversation never stored
+                # would run as a plain turn with no card in view.
+                lock.release()
+                return _tool_error_response(
+                    ToolError(
+                        error=ErrorCode.NOT_FOUND,
+                        retry=RetryMode.DO_NOT_RETRY,
+                        detail=(
+                            "This card is not part of this conversation, so the agent "
+                            "cannot answer about it. Ask again without the card."
+                        ),
+                        pointer="/component_ref/component_id",
+                    ),
+                    status_code=404,
+                )
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
             conversation.turn_user_message = body.message

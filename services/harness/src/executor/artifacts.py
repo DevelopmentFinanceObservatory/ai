@@ -102,6 +102,21 @@ def declared_shape(
     )
 
 
+def declared_dropped_key_count(structured_content: Mapping[str, object] | None) -> int:
+    """How many keys a successful call declared it left out of its result
+    (`analysis_mcp.result.VerbResult.dropped_key_count`): the numerator keys
+    a keyed `quotient_of` found no denominator for.
+
+    0 when the content carries no count, as `get_data`'s manifest never does,
+    and when the member is not a count, read the way `declared_shape` reads a
+    malformed `stat_var_count` as absent.
+    """
+    count = (structured_content or {}).get("dropped_key_count")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return 0
+    return max(count, 0)
+
+
 def retrieved_frame_columns(
     structured_content: Mapping[str, object], *, compiled: Iterable[str]
 ) -> FrameColumns | None:
