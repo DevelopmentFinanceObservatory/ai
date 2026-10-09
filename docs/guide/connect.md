@@ -1,38 +1,28 @@
 ---
-description: Add the DFO MCP server to Claude, ChatGPT, Gemini, Claude Code, Codex or Gemini CLI and check the connection with one question.
+description: Connect the DFO to Claude, ChatGPT or Gemini so your assistant can look up development finance data. Developers can also connect Claude Code, Codex or Gemini CLI.
 ---
 
-# Connect
+# Connect your AI assistant
 
-Connect the DFO MCP server to your assistant. Ask one question to check that its tools respond.
+You can connect the DFO to an AI assistant such as Claude, ChatGPT or Gemini. Once it's connected, you can ask the assistant questions about development finance. It looks up the answer in DFO data and tells you which source the numbers come from. Setup takes a few minutes and doesn't need a DFO account.
 
-You need an MCP client. The Claude, ChatGPT and Gemini tabs below add the server from the app.
-
-## The endpoint
-
-The server speaks MCP over streamable HTTP at one URL, a DFO subdomain served by the website's proxy, with no trailing slash:
+The connection uses MCP (Model Context Protocol), a standard way for AI assistants to use outside tools. You only need one thing, the DFO's server address:
 
 ```text
 https://mcp.<dfo-domain>/mcp
 ```
 
-The site answers `/mcp/` with a 308 redirect to `/mcp`, so leave the slash off in every client configuration below. The endpoint needs no token, because the site forwards each request to the DFO AI service with its own.
+Copy it exactly, with no slash at the end.
 
 <!-- TODO: replace <dfo-domain> with the public domain once the website is deployed. -->
 
-One endpoint serves nineteen tools. `search`, `get_data`, `describe`, `sources`, `get_skill` and `get_skill_file` find, fetch and explain data. `sources` lists the datasets DFO holds and how each is made, and `get_skill_file` reads one file of a skill that `get_skill` loaded. `aggregate`, `compare`, `growth`, `rank`, `share_of`, `quotient_of`, `sum_of`, `filter` and `join` analyse the data `get_data` returned. `sum_of` adds two single-series slices, period by period, and `quotient_of` divides one measure by another, such as GDP by population. `resolve_anchor` finds the latest period of the data, which a rolling `growth`, `rank` or `filter` call counts from. `describe_frame`, `write_component` and `describe_component` turn a result into a chart, table or stat card. A client that draws MCP Apps shows the component as an interactive view.
-
-A client that declares its capabilities without MCP Apps gets the component's data as a Markdown table in the reply text. A client on the 2025-11-25 protocol revision declares its capabilities only when it opens a session, and this server keeps no sessions, so it cannot see them. It answers every such client as an MCP Apps host, and the reply text leaves out the data table. A text-only client passes `"include_projection": "full"` to `write_component` or `describe_component` to get the table.
-
-Every call answers within 45 seconds. The server stops a call still running at 45 seconds and answers `service_unavailable`, naming the tool and the limit and asking for a repeat after 5 seconds. A large `get_data` request, such as aid from every donor to one country, can take longer upstream. The tool then returns `operation_still_processing` a few seconds before that limit, and a repeat call with the same arguments picks up the same retrieval. A mid-size request that runs for more than about 30 seconds without moving to that background path cannot finish inside one call from this server. Its refusal suggests a narrower scope, such as fewer entities or a shorter window. A call that fetches, analyses or publishes a frame while the server already holds as many frame rows in memory as it allows answers `service_unavailable`, naming the rows the call needs and the rows free, and asks for a repeat after 2 seconds.
-
-## Add the server to your client
+## Add the DFO to your assistant
 
 :::tabs
 
 ::tab{label="Claude"}
 
-Open this link, which fills in the Add custom connector dialog, then confirm. Replace `<dfo-domain>` with the public domain:
+The quickest way is to open this link, which fills in the details for you, then confirm:
 
 ```text
 https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=DFO&connectorUrl=https%3A%2F%2Fmcp.<dfo-domain>%2Fmcp
@@ -40,36 +30,117 @@ https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=
 
 <!-- TODO: turn the template into a link once the domain is set. -->
 
-To fill in the dialog by hand:
+To add it by hand:
 
-1. Open **Customize**, then **Connectors**.
+1. In Claude, go to **Customize**, then **Connectors**.
 1. Choose **Add custom connector**.
-1. Enter `DFO` as the name and `https://mcp.<dfo-domain>/mcp` as the **MCP server URL**.
-1. Choose **No sign-in** and save.
+1. Enter **DFO** as the name and paste the server address.
+1. Choose **No sign-in**, then save.
 
-The free Claude plan allows one custom connector. A connector added on the web also works in the desktop app and on mobile.
-
-On Team and Enterprise plans an Owner adds the connector under **Organization settings**, then **Connectors**, and members then select **Connect**. The same query string on `https://claude.ai/admin-settings/connectors` fills in the Owner's dialog.
+Once added, the DFO also works in the Claude desktop and mobile apps. On the free plan you can add one custom connector. On Team and Enterprise plans, an Owner adds it under **Organization settings**, then **Connectors**, and members then select **Connect**. Owners can also use the quick link above with `https://claude.ai/admin-settings/connectors` in place of `https://claude.ai/customize/connectors`.
 
 ::tab{label="ChatGPT"}
 
-1. Open **Plugins**, choose the plus button, then choose **Add custom MCP server**.
-1. Enter a name and a description.
-1. Under **Connection**, enter `https://mcp.<dfo-domain>/mcp` as the URL.
-1. Choose no authentication.
+1. Open **Plugins**, select **+**, then **Add custom MCP server**.
+1. Enter a name (for example, DFO) and a short description.
+1. Under **Connection**, paste the server address.
+1. Choose **No authentication**.
 1. Select **I understand and want to continue**, then **Create as a plugin**.
 
-To use it, type `@` in the prompt box and select the plugin. OpenAI says account and workspace policies apply to adding custom servers.
-
-ChatGPT's own tool-call limit is about 60 seconds and it sends no progress notifications, so a call that reaches this server's 45-second answer already has margin.
+To use it, type **@** in the message box and select the DFO. Your organisation's ChatGPT settings may control whether you can add custom servers.
 
 ::tab{label="Gemini"}
 
 1. Go to gemini.google.com and open **Settings**, then **Connected Apps**.
 1. Under **Custom apps**, select **Add a custom app**.
-1. Enter `https://mcp.<dfo-domain>/mcp` as the URL and select **Next**.
+1. Paste the server address and select **Next**.
 
-Custom apps need a personal Google account, a user aged 18 or over in the US, English as the language, and Keep Activity on. You add the app in the web app only. A connected app then works on mobile.
+Custom apps require a personal Google account, a US user aged 18 or over, English as your language, and Keep Activity turned on. You add the app on the web, and it then works on mobile too.
+
+:::
+
+## Check that it works
+
+Ask your assistant:
+
+> What is health spending per person in Kenya?
+
+Your assistant should show that it's using a DFO tool, then answer with figures that name **World Development Indicators** as the source. The wording changes each time, but the source should be the same.
+
+Depending on the app, results appear as an interactive chart or table (Claude desktop, ChatGPT Work mode) or as a plain table in the reply (Gemini). ChatGPT's regular chat shows text only.
+
+### If it doesn't work
+
+- **The assistant answers without using the DFO.** Check that the DFO connector is turned on for this chat. In ChatGPT, type @ and select it.
+- **The assistant says it can't reach the server.** Check the address ends in `/mcp` with no slash after it.
+- **The request takes too long or fails.** Try a narrower question, such as fewer countries or a shorter time period.
+- **You see an error with a "trace id".** Send that id to the DFO team so they can look into it.
+
+For error codes and other technical problems, see [Troubleshooting for developers](#troubleshooting-for-developers).
+
+## For developers
+
+The rest of this page covers the server's behaviour, setup for developer tools, and direct access for pilot testers.
+
+### The endpoint
+
+The server uses MCP over streamable HTTP at a single URL, a DFO subdomain served by the website's proxy:
+
+```text
+https://mcp.<dfo-domain>/mcp
+```
+
+Leave off the trailing slash in every client configuration. The site answers `/mcp/` with a 308 redirect to `/mcp`, which some clients don't follow.
+
+No token is needed. The site forwards each request to the DFO AI service with its own credentials.
+
+### Tools
+
+One endpoint serves nineteen tools:
+
+| Purpose                                        | Tools                                                                                                             |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Find, fetch and explain data                   | `search`, `get_data`, `describe`, `sources`, `get_skill`, `get_skill_file`                                        |
+| Analyse data returned by `get_data`            | `aggregate`, `compare`, `growth`, `rank`, `share_of`, `quotient_of`, `sum_of`, `filter`, `join`, `resolve_anchor` |
+| Turn a result into a chart, table or stat card | `describe_frame`, `write_component`, `describe_component`                                                         |
+
+A few notes:
+
+- `sources` lists the datasets the DFO holds and how each is made.
+- `get_skill_file` reads one file from a skill that `get_skill` loaded.
+- `sum_of` adds two single-series slices, period by period.
+- `quotient_of` divides one measure by another, such as GDP by population.
+- `resolve_anchor` finds the latest period of the data, which a rolling `growth`, `rank` or `filter` call counts from.
+
+### How components are returned
+
+Clients that support MCP Apps show components as interactive views. Clients that declare their capabilities without MCP Apps get the component's data as a Markdown table in the reply text.
+
+This server is stateless, so it can't see capabilities that clients on the 2025-11-25 protocol revision declare at session start. It treats those clients as MCP Apps hosts and leaves the data table out of the reply. Text-only clients should pass `"include_projection": "full"` to `write_component` or `describe_component` to get the table.
+
+### Time limits
+
+Every call answers within 45 seconds.
+
+| Situation                                                                                                 | Response                                                                                                  | What to do                                                   |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| A call is still running at 45 seconds                                                                     | `service_unavailable`, naming the tool and the limit                                                      | Repeat after 5 seconds                                       |
+| A large `get_data` request, such as aid from every donor to one country, takes longer upstream            | `operation_still_processing`, a few seconds before the limit, while retrieval continues in the background | Repeat with the same arguments to pick up the same retrieval |
+| A mid-size request runs for more than about 30 seconds without moving to the background path              | A refusal suggesting a narrower scope                                                                     | Narrow the request: fewer entities or a shorter window       |
+| A call that fetches, analyses or publishes a frame arrives while the server is at its in-memory row limit | `service_unavailable`, naming the rows needed and the rows free                                           | Repeat after 2 seconds                                       |
+
+All supported clients allow more than 45 seconds per tool call, so no timeout override is needed:
+
+| Client      | Client tool-call limit                           |
+| ----------- | ------------------------------------------------ |
+| ChatGPT     | About 60 seconds, with no progress notifications |
+| Claude Code | 60 seconds per request to a remote server        |
+| Codex       | 300 seconds by default                           |
+| Gemini CLI  | 10 minutes by default                            |
+
+### Add the server to a developer tool
+
+:::tabs
 
 ::tab{label="Claude Code"}
 
@@ -79,7 +150,7 @@ Run this in a terminal:
 claude mcp add --transport http dfo https://mcp.<dfo-domain>/mcp
 ```
 
-This adds the server for the current project only. Add `--scope user` to use it in every project, or `--scope project` to write it to a shared `.mcp.json`:
+This adds the server to the current project only. Add `--scope user` to use it in every project, or `--scope project` to write it to a shared `.mcp.json`:
 
 ```json title=".mcp.json"
 {
@@ -92,13 +163,11 @@ This adds the server for the current project only. Add `--scope user` to use it 
 }
 ```
 
-Set `"type"` to `"http"`. Claude Code treats the entry as a local command when that field is absent.
-
-Claude Code's own per-request cap for a remote server is 60 seconds, above this server's 45-second answer, so no `timeout` override is needed.
+Set `"type"` to `"http"`. Without it, Claude Code treats the entry as a local command.
 
 ::tab{label="Codex"}
 
-In the ChatGPT desktop app, open **Settings**, then **MCP servers**, then **Add server**. Choose **Streamable HTTP**, enter `https://mcp.<dfo-domain>/mcp`, save, then choose **Restart**.
+In the app, open **Settings**, then **MCP servers**, then **Add server**. Choose **Streamable HTTP**, enter the server address, save, then choose **Restart**.
 
 Or add the server to `~/.codex/config.toml`:
 
@@ -107,13 +176,11 @@ Or add the server to `~/.codex/config.toml`:
 url = "https://mcp.<dfo-domain>/mcp"
 ```
 
-The desktop app, the CLI and the IDE extension share the configuration.
-
-Codex defaults its own tool-call timeout to 300 seconds, well above this server's 45-second answer.
+The desktop app, CLI and IDE extension share this configuration.
 
 ::tab{label="Gemini CLI"}
 
-Add the server to `settings.json` (`~/.gemini/settings.json` for every project, `.gemini/settings.json` for one):
+Add the server to `settings.json`: `~/.gemini/settings.json` for every project, or `.gemini/settings.json` for one project.
 
 ```json title="settings.json"
 {
@@ -125,33 +192,31 @@ Add the server to `settings.json` (`~/.gemini/settings.json` for every project, 
 }
 ```
 
-Gemini CLI defaults its own tool-call timeout to 10 minutes, well above this server's 45-second answer.
-
 :::
 
-## What each client shows
+### Check the connection
 
-Claude Desktop and ChatGPT's Work mode draw a component as an interactive view. ChatGPT's regular chat drew no view. The Gemini web app shows the data as a table in the reply.
-
-## Direct access with a pilot token
-
-Pilot testers with a DFO access token can reach the DFO AI service directly, at its own URL with the trailing slash:
+Ask your assistant:
 
 ```text
-https://<dfo-mcp-host>/mcp/
+What is health spending per person in Kenya?
 ```
 
-A bare `/mcp` there answers a 307 redirect to `/mcp/`. Every request carries the token as a bearer header:
+The assistant calls `search` with arguments like these:
 
-```text
-Authorization: Bearer <your-dfo-token>
+```json
+{
+  "parts": [
+    {
+      "variable": "health spending per person",
+      "entities": [{ "text": "Kenya" }]
+    }
+  ],
+  "raw_query": "health spending per person in Kenya"
+}
 ```
 
-The service rejects a request without a valid token with HTTP 401 before any tool runs. For the pilot every token is the same shared secret. Ask whoever runs the deployment for it. Each developer tool above takes the header in its own field: `--header` on `claude mcp add`, `headers` in `.mcp.json` and in Gemini CLI's `settings.json`, and `bearer_token_env_var` in Codex's `config.toml`, which names the environment variable holding the token.
-
-## Check the connection
-
-Your assistant should get this back from `search`:
+The wording of `variable` varies between runs. `search` should return:
 
 ```text
 "Healthcare expenditure per person in Kenya, 2000 to 2023, according to World Development Indicators."  [spec_0002907ee44bf25fc98f343372614a84]
@@ -163,42 +228,47 @@ unit options for get_data: InternationalDollar (InternationalDollar), USDollar (
 no time_text was given; the answer was resolved across every period with data.
 ```
 
-Ask your assistant:
-
-```text
-What is health spending per person in Kenya?
-```
-
-The assistant calls `search` with arguments like these. The reply names the dataset and its `spec_…` id:
-
-```json
-{
-  "parts": [
-    {"variable": "health spending per person", "entities": [{"text": "Kenya"}]}
-  ],
-  "raw_query": "health spending per person in Kenya"
-}
-```
-
-The model varies the wording of `variable` from run to run. The reply should name the `spec_0002907ee44bf25fc98f343372614a84` id and World Development Indicators as its source.
+The reply should include the id `spec_0002907ee44bf25fc98f343372614a84` and name World Development Indicators as the source.
 
 <!-- TODO: verify this output against the public endpoint once it exists. It comes from a call to the data tools against the dev APIs on 28 September 2026. -->
 
 If the assistant answers without calling `search`, check that the client lists the DFO tools. In Claude Code, `claude mcp list` shows each server and whether it connected.
 
-## Troubleshooting
+### Direct access with a pilot token
 
-A redirect on connect, or a client that reports the server as unreachable while its own logs show a 308 or 307, means the URL has the wrong ending. Use `/mcp` with no trailing slash on the website, and `/mcp/` with the slash on the direct endpoint.
+Pilot testers with a DFO access token can reach the DFO AI service directly. This URL takes a trailing slash:
 
-HTTP 401 on the direct endpoint means the token is missing or wrong. Check the `Authorization` header reads `Bearer ` followed by the token.
+```text
+https://<dfo-mcp-host>/mcp/
+```
 
-A `rate_limited` refusal means the server is taking more calls than it accepts: more tool calls per second than its limit across all callers, or 16 calls already running on the instance that took the call. Repeat the call after the `retry_after_s` the refusal names.
+A bare `/mcp` here answers with a 307 redirect to `/mcp/`. Every request must carry the token as a bearer header:
 
-An HTTP 429 from the site means one address has sent more requests in a minute than the site allows. The `Retry-After` header on the response gives the seconds to wait.
+```text
+Authorization: Bearer <your-dfo-token>
+```
 
-An `internal_error` refusal means a tool failed in a way it has no specific refusal for. It carries a trace id and no other detail. Send that id to whoever runs the deployment, who can find the full error in the server's logs.
+Requests without a valid token are rejected with HTTP 401 before any tool runs. During the pilot, every tester uses the same shared token. Ask whoever runs the deployment for it.
+
+Each developer tool takes the header in its own field:
+
+| Tool        | Where the token goes                                                                          |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| Claude Code | `--header` on `claude mcp add`, or `headers` in `.mcp.json`                                   |
+| Gemini CLI  | `headers` in `settings.json`                                                                  |
+| Codex       | `bearer_token_env_var` in `config.toml`, naming the environment variable that holds the token |
+
+## Troubleshooting for developers
+
+| Problem                                                                             | Cause                                                                                                          | Fix                                                                                            |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Redirect on connect, or "server unreachable" with a 308 or 307 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp` (no slash) on the website endpoint and `/mcp/` (with slash) on the direct endpoint  |
+| HTTP 401 on the direct endpoint                                                     | Token missing or wrong                                                                                         | Check the header reads `Authorization: Bearer <token>`                                         |
+| `rate_limited` refusal                                                              | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                                             |
+| HTTP 429 from the site                                                              | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                                         |
+| `internal_error` refusal                                                            | A tool failed in a way with no specific refusal, and the response carries only a trace id                      | Send the trace id to whoever runs the deployment so they can find the error in the server logs |
 
 ## Next
 
-- [What you can ask](what-you-can-ask.md) follows one question from `search` to a cited answer and lists what the server refuses.
-- The Tools reference lists every argument and error code. <!-- TODO: link when the generated Tools reference is published. -->
+- [**How the MCP server answers questions**](what-you-can-ask.md)**:** follows one question from search to a cited answer and lists what the server refuses.
+- **Tools reference:** every argument and error code. <!-- TODO: link when the generated Tools reference is published. -->
