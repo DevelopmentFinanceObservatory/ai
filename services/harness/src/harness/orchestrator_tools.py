@@ -26,17 +26,24 @@ refused as `capability_unavailable` this turn is refused without a call. A
 error, is a refusal the model may retry, as an unreachable skill read is.
 Each tool's calls per turn are capped (`BUDGETS`). The download surface
 fetches one dataset and never plans.
+
+Every tool validates the model's arguments against its annotations before its
+body runs (`_validated_arguments`), so a malformed argument comes back to the
+model as an error naming the field, and the body receives model instances.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import logging
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal
+from types import FunctionType
+from typing import Any, Literal, get_type_hints
 
 import httpx2
 from compiler.sources import (
@@ -54,7 +61,7 @@ from mcp.types import REQUEST_TIMEOUT
 from planner.plan import MAX_ASK_CHARS, MAX_PLAN_ASKS, earlier_block
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from harness.dfo_faq import DfoFaqUnavailable, read_dfo_faq
 from harness.graph import (
@@ -88,6 +95,8 @@ logger = logging.getLogger(__name__)
 # that failed gives it back (`harness.graph`'s `plan_done`) for a brief
 # that avoids the failure. `make_charts` counts the calls that drew at
 # least one chart, `make_charts_failed` the calls that drew none.
+# `invalid_arguments` counts the calls of any tool refused for malformed
+# arguments, which spend nothing of the tool's own budget.
 BUDGETS = {
     "search": 4,
     "fetch": 6,
@@ -99,6 +108,7 @@ BUDGETS = {
     # A file a skill links, or the next page of a long one.
     "get_skill_file": 4,
     "recall": 3,
+    "invalid_arguments": 3,
 }
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
@@ -268,6 +278,87 @@ def _charts_spent(tool_context: ToolContext) -> str | None:
     return None
 
 
+@functools.cache
+def _adapter(annotation: Any) -> TypeAdapter[Any]:
+    return TypeAdapter(annotation)
+
+
+def _argument_problems(name: str, exc: ValidationError) -> list[str]:
+    """Each of `exc`'s errors as `<name>.<loc>: <msg>`, without the input."""
+    return [
+        f"{'.'.join(str(step) for step in (name, *error['loc']))}: {error['msg']}"
+        for error in exc.errors(include_url=False)
+    ]
+
+
+def _validated_arguments(tool: FunctionType) -> Callable[..., Any]:
+    """`tool` wrapped to validate every argument but `tool_context` before it runs.
+
+    ADK hands a function tool the model's arguments as parsed JSON, whatever
+    the annotations say. The wrapper validates them with pydantic and calls
+    `tool` with the validated values. If any fail, it returns `{"error": ...}`
+    naming every problem and does not call `tool`. Rejected calls count
+    against `BUDGETS["invalid_arguments"]`. A tool with no model arguments is
+    returned as is.
+    """
+    signature = inspect.signature(tool)
+    hints = get_type_hints(tool)
+    adapters = {
+        name: _adapter(hints[name]) for name in signature.parameters if name != "tool_context"
+    }
+    if not adapters:
+        return tool
+
+    def bind(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> inspect.BoundArguments | dict[str, str]:
+        """The call's arguments, validated, or the error the model is given."""
+        bound = signature.bind(*args, **kwargs)
+        problems: list[str] = []
+        for name, value in bound.arguments.items():
+            if name not in adapters:
+                continue
+            try:
+                bound.arguments[name] = adapters[name].validate_python(value)
+            except ValidationError as exc:
+                logger.warning("orchestrator %s: invalid %s: %s", tool.__name__, name, exc)
+                problems += _argument_problems(name, exc)
+        if not problems:
+            return bound
+        tool_context: ToolContext = bound.arguments["tool_context"]
+        used = _used(tool_context, "invalid_arguments")
+        if used >= _budgets(tool_context)["invalid_arguments"]:
+            return {
+                "error": f"{tool.__name__}: {used} call(s) this turn had invalid arguments, "
+                f"the limit. {_ANSWER_NOW}"
+            }
+        _count(tool_context, "invalid_arguments")
+        return {
+            "error": f"{tool.__name__}: {'; '.join(problems)}. "
+            "Correct these arguments and call again."
+        }
+
+    if inspect.iscoroutinefunction(tool):
+
+        @functools.wraps(tool)
+        async def checked_async(*args: Any, **kwargs: Any) -> Any:
+            bound = bind(args, kwargs)
+            if isinstance(bound, dict):
+                return bound
+            return await tool(*bound.args, **bound.kwargs)
+
+        return checked_async
+
+    @functools.wraps(tool)
+    def checked(*args: Any, **kwargs: Any) -> Any:
+        bound = bind(args, kwargs)
+        if isinstance(bound, dict):
+            return bound
+        return tool(*bound.args, **bound.kwargs)
+
+    return checked
+
+
 def _asks_refusal(asks: list[str]) -> dict[str, Any] | None:
     """The refusal of a `plan` call whose `asks` break the planner's limits
     (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None."""
@@ -429,8 +520,9 @@ def build_orchestrator_tools(
         asks for each member on its own: "African countries" is
         `{"text": "Africa", "members": true}`, and "Africa" alone is the
         region as one place. All parts go in one call. A flow measure such
-        as aid, donors or recipients needs its entity's role, as spoken:
-        `to` for a recipient, `from` for a donor.
+        as aid, donors or recipients needs `role` on each entity in
+        `entities`, as spoken. Use `to` for a recipient and `from` for a
+        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`.
 
         Returns the result's `kind`: a `resolution` reads each part
         separately; a `catalogue` means the question asked what data DFO
@@ -449,10 +541,7 @@ def build_orchestrator_tools(
         spent = _spend(tool_context, "search")
         if spent:
             return {"error": spent}
-        wire_parts = [
-            OrchestratorSearchPart.model_validate(part).model_dump(exclude_none=True)
-            for part in parts
-        ]
+        wire_parts = [part.model_dump(exclude_none=True) for part in parts]
         try:
             digest = await resolver(question=query, parts=wire_parts)
         except ResolverError as exc:
@@ -538,7 +627,7 @@ def build_orchestrator_tools(
             return {"error": spent}
         args: dict[str, Any] = {"spec_id": spec_id}
         if scope is not None:
-            args["scope"] = FetchScope.model_validate(scope).model_dump(exclude_none=True)
+            args["scope"] = scope.model_dump(exclude_none=True)
         # A stated reading wins, and a breakdown reads the family separately.
         # A spec a plan's step retrieved keeps the plan's reading; one a
         # search returned is read by the compiler's own family rule.
@@ -559,7 +648,7 @@ def build_orchestrator_tools(
         elif source is not None and is_family(source):
             args["stat_vars"] = default_reading(source).value
         if breakdown is not None:
-            args["breakdown"] = Breakdown.model_validate(breakdown).model_dump()
+            args["breakdown"] = breakdown.model_dump()
         key = _fetch_key(args, block)
         earlier = (tool_context.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
@@ -661,8 +750,7 @@ def build_orchestrator_tools(
         drawn: list[dict[str, Any]] = []
         landed = False
         try:
-            for raw in charts[:MAX_CHARTS_PER_CALL]:
-                chart = Chart.model_validate(raw)
+            for chart in charts[:MAX_CHARTS_PER_CALL]:
                 frame = frames.get(chart.frame)
                 if frame is None:
                     drawn.append({"title": chart.title, "error": f"unknown frame {chart.frame!r}"})
@@ -867,15 +955,18 @@ def build_orchestrator_tools(
             }
 
     return [
-        search,
-        fetch,
-        make_charts,
-        ask_user,
-        plan,
-        get_skill,
-        get_skill_file,
-        explain_dfo,
-        recall,
+        _validated_arguments(tool)
+        for tool in (
+            search,
+            fetch,
+            make_charts,
+            ask_user,
+            plan,
+            get_skill,
+            get_skill_file,
+            explain_dfo,
+            recall,
+        )
     ]
 
 
