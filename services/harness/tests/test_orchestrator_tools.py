@@ -240,6 +240,110 @@ async def test_make_charts_writes_latest_periods_as_a_relative_window():
     assert "window" not in whole
 
 
+def test_validating_arguments_leaves_every_declaration_as_the_model_sees_it():
+    tools, _ = _tools()
+    wrapped = {name: fn for name, fn in tools.items() if hasattr(fn, "__wrapped__")}
+
+    assert set(wrapped) == set(tools) - {"explain_dfo"}
+    for fn in wrapped.values():
+        assert (
+            FunctionTool(fn)._get_declaration() == FunctionTool(fn.__wrapped__)._get_declaration()
+        )
+
+
+# --- argument validation ----------------------------------------------------
+
+_NGA = json.dumps({"observationAbout": "country/NGA"})
+
+
+async def _search_role_on_the_part(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    part = {"variable": "aid", "role": "to", "entities": [{"text": "Kenya"}]}
+    return await tools["search"]("aid to Kenya", [part], ctx)
+
+
+async def _fetch_unknown_scope_key(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    return await tools["fetch"](SPEC_LIFE, ctx, scope={"places": ["Kenya"]})
+
+
+async def _charts_one_malformed(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    await tools["fetch"](SPEC_LIFE, ctx)
+    good = {"frame": frame_id_for(REF), "type": "bar_chart", "title": "t", "select_json": _NGA}
+    return await tools["make_charts"]([good, {**good, "type": "pie_chart"}], ctx)
+
+
+async def _plan_non_text_ask(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    return tools["plan"]("Kenya's aid", ["the total", 5], ctx)
+
+
+async def _recall_unknown_part(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    return await tools["recall"]("plans", ctx)
+
+
+@pytest.mark.parametrize(
+    ("call", "tool", "budget", "named"),
+    [
+        (_search_role_on_the_part, "search", "search", "parts.0.role: Extra inputs"),
+        (_fetch_unknown_scope_key, "fetch", "fetch", "scope.places: Extra inputs"),
+        (_charts_one_malformed, "make_charts", "make_charts_failed", "charts.1.type: Input"),
+        (_plan_non_text_ask, "plan", "plan", "asks.1: Input should be a valid string"),
+        (_recall_unknown_part, "recall", "recall", "part: Input should be 'plan'"),
+    ],
+)
+async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
+    call, tool: str, budget: str, named: str, caplog: pytest.LogCaptureFixture
+):
+    resolver, executor = _resolver(_digest()), FakeExecutor()
+    recalled: list[dict[str, Any]] = []
+
+    async def recall_part(**target: Any) -> dict[str, Any]:
+        recalled.append(target)
+        return {}
+
+    tools, ctx = _tools(resolver, executor, recall_part=recall_part)
+
+    found = await call(tools, ctx)
+
+    assert set(found) == {"error"}
+    assert found["error"].startswith(f"{tool}: ")
+    assert named in found["error"]
+    assert "input_value" not in found["error"]
+    assert not resolver.calls
+    assert [name for name, _ in executor.calls if name != "describe_frame"] in ([], ["get_data"])
+    assert not executor.landed
+    assert not recalled
+    assert pending_action(ctx.state) is None
+    assert ctx.state[ORCHESTRATOR_CALLS_KEY]["invalid_arguments"] == 1
+    assert budget not in ctx.state[ORCHESTRATOR_CALLS_KEY]
+    assert any("input_value" in record.getMessage() for record in caplog.records)
+
+
+async def test_calls_with_invalid_arguments_stop_at_their_budget():
+    tools, ctx = _tools()
+
+    for _ in range(BUDGETS["invalid_arguments"]):
+        rejected = await _search_role_on_the_part(tools, ctx)
+        assert "Correct these arguments" in rejected["error"]
+    spent = await _search_role_on_the_part(tools, ctx)
+
+    assert spent["error"].endswith(orchestrator_tools._ANSWER_NOW)
+    assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": BUDGETS["invalid_arguments"]}
+
+
+async def test_adk_function_tool_returns_the_argument_error_for_a_part_level_role():
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    part = {"variable": "aid", "role": "to", "entities": [{"text": "Kenya"}]}
+
+    found = await FunctionTool(tools["search"]).run_async(
+        args={"query": "aid to Kenya", "parts": [part]}, tool_context=ctx
+    )
+
+    assert set(found) == {"error"}
+    assert "parts.0.role" in found["error"]
+    assert not resolver.calls
+    assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": 1}
+
+
 # --- search ---------------------------------------------------------------
 
 
@@ -311,7 +415,10 @@ def test_search_tells_the_model_when_to_set_a_role_and_to_choose_a_source_throug
     tools, _ = _tools()
     schema = OrchestratorSearchPart.model_json_schema()
 
-    assert "role" in tools["search"].__doc__
+    doc = " ".join(tools["search"].__doc__.split())
+
+    assert "`role` on each entity in `entities`" in doc
+    assert '{"text": "Kenya", "role": "to"}' in doc
     assert "get_data" not in schema["properties"]["source"]["description"]
     assert "fetch" in schema["properties"]["source"]["description"]
 
