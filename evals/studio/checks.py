@@ -410,7 +410,7 @@ def _fact_corpus(frame: dict[str, Any]) -> set[float]:
     if event == "error":
         return _numbers_in_data(frame.get("error"))
     if event == "elicitation.request":
-        return _numbers_in_data([frame.get("question"), frame.get("options")])
+        return _numbers_in_data(frame.get("questions"))
     return set()
 
 

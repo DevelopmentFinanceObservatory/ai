@@ -168,7 +168,9 @@ class RetrievalEvidence(StrictModel):
     unit named by reference (a Data Commons unit dcid such as `CurrencyUSD`)
     and its text. `stated_unit` holds a unit stated field by field, the
     frame grammar's `{currency, prices, base_year}` object a mint serves when
-    its definition binds the unit by request. Only a manifest carries it.
+    its definition binds the unit by request. A manifest reads it from the
+    series it returned, and a discovered source from its definition's
+    `facets.unit.request` (`requested_unit`).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -209,12 +211,31 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         entity_refs=source.entity_refs,
         unit_ref=source.unit_ref,
         unit_label=source.unit_label,
+        stated_unit=requested_unit(source.identity),
         provenance_ref=source.provenance_ref,
         provenance_label=source.provenance_label,
         resolved_sources=source.resolved_sources,
         window=source.coverage_window,
         identity=source.identity,
     )
+
+
+def requested_unit(identity: Mapping[str, JsonValue] | None) -> Unit | None:
+    """The unit a definition binds by request (`facets.unit.request`), which its frame is
+    converted to on fetch.
+
+    `None` when the definition binds no unit by request, or binds one that is
+    not a single `Unit`, such as a currency named by entity role, which
+    resolves per row.
+    """
+    facets = (identity or {}).get("facets")
+    unit = facets.get("unit") if isinstance(facets, dict) else None
+    if not isinstance(unit, dict) or "request" not in unit:
+        return None
+    try:
+        return Unit.model_validate(unit["request"])
+    except ValidationError:
+        return None
 
 
 def evidence_from_manifest(
@@ -1226,23 +1247,35 @@ class UnitReading(NamedTuple):
 
 
 def _read_unit(evidence: RetrievalEvidence, described: str) -> UnitReading:
-    """Read the unit `evidence` states: a field-by-field unit as it stands, a
-    unit dcid by its structure, and whatever either leaves unstated from the
-    unit's text."""
-    if (stated := evidence.stated_unit) is not None:
-        return UnitReading(stated.currency, stated.prices, stated.base_year)
-    by_ref = read_unit_dcid(evidence.unit_ref)
+    """Read the unit `evidence` states: what `_structured_reading` reads, and
+    whatever that leaves unstated from the unit's text."""
+    structured = _structured_reading(evidence)
+    if evidence.stated_unit is not None:
+        return structured
     prices, base_year = (
-        (by_ref.prices, by_ref.base_year)
-        if by_ref.prices is not None
+        (structured.prices, structured.base_year)
+        if structured.prices is not None
         else _detect_price_basis(described)
     )
-    currency = by_ref.currency or (
+    currency = structured.currency or (
         _PPP
         if _PPP_TEXT.search(described)
         else _detect_currency(evidence.unit_ref, evidence.unit_label)
     )
     return UnitReading(currency, prices, base_year)
+
+
+def _structured_reading(evidence: RetrievalEvidence) -> UnitReading:
+    """What `evidence`'s unit states outside its text: a field-by-field unit as it
+    stands, else a unit dcid by its structure.
+
+    A retrieved series states its unit in these two forms alone, a request
+    object or a ref, and no label, so this is the reading a discovered source
+    and the manifest that later retrieves it share.
+    """
+    if (stated := evidence.stated_unit) is not None:
+        return UnitReading(stated.currency, stated.prices, stated.base_year)
+    return read_unit_dcid(evidence.unit_ref)
 
 
 def read_unit_dcid(ref: str | None) -> UnitReading:
@@ -1371,7 +1404,15 @@ def _unit_issues(
                 required=unit.model_dump(),
             )
         )
-    issues.extend(_price_basis_issues(requirement, unit, described, basis, base_year))
+    issues.extend(
+        _price_basis_issues(
+            requirement,
+            unit,
+            described,
+            UnitReading(currency, basis, base_year),
+            structured=_structured_reading(evidence),
+        )
+    )
     return issues
 
 
@@ -1388,76 +1429,85 @@ def _price_basis_issues(
     requirement: DatasetRequirement,
     unit: Unit,
     described: str,
-    basis: PriceBasis | None,
-    base_year: int | None,
+    reading: UnitReading,
+    *,
+    structured: UnitReading,
 ) -> list[EvidenceIssue]:
-    """Whether the price basis the unit's text states is the one required.
+    """Whether the price basis the source's unit states is the one required.
 
-    A basis the text does not state is a warning, not an error: the base
-    year is missing from the search surface (issue #193), so an error here
-    would block every constant-price plan. Today only the current-price arm
-    runs -- `_check_requirements_meetable` refuses every constant-price
-    requirement outright -- and the detection is a text heuristic.
+    `reading` is the unit as `_read_unit` reads it, its text included, and
+    `structured` the part a retrieved series repeats (`_structured_reading`).
+    A unit stating the other basis, or constant prices of another base
+    year, is an error however it states it.
+
+    A current-price requirement is met by a unit stating current prices, and
+    one stating no basis is a warning: a bare currency ref such as
+    `CurrencyUSD` names none, and an error would block every plan over one.
+
+    No operation restates a series in other prices, so a constant-price
+    requirement is met only by a unit that states constant prices of its
+    base year outside its text, by a request object or a unit id such as
+    `ConstantUSD_2024`. A unit stating no basis, no base year, or constant
+    prices in its label alone is an error. The manifest carries no label, so
+    a source accepted on its label would be refused once retrieved, and an
+    answer over a source of unknown base year could claim a year it does not
+    have.
     """
-    if basis is None:
+    basis, base_year = reading.prices, reading.base_year
+    required = unit.model_dump()
+    severity = Severity.ERROR if unit.prices == "constant" else Severity.WARNING
+
+    def unverified(why: str) -> list[EvidenceIssue]:
         return [
             EvidenceIssue(
                 code=EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
-                severity=Severity.WARNING,
+                severity=severity,
                 requirement_id=requirement.id,
-                detail=(
-                    f"the source's unit {described!r} does not state whether its prices are "
-                    f"current or constant; the requirement asks for {unit.prices} prices"
-                ),
+                detail=f"the source's unit {described!r} {why}",
                 found=described or None,
-                required=unit.model_dump(),
+                required=required,
             )
         ]
-    if basis != unit.prices:
+
+    def mismatch(
+        found: str, stated: PriceBasis | int, asked: PriceBasis | int | None
+    ) -> list[EvidenceIssue]:
         return [
             EvidenceIssue(
                 code=EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
                 severity=Severity.ERROR,
                 requirement_id=requirement.id,
-                detail=(
-                    f"the source's unit {described!r} states {basis} prices, "
-                    f"the requirement asks for {unit.prices} prices"
-                ),
-                found=basis,
-                required=unit.prices,
+                detail=f"the source's unit {described!r} states {found}",
+                found=stated,
+                required=asked,
             )
         ]
+
+    asked = f"the requirement asks for {_prices_words(unit)}"
+    if basis is None:
+        return unverified(f"does not state whether its prices are current or constant; {asked}")
+    if basis != unit.prices:
+        return mismatch(f"{basis} prices, {asked}", basis, unit.prices)
     if unit.prices == "current":
         return []
-    if base_year is None:
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
-                severity=Severity.WARNING,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the source's unit {described!r} states constant prices but no base year; "
-                    f"the requirement asks for constant {unit.base_year} prices"
-                ),
-                found=described,
-                required=unit.model_dump(),
-            )
-        ]
-    if base_year != unit.base_year:
-        return [
-            EvidenceIssue(
-                code=EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
-                severity=Severity.ERROR,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the source's unit {described!r} states constant {base_year} prices, "
-                    f"the requirement asks for constant {unit.base_year} prices"
-                ),
-                found=base_year,
-                required=unit.base_year,
-            )
-        ]
+    if base_year is not None and base_year != unit.base_year:
+        return mismatch(f"constant {base_year} prices, {asked}", base_year, unit.base_year)
+    if base_year is None or structured.prices != "constant":
+        stated = (
+            "states constant prices but no base year"
+            if base_year is None
+            else f"states constant {base_year} prices only in its label, which a retrieved "
+            "series does not carry"
+        )
+        return unverified(f"{stated}; {asked}")
     return []
+
+
+def _prices_words(unit: Unit) -> str:
+    """The prices `unit` asks for, in words for an issue's detail."""
+    if unit.prices == "current":
+        return "current prices"
+    return f"constant {unit.base_year} prices"
 
 
 # --- Source -------------------------------------------------------------------

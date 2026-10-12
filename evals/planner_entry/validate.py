@@ -125,7 +125,8 @@ async def propose(task: Task, payload: Mapping[str, Any], refusal: str | None) -
             },
         )
         script = [[propose_call], [ask], [propose_call]]
-        answers = [{"result": {"spec_id": COMBINE_OPTION}}]
+        # The reply the studio's interrupt route sends for an answered pause.
+        answers = [{"result": {"answers": {"q1": {"kind": "option", "spec_id": COMBINE_OPTION}}}}]
     run = await run_entry(
         task,
         load_recording(task.id),

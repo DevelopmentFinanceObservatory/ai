@@ -212,11 +212,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.SOURCE_PIN_VIOLATED
         ):
             return IssueResolution.DISCOVER_AGAIN
-        case (
-            CompileIssueCode.SOURCE_UNUSABLE
-            | CompileIssueCode.REQUIREMENT_UNMEETABLE
-            | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE
-        ):
+        case CompileIssueCode.SOURCE_UNUSABLE | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE:
             return IssueResolution.UNMEETABLE
         case CompileIssueCode.NO_CAPABILITY | CompileIssueCode.FRAME_UNIT_UNBOUND:
             return IssueResolution.UNSUPPORTED
@@ -361,8 +357,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "state the same unit on both sides' requirements, so each source is retrieved in it"
     ),
     CompileIssueCode.FRAME_PRICE_BASES_DIFFER: (
-        "state one currency at current prices on both sides' requirements, so each source is "
-        "retrieved in it; no requirement may ask for constant prices"
+        "state one unit on both sides' requirements, either one currency at current prices or "
+        "one currency at constant prices of one base year, so each source is retrieved in it, "
+        "and keep a pinned source's own unit on its side"
     ),
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
         "on each requirement the reason names, state the unit it gives and leave its "

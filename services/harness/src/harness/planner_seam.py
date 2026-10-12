@@ -162,6 +162,7 @@ from harness.settings import Settings
 from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
 from harness.turn_records import (
     SETTLED_STATUSES,
+    CandidateReading,
     RenderedReadings,
     SearchReading,
     measure_choice_text,
@@ -1486,28 +1487,35 @@ def _reading_pin_sources(
     holds it as its own spec_id; a spec_id only ever offered as a candidate
     is not. A spec_id that only readings of another count settle
     (`SearchReading.other_count_of`) names the source that offered it. Each
-    keeps the parties its settling reading asked for.
+    keeps the parties its settling reading asked for. A fetched price sibling
+    (`SearchReading.sibling_of` on axis `unit`) settles as its own source,
+    since its block elects the count search elected for the source that
+    offered it.
     """
-    settled = [reading for reading in readings if reading.get("status") in SETTLED_STATUSES]
-    elected = {reading.get("spec_id") for reading in settled if not reading.get("other_count_of")}
+    settled = [
+        parsed
+        for parsed in (SearchReading.model_validate(reading) for reading in readings)
+        if parsed.status in SETTLED_STATUSES
+    ]
+    elected = {reading.spec_id for reading in settled if reading.other_count_of is None}
     counts_of = {
-        reading.get("spec_id"): str(reading["other_count_of"])
+        reading.spec_id: reading.other_count_of
         for reading in settled
-        if reading.get("other_count_of")
+        if reading.other_count_of is not None
     }
     sources: dict[str, PinSource] = {}
     for spec_id in shown:
         from_earlier = spec_id in earlier
-        reading = next((r for r in reversed(settled) if r.get("spec_id") == spec_id), {})
+        reading = next((r for r in reversed(settled) if r.spec_id == spec_id), None)
         sources[spec_id] = PinSource(
-            provenance_ref=reading.get("provenance_ref"),
-            provenance_account=reading.get("provenance_account"),
+            provenance_ref=reading.provenance_ref if reading else None,
+            provenance_account=reading.provenance_account if reading else None,
             block=None if from_earlier else blocks.get(spec_id),
             warnings=_warning_codes(warnings.get(spec_id)),
             settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
             other_count_of=None if spec_id in elected else counts_of.get(spec_id),
-            asked_roles=tuple(reading.get("asked_roles") or ()),
+            asked_roles=tuple(reading.asked_roles) if reading else (),
         )
     return sources
 
@@ -1647,9 +1655,9 @@ def _workflow_lines(workflow: dict[str, Any], *, stated: Collection[str] = ()) -
     and `has_data` are dropped. Both are discovery's own bookkeeping, and the
     step and binding wiring is the mechanic above.
 
-    A source whose measure offers other ways of counting the flow names each
-    with its spec_id (`_measure_choice_text`), so an amendment asking for
-    one pins it, unless every one is in `stated`. A windowed copy carries
+    A source whose measure offers other ways of counting the flow or other
+    prices names each with its spec_id (`_measure_choice_text`), so an
+    amendment asking for one pins it, unless every one is in `stated`. A windowed copy carries
     its origin's `elected_measure`, so the choice a reading of the origin
     states is not stated again.
     """
@@ -1674,20 +1682,28 @@ def _workflow_lines(workflow: dict[str, Any], *, stated: Collection[str] = ()) -
 
 
 def _measure_choice_text(elected: Any, stated: Collection[str]) -> str:
-    """A source's `elected_measure` and each other count with its spec_id (`measure_choice_text`).
+    """A source's `elected_measure`, each other count and each other prices,
+    with its spec_id (`measure_choice_text`).
 
     For example "; counted as gross disbursements; other counts: net
-    disbursements [spec_…]", the choice at most `_PLAN_MEASURE_CHOICE_CAP`
-    characters. Empty when it offers none, none fits, or `stated` holds
-    every one.
+    disbursements [spec_…]; other prices: constant prices [spec_…]", the
+    choice at most `_PLAN_MEASURE_CHOICE_CAP` characters. Empty when it
+    offers none, none fits, or `stated` holds every one.
     """
     if not isinstance(elected, dict):
         return ""
     measure = ElectedMeasure.model_validate(elected)
-    others = measure.other_counts()
-    if all(other.spec_id in stated for other in others):
+    counts = measure.other_counts()
+    prices = [
+        CandidateReading(spec_id=other.spec_id, label=other.label)
+        for other in measure.alternatives
+        if other.axis == "unit"
+    ]
+    if all(other.spec_id in stated for other in [*counts, *prices]):
         return ""
-    text = measure_choice_text(measure.label, others, cap=_PLAN_MEASURE_CHOICE_CAP)
+    text = measure_choice_text(
+        measure.label, counts, other_prices=prices, cap=_PLAN_MEASURE_CHOICE_CAP
+    )
     return f"; {text}" if text else ""
 
 

@@ -81,6 +81,7 @@ from harness.studio_state import (
     _apply_operations,
     _next_manifest,
     _PendingInterrupt,
+    _PendingQuestion,
     _tool_error_response,
 )
 from harness.studio_translate import (
@@ -102,13 +103,17 @@ from harness.wire import (
     CompositionManifest,
     CompositionMutation,
     Done,
+    ElicitationAnswer,
     ErrorCode,
     ErrorFrame,
     InterruptDecision,
     InterruptResponse,
     MessageComplete,
+    OptionAnswer,
     RetryMode,
+    SkippedAnswer,
     StepStatus,
+    TextAnswer,
     ToolError,
     TurnRequest,
 )
@@ -126,13 +131,52 @@ _APPROVAL_DECISION = {
 }
 
 
+def _answers_refusal(
+    questions: tuple[_PendingQuestion, ...], answers: dict[str, ElicitationAnswer]
+) -> str | None:
+    """What is wrong with `answers` to `questions`, or `None`. Valid answers
+    name every question exactly once, pick only that question's offered
+    options, and skip only a skippable question."""
+    asked = [question.id for question in questions]
+    missing = [question_id for question_id in asked if question_id not in answers]
+    extra = sorted(set(answers) - set(asked))
+    if missing or extra:
+        return f"answers must name exactly the questions {asked}: missing {missing}, extra {extra}"
+    for question in questions:
+        answer = answers[question.id]
+        if isinstance(answer, OptionAnswer) and answer.option_id not in question.options:
+            return f"option {answer.option_id!r} is not offered by question {question.id!r}"
+        if isinstance(answer, SkippedAnswer) and not question.skippable:
+            return f"question {question.id!r} cannot be skipped"
+    return None
+
+
+def _elicitation_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> str | None:
+    """What is wrong with an `answer` or `skip` to an elicitation, or `None`.
+    A skip dismisses a skippable pause and carries nothing. An answer
+    carries `answers` (`_answers_refusal`). A legacy entry
+    (`_PendingInterrupt.legacy`) also takes its one answer as `payload`."""
+    if body.decision is InterruptDecision.SKIP:
+        if body.payload is not None or body.answers is not None:
+            return "decision 'skip' takes no payload or answers"
+        return None if pending.skippable else "this elicitation cannot be skipped as a whole"
+    if body.payload is not None:
+        if body.answers is not None or not pending.legacy:
+            return "an elicitation answer carries answers, not a payload"
+        return None if body.payload else "decision 'answer' requires answers"
+    if body.answers is None:
+        return "decision 'answer' requires answers, one per question id"
+    return _answers_refusal(pending.questions, body.answers)
+
+
 def _interrupt_refusal(
     pending: _PendingInterrupt | None, body: InterruptResponse
 ) -> JSONResponse | None:
     """Everything that can be wrong with an interrupt.response, as one HTTP
-    refusal: unknown id, a decision foreign to the interrupt kind, and the
-    payload discipline (delta 12: answer/amend carry the text they act on,
-    the other decisions must not smuggle one)."""
+    refusal: unknown id, a decision foreign to the interrupt kind, an
+    elicitation's answers (`_elicitation_refusal`), and the plan payload
+    discipline (delta 12: amend carries the text it acts on, the other
+    decisions must not smuggle one)."""
     if pending is None:
         return _tool_error_response(
             ToolError(
@@ -152,9 +196,13 @@ def _interrupt_refusal(
     if body.decision not in allowed:
         detail = f"decision {body.decision.value!r} does not apply to a {pending.kind} interrupt"
         fix = f"send one of: {', '.join(sorted(d.value for d in allowed))}"
-    elif body.decision in (InterruptDecision.ANSWER, InterruptDecision.AMEND):
+    elif pending.kind == "elicitation":
+        detail = _elicitation_refusal(pending, body)
+    elif body.answers is not None:
+        detail = "a plan interrupt takes no answers"
+    elif body.decision is InterruptDecision.AMEND:
         if not body.payload:
-            detail = f"decision {body.decision.value!r} requires a text payload"
+            detail = "decision 'amend' requires a text payload"
     elif body.payload is not None:
         detail = f"decision {body.decision.value!r} does not take a payload"
     if detail is None:
@@ -168,6 +216,54 @@ def _interrupt_refusal(
         ),
         status_code=422,
     )
+
+
+def _given_answers(
+    pending: _PendingInterrupt, body: InterruptResponse
+) -> dict[str, ElicitationAnswer]:
+    """An accepted `answer`'s answers by question id. A legacy entry's
+    `payload` is its one question's answer. An offered option id is a pick,
+    anything else free text."""
+    if body.answers is not None:
+        return body.answers
+    assert body.payload  # `_elicitation_refusal` admits only a non-empty legacy payload
+    (question,) = pending.questions
+    if body.payload in question.options:
+        return {question.id: OptionAnswer(kind="option", option_id=body.payload)}
+    return {question.id: TextAnswer(kind="text", text=body.payload)}
+
+
+def _resume_answer(answer: ElicitationAnswer) -> dict[str, str]:
+    """One answer as the graph reads it: a pick names its candidate id."""
+    match answer:
+        case OptionAnswer(option_id=option_id):
+            return {"kind": "option", "spec_id": option_id}
+        case TextAnswer(text=text):
+            return {"kind": "text", "text": text}
+        case SkippedAnswer():
+            return {"kind": "skipped"}
+
+
+def _answered_lines(pending: _PendingInterrupt, answers: dict[str, ElicitationAnswer]) -> list[str]:
+    """The answers the turn's record keeps, readable: an option's label, with
+    its spec_id when the option carries one, or the user's own words. A lone
+    question's answer stands alone. With several, each follows its question.
+    Skipped questions, and a legacy pick whose label was never kept, add
+    nothing."""
+    lines: list[str] = []
+    for question in pending.questions:
+        match answers[question.id]:
+            case OptionAnswer(option_id=option_id):
+                said = question.options.get(option_id)
+                if said and option_id.startswith("spec_"):
+                    said = f"{said} ({option_id})"
+            case TextAnswer(text=text):
+                said = text
+            case SkippedAnswer():
+                said = None
+        if said:
+            lines.append(said if len(pending.questions) == 1 else f"{question.question} {said}")
+    return lines
 
 
 def _composition_refusal(
@@ -1156,7 +1252,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return refusal
             assert pending is not None  # narrowed by _interrupt_refusal
-            requested_answer = {"decision": body.decision.value, "payload": body.payload}
+            requested_answer: dict[str, Any] = {
+                "decision": body.decision.value,
+                "payload": body.payload,
+            }
+            if body.answers is not None:
+                # The whole answer, so a retry with other answers is told
+                # apart from the one that resumed.
+                requested_answer["answers"] = {
+                    question_id: answer.model_dump(mode="json")
+                    for question_id, answer in body.answers.items()
+                }
             resuming = pending.resuming_segment is not None
             if not resuming and pending.kind == "plan":
                 # Recorded once per interrupt id, on its first answer only:
@@ -1287,15 +1393,22 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
 
         if pending.kind == "elicitation":
-            # skip -> the graph falls to its default reading; an answer that
-            # is not one of the offered option ids is the open-ended reply,
-            # and re-resolves as refining text.
+            # skip dismisses the whole pause; an answer resumes with every
+            # question's answer, keyed by question id.
             if body.decision is InterruptDecision.SKIP:
                 answer: dict[str, Any] = {"skip": True}
-            elif isinstance(body.payload, str) and body.payload not in pending.option_ids:
-                answer = {"text": body.payload}
             else:
-                answer = {"spec_id": body.payload}
+                given = _given_answers(pending, body)
+                answer = {
+                    "answers": {
+                        question.id: _resume_answer(given[question.id])
+                        for question in pending.questions
+                    }
+                }
+                # The turn's history record must carry the answers or the
+                # next turn's digest shows only the un-refined ask.
+                for line in _answered_lines(pending, given):
+                    conversation.turn_user_message += f"\n(then: {line})"
         elif body.decision is InterruptDecision.APPROVE:
             # The plan is keyed on its revision hash (`plan_revision`), and
             # the approval dated by the record of its first answer, so a
@@ -1314,10 +1427,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 answer["at"] = recorded.at.isoformat()
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
-        if body.payload and body.decision in (InterruptDecision.ANSWER, InterruptDecision.AMEND):
-            # Amendments and free-text answers refine the question; the
-            # turn's history record must carry them or the next turn's
-            # digest shows only the un-refined ask.
+            # An amendment refines the question, so the turn's history record
+            # carries it.
             conversation.turn_user_message += f"\n(then: {body.payload})"
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))

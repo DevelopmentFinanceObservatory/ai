@@ -259,15 +259,15 @@ def test_plan_record_reads_each_source_no_search_returned() -> None:
 def test_a_later_turns_reading_of_a_source_states_how_it_is_counted() -> None:
     """A translator-found source offering net beside gross reaches a later
     turn's ledger, through the stored record, with both counts and the net
-    spec_id. A price alternative is no other count."""
+    spec_id. A price alternative is listed under other prices."""
     raw = copy.deepcopy(_FIXTURE["plans"]["guatemala_top_donors"])
     (source,) = raw["workflow"]["sources"]
-    net = "spec_" + "e" * 32
+    net, constant = "spec_" + "e" * 32, "spec_" + "f" * 32
     source["elected_measure"] = {
         "label": "gross disbursements",
         "alternatives": [
             {"spec_id": net, "label": "net disbursements", "axis": "what"},
-            {"spec_id": "spec_" + "f" * 32, "label": "constant prices", "axis": "unit"},
+            {"spec_id": constant, "label": "constant prices", "axis": "unit"},
         ],
     }
     stored = PlanRecord.from_plan(Plan.model_validate(raw)).model_dump(mode="json")
@@ -278,9 +278,9 @@ def test_a_later_turns_reading_of_a_source_states_how_it_is_counted() -> None:
     rendered = render_readings(readings, budget=10_000)
 
     assert (
-        f"   counted as gross disbursements; other counts: net disbursements [{net}]"
-        in rendered.text.splitlines()
-    )
+        f"   counted as gross disbursements; other counts: net disbursements [{net}]; "
+        f"other prices: constant prices [{constant}]"
+    ) in rendered.text.splitlines()
     assert rendered.other_counts == (net,)
 
 
@@ -481,6 +481,31 @@ def test_comparison_intent_survives_reading_serialization(separate: bool | None)
         assert reading.model_dump(mode="json")["separate"] is True
     else:
         assert "separate" not in reading.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("stored", "count_of"),
+    [
+        ({"other_count_of": "spec_gross"}, "spec_gross"),
+        ({"sibling_of": {"spec_id": "spec_gross", "axis": "what"}}, "spec_gross"),
+        ({"sibling_of": {"spec_id": "spec_gross", "axis": "unit"}}, None),
+    ],
+    ids=["stored-before-sibling-of", "another-count", "other-prices"],
+)
+def test_a_stored_sibling_reading_names_the_reading_that_offered_it(
+    stored: dict[str, Any], count_of: str | None
+) -> None:
+    """A reading stored with `other_count_of` reads as another count of the
+    reading it names. A sibling on axis `unit` has no `other_count_of`."""
+    reading = SearchReading.model_validate(
+        {"text": "aid", "status": "chosen", "spec_id": "spec_net", **stored}
+    )
+    dumped = reading.model_dump(mode="json")
+
+    assert reading.sibling_of is not None and reading.sibling_of.spec_id == "spec_gross"
+    assert reading.other_count_of == count_of
+    assert "other_count_of" not in dumped
+    assert SearchReading.model_validate(dumped) == reading
 
 
 def test_reading_reads_the_structured_fields_a_part_adds() -> None:

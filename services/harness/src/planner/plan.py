@@ -3581,7 +3581,9 @@ class PinSource(StrictModel):
     is the spec_id of the source that offered this one as another way of
     counting its flow, when only a `fetch` of it settled it
     (`harness.turn_records.SearchReading.other_count_of`): its block then
-    names its own measure, which search did not elect. `asked_roles` are the
+    names its own measure, which search did not elect. A source offered as
+    the same count in other prices has none: its block elects the count
+    search elected for the source that offered it. `asked_roles` are the
     flow parties the search part that settled on it asked for, each a
     `planner.parties.PARTY_ROLES` word, empty when it named none.
     """

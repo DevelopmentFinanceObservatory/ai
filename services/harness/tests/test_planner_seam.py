@@ -937,7 +937,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
-    fake_tool_context = SimpleNamespace(session=SimpleNamespace(events=events))
+    fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
     assert _elected_spec_ids(fake_tool_context) == frozenset()
 
 
@@ -1722,12 +1722,14 @@ def test_the_plan_section_names_the_source_a_requirement_s_evidence_came_from(
     )
 
 
-def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spec_id(
+def test_the_plan_section_names_each_other_count_and_prices_of_a_source_with_its_spec_id(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """An amendment asking for net disbursements pins the spec_id named here,
-    unless the search readings above already name it."""
+    unless the search readings above already name it. Other prices are named
+    the same way."""
     net = "spec_" + "e" * 32
+    constant = "spec_" + "f" * 32
     dumped = _translated_plan(decision, requirement, derived_requirement).model_dump(mode="json")
     dumped["workflow"]["sources"] = [
         {
@@ -1737,7 +1739,7 @@ def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spe
                 "label": "gross disbursements",
                 "alternatives": [
                     {"spec_id": net, "label": "net disbursements", "axis": "what"},
-                    {"spec_id": "spec_" + "f" * 32, "label": "constant prices", "axis": "unit"},
+                    {"spec_id": constant, "label": "constant prices", "axis": "unit"},
                 ],
             },
         }
@@ -1747,9 +1749,9 @@ def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spe
 
     assert (
         f"{SPEC} -- official development assistance; counted as gross disbursements; "
-        f"other counts: net disbursements [{net}]\n"
+        f"other counts: net disbursements [{net}]; other prices: constant prices [{constant}]\n"
     ) in rendered
-    assert "other counts" not in _plan_context(dumped, stated={net})
+    assert "other counts" not in _plan_context(dumped, stated={net, constant})
 
 
 # Search's answer to "Bilateral plus imputed multilateral aid from France to
@@ -3635,7 +3637,9 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         new_message=resume_message,
     )
 
-    fake_tool_context = SimpleNamespace(session=SimpleNamespace(events=await harness.events()))
+    fake_tool_context = SimpleNamespace(
+        state={}, session=SimpleNamespace(events=await harness.events())
+    )
     assert _elected_spec_ids(fake_tool_context) == frozenset({SPEC_B})
 
 
