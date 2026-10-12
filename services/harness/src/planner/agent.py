@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -679,6 +679,28 @@ def _picks(result: object, offered: dict[str, frozenset[str]]) -> tuple[str, ...
     )
 
 
+def _answered_calls(tool_context: ToolContext) -> Iterator[tuple[dict[str, Any], object]]:
+    """Each interrupt answer with the nearest preceding call sharing its id."""
+    calls: dict[str, dict[str, Any]] = {}
+    for event in tool_context.session.events:
+        if not (event.content and event.content.parts):
+            continue
+        for part in event.content.parts:
+            call = part.function_call
+            if (
+                call is not None
+                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+                and call.id is not None
+            ):
+                calls[call.id] = call.args or {}
+                continue
+            response = part.function_response
+            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
+                continue
+            if response.id in calls:
+                yield calls[response.id], (response.response or {}).get("result")
+
+
 def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     """Every spec_id the user actually chose answering an `adk_request_input`
     call, read off this session's own event history -- the record of what
@@ -745,28 +767,9 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     shares, `events` included.
     """
     specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
-    offered_by_call: dict[str, dict[str, frozenset[str]]] = {}
     elected: set[str] = set()
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
-                offered_by_call[call.id] = _offered_candidates(call.args or {})
-                continue
-            response = part.function_response
-            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
-                continue
-            offered = offered_by_call.get(response.id)
-            if offered:
-                elected |= counts_chosen(
-                    _picks((response.response or {}).get("result"), offered), specs
-                )
+    for args, result in _answered_calls(tool_context):
+        elected |= counts_chosen(_picks(result, _offered_candidates(args)), specs)
     return frozenset(elected)
 
 
