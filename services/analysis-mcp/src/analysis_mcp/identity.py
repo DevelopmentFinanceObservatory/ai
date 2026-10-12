@@ -13,24 +13,24 @@ always reproduces the identical hash -- identical question, identical
 hash, with no indirection to restore. This is what makes
 `recompute_op_spec_hash` an actual integrity check rather than a
 coincidence. This is a *new* family, distinct from dfo-spec-kit's own
-`spec1` (dataset definitions) and `cv1` (frame-grammar content
+`spec1` (dataset definitions) and `cv2` (frame-grammar content
 versions): op-spec is neither a dataset-spec nor a component-spec, so it
 gets its own separator rather than being squeezed into one of theirs.
 
 Toolkit result `content_version` (domain separator `opcv1`, prefix `ocv_`):
 minted over `{op_spec_hash, input content_versions, execution identity}`.
-Distinct from frame-grammar's own `cv1` family (a *frame's* content_version,
-naming its lineage back to the graph) -- a toolkit result's content_version
+Distinct from frame-grammar's own `cv2` family (a *frame's* content_version,
+the hash of its canonical bytes alone) -- a toolkit result's content_version
 names a *computation's* lineage back to the op-spec and engine that produced
 it, a different thing that happens to share the "content_version" name.
 `ocv_` makes the two families visually distinguishable at a glance, the same
 way `spec_`/`cv_` already are.
 
-Both preimages follow the same discipline frame-grammar's own `cv1`
-family uses: a closed, explicit keyword allowlist (never a wholesale
-`model_dump` of some richer object), JCS handles object-member ordering on
-its own, and every array member gets an explicit sort order plus a refusal
--- never a silent tie-break -- on any duplicate that sort exposes.
+Both preimages are a closed, explicit keyword allowlist, as frame-grammar's
+own `cv2` preimage is (never a wholesale `model_dump` of some richer
+object). JCS handles object-member ordering on its own, and every array
+member gets an explicit sort order plus a refusal -- never a silent
+tie-break -- on any duplicate that sort exposes.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ TOOLKIT_CONTENT_VERSION_PATTERN = re.compile(rf"^{TOOLKIT_CONTENT_VERSION_PREFIX
 # The format an *input* content_version must already carry, whether it came
 # from a Datasets snapshot's `frame_ref` or from resolving a chained verb
 # result's own `frame_ref` to its stored frame -- both name a
-# `dfo_frame_grammar` frame, so both mint under frame-grammar's own `cv1`
+# `dfo_frame_grammar` frame, so both mint under frame-grammar's own `cv2`
 # family.
 _INPUT_CONTENT_VERSION_PATTERN = re.compile(r"^cv_[0-9a-f]{32}$")
 

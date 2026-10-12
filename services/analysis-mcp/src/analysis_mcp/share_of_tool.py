@@ -509,14 +509,12 @@ async def share_of(
 
     # The numerator side's own upstream_trace is carried forward -- the same
     # "the first-named side is the reference" choice `compare_tool.compare`
-    # already makes for its own left side. Both sides' own lineage is bound
+    # already makes for its own left side. Both sides' own frames are bound
     # into `content_version` via `input_content_versions` above, and carried
     # onto the trace's own `input_content_versions` field verbatim.
     output_trace = Trace(
         upstream_trace=numerator_trace.upstream_trace,
-        frame_content_version=derive_frame_content_version(
-            frame=result.frame, upstream_trace=numerator_trace.upstream_trace
-        ),
+        frame_content_version=derive_frame_content_version(frame=result.frame),
         op_spec_hash=op_spec_hash,
         execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
         applied_policy=AppliedPolicy(

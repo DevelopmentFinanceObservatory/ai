@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,6 +24,8 @@ from fastmcp.client.client import CallToolResult
 from .test_client import _client, text_of
 from .test_digest import _envelope, _spec
 from .test_search_tool import Handler, _json_handler, _reset_client
+
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 __all__ = ["_reset_client"]  # re-exported so pytest picks it up as an autouse fixture here too
 
@@ -195,6 +198,51 @@ async def test_no_data_flagged_match_definition_is_written_as_a_single_object() 
 
     assert result.is_error is False
     assert store.written == [_stored(definition)]
+
+
+async def test_a_sibling_measure_definition_is_written_beside_its_spec() -> None:
+    """The recorded aid envelope's sibling, net disbursements, resolves in `get_data`."""
+    envelope = json.loads((_FIXTURES / "resolve_aid_france_kenya.json").read_text())
+    spec = envelope["parts"][0]["spec"]
+    sibling = spec["resolved"]["alternative_measures"][0]["definition"]
+    store = _SpyStore()
+
+    result = await _call_search_with_store(
+        _json_handler(200, envelope), [{"variable": "aid"}], store
+    )
+
+    assert result.is_error is False
+    assert store.written == [_stored(spec["definition"]), _stored(sibling)]
+
+
+async def test_an_unhashable_sibling_is_skipped_and_named_nowhere_in_the_answer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    envelope = json.loads((_FIXTURES / "resolve_aid_france_kenya.json").read_text())
+    spec = envelope["parts"][0]["spec"]
+    sibling = spec["resolved"]["alternative_measures"][0]
+    tampered = {
+        **sibling,
+        "label": "constant prices",
+        "axis": "unit",
+        "definition": {**sibling["definition"], "spec_id": "spec_" + "0" * 32},
+    }
+    spec["resolved"]["alternative_measures"].append(tampered)
+    store = _SpyStore()
+
+    result = await _call_search_with_store(
+        _json_handler(200, envelope), [{"variable": "aid"}], store
+    )
+
+    assert result.is_error is False
+    assert store.written == [_stored(spec["definition"]), _stored(sibling["definition"])]
+    logged = [record.getMessage() for record in caplog.records]
+    assert any(
+        tampered["definition"]["spec_id"] in line and spec["spec_id"] in line for line in logged
+    )
+    shown = text_of(result) + json.dumps(result.structured_content)
+    assert sibling["definition"]["spec_id"] in shown
+    assert tampered["definition"]["spec_id"] not in shown
 
 
 # The elected StatVars: `resolved.stat_vars.items[].ref`

@@ -40,7 +40,6 @@ from .replay_support import (
     yearly,
 )
 
-_THIRD = "cv_" + "3" * 32
 _KEPT = ["dcid:FRA", "dcid:GBR"]
 _LATEST = {"anchor": "latest", "offset": 0, "rule": "half1"}
 _POPULATIONS = [{"spec_id": SPEC, "bindings": {}}]
@@ -167,7 +166,7 @@ async def test_a_filter_then_growth_recipe_is_replayed_after_its_dataset_moves(
             },
         )
     )
-    services.upstream.move(SECOND_VALUES, to=SECOND)
+    services.upstream.move(SECOND_VALUES)
 
     replayed = await services.replay(recipe)
 
@@ -232,13 +231,12 @@ async def test_a_rolling_recipe_keeps_its_latest_year_until_half_the_series_hold
     france, britain, america = REPORTERS
 
     # One of three reporters holds 2023: under half, so the latest year stands.
-    services.upstream.move(
+    second = services.upstream.move(
         {
             france: yearly(range(2019, 2024), start=150.0),
             britain: yearly(range(2019, 2023), start=300.0),
             america: yearly(range(2019, 2023), start=450.0),
-        },
-        to=SECOND,
+        }
     )
     held = await services.replay(recipe)
 
@@ -246,7 +244,7 @@ async def test_a_rolling_recipe_keeps_its_latest_year_until_half_the_series_hold
     assert held.recipe["anchor"]["period"] == "2022"
     assert held.recipe["normal_form_hash"] == recipe["normal_form_hash"]
     assert services.called("resolve_anchor") == [
-        {"populations": _POPULATIONS, "roots": [{"spec_id": SPEC, "content_version": SECOND}]}
+        {"populations": _POPULATIONS, "roots": [{"spec_id": SPEC, "content_version": second}]}
     ]
     (stood,) = services.called("growth")
     assert (stood["window_start"], stood["window_end"]) == ("2019", "2022")
@@ -263,8 +261,7 @@ async def test_a_rolling_recipe_keeps_its_latest_year_until_half_the_series_hold
             france: yearly(range(2019, 2024), start=150.0),
             britain: yearly(range(2019, 2024), start=300.0),
             america: yearly(range(2019, 2023), start=450.0),
-        },
-        to=_THIRD,
+        }
     )
     moved = await services.replay(recipe)
 

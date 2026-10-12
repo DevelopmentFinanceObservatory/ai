@@ -2,15 +2,17 @@
 
 This document tells you how to connect the Studio frontend to the agent
 service. It is the one document you need. The source of truth for every
-shape is `services/harness/src/harness/wire.py`. Recorded example streams
-are in `docs/transcripts/`. This document agrees with both.
+shape is `services/harness/src/harness/wire.py`, and
+`services/harness/tests/wire_fixtures/studio/` holds one example of each
+frame and request. This document agrees with both.
 
 ## Start here
 
 1. Get the repo and install: `uv sync --all-packages` (Python 3.13, uv).
 
-1. Start the deterministic test server (no keys, no network):
-   `just studio-scripted`
+1. Put a `GOOGLE_API_KEY` in `.env` (`just env`) and start a local
+   server against the real model and platform: `just studio-live`. Every
+   turn costs model spend.
 
 1. Send a turn and watch the stream:
 
@@ -24,9 +26,9 @@ are in `docs/transcripts/`. This document agrees with both.
    You get `data:` lines: steps, a card, the message, `done`. Render them
    per section 5.
 
-1. Build each UI state against the recordings in `docs/transcripts/` and
-   the prompt gallery (section 12). The scripted server reproduces every
-   state on demand, including pauses and errors.
+1. Build each UI state against the fixtures in
+   `services/harness/tests/wire_fixtures/studio/` and the prompt gallery
+   (section 12).
 
 1. When your UI renders all of that, change the base URL to the dev
    deployment. Nothing else changes.
@@ -58,9 +60,7 @@ the list of blocks on the canvas.
   document does not name.
 - The production server sets no CORS headers; same-origin access is your
   arrangement to make. A live local server answers preflights for the
-  origins listed in `STUDIO_CORS_ORIGINS` (comma-separated). The scripted
-  test server (below) allows all origins
-  so a local page can talk to it directly.
+  origins listed in `STUDIO_CORS_ORIGINS` (comma-separated).
 
 ## 2. Endpoints
 
@@ -174,90 +174,53 @@ a seed carries and for Search's answer for its identity, which supplies
 the rest. A seed or an answer past one is refused whole; nothing is cut
 to fit.
 
-| Member of `spec` or of Search's answer                             | Bound                     |
-| ------------------------------------------------------------------ | ------------------------- |
-| `resolved.rendered_sentence`                                       | 2,000 characters          |
-| `resolved.entities`                                                | 1,024 items               |
-| the roles of `definition.identity.entities`                        | 16                        |
-| `resolved.slots`, `coverage.dimensions`, `role_axis_facts`         | 64 items each             |
-| any other string the harness reads (a dcid, a role, a label)       | 256 characters            |
-| any count or year the harness reads                                | a whole number, 12 digits |
-| the sentence, measure and entities together, as a model reads them | 65,536 characters         |
-| the record the turn keeps of the seed, identity included           | 131,072 characters        |
+| Member of `spec` or of Search's answer                       | Bound                     |
+| ------------------------------------------------------------ | ------------------------- |
+| `resolved.rendered_sentence`                                 | 2,000 characters          |
+| `resolved.entities`                                          | 1,024 items               |
+| the roles of `definition.identity.entities`                  | 16                        |
+| `resolved.slots`, `coverage.dimensions`, `role_axis_facts`   | 64 items each             |
+| any other string the harness reads (a dcid, a role, a label) | 256 characters            |
+| any count or year the harness reads                          | a whole number, 12 digits |
 
-**What a seeded turn shows before approval.** The harness resolves each
-usable seed's identity again through the Search API, all seeds at once,
-stores the definition Search answers with in data-mcp's definition
-store, and retrieves nothing yet. Every label, sentence, count and
-headline the turn shows comes from that answer, never from the block
-the client posted. The Activity feed shows one "Receive the datasets
-from Search" step counting the seeds received. A seed dropped or not
-reached shows its own failed `seed-<n>` step. No retrieval in the turn
-takes a dropped seed's dataset (below), and the turn's next words name
-it as `dataset <n> from Search` (its position in `seed_spec`, from 1)
-with Search's reason. Those words
-are a `message.delta` before the plan card, the `question` of an
-`elicitation.request` the turn pauses on, or the closing text when no
-plan is drafted. The turn then plans from the kept seeds without
-searching, and the plan card follows as on any planned turn. When no
-seed is kept, the turn continues from the question alone, as a turn
-without seeds does, except that a reading of a dropped dataset is left
-out of the question's search: the turn asks between the other readings,
-or closes saying the question resolves to a dataset it left out.
+**What a seeded turn shows.** The harness resolves each usable seed's
+identity again through the Search API, all seeds at once, stores the
+definition Search answers with in data-mcp's definition store, and
+retrieves nothing yet. Every label, sentence, count and headline the turn
+shows comes from that answer, never from the block the client posted. The
+Activity feed shows one "Receive the datasets from Search" step counting
+the seeds kept. A seed dropped or not reached shows its own failed
+`seed-<n>` step. The agent then starts from the kept seeds as definite
+search results: it fetches or plans with them without searching, and the
+turn goes on as any data turn does. When no seed is kept, the turn
+continues from the question alone, as a turn without seeds does.
 
-**Planning.** A turn whose seeds carry an operation always plans. A
-turn with one seed and no operation takes the same depth policy as a
-searched answer: a seed that names one series goes straight to
-`get_data`, and one that names a family, such as aid to Kenya from
-every donor, is planned. The planner pins each seed and chooses the
-years to retrieve, and the plan retrieves the seed over those years.
-One retrieval returns at most data-mcp's `MAX_FRAME_ROWS` rows, so the
-planner asks for the fewest years the question needs: one year for a
-rank across places or donors, and the range a growth runs over.
-Education aid to Kenya is 242 rows in 2024 and 3,780 over every year. A
-retrieval past the ceiling shows a failed step, and the planner replans
-with a narrower window and the seed still pinned. An operation over
-`place`, `origin` or `destination` runs across every member of the axis
-the seed leaves open, and a rank that asks for a top or bottom N keeps
-that many rows. A component draws at most 24 series. When a turn goes
-straight to `get_data` with a seed whose question named no year, it
-retrieves the year Search showed.
+**Planning.** The agent hands the operations a seed carries to the
+planner. The planner pins each seed and chooses the years to retrieve,
+and the plan retrieves the seed over those years. One retrieval returns
+at most data-mcp's `MAX_FRAME_ROWS` rows, so the planner asks for the
+fewest years the question needs: one year for a rank across places or
+donors, and the range a growth runs over. Education aid to Kenya is 242
+rows in 2024 and 3,780 over every year. A retrieval past the ceiling
+shows a failed step, and the planner replans with a narrower window and
+the seed still pinned. An operation over `place`, `origin` or
+`destination` runs across every member of the axis the seed leaves open,
+and a rank that asks for a top or bottom N keeps that many rows. A
+component draws at most 24 series.
 
 **The download surface.** A `download` turn retrieves one dataset and
-computes nothing. It retrieves the first usable seed. Every other
-usable seed shows a failed `seed-<n>` step with code
-`one_dataset_per_download`. When the retrieved seed carries operations,
-a failed `seed-<n>-operations` step with code
-`no_operations_on_download` names each one, and the data is still
-retrieved. A question asking for a per-head figure that no series
-holds closes with a refusal, since the division is a computation.
+computes nothing: the agent fetches once and does not plan.
 
 **A dropped seed.** The turn drops a seed when Search's answer for its
 identity is not the dataset the user handed over: Search refuses the
 identity, resolves it to something other than one dataset, resolves it
 to another `spec_id`, or answers with a block the harness cannot read.
 The turn checks each seed once, as it receives the seeds and before it
-plans or retrieves anything. The seed's `seed-<n>` step fails with code
-`seed_dropped` and carries the reason.
-
-On a planned turn the dropped seed's name and the reason arrive in a
-`message.delta` frame, and its `message.complete`, before
-`plan.proposed`, with a request to search for the dataset again. The
-plan card has no field for the drop. The card's `depth` and
-`depth_notice` describe the kept seeds.
-
-For the rest of the turn no plan retrieves the dropped dataset, pinned
-or through a new search, over the seed's years or any others. A kept
-seed over the same dataset and other years stays usable.
-
-A dropped seed stops the turn in two cases:
-
-- the planner drafts no plan from the kept seeds. The closing text names
-  the dropped seed, the seeds that were not planned, and the planner's
-  reason, and the turn draws no card;
-- no seed is kept and the question's own search resolves only to a
-  dropped dataset. The closing text names the dropped seed and says the
-  question resolves to a dataset the turn left out.
+retrieves anything. The seed's `seed-<n>` step fails with code
+`seed_dropped` and carries the reason. The agent is told the seed's
+name, `dataset <n> from Search` (its position in `seed_spec`, from 1),
+and Search's reason, and its reply tells the user and suggests searching
+for the dataset again.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
@@ -333,20 +296,20 @@ connection. Use `/cancel` for the Stop button.
 
 Every frame has `event` and `seq`. The other fields per type:
 
-| `event`               | Fields                                                                                                                                                                    | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `message.delta`       | `text`                                                                                                                                                                    | Append this text to the streaming assistant message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `message.complete`    | `text`                                                                                                                                                                    | The full final message for the turn. Replaces the deltas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `plan.proposed`       | `interrupt_id`, `plan_version_id`, `version`, `title`, `steps[]`, `actions[]`, `depth?`, `depth_notice?`, `decisions[]?`, `revision?`, `requirements[]?`, `operations[]?` | The plan card. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `plan.versioned`      | `plan_version_id`, `version`, `supersedes`, `changed[]?`                                                                                                                  | A new plan replaces the card `supersedes` names; a new `plan.proposed` follows. `version` rises after an amend and is 1, which can be lower than the superseded version, when the plan was drafted again.                                                                                                                                                                                                                                                                                                                |
-| `activity.step`       | `step_id`, `label`, `status`, `detail?`, `tool?`, `duration_ms?`, `produced?`, `progress?`                                                                                | One execution step for the Activity feed. `step_id` is `s` plus the `seq` of the step's first frame, unique across the turn's segments; match a step's later frames by it, not by position. On the stream after an approval the plan steps run first; each plan step's final frame arrives in plan order, though steps that run at the same time may send their `running` frames in another order. Each plan step's `label` is that step's `label` on the plan card. A plan-step reference on this frame is a follow-up. |
-| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`                                    | A new card exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                                                       | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
-| `composition.updated` | `manifest`                                                                                                                                                                | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `elicitation.request` | `interrupt_id`, `question`, `input`, `options[]?`, `allow_free_text`, `skippable`, `progress?`                                                                            | A question for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `suggestions`         | `items[]`                                                                                                                                                                 | Follow-up chips. The list is empty in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `error`               | `error` (a ToolError object)                                                                                                                                              | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `done`                | `trace_id`, `composition?`                                                                                                                                                | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `event`               | Fields                                                                                                                                         | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `message.delta`       | `text`                                                                                                                                         | Append this text to the streaming assistant message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `message.complete`    | `text`                                                                                                                                         | The full final message for the turn. Replaces the deltas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `plan.proposed`       | `interrupt_id`, `plan_version_id`, `version`, `title`, `steps[]`, `actions[]`, `decisions[]?`, `revision?`, `requirements[]?`, `operations[]?` | The plan card. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `plan.versioned`      | `plan_version_id`, `version`, `supersedes`, `changed[]?`                                                                                       | A new plan replaces the card `supersedes` names; a new `plan.proposed` follows. `version` rises after an amend and is 1, which can be lower than the superseded version, when the plan was drafted again.                                                                                                                                                                                                                                                                                                                |
+| `activity.step`       | `step_id`, `label`, `status`, `detail?`, `tool?`, `duration_ms?`, `produced?`, `progress?`                                                     | One execution step for the Activity feed. `step_id` is `s` plus the `seq` of the step's first frame, unique across the turn's segments; match a step's later frames by it, not by position. On the stream after an approval the plan steps run first; each plan step's final frame arrives in plan order, though steps that run at the same time may send their `running` frames in another order. Each plan step's `label` is that step's `label` on the plan card. A plan-step reference on this frame is a follow-up. |
+| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`         | A new card exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                            | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
+| `composition.updated` | `manifest`                                                                                                                                     | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `elicitation.request` | `interrupt_id`, `question`, `input`, `options[]?`, `allow_free_text`, `skippable`                                                              | A question for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `suggestions`         | `items[]`                                                                                                                                      | Follow-up chips. The list is empty in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `error`               | `error` (a ToolError object)                                                                                                                   | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `done`                | `trace_id`, `composition?`                                                                                                                     | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Notes on specific fields:
 
@@ -356,16 +319,6 @@ Notes on specific fields:
   `label`; show `description` when the user expands the step. `args`
   holds the tool arguments backing the step, for a client that wants to
   show more than the label.
-- `plan.proposed.depth` says how much dialogue the plan may still ask the
-  user for before it runs: `shallow` allows at most one clarifying question,
-  `standard` up to two, and `deep` up to three with no silent defaulting on
-  an unresolved choice. A client may ignore `depth`; it only explains why
-  the turns that follow may ask more or fewer questions.
-- `plan.proposed.depth_notice` is one plain sentence explaining why a plan
-  is being proposed for this question (a compound ask, a methodological
-  choice, a degraded resolution, a wide identity, or the user's own request
-  for a thorough treatment). Show it beside the plan card as the reason the
-  card appeared; it is absent when the server has none to give.
 - `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?}`, the choices the agent made for the user.
 - `plan.proposed.revision` is a string identifying the plan's approval
   key, distinct from the integer `version`. It sits beside `version`: a
@@ -385,26 +338,15 @@ Notes on specific fields:
   `<code>: <message>` from the refusal, or the message alone when the
   failure has no code, cut at 400 characters, for a reader diagnosing
   the turn. `produced` (`{component_id, revision}`)
-  links a step to its card. In a data turn, the closing message states the
-  reason a card was refused in plain words. It names the platform only when
-  a platform service refused the write, and it says so when the assistant
-  withheld the card. Any other refusal reads "the card could not be added".
-  An edit turn whose write is refused closes with "The edit was refused:
-  <message>", quoting the refusal's own message.
-- The step with `tool: "search"` is the data search. Its `detail` reads
-  `resolved: <status>`, then `N parts: <variable>: <status>; ...` when
-  the question named several measures, then the search's own
-  diagnostics. A measure asked per head with no such series is searched
-  again as two, the measure and its denominator, and `detail` says so:
-  `searched again as N parts in place of "<variable>", ...`, two parts
-  for each measure named, followed by each
-  part's status when the second search did not resolve both and the
-  first result stands. `searched again with the unit in the measure: "<variable>"` precedes it when the per-head phrase was read as a unit.
+  links a step to its card. In a data turn, the agent's reply says why a
+  card it asked for was not drawn. An edit turn whose write is refused
+  closes with "The edit was refused: <message>", quoting the refusal's own
+  message.
 - An `activity.step` with no `tool` is a status line: what is happening
   now, in the present tense. It opens `running` and later gets a
   `complete` frame with `duration_ms` on the same `step_id`. One status
-  line runs at a time, and on the orchestrator engine one runs whenever
-  an agent is working and no tool step is running. Show the label of the
+  line runs at a time, and one runs whenever an agent is working and no
+  tool step is running. Show the label of the
   most recently opened step that is still `running`; a `complete` or
   `failed` frame updates the Activity record only. Fold status lines in
   the Activity record.
@@ -429,7 +371,8 @@ Notes on specific fields:
   <measure>" when the retrieval states no years; "Looking at the data"
   after several fetches, or after one that failed or whose measure no
   search named), "Going over the charts", "Reading the earlier turn",
-  "Going over the notes on DFO", "Working out the next step" after a hand-off
+  "Going over your canvas" after the agent looked at the canvas (its tool
+  step reads "Looking at your canvas"), "Going over the notes on DFO", "Working out the next step" after a hand-off
   to the planner or a question to the user that was refused, and
   "Reading the plan's results" from the moment an approved plan finishes
   running. A batch that mixes tools is named by its latest stage (charts,
@@ -445,8 +388,7 @@ Notes on specific fields:
   hand-back that carries no plan shows a `failed` "The planner could not
   make a plan", then "Reading the planner's answer"; the closing message
   then says what could not be calculated. No model thought text is sent.
-- The orchestrator engine shows one step per agent tool call: "Searching
-  for data" (detail: the query, then what it found and did not find),
+- The agent shows one step per tool call: "Searching for data" (detail: the query, then what it found and did not find),
   "Fetching <measure>" (detail: the retrieval's summary), "Making N
   charts", and one step per card written ("Line chart: <title>"). The
   calls a fetch makes on its own behalf (retrieving and checking the
@@ -465,9 +407,11 @@ A client that wants the raw frame behind a card takes its reference from `payloa
    How your app reaches `dfo-apis` (direct, through your proxy, or another
    way) is your decision; the reference pages already talk to the same
    service.
-1. Read `artifacts[0].url` from the response. It is a short-lived signed
-   URL. Do not store it; request a fresh one each time.
-1. Fetch that URL. The body is a Parquet file. Each row is one point:
+1. Read `artifacts[0].url` from the response. It is a root-relative link
+   that does not expire. Resolve it against the `dfo-apis` origin.
+1. Fetch that link and follow its 302 redirect to the file. The redirect
+   target is a signed URL that lasts five minutes, so follow it at once.
+   The body is a Parquet file. Each row is one point:
    `{stat_var, observationAbout, time_period, value, unit, measurementMethod, provenance, status}`.
 
 The frame can hold more rows than the card draws. `payload.component` holds exactly the drawn points. The platform mints the file, and every row carries its provenance.
@@ -482,8 +426,7 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
 - `fact_summary` holds `component_id`, `revision`, `series[]` (`{id, label, point_count, coordinates?, first?, first_period?, last?, last_period?, change?}`; `first_period` and `last_period` are the periods of the first and last drawn points that hold a value; each is absent when its point carries no period, and both are absent for a stat card or table, which draw no series), `indicators[]`
   (`{id, name, description}`), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?` (the unit slot of the card's payload, repeated as the platform states it, with its shape below),
   `series_truncated?`, `countries?`, `defaults?` (`[{pointer, detail}]`: the choices the platform made where the card's intent left one open, each naming the intent field it filled by JSON Pointer; absent means it made none). By design, the numbers in the message
-  text come from fact summaries; the models are constrained to them, and
-  the recorded transcripts hold to it. A chart's `window` is the one the
+  text come from fact summaries; the models are constrained to them. A chart's `window` is the one the
   platform states, or else the periods its axis draws: a bar chart of
   entities at one period has that period as both `start` and `end`. A
   table's and a stat card's `window` is null, and `series[].change` is
@@ -510,13 +453,12 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
   whose retrievals cannot all be identified is withheld.
 - `elicitation.request.input` is `single_select`, `multi_select`, or
   `text`. In v1 the server emits only `single_select`, and the `answer`
-  payload is one string. Treat `multi_select` as reserved. `progress` is
-  `{completed, total}` for an "N of M" counter.
+  payload is one string. Treat `multi_select` as reserved.
 
 ## 6. Pauses and resumes
 
-A turn can pause more than once. Clarifying questions stop after two
-rounds (the agent then continues with its default reading). Plan reviews
+A turn can pause more than once. The agent asks at most two clarifying
+questions a turn, then goes on with what it has. Plan reviews
 recur after each amendment, with no fixed count. Follow this procedure in
 a loop:
 
@@ -614,9 +556,8 @@ Edit Card panel's "Describe your edits" text):
   fixed message, for example "turn it into a bar chart".
 
 **Follow-up** (`intent: "follow_up"`): the agent gets the card's summary as
-context for a normal data turn. On the orchestrator engine the agent is also
-told the question is about that card. The agent reads the card's latest
-revision. A `component_id` this conversation never held answers 404
+context for a normal data turn, and is told the question is about that
+card. The agent reads the card's latest revision. A `component_id` this conversation never held answers 404
 `not_found` with `pointer: "/component_ref/component_id"`; a card inherited
 by a copy of someone else's conversation is one of these.
 
@@ -625,7 +566,7 @@ from the canvas state without a data search. An empty canvas gets the
 answer "nothing yet".
 
 **Cross-turn memory**: the agent remembers two things. It remembers the
-canvas (card titles and fact summaries, for the newest 16 blocks): "now
+canvas (card titles and fact summaries, for the last 16 blocks in canvas order): "now
 the same for Uganda" works after a Kenya card. It also remembers the
 recent conversation (the newest 10 exchanges: what you asked, what it
 answered, which cards resulted): "show life expectancy for the country I
@@ -648,6 +589,12 @@ canvas at once. With `auto_add: false`, cards stream as `component.created`
 but do not join the canvas. Add one later with the `add` operation. Use
 this for the Auto-add toggle and the "Added" chip.
 
+**Removal by the agent**: when the user asks in chat to remove cards or
+clear the canvas, the agent takes the blocks off, and a
+`composition.updated` frame carries the manifest without them. The removed
+components stay readable. A model turn's manifest can therefore shrink or
+be empty.
+
 **Card meta** (`set_card_meta`): `meta` = `{subtitle?, description?, x_label?, y_label?, style?}`. The server stores these fields and returns
 them on the block. The server never interprets them, and the platform never
 sees them. `style` is a free object for client-defined settings, for
@@ -668,9 +615,10 @@ from (`min_catalog_version` currently equals it).
 - `indicators[].description` is a technical property string (for example
   `mp=lifeExpectancy,pt=Person`) or empty. Prose definitions
   wait on the upstream platform (`docs/upstream-asks.md`).
-- Some questions fail at resolve with `capability_unavailable` ("identity
-  does not reproduce spec_id"). This is a known upstream data gap. Show the
-  error; a retry will not help.
+- Some searches refuse with `capability_unavailable` ("identity does not
+  reproduce spec_id"). This is a known upstream data gap. The search step
+  shows `failed` and the agent answers without that data; a retry will not
+  help.
 - Cross-turn memory is bounded: the newest 16 canvas blocks and the
   newest 10 exchanges (older context is looked up on demand, which can
   miss). Very long conversations keep working from that window.
@@ -682,50 +630,24 @@ from (`min_catalog_version` currently equals it).
 
 ## 12. Prompt gallery and test material
 
-Each row is a real prompt, the behavior it causes, and the recorded stream
-that shows it. Every recording came from a live run against real data; all
-frames validate against the models in
-`services/harness/src/harness/wire.py`.
+Each row is a real prompt and the behavior it causes. Every frame
+validates against the models in `services/harness/src/harness/wire.py`,
+and `services/harness/tests/wire_fixtures/studio/` holds one static
+example of each frame and request.
 
-| Prompt or request                                                                                  | Behavior                                                                                                | Recording                                                                                                                                                                                                                                              |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| "life expectancy in Nigeria"                                                                       | Direct data turn: steps → card → message → done                                                         | `studio_transcript.jsonl`                                                                                                                                                                                                                              |
-| "give me a comprehensive overview of health spending in Kenya"                                     | Plan pause → approve on `/interrupt` → card                                                             | `studio_transcript_plan.jsonl`                                                                                                                                                                                                                         |
-| Same plan, `decision: "amend"`, payload "focus on the change since 2015"                           | `plan.versioned` → new `plan.proposed` → approve → card                                                 | `studio_transcript_amend.jsonl`                                                                                                                                                                                                                        |
-| Same plan, `decision: "reject"`                                                                    | `message.complete` → `done`; nothing computed                                                           | `studio_transcript_reject.jsonl`                                                                                                                                                                                                                       |
-| Turn 1 "life expectancy in Kenya"; turn 2 "now the same for Uganda"; turn 3 "what's on my canvas?" | Canvas memory across turns; a canvas question with no data search                                       | `studio_transcript_followup.jsonl`                                                                                                                                                                                                                     |
-| `component_ref` edit: "rename it to …", then "turn it into a bar chart"                            | `component.revised`, then a replacement `component.created`                                             | `studio_transcript_edit.jsonl`                                                                                                                                                                                                                         |
-| "average annual rainfall in Middle Earth"                                                          | No data: honest `message.complete` → `done`, no card                                                    | `studio_transcript_nodata.jsonl`                                                                                                                                                                                                                       |
-| "population of Ghana"                                                                              | Stream-fatal `error` (`capability_unavailable`, a known upstream data gap)                              | `studio_transcript_error.jsonl`                                                                                                                                                                                                                        |
-| Any turn, then POST `/cancel`                                                                      | Stream ends with the `cancelled` error frame                                                            | `studio_transcript_cancel.jsonl`                                                                                                                                                                                                                       |
-| "quickly, life expectancy in Japan" with `auto_add: false`, then an `add` operation                | Cards stream without joining the canvas; the `add` response manifest is `composition_add_response.json` | `studio_transcript_autoadd.jsonl`                                                                                                                                                                                                                      |
-| An ambiguous question that resolves to several readings                                            | `elicitation.request` pause; answer, free text, or skip                                                 | No live recording (current data rarely returns candidates). The frame shape is the fixture `services/harness/tests/wire_fixtures/studio/event-13-elicitation-skippable.json`; the request shapes are `request-07-interrupt-skip.json` and section 4.2. |
+| Prompt or request                                                                                  | Behavior                                                                       |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| "life expectancy in Nigeria"                                                                       | Direct data turn: steps → card → message → done                                |
+| "give me a comprehensive overview of health spending in Kenya"                                     | Plan pause → approve on `/interrupt` → card                                    |
+| Same plan, `decision: "amend"`, payload "focus on the change since 2015"                           | `plan.versioned` → new `plan.proposed` → approve → card                        |
+| Same plan, `decision: "reject"`                                                                    | `message.complete` → `done`; nothing computed                                  |
+| Turn 1 "life expectancy in Kenya"; turn 2 "now the same for Uganda"; turn 3 "what's on my canvas?" | Canvas memory across turns; a canvas question with no data search              |
+| `component_ref` edit: "rename it to …", then "turn it into a bar chart"                            | `component.revised`, then a replacement `component.created`                    |
+| "average annual rainfall in Middle Earth"                                                          | No data: honest `message.complete` → `done`, no card                           |
+| Any turn, then POST `/cancel`                                                                      | Stream ends with the `cancelled` error frame                                   |
+| "quickly, life expectancy in Japan" with `auto_add: false`, then an `add` operation                | Cards stream without joining the canvas; the `add` response holds the manifest |
+| An ambiguous question that resolves to several readings                                            | `elicitation.request` pause; answer, free text, or skip                        |
 
-**Deterministic local server.** Clone the repo, run `uv sync --all-packages`, then `just studio-scripted`. This serves the full
-interface on `http://localhost:8080` with no model, no upstream service,
-and no credentials: fixed data, and identical requests produce identical
-streams (only `duration_ms` varies), so end-to-end tests can snapshot
-them. Any non-empty bearer token is accepted. The prompt picks the path:
-
-| Prompt contains | Path                                                                             |
-| --------------- | -------------------------------------------------------------------------------- |
-| `comprehensive` | plan pause (approve / amend / reject)                                            |
-| `ambiguous`     | elicitation pause (answer / free text / skip), a state live data rarely produces |
-| `nothing`       | no-data close                                                                    |
-| `fail`          | stream-fatal `error` frame                                                       |
-| anything else   | direct fetch → one card → done                                                   |
-
-Card edits work too: a type word ("bar chart") recreates, any other edit
-message renames.
-
-Against the real agent, phrasing steers the same way: "comprehensive",
-"thorough", or "detailed analysis" leads to the plan path; "quickly" leads
-to a direct fetch. A real turn takes 15 to 60 seconds and several model
-calls; a scripted turn is instant.
-
-Each `.jsonl` file is one recorded conversation, one frame per line, in
-order. A file can hold several turns and stream segments: `seq` restarts
-at 0 at each turn, and a paused stream continues in the same file after
-its `/interrupt`. States with no recording (card meta, pin, reorder,
-remove, edit conflict, malformed requests) are plain HTTP request →
-response cycles; build them from sections 4, 7, and 9.
+A real turn takes 15 to 60 seconds and several model calls. Card meta,
+pin, reorder, remove, edit conflict and malformed requests are plain HTTP
+request → response cycles; build them from sections 4, 7, and 9.

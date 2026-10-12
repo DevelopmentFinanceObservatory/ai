@@ -67,6 +67,16 @@ class Refusal:
 
 
 @dataclass(frozen=True, kw_only=True)
+class NormalFormConflict:
+    """A publish dfo-apis answered `recipe_requires_matching_normal_form_hash`: it
+    holds the pair under a recipe with another `normal_form_hash` and kept that
+    recipe. The frame is published, and dfo-apis draws a card of the sent recipe on
+    it under no render. `detail` is dfo-apis' own."""
+
+    detail: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class WriteReply:
     """The reply to a successful create or revise.
 

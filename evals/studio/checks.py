@@ -1,9 +1,8 @@
 """Wire-contract conformance checks over studio frame streams.
 
 The contract layer of harness-studio-v1: mechanical, model-free assertions
-that any recorded stream — a scripted run, a live run, or a transcript in
-`docs/transcripts/` — obeys the invariants `docs/frontend-interface.md`
-promises the frontend:
+that any recorded stream (a scripted run or a live run) obeys the
+invariants `docs/frontend-interface.md` promises the frontend:
 
 - every frame validates against `harness.wire.STUDIO_FRAME_ADAPTER`
 - `seq` starts at 0 per turn and strictly increases across resumed segments
@@ -13,22 +12,23 @@ promises the frontend:
   frames, and the `composition_id` never changes within a conversation
 - `component.revised` only ever names a component the conversation has seen
 - every number in a `message.complete` is grounded in the turn's fact
-  frames — fact summaries, step results, plan text — or a prior turn's
-  fact summaries (the canvas digest narration may cite); ids, revisions,
-  and timestamps are structure and never ground anything
+  frames — fact summaries, step results, plan text, the periods a component
+  draws — or a prior turn's fact summaries (the canvas digest narration may
+  cite), or is a value a component draws (cited to four or more
+  significant figures); ids, revisions, and timestamps are structure and
+  never ground anything
 - a live runner additionally holds each SSE response to `check_segment`:
   exactly one terminal frame, last (a flat transcript has lost its
   segment boundaries, so `check_transcript` cannot assert this)
 
 Beyond the contract, a case names the properties it holds in its `checks`
 list (`CASE_CHECKS`, run by `run_case_checks`). Those read a case's
-`Evidence`: the frames of each turn and, when the orchestrator engine was run
-scripted (`orchestrator_scripted`), the log of every model request and tool
-call, so a property of what a model was shown is asserted on the request
-itself.
+`Evidence`: the frames of each turn and, when the studio runs scripted
+(`orchestrator_scripted`), the log of every model request and tool call, so a
+property of what a model was shown is asserted on the request itself.
 
-Frames are plain dicts (as decoded from SSE `data:` lines or a transcript
-JSONL). All checks return violation strings; an empty list is a pass.
+Frames are plain dicts (as decoded from SSE `data:` lines). All checks return
+violation strings; an empty list is a pass.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ import itertools
 import json
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Set
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,6 +61,9 @@ _SCALES = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "trillion": 1e12}
 # Small counts ("2 series", "3 steps") are derivable from structure; only
 # larger integers, years, and decimals must ground.
 _GROUNDING_INT_FLOOR = 12
+
+# Fewest significant figures at which a drawn chart point grounds a citation.
+_DRAWN_MIN_SIGNIFICANT_FIGURES = 4
 
 
 def validate_frames(frames: list[dict[str, Any]]) -> list[str]:
@@ -174,18 +177,31 @@ def check_conversation(
     return violations
 
 
-def _numbers_in_text(text: str) -> list[tuple[str, float, float]]:
-    """Numeric claims in narration text, as (written form, number, scale):
-    "7.6 million" is ("7.6 million", 7.6, 1e6). Integers up to the floor
-    are exempt (structural counts) -- unless written as a percentage or
+@dataclass(frozen=True)
+class _Citation:
+    """One number narration cites. `decimals` and `figures` come from the
+    written digits, so "1.260" keeps the zero a float would drop."""
+
+    written: str
+    value: float
+    scale: float
+    decimals: int
+    figures: int
+
+
+def _numbers_in_text(text: str) -> list[_Citation]:
+    """Numeric claims in narration text: "7.60 million" is value 7.6 at scale
+    1e6, written to 2 decimals and 3 significant figures. Integers up to the
+    floor are exempt (structural counts) -- unless written as a percentage or
     with a scale word, which are always quantitative claims. Known residual
     gaps, accepted: scientific notation, and malformed thousands separators
     ("1,2" reads as 12)."""
-    values = []
+    citations = []
     for match in _NUMBER_TOKEN.finditer(text):
         token = match.group()
+        digits = token.replace(",", "")
         try:
-            value = float(token.replace(",", ""))
+            value = float(digits)
         except ValueError:
             continue
         scale_word = _SCALE_WORD.match(text, match.end())
@@ -199,8 +215,17 @@ def _numbers_in_text(text: str) -> list[tuple[str, float, float]]:
             and abs(value) <= _GROUNDING_INT_FLOOR
         ):
             continue
-        values.append((written, value, scale))
-    return values
+        whole, _, fraction = digits.partition(".")
+        citations.append(
+            _Citation(
+                written=written,
+                value=value,
+                scale=scale,
+                decimals=len(fraction),
+                figures=len((whole + fraction).lstrip("0")),
+            )
+        )
+    return citations
 
 
 def _numbers_in_prose(text: str) -> set[float]:
@@ -213,7 +238,7 @@ def _numbers_in_prose(text: str) -> set[float]:
         return set()
     if " " not in stripped:
         try:
-            return {float(stripped.replace(",", ""))}
+            return {abs(float(stripped.replace(",", "")))}
         except ValueError:
             return set()
     found: set[float] = set()
@@ -231,7 +256,7 @@ def _numbers_in_data(node: Any) -> set[float]:
     if isinstance(node, bool):
         return found
     if isinstance(node, (int, float)):
-        found.add(float(node))
+        found.add(abs(float(node)))
     elif isinstance(node, str):
         found |= _numbers_in_prose(node)
     elif isinstance(node, dict):
@@ -245,15 +270,57 @@ def _numbers_in_data(node: Any) -> set[float]:
     return found
 
 
-def _grounded(value: float, corpus: set[float], scale: float = 1.0) -> bool:
-    """Exact, or a rounding of a corpus fact at the precision the narration
-    used (54.462 grounds "54.5" and "54"; 12.6 grounds "13"; 7,640,000
-    grounds "7.6 million")."""
-    if value * scale in corpus:
+def _drawn_fields(node: Any) -> Iterator[tuple[str, Any]]:
+    """Every `value` number and `period` string a component draws, whatever
+    block holds them (stat card, chart point, table row)."""
+    if isinstance(node, dict):
+        for key, child in node.items():
+            if (
+                key == "value" and isinstance(child, (int, float)) and not isinstance(child, bool)
+            ) or (key == "period" and isinstance(child, str)):
+                yield key, child
+            else:
+                yield from _drawn_fields(child)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _drawn_fields(child)
+
+
+def _drawn_values(frame: dict[str, Any]) -> set[float]:
+    """The magnitudes a component draws. A chart holds hundreds of them, and a
+    citation of up to three figures lands within half a unit of one by
+    chance, so `_grounded` accepts these only for longer citations."""
+    component = (frame.get("payload") or {}).get("component")
+    return {abs(float(child)) for key, child in _drawn_fields(component) if key == "value"}
+
+
+def _drawn_periods(frame: dict[str, Any]) -> set[float]:
+    """Years at period endpoints; month and day digits are not quantitative facts."""
+    component = (frame.get("payload") or {}).get("component")
+    return {
+        float(year)
+        for key, child in _drawn_fields(component)
+        if key == "period"
+        for year in re.findall(r"(?:^|/)([0-9]{4})(?=$|-|/)", child)
+    }
+
+
+def _matches(citation: _Citation, facts: Set[float]) -> bool:
+    if citation.value * citation.scale in facts:
         return True
-    text = f"{value}"
-    decimals = len(text.split(".")[1]) if "." in text and not text.endswith(".0") else 0
-    return any(round(fact / scale, decimals) == value for fact in corpus)
+    return any(round(fact / citation.scale, citation.decimals) == citation.value for fact in facts)
+
+
+def _grounded(citation: _Citation, corpus: Set[float], *, drawn: Set[float] = frozenset()) -> bool:
+    """Exact, or a rounding of a corpus fact at the decimals the narration
+    wrote (54.462 grounds "54.5" and "54"; 12.6 grounds "13"; 7,640,000
+    grounds "7.6 million"; 7,600,000 grounds "7.60 million" and 7,640,000
+    does not). A drawn value grounds only a citation written with at least
+    `_DRAWN_MIN_SIGNIFICANT_FIGURES` significant figures, zeros of a whole
+    number and trailing decimal zeros included."""
+    if _matches(citation, corpus):
+        return True
+    return citation.figures >= _DRAWN_MIN_SIGNIFICANT_FIGURES and _matches(citation, drawn)
 
 
 def _fact_corpus(frame: dict[str, Any]) -> set[float]:
@@ -267,7 +334,7 @@ def _fact_corpus(frame: dict[str, Any]) -> set[float]:
         summary = dict(frame.get("fact_summary") or {})
         summary.pop("component_id", None)
         summary.pop("revision", None)
-        return _numbers_in_data(summary)
+        return _numbers_in_data(summary) | _drawn_periods(frame)
     if event == "activity.step":
         return _numbers_in_data([frame.get("label"), frame.get("detail")])
     if event == "plan.proposed":
@@ -281,20 +348,25 @@ def _fact_corpus(frame: dict[str, Any]) -> set[float]:
 
 def check_grounding(turns: list[list[dict[str, Any]]]) -> list[str]:
     """Numbers in `message.complete` must exist in the turn's own fact
-    frames or in an earlier turn's fact summaries (the canvas digest)."""
+    frames or in an earlier turn's fact summaries (the canvas digest), or
+    match a value a component draws. Facts compare by magnitude: narration
+    says "an outflow of $223 million" for -223e6."""
     violations = []
     digest_corpus: set[float] = set()
+    digest_drawn: set[float] = set()
     for number, turn in enumerate(turns, start=1):
         corpus = set(digest_corpus)
+        drawn = set(digest_drawn)
         for frame in turn:
             corpus |= _fact_corpus(frame)
+            drawn |= _drawn_values(frame)
         for frame in turn:
             if frame.get("event") != "message.complete":
                 continue
             ungrounded = [
-                written
-                for written, value, scale in _numbers_in_text(frame.get("text", ""))
-                if not _grounded(value, corpus, scale)
+                citation.written
+                for citation in _numbers_in_text(frame.get("text", ""))
+                if not _grounded(citation, corpus, drawn=drawn)
             ]
             if ungrounded:
                 violations.append(
@@ -304,6 +376,7 @@ def check_grounding(turns: list[list[dict[str, Any]]]) -> list[str]:
         for frame in turn:
             if frame.get("event") in ("component.created", "component.revised"):
                 digest_corpus |= _fact_corpus(frame)
+                digest_drawn |= _drawn_values(frame)
     return violations
 
 

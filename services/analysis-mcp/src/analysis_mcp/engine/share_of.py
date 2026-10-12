@@ -91,7 +91,7 @@ from dfo_frame_grammar.grammar import (
     UnitCell,
 )
 
-from analysis_mcp.engine.columnar import frame_from_columns, repeated
+from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
@@ -99,6 +99,7 @@ from analysis_mcp.engine.common import (
     cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
     first_cross_side_facet_mismatch,
+    frame_keeping_role_types,
 )
 from analysis_mcp.engine.two_sided import (
     DenominatorByPartialError,
@@ -306,6 +307,21 @@ class ShareOfResult:
     numerator_only_periods: tuple[KeyPeriods, ...] = ()
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     exclusions: Exclusions = field(default_factory=Exclusions)
+
+
+def _exceeding_whole_warnings(period_shares: Sequence[PeriodShare]) -> tuple[str, ...]:
+    """A `share_exceeds_whole` warning when any share is above 100 per cent:
+    the numerator is then no part of the denominator, as a gross figure over a
+    net one can be, or the two count something twice. Empty otherwise."""
+    above = [share for share in period_shares if share.percent > 100.0]
+    if not above:
+        return ()
+    largest = max(above, key=lambda share: share.percent)
+    return (
+        f"share_exceeds_whole: {len(above)} share(s) above 100%, the largest "
+        f"{largest.percent:.1f}% in {largest.time_period}; the numerator is not a part of "
+        "the denominator",
+    )
 
 
 def _differing_facet_warning(axis: str, numerator_ref: str, denominator_ref: str) -> str:
@@ -553,7 +569,7 @@ def run_share_of(
                 )
             )
 
-    output_frame = frame_from_columns(
+    output_frame = frame_keeping_role_types(
         {
             STAT_VAR_COLUMN: repeated(stat_var, len(period_shares)),
             TIME_PERIOD_COLUMN: pa.array(
@@ -567,6 +583,7 @@ def run_share_of(
             },
         },
         role_keys=numerator_by,
+        source=numerator_frame,
     )
 
     return ShareOfResult(
@@ -579,7 +596,14 @@ def run_share_of(
         numerator_facet_selections=numerator_facets,
         denominator_facet_selections=denominator_facets,
         warnings=tuple(
-            dict.fromkeys((*numerator.warnings, *denominator.warnings, *cross_side_facet_warnings))
+            dict.fromkeys(
+                (
+                    *numerator.warnings,
+                    *denominator.warnings,
+                    *cross_side_facet_warnings,
+                    *_exceeding_whole_warnings(period_shares),
+                )
+            )
         ),
         numerator_periods=pairing.numerator_periods,
         denominator_periods=pairing.denominator_periods,

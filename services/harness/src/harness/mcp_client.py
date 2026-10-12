@@ -1,9 +1,9 @@
-"""The graph's Resolver and Executor over the loopback MCP mounts.
+"""The `search` tool's Resolver and the workflow's Executor over the loopback MCP mounts.
 
 `McpResolver` wraps data-mcp `search`; `McpExecutor` routes plan steps to
 data-mcp (`get_data`) and presentation-mcp (`describe_frame` /
 `write_component` / `describe_component`). The analysis verbs reach
-analysis-mcp through the execute node's `ToolSurface` instead (see
+analysis-mcp through the execute node's `ToolSurface` (see
 `harness.agents.build_tool_surface`); this module never sees them. Both
 speak MCP over streamable HTTP to the mounts `harness.server.create_app`
 hosts in-process -- the same seam a split-out deployment would use, just
@@ -19,12 +19,11 @@ init deadline (`Settings.mcp_init_timeout_s`). FastMCP's own `Client`
 defaults both to `None`, unbounded; on this, the harness's own served
 request path, an unbounded MCP call holds the request open indefinitely.
 
-Context discipline: what these return into graph state and node payloads is
-digest-sized. The resolver maps the search envelope down to the graph's
-decision inputs (status / spec_id / candidates / choice_points / parts /
-warnings); the full envelope, with its dozens of unbound definition slots,
-never leaves this module (`harness.tool_contracts.graph_envelope`). The executor returns frame REFERENCES; rows stay
-in the materialisation store.
+Context discipline: what these return into session state and node payloads
+is digest-sized. The resolver maps the search envelope down to its digest
+(`harness.tool_contracts.resolver_digest`); the full envelope, with its
+dozens of unbound definition slots, never leaves this module. The executor
+returns frame REFERENCES; rows stay in the materialisation store.
 
 Clients: every mount gets one client per conversation, held in a
 `compiler.caller_clients.CallerClients` registry keyed by the conversation's
@@ -121,7 +120,6 @@ from harness.provenance import (
     data_artifact,
     manifest_with_stat_vars,
     merged_manifest,
-    retrieval_frame_ref,
     summed_stat_var_count,
 )
 from harness.rolling_cards import (
@@ -276,7 +274,8 @@ async def _call_held(
 
 
 class McpResolver:
-    """data-mcp `search` behind the graph's Resolver protocol."""
+    """data-mcp `search` behind the `search` tool's `Resolver` protocol
+    (`harness.orchestrator_tools`)."""
 
     def __init__(self, *, settings: Settings) -> None:
         self._url = settings.data_mcp_url
@@ -308,45 +307,16 @@ class McpResolver:
         await self._clients.aclose()
 
     async def __call__(
-        self,
-        *,
-        question: str,
-        spec_id: str | None = None,
-        wide: bool = False,
-        parts: list[dict[str, Any]] | None = None,
+        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
     ) -> dict[str, Any]:
-        if spec_id is not None:
-            # A clarify re-entry: the user (or the bound loop) already chose a
-            # reading, and its definition was registered by the first search.
-            # Re-searching would only reproduce the fork the choice settled.
-            # `wide` cannot be recomputed without that search, so it is not
-            # recomputed here: `graph.clarify` carries forward the chosen
-            # candidate's own `wide` verdict (`harness.tool_contracts.
-            # graph_envelope`'s `candidates` branch computes one per offered
-            # spec, the same predicate a `definite` reading gets) and
-            # `graph.probe` passes it through as this call's `wide` argument.
-            # `parts` is the decomposition `graph.probe` carries forward from
-            # the search that first produced the candidates; its length is
-            # the same part count that search's envelope reported.
-            return {
-                "status": "definite",
-                "spec_id": spec_id,
-                "choice_points": 0,
-                "parts": len(parts) if parts else 1,
-                "warnings": [],
-                "candidates": [],
-                "wide": wide,
-            }
-        if not parts:
-            # `graph.probe` omits `parts` when the decomposition came back
-            # empty, and `create_root_workflow` can wire this resolver with
-            # no generative seam to have re-decomposed first (unlike the
-            # shipped server, which always wires `GeminiConverse` or
-            # `ScriptedResolver`). Refuse here rather than sending `search`
-            # a null/empty `parts`, which the tool's own schema rejects with
-            # a raw MCP validation failure the graph cannot present. No
-            # silent `{"variable": question}` stand-in -- an unscoped guess
-            # would mask the gap instead of surfacing it.
+        if raw_text:
+            # The orchestrator's second search: Search reads `question` itself
+            # through its raw-text door, so no decomposition is sent.
+            arguments: dict[str, Any] = {"raw_query": question}
+        elif not parts:
+            # Refused here rather than sending `search` an empty `parts`, which
+            # the tool's own schema rejects with a raw MCP validation failure
+            # the caller cannot present.
             raise ResolverError(
                 "search needs at least one decomposed part; none were supplied",
                 refusal={
@@ -355,7 +325,8 @@ class McpResolver:
                     "fix": {"detail": "the question could not be decomposed into search parts"},
                 },
             )
-        arguments: dict[str, Any] = {"parts": parts, "raw_query": question}
+        else:
+            arguments = {"parts": parts, "raw_query": question}
         client = await self._clients.get()
         try:
             result = await _call_held(self._clients, client, "search", arguments)
@@ -687,12 +658,10 @@ class McpExecutor:
         if result.is_error:
             return _refusal_outcome(result.structured_content, fallback_text=_result_text(result))
         manifest = await manifest_with_stat_vars(result.structured_content or {})
-        ref = retrieval_frame_ref(manifest)
-        self._provenance.put(
-            conversation=current_conversation_id.get(),
-            spec_id=ref["spec_id"],
-            content_version=ref["content_version"],
-            manifest=manifest,
+        # The frame goes straight to describe_frame and charts, which read it from
+        # dfo-apis under the pair `put_retrieval` returns.
+        ref = self._provenance.put_retrieval(
+            conversation=current_conversation_id.get(), manifest=manifest
         )
         return {
             "outcome": "ok",
@@ -1020,7 +989,7 @@ class McpExecutor:
 
         Returns `None`, refusing to assemble, when the frame has no lineage.
         It was never linked
-        (`harness.graph._link_evidence_to_terminal_frames`, which links
+        (`harness.graph.answer.link_evidence_to_terminal_frames`, which links
         nothing when a retrieval it rests on has no manifest), the store has
         evicted it, or the envelope names no input frame at all. A card
         built anyway would state a source it cannot support, which is worse

@@ -80,17 +80,28 @@ class StepRecord(StrictModel):
     out of its result (`executor.artifacts.declared_dropped_key_count`), 0
     for every call but a keyed `quotient_of` that found some numerator keys
     no denominator.
+
+    `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
+    the manifest's own pair for a `get_data` step whose `frame_ref` differs
+    from it (a frame minted with extra columns,
+    `executor.artifacts.manifest_frame_ref`), and `None` otherwise.
     """
 
     step_id: Identifier
     tool: ToolId
     attempts: int
     frame_ref: FrameRef
+    manifest_ref: FrameRef | None = None
     digest: str
     row_count: int | None = None
     role_keys: tuple[str, ...] | None = None
     stat_var_count: int | None = None
     dropped_key_count: int = Field(default=0, ge=0)
+
+    @property
+    def presented_ref(self) -> FrameRef:
+        """The pair the frame is described and drawn by: the one dfo-apis serves."""
+        return self.manifest_ref or self.frame_ref
 
 
 class EvidenceRecord(StrictModel):

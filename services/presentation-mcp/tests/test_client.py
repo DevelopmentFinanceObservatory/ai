@@ -42,7 +42,13 @@ from presentation_mcp import frame_publish
 from presentation_mcp.client import PRINCIPAL_HEADER, WRITE_TOKEN_HEADER, PlatformAssembler
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody
-from presentation_mcp.platform_contract import Caller, Refusal, RetryMode, WriteReply
+from presentation_mcp.platform_contract import (
+    Caller,
+    NormalFormConflict,
+    Refusal,
+    RetryMode,
+    WriteReply,
+)
 from presentation_mcp.settings import Settings
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
@@ -668,23 +674,26 @@ async def test_publish_frame_refuses_a_recipe_over_the_ceiling_and_sends_nothing
 
 
 @pytest.mark.parametrize(
-    ("constraint_id", "published"),
+    ("constraint_id", "published", "answered"),
     [
-        ("recipe_requires_matching_normal_form_hash", True),
-        ("recipe_requires_matching_replay_key", True),
-        ("replay_key_requires_one_frame", True),
-        ("lineage_requires_matching_inputs", False),
-        (None, False),
+        ("recipe_requires_matching_normal_form_hash", True, NormalFormConflict),
+        ("recipe_requires_matching_replay_key", True, bool),
+        ("replay_key_requires_one_frame", True, bool),
+        ("lineage_requires_matching_inputs", False, Refusal),
+        (None, False, Refusal),
     ],
 )
 async def test_a_recipe_conflict_leaves_the_frame_published_and_any_other_conflict_refuses(
     materialisation_store: InMemoryMaterialisationStore,
     constraint_id: str | None,
     published: bool,
+    answered: type,
 ) -> None:
     """dfo-apis records the frame before it compares recipes, so a recipe conflict
-    means the pair is published under the recipe dfo-apis already held."""
+    means the pair is published under the recipe dfo-apis already held. A caller
+    publishing its own recipe is told when the held one has another normal form."""
     ref = await _put_derived_frame(materialisation_store)
+    recipe = await build_recipe(ref, store=materialisation_store)
     paths: list[str] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -698,7 +707,12 @@ async def test_a_recipe_conflict_leaves_the_frame_published_and_any_other_confli
 
     async with _assembler(handler) as assembler:
         replies = [await assembler.get_frame_view(frame_ref=ref.model_dump()) for _ in range(2)]
+        own = await assembler.publish_frame(
+            spec_id=ref.spec_id, content_version=ref.content_version, recipe=recipe
+        )
 
+    assert own is False if answered is bool else isinstance(own, answered)
+    assert paths.pop() == "/api/datasets/frames/publish"
     frame_path = f"/api/presentation/frames/{ref.spec_id}/{ref.content_version}"
     if published:
         assert not any(isinstance(reply, Refusal) for reply in replies)
@@ -731,19 +745,25 @@ async def test_publish_sends_the_composed_stat_vars_the_stored_trace_describes(
     assert publish_body["composed_stat_vars"] == [per_head.model_dump(mode="json")]
 
 
-async def test_publish_leaves_a_place_type_column_out_of_the_published_frame(
-    materialisation_store: InMemoryMaterialisationStore,
+@pytest.mark.parametrize(
+    ("role", "cell"),
+    [("observationAbout", "Continent"), ("financingRecipient", "total")],
+)
+async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_published_frame(
+    materialisation_store: InMemoryMaterialisationStore, role: str, cell: str
 ) -> None:
-    """A level filter's output carries `observationAbout_type` as a role.
-    dfo-apis joins every role's value into a series label, so the published
-    frame holds the place column alone, and the door's own `Frame.build`
-    accepts it with every row kept.
+    """A level filter's output carries `observationAbout_type` as a role, and a
+    sum keyed by a flow party carries `financingRecipient_kind`. dfo-apis joins
+    every role's value into a series label, so the published frame holds the
+    place column alone, and the door's own `Frame.build` accepts it with every
+    row kept.
     """
+    described = f"{role}_type" if role == "observationAbout" else f"{role}_kind"
     rows = [
         {
             "stat_var": "dcid:LifeExpectancy_Person",
-            "observationAbout": place,
-            "observationAbout_type": "Continent",
+            role: place,
+            described: cell,
             "time_period": year,
             "value": value,
         }
@@ -753,7 +773,7 @@ async def test_publish_leaves_a_place_type_column_out_of_the_published_frame(
             ("asia", "2020", 74.2),
         )
     ]
-    frame = Frame.build(role_keys=["observationAbout", "observationAbout_type"], rows=rows)
+    frame = Frame.build(role_keys=[role, described], rows=rows)
     await materialisation_store.put(
         FrameRef(spec_id=_OPS_SPEC_ID, content_version=_OCV_CONTENT_VERSION),
         frame=frame,
@@ -774,10 +794,10 @@ async def test_publish_leaves_a_place_type_column_out_of_the_published_frame(
         )
 
     publish_body = json.loads(gzip.decompress(requests[0].content))
-    assert publish_body["role_keys"] == ["observationAbout"]
-    assert all("observationAbout_type" not in row for row in publish_body["rows"])
+    assert publish_body["role_keys"] == [role]
+    assert all(described not in row for row in publish_body["rows"])
     published = Frame.build(role_keys=publish_body["role_keys"], rows=publish_body["rows"])
-    assert published.columns == tuple(c for c in frame.columns if c != "observationAbout_type")
+    assert published.columns == tuple(c for c in frame.columns if c != described)
     assert published.table.num_rows == 3
 
 

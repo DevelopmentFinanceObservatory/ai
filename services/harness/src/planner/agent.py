@@ -14,9 +14,6 @@ that is the harness's own graph, keyed on the plan's revision rather than on
 an ADK tool confirmation this agent would have to carry across its own
 nested `Runner`.
 
-The harness decides the depth policy (how much dialogue a question earns)
-before the planner is invoked.
-
 Built with a tool surface, the planner also carries `planner.skills`'
 `get_skill` and `get_skill_file`, and its instruction carries `_SKILLS`, the
 paragraph naming them. Built without one, it carries neither, so the
@@ -44,11 +41,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
 
-from compiler.sources import block_groups
+from compiler.sources import PROVIDER_ACCOUNT, block_groups, source_from_spec_block
 from compiler.surface import ToolSurface
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.settings import Settings as DataMcpSettings
@@ -64,16 +62,21 @@ from pydantic_core import to_jsonable_python
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    load_log,
+    requirement_open_roles,
+    requirement_revision,
     resolve_definition,
     resolved_spec,
 )
-from translator.referral import ReferralKind, clear_referral, load_referral
+from translator.referral import Referral, ReferralKind, clear_referral, load_referral
 from translator.tool import Translate
 
 from planner.declaration import PlanTool
 from planner.parties import PARTY_ROLES, across_party, party_role
 from planner.plan import (
+    MAX_DECISION_OPTIONS,
     MAX_DECLINES,
+    MAX_OPTION_CHARS,
     MAX_PLAN_ASKS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
@@ -93,21 +96,21 @@ from planner.plan import (
     PlanStatus,
     RecordedDefinition,
     ResolvedBy,
-    SeededSource,
     SessionState,
+    SumOfRequirement,
     UnsettledFixError,
     UnsupportedPlanError,
     WindowedPin,
     cut_user_text,
     full_histories,
     full_history,
+    inputs_of,
     is_search_pin,
     load_asks,
     load_optional_declines,
     load_plan,
     load_plan_rounds,
     load_unsupported,
-    names_dropped_seed,
     open_window,
     period_window,
     pin_sources,
@@ -119,22 +122,25 @@ from planner.plan import (
     save_full_history,
     save_plan,
     save_plan_rounds,
-    save_seeded_sources,
     save_windowed_pins,
     search_pin_slot,
-    seeded_sources,
     settle_decisions,
     shown_identity,
-    windowed_copy,
     windowed_pin,
     windowed_pins,
 )
-from planner.records import Identifier, OpenPeriodFault, RollingIssue, RollingPlanError
+from planner.records import (
+    Identifier,
+    OpenPeriodFault,
+    ResolvedSourceMention,
+    RollingIssue,
+    RollingPlanError,
+)
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.shapes import PLACE_PHRASE
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import ResolvedGroup
+from planner.workflow import ResolvedGroup, SelectedSource
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -203,8 +209,8 @@ _PLANNING = (
     "alternative; a value the question already states outright -- the "
     "entity it names, the measure it names -- is a fact for a requirement's "
     "own fields to carry, and needs no `Decision` entry at all. The search "
-    "results in your first message, a resolve envelope or numbered search "
-    "readings, are what the conversation's searches established, as far as "
+    "results in your first message, numbered search readings, are what the "
+    "conversation's searches established, as far as "
     "that message reports them; a reading from an earlier turn counts as "
     "much as one from this turn. With no search results, draft from the "
     "question alone. A "
@@ -229,8 +235,8 @@ _PLANNING = (
     '"Since 2015" keeps 2015 a fixed start and rolls only the end. Years '
     'the question names ("from 2015 to 2020") stay fixed, with no '
     "`rolling` and no `period_end_open`. Source is "
-    "different: when a result's own `spec_id` (a definite or chosen reading, "
-    "or the envelope's `spec_id`) answers a dataset requirement, pin it as "
+    "different: when a result's own `spec_id` (a definite or chosen reading) "
+    "answers a dataset requirement, pin it as "
     "that requirement's `source_spec_id`, verbatim, and cite no decision "
     "for the pin itself -- the plan records why on its own. A candidate's "
     "`spec_id` is pinned only with a `Decision` of your own whose "
@@ -257,12 +263,16 @@ _PLANNING = (
     "A rate, index or per-person figure is never summed. "
     'A party the question names no member of, such as the donors of "top '
     'donors", goes in `across` (see `across`). '
+    'A region or group named alone, such as "Africa", is one entity with its '
+    'own figure; "African countries", or a figure for each member, names the '
+    "set once with `members` set, however many members it has. "
     "A result's open axes "
     "(`open_entity_axes`) are the columns left open: `origin` is the giving party "
     "(an entity `role` of donor, creditor or exporter), `destination` the receiving "
     "party (recipient, debtor or importer), `observationAbout` the place. "
     "A requirement whose `across` is the place, such as `'country'`, names "
-    "no place, so its retrieval holds every level (see `PlaceType`). Before "
+    "no place, so its retrieval holds every level (see `level` on "
+    "`place_level`). Before "
     "a `rank`, an `aggregate` across places, a `share_of` or a "
     "`quotient_of` reads it, keep "
     "one level with a `filter` reading that requirement directly, whose "
@@ -304,10 +314,17 @@ _PLANNING = (
     "one total of two different sources, such as bilateral aid plus imputed "
     "multilateral aid, state a `sum_of`, naming each side's `entity` when "
     "its requirement names several on one side of the flow, such as two "
-    "donors. Whether the two sources add up without "
-    "counting a flow twice is a methodological fact, not an assumption: "
-    "read it in the skill the sources' search results name, and cite a "
-    "`Decision` recording it, with the skill in its `rationale`. A sum "
+    "donors. Tables whose provenance states account `provider`, such as the "
+    "OECD and ONE aid tables, add up as the skill the sources' search "
+    "results name says: cite a `Decision` recording it, with the skill in its `rationale`. "
+    "Whether any other two datasets add up without "
+    "counting a flow twice is the user's to decide: read what that skill "
+    "says about it; `propose_plan` refuses such a `sum_of` with the "
+    "`options` to ask with. If the user picks adding them, cite a "
+    "`Decision` resolved by `user` whose `chosen` is that option id; "
+    "otherwise show the two series separately. ODA loans "
+    'count in both aid and debt flows, so asking about a total of the two ("net '
+    'flows" of aid and debt) names that overlap. A sum '
     "states the same `unit` on both inputs, or on neither. To total several "
     "entities of one series, `aggregate` it. A total over a span of years, "
     'such as "the total between 2010 and the latest", is one figure, never '
@@ -350,9 +367,9 @@ _PLANNING = (
 # What each `propose_plan` call states about which plan it means. Held apart
 # from `_PLANNING` because it is the one paragraph `question_fixed` rewrites:
 # standalone and `harness_pair_v1` keep `_VERSIONING_FREE`, where a restart is
-# a normal way to begin a second plan; the harness graph's own seam builds with
-# `question_fixed=True`, where the turn's question is the graph's, not the
-# planner's, to change. What each argument does is on the argument.
+# a normal way to begin a second plan; `harness.planner_seam` builds with
+# `question_fixed=True`, where the orchestrator's brief fixes the turn's
+# question. What each argument does is on the argument.
 _VERSIONING_FREE = (
     "Call `propose_plan` once with the complete first draft, and again "
     "whenever the user asks for a change. Once a plan is recorded, decide "
@@ -375,8 +392,8 @@ _VERSIONING_FIXED = (
 # planner is also built without them, and an instruction naming a tool the
 # agent lacks sends the model at one ADK raises on.
 _SKILLS = (
-    "The search results name the skills that apply to them by id, and an "
-    "envelope's `skills` describes each. When a skill bears on the question, "
+    'The search readings close with a "Skills named" line listing, by id, '
+    "the skills that apply to them. When a skill bears on the question, "
     "call `get_skill` with its id before you draft, and let what it says "
     "shape your decisions; read a file it links with `get_skill_file`. A "
     "question about DFO itself (what it covers, where its data comes from, "
@@ -390,13 +407,21 @@ _SKILLS = (
 # apart because the planner is also built standalone -- its own eval set scores
 # it that way -- and its `propose_plan` answers with no translation to read.
 _TRANSLATING = (
+    "`source_name_ambiguous` means Search could not choose which publisher or table a "
+    "source wording names. Ask the user through `adk_request_input`, using the offered "
+    "refs as candidate ids, then state the chosen ref in `source_ref` and keep the "
+    "source wording and `source_exclude` on the requirement. "
     "`propose_plan` has every plan it records translated at once and answers "
     "with the verdict in `translation`. Once a "
     "referral is settled, by your own decision or the "
     "user's answer, propose with the `amends_version` the last "
     "`propose_plan` call answered with, so the patch lands on that plan and "
     "is translated in turn. When `translation` answers that the plan "
-    "compiled, call `submit_plan`. Otherwise `translation` "
+    "compiled, call `submit_plan`. When translation answers "
+    "`named_in_place_of_across`, the pinned dataset covers only that group: the "
+    "requirement now names it in `entities` and states "
+    "no `across`. Amend from the plan as recorded and do not restore `across`. "
+    "Otherwise `translation` "
     "is the referral. `choice_required` "
     "(`source_ambiguous`, or `pinned_source_not_found` when the pinned source "
     "was not found) means a requirement's source is not settled: "
@@ -408,6 +433,10 @@ _TRANSLATING = (
     "its own `candidates`; repair them all in one patch. Where a requirement "
     "is offered one candidate, the fresh search settled it: pin that "
     "`spec_id` as its `source_spec_id` and cite no decision for the pin. "
+    "A source under the referral's `withheld` dropped the pinned source's "
+    "scope, such as a named group, and is never pinned: when no candidate "
+    "keeps that scope, make the referral's `repair` to the requirement, which "
+    "names that scope again, and propose again; with no `repair`, ask the user. "
     "Where several are offered, settle it yourself when the question, the brief or the "
     "candidates' coverage make one the clear answer, a source the question "
     "or the brief names included; when the choice is the user's to make, "
@@ -417,8 +446,8 @@ _TRANSLATING = (
     "resolved by `planner_default` when you chose and by `user` when the "
     "user's answer did; pin that `spec_id` as the requirement's "
     "`source_spec_id`, and propose again. "
-    "A `choice_required` referral with no candidates means the pinned source "
-    "is gone: unpin it and change what the requirement asks for. By `kind`: "
+    "A `choice_required` referral with no candidates and none withheld means "
+    "the pinned source is gone: unpin it and change what the requirement asks for. By `kind`: "
     "`no_data` carries the nearest real sources search found instead and the "
     "reason code for why, each described without a spec_id -- read them for "
     "context, never pin one, since the requirement itself is what has to "
@@ -433,7 +462,6 @@ _TRANSLATING = (
     "`user`, which replaces the stated source; `ask_not_understood` means "
     "search dropped part of the ask and answered a narrower one, so reword "
     "the part the referral names; "
-    "`seed_dropped` means remove that requirement; "
     "`requirement_needs_repair` names the `constraint` the requirement breaks and "
     "the `repair` you may make, so make it and propose again; "
     "`no_operation_covers` means no operation carries that requirement out; "
@@ -451,8 +479,9 @@ _TRANSLATING = (
     "`internal_failure` is a "
     "fault in the system that no change to the plan repairs, so tell the user, "
     "with its `reference`, and propose nothing further. The options an ask "
-    "offers come only from the referral's `candidates`; with none, the ask "
-    "says what cannot be done and asks what to change. A plan "
+    "offers come only from the referral's `candidates` or a refusal's "
+    "`options`; with neither, the ask says what cannot be done and asks what "
+    "to change. A plan "
     "that cannot be carried out is not one to approve. "
 )
 
@@ -485,8 +514,8 @@ def planner_instruction(
     `question_fixed` selects which paragraph explains `starts_new_plan`:
     `_VERSIONING_FREE` where a restart begins a second plan of its own
     (standalone, and `harness_pair_v1`'s multi-turn session), or
-    `_VERSIONING_FIXED`, where the harness graph's own seam holds the turn's
-    question and a restart is instead how the model tells it the user asked a
+    `_VERSIONING_FIXED`, where `harness.planner_seam` holds the turn's
+    question and a restart is how the model tells it the user asked a
     different one. False, the default, selects `_VERSIONING_FREE`.
     """
     return (
@@ -912,7 +941,7 @@ def _resolve_intent(
     named there would restart the loop. A restart begins at version 1 and is
     counted like an amendment, so restarting does not escape the bound.
 
-    `question_fixed` (the harness graph's own seam builds the planner with it
+    `question_fixed` (`harness.planner_seam` builds the planner with it
     set; standalone and `harness_pair_v1` leave it `False`) narrows both
     readings once a plan is recorded, against `existing.question` rather than
     the call's own wording of the question it is answering:
@@ -1096,11 +1125,11 @@ def _offered_candidates(args: dict[str, Any]) -> frozenset[str]:
     - the planner's own `ask_user` tool call: a plain `FunctionTool` call,
       so `args` is exactly the kwargs the model supplied, flat --
       `args["candidates"]`.
-    - the graph's `clarify` interrupt (`harness.graph`'s `CLARIFY_INTERRUPT`):
+    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
       built through ADK's own `google.adk.workflow.utils.
       _workflow_hitl_utils.create_request_input_event`, which dumps the
       whole `RequestInput` into `args` -- the caller's own `payload` (where
-      `clarify` puts `candidates`) nests under `args["payload"]`.
+      `ask` puts `candidates`) nests under `args["payload"]`.
     """
     candidates = args.get("candidates")
     if not candidates:
@@ -1134,10 +1163,10 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     hasn't arrived -- contributes nothing: its candidates were offered, not
     elected, so a pin naming one is refused rather than silently accepted.
 
-    Every `adk_request_input` call the graph itself raises -- `harness.
-    graph`'s `CLARIFY_INTERRUPT` -- shares the one fixed id `"clarify"`
-    across every clarify round in a session, unlike the planner's own
-    `ask_user` calls, each of which gets its own id. Pairing by id alone
+    Every `adk_request_input` call the workflow itself raises (the `ask`
+    node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
+    id `"clarify"` across every question in a session. The planner's own
+    `ask_user` calls each get their own id. Pairing by id alone
     would let a round-2 offer, re-raised under the same id, retroactively
     read a round-1 answer as electing whatever round 2 happens to also
     offer. This walks the session once, in event order, and pairs each
@@ -1201,7 +1230,13 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
 # The referral kinds that hand a requirement back because what it asks for cannot be
 # done, so what to change is the user's to choose. `propose_plan` holds a plan over
 # one of these until the user has answered.
-_USER_DECIDES = frozenset({ReferralKind.REQUIREMENT_UNMEETABLE, ReferralKind.UNSUPPORTED_ASK})
+_USER_DECIDES = frozenset(
+    {
+        ReferralKind.REQUIREMENT_UNMEETABLE,
+        ReferralKind.UNSUPPORTED_ASK,
+        ReferralKind.SOURCE_NAME_AMBIGUOUS,
+    }
+)
 
 
 def _is_answer(body: dict[str, Any]) -> bool:
@@ -1330,27 +1365,123 @@ def _referral_unanswered(
     )
 
 
+# The option of a combination ask that adds the two datasets.
+COMBINE_OPTION = "add them"
+
+# The options a combination ask offers, as `_combination_unasked`'s refusal
+# hands them to `adk_request_input`: each `id` is what the user's pick comes
+# back as, and Studio shows each `label`.
+COMBINATION_OPTIONS: tuple[dict[str, str], ...] = (
+    {"id": COMBINE_OPTION, "label": "Add them into one total"},
+    {"id": "show them separately", "label": "Show them side by side, without adding them"},
+)
+
+
+def _combination_ask() -> Action:
+    """The `adk_request_input` call that asks the user whether to add two datasets.
+
+    It carries `COMBINATION_OPTIONS` and needs only the question. What it asks
+    about is the refusal that carries it (`_combination_picks`).
+    """
+    return Action(
+        call=REQUEST_INPUT_FUNCTION_CALL_NAME,
+        arguments={"options": [dict(option) for option in COMBINATION_OPTIONS]},
+        needs=("message",),
+    )
+
+
+# What a combination ask asks about: the `sum_of` requirement's id and the
+# datasets its sides read (`_sum_datasets`).
+type _Combination = tuple[str, frozenset[str]]
+
+
+def _refused_combination(body: dict[str, Any]) -> _Combination | None:
+    """The combination a `combination_unasked` refusal names in its `detail`, or `None`."""
+    if body.get("code") != ProblemCode.COMBINATION_UNASKED.value:
+        return None
+    detail = body.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    requirement_id = detail.get("requirement_id")
+    datasets = detail.get("datasets")
+    if not isinstance(requirement_id, str) or not isinstance(datasets, list):
+        return None
+    named = [dataset for dataset in datasets if isinstance(dataset, str)]
+    if len(named) != len(datasets):
+        return None
+    return requirement_id, frozenset(named)
+
+
+def _combination_picks(
+    tool_context: ToolContext,
+) -> tuple[dict[_Combination, str | None], bool]:
+    """The option id the user last picked for each combination they were asked about, and a flag.
+
+    A combination ask is an `adk_request_input` call whose `options` are
+    `COMBINATION_OPTIONS`. It asks about the combination the latest
+    `combination_unasked` refusal of `propose_plan` before it names, read off
+    that refusal's own response event, so the model cannot point an ask at
+    another sum. A refusal binds the first ask after it and no other, so an
+    ask with no refusal of its own before it asks about nothing. Each
+    response pairs with the nearest preceding call sharing its `id`, as
+    `_elected_spec_ids` pairs them. Studio sends a picked option's id as
+    `{"spec_id": id}`. Each answer about a combination replaces the one
+    before it, and free text or a skip records `None`, so a user who changes
+    their mind, or answers outside the options, ends with no pick for it.
+    The flag says whether any answer to any combination ask, about a
+    combination or about nothing, was other than `COMBINE_OPTION`.
+    """
+    offered = [dict(option) for option in COMBINATION_OPTIONS]
+    ids = {option["id"] for option in COMBINATION_OPTIONS}
+    refused: _Combination | None = None
+    asks: dict[str, _Combination | None] = {}
+    picks: dict[_Combination, str | None] = {}
+    declined = False
+    for event in tool_context.session.events:
+        if not (event.content and event.content.parts):
+            continue
+        for part in event.content.parts:
+            call = part.function_call
+            if (
+                call is not None
+                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+                and call.id is not None
+            ):
+                if (call.args or {}).get("options") == offered:
+                    asks[call.id], refused = refused, None
+                else:
+                    asks.pop(call.id, None)
+                continue
+            response = part.function_response
+            if response is None:
+                continue
+            body = response.response or {}
+            if response.name == "propose_plan":
+                refused = _refused_combination(body) or refused
+            elif response.name == REQUEST_INPUT_FUNCTION_CALL_NAME and response.id in asks:
+                result = body.get("result")
+                option = result.get("spec_id") if isinstance(result, dict) else None
+                declined = declined or option != COMBINE_OPTION
+                combination = asks[response.id]
+                if combination is not None:
+                    picks[combination] = option if option in ids else None
+    return picks, declined
+
+
 def _election_untraceable(
     decisions: Sequence[Decision], tool_context: ToolContext
 ) -> dict[str, object] | None:
-    """Return the refusal for a `resolved_by=user` source pin the user never chose, or `None`.
+    """Return the refusal for a `resolved_by=user` decision the user never made, or `None`.
 
     A `resolved_by=user` source pin is model-self-reported, so it is checked
     against what the user actually chose: an answer to an `adk_request_input`
-    call on record in this session (`_elected_spec_ids`), or a dataset the user
-    handed to Studio from Search, or a copy of one over another window
-    (`planner.plan.seeded_sources`, which only `harness.graph`'s `seed` node
-    and `_window_pins` write). A pin naming a spec_id that was never
-    offered, was offered but not chosen, or was offered with no answer on
-    record yet is refused. `Plan`'s own validators have no session to read
-    (see `planner.plan.DatasetRequirement`), so they cannot check this. A pin
-    on a dataset the turn dropped is refused before this check
-    (`_dropped_seed_pinned`), so the advice below to record a pin as
-    `planner_default` is never given for one.
+    call on record in this session (`_elected_spec_ids`). A pin naming a
+    spec_id that was never offered, was offered but not chosen, or was
+    offered with no answer on record yet is refused. `Plan`'s own validators
+    have no session to read (see `planner.plan.DatasetRequirement`), so they
+    cannot check this.
     """
-    elected = _elected_spec_ids(tool_context) | {
-        seeded.source.spec_id for seeded in seeded_sources(tool_context.state)
-    }
+    elected = _elected_spec_ids(tool_context)
     untraceable = sorted(
         {
             decision.fixes.source_spec_id
@@ -1432,6 +1563,13 @@ def _choice_not_offered(plan: Plan, tool_context: ToolContext) -> dict[str, obje
     pin's, which discovery recorded and no model wrote. While it is pending,
     each such requirement as `plan` states it either pins one of them or
     pins nothing. A requirement the plan no longer states passes.
+
+    A requirement whose found sources the referral withholds, because they
+    drop the scope of the pinned source it set aside, may pin nothing only
+    when it also changes its `entities`, `across` or `source` from the plan the
+    referral is about: stated unpinned and otherwise unchanged, it would
+    have the translator's search find those sources again
+    (`_withheld_scope_dropped`).
     """
     referral = load_referral(tool_context.state)
     if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
@@ -1441,7 +1579,12 @@ def _choice_not_offered(plan: Plan, tool_context: ToolContext) -> dict[str, obje
             requirement = plan.requirement(requirement_id)
         except KeyError:
             continue
-        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        if requirement.source_spec_id is None:
+            refused = _withheld_scope_dropped(requirement, referral, tool_context)
+            if refused is not None:
+                return refused
             continue
         offered = [candidate.spec_id for candidate in candidates]
         if requirement.source_spec_id in offered:
@@ -1457,57 +1600,306 @@ def _choice_not_offered(plan: Plan, tool_context: ToolContext) -> dict[str, obje
     return None
 
 
-def _dropped_seed_pinned(
-    decisions: Sequence[Decision],
-    requirements: Sequence[EvidenceRequirement],
-    tool_context: ToolContext,
+def _withheld_scope_dropped(
+    requirement: DatasetRequirement, referral: Referral, tool_context: ToolContext
 ) -> dict[str, object] | None:
-    """Return the refusal for a pin on a dataset the turn dropped, or `None`.
+    """Return the refusal for `requirement`, stated unpinned, that would retrieve a source `referral` withholds, or `None`.
 
-    The turn dropped the dataset because its StatVars have left it, and the
-    user is told the plan leaves it out. A decision or a dataset requirement
-    whose pin `planner.plan.names_dropped_seed` reads as a dropped dataset
-    (the seed's spec_id, or that of a copy of it over another window) is
-    refused whatever `resolved_by` says.
+    It is refused when `referral` withholds sources found in its place
+    (`translator.referral.WithheldSource`) and it asks `search` for what the
+    recorded plan the referral is about asked (`_search_scope`).
     """
-
-    def dropped(spec_id: str | None) -> bool:
-        return spec_id is not None and names_dropped_seed(tool_context.state, spec_id=spec_id)
-
-    slots = sorted(
-        decision.slot
-        for decision in decisions
-        if decision.fixes is not None and dropped(decision.fixes.source_spec_id)
-    )
-    requirement_ids = sorted(
-        requirement.id
-        for requirement in requirements
-        if isinstance(requirement, DatasetRequirement) and dropped(requirement.source_spec_id)
-    )
-    if not slots and not requirement_ids:
+    if requirement.id == referral.requirement_id:
+        withheld, repair = referral.withheld, referral.repair
+    else:
+        stale = next(
+            (pin for pin in referral.stale_pins if pin.requirement_id == requirement.id), None
+        )
+        withheld, repair = (stale.withheld, stale.repair) if stale is not None else ((), None)
+    recorded = load_plan(tool_context.state)
+    if not withheld or recorded is None:
+        return None
+    try:
+        referred = recorded.requirement(requirement.id)
+    except KeyError:
+        return None
+    if not isinstance(referred, DatasetRequirement) or (
+        _search_scope(requirement) != _search_scope(referred)
+    ):
         return None
     return problem(
-        ProblemCode.SEED_DROPPED,
-        f"decision(s) {slots!r} and requirement(s) {requirement_ids!r} pin a dataset this "
-        "turn dropped: the user is told that this plan leaves it out, why, and to search for "
-        "it again. Do not plan that dataset again in this turn, pinned or unpinned. Name "
-        "each requirement that retrieves or reads it in `removed_evidence_requirements` and "
-        "each decision that pins it in `removed_decisions`, and plan the rest of the question.",
+        ProblemCode.SOURCE_NOT_OFFERED,
+        f"{requirement.id!r} is unpinned but asks for what it asked before, so the search "
+        "would find again the sources the referral withholds for dropping the pinned "
+        "source's scope. "
+        + (
+            f"Make the referral's repair, {repair}, and propose again."
+            if repair is not None
+            else f"Ask the user through `{REQUEST_INPUT_FUNCTION_CALL_NAME}` what to change."
+        ),
         outcome=Outcome.REFUSED,
-        detail={"decisions": slots, "requirements": requirement_ids},
+        detail={"requirement_id": requirement.id, "repair": repair},
     )
+
+
+def _search_scope(
+    requirement: DatasetRequirement,
+) -> tuple[
+    frozenset[tuple[str, str | None, bool]], tuple[str, ...], tuple[str | None, str | None, bool]
+]:
+    """The scope `search` is asked for `requirement`: its entities, open roles and named source.
+
+    The entities are a set of names, casefolded with runs of whitespace as
+    one space, each with the `PARTY_ROLES` word its role stands for
+    (`party_role`) and whether it asks for the set's members, and the open
+    roles are `translator.discovery.requirement_open_roles`.
+    Two requirements stating their entities in another order, or their
+    `across` in other words for one role ("recipient", "recipients"), have
+    one scope. The named source follows Search's word matching: casefold,
+    punctuation as spaces, a leading "the" dropped and whitespace collapsed.
+    """
+    entities = frozenset(
+        (
+            " ".join(entity.name.casefold().split()),
+            party_role(entity.role) if entity.role is not None else None,
+            entity.members,
+        )
+        for entity in requirement.entities
+    )
+    source = None
+    if requirement.source is not None:
+        words = "".join(
+            " " if unicodedata.category(char).startswith("P") else char
+            for char in requirement.source.casefold()
+        ).split()
+        if len(words) > 1 and words[0] == "the":
+            words = words[1:]
+        source = " ".join(words)
+    return (
+        entities,
+        tuple(requirement_open_roles(requirement)),
+        (source, requirement.source_ref, requirement.source_exclude),
+    )
+
+
+def _pinned_source(spec_id: str | None, tool_context: ToolContext) -> SelectedSource | None:
+    """The source `spec_id` pins, as the record that states it; `None` when nothing on record does.
+
+    The source is a block's the planner was shown, or one the
+    translator's discovery recorded, such as a referral's candidate
+    (`translator.discovery.DiscoveryLog.recorded_source`).
+    """
+    if spec_id is None:
+        return None
+    shown = pin_sources(tool_context.state).get(spec_id)
+    block = shown.spec_block(spec_id) if shown is not None else None
+    if block is not None:
+        try:
+            return source_from_spec_block(block)
+        except ValueError:
+            return None
+    return load_log(tool_context.state).recorded_source(spec_id)
+
+
+class _SumDatasets(NamedTuple):
+    """The datasets both sides of a `sum_of` read, and what their pins state of them.
+
+    `stated` says a pin states each dataset's provenance. `provider_flows`
+    says each pin also states its provenance's account is `PROVIDER_ACCOUNT`:
+    the OECD and ONE aid tables, whose skill says how they add up.
+    """
+
+    datasets: frozenset[str]
+    stated: bool
+    provider_flows: bool
+
+
+def _sum_datasets(
+    plan: Plan, requirement: SumOfRequirement, tool_context: ToolContext
+) -> _SumDatasets:
+    """The datasets both sides of `requirement` read in `plan`, and what their pins state.
+
+    A dataset requirement whose pin states its dataset (`_pinned_source`)
+    reads that dataset's provenance ref. One whose dataset no pin states
+    reads a dataset of its own: `spec:<source_spec_id>` for a pin whose
+    dataset this turn cannot read, `requirement:<id>:<revision>` for an unpinned one, where the revision
+    (`requirement_revision`) hashes what the requirement asks for. So two such
+    sides read one dataset only when they share the pin, or the requirement
+    with the content it was asked about.
+    """
+    datasets: set[str] = set()
+    stated = True
+    provider_flows = True
+    pending = [requirement.left.input_id, requirement.right.input_id]
+    while pending:
+        read = plan.requirement(pending.pop())
+        if isinstance(read, DatasetRequirement):
+            source = _pinned_source(read.source_spec_id, tool_context)
+            prior = pin_sources(tool_context.state).get(read.source_spec_id or "")
+            dataset = (
+                source.provenance_ref
+                if source is not None
+                else prior.provenance_ref
+                if prior is not None
+                else None
+            )
+            account = (
+                source.provenance_account
+                if source is not None
+                else prior.provenance_account
+                if prior is not None
+                else None
+            )
+            if dataset is None:
+                stated = False
+                dataset = (
+                    f"requirement:{read.id}:{requirement_revision(read)}"
+                    if read.source_spec_id is None
+                    else f"spec:{read.source_spec_id}"
+                )
+            if account != PROVIDER_ACCOUNT:
+                provider_flows = False
+            datasets.add(dataset)
+        pending.extend(inputs_of(read))
+    return _SumDatasets(frozenset(datasets), stated, provider_flows)
+
+
+def _combination_unasked(
+    plan: Plan, tool_context: ToolContext, *, previous: Plan | None
+) -> dict[str, object] | None:
+    """Return the refusal for a `sum_of` of two datasets the user was not asked to combine, or `None`.
+
+    Whether two datasets add up without counting a flow twice is the
+    user's to settle, since ODA loans, for one, count in both aid and debt
+    flows. So a `sum_of` passes only when the user's latest pick for it,
+    its id and the datasets its sides read (`_combination_picks`), is
+    `COMBINE_OPTION`, and it cites a `Decision` resolved by `user` whose
+    `chosen` is that option, unless its sides read one dataset, or only
+    tables of a provider's flows (`_SumDatasets.provider_flows`), as the
+    pins of their dataset requirements state. A `user` decision is the model's own claim,
+    so citing one, even a source pin the user did elect, settles nothing
+    without the pick. A pick for one sum, or for the same sum over other
+    datasets, settles nothing for another.
+
+    `plan` pins the sources the planner named, before `_window_pins` moves
+    a pin to a copy over the requirement's period, which no store records a
+    dataset for until the plan is recorded. A side with an unpinned dataset
+    requirement, or a pin whose dataset this turn cannot read
+    (`_pinned_source`), reads a dataset of its own, named by that
+    requirement or pin (`_sum_datasets`). A Studio turn opens its own
+    session, so a plan carried into a later turn has no pick on record.
+    A `sum_of` that `previous`, the plan this call amends, states unchanged,
+    over the same datasets and citing the same `user` decisions to add
+    them, was checked when `previous` was recorded and keeps its sum,
+    unless some combination ask in this session was answered with anything
+    but `COMBINE_OPTION`. The refusal's action carries the `COMBINATION_OPTIONS`
+    the ask offers, so the user picks one of them and the planner phrases
+    only the question, and its `detail` names the sum and its datasets,
+    which is what the ask that follows asks about.
+    """
+    picks, declined = _combination_picks(tool_context)
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, SumOfRequirement):
+            continue
+        datasets, stated, provider_flows = _sum_datasets(plan, requirement, tool_context)
+        if stated and (len(datasets) == 1 or provider_flows):
+            continue
+        consent = _consenting_decisions(plan, requirement)
+        pick = picks.get((requirement.id, datasets))
+        if consent and pick == COMBINE_OPTION:
+            continue
+        if (
+            consent
+            and previous is not None
+            and not declined
+            and requirement in previous.evidence_requirements
+            and _sum_datasets(previous, requirement, tool_context).datasets == datasets
+            and _consenting_decisions(previous, requirement) == consent
+        ):
+            continue
+        return problem(
+            ProblemCode.COMBINATION_UNASKED,
+            f"{requirement.id!r} adds two datasets, and whether they add up without "
+            "counting a flow twice is the user's to decide: ODA loans, for one, count in "
+            f"both aid and debt flows. Ask the user through `{REQUEST_INPUT_FUNCTION_CALL_NAME}` "
+            "with this action's `options` unchanged and a `message` naming that overlap. "
+            f"If they pick {COMBINE_OPTION!r}, cite a `Decision` resolved by `user` whose "
+            "`options` are those option ids and whose `chosen` is the one they picked; "
+            f"otherwise remove {requirement.id!r} and show the two series separately.",
+            outcome=Outcome.REFUSED,
+            action=_combination_ask(),
+            detail={
+                "requirement_id": requirement.id,
+                "datasets": sorted(datasets),
+            },
+        )
+    return None
+
+
+def _consenting_decisions(plan: Plan, requirement: SumOfRequirement) -> dict[str, Decision]:
+    """The decisions `requirement` cites in `plan` resolved by `user` to `COMBINE_OPTION`, by slot."""
+    return {
+        decision.slot: decision
+        for decision in plan.decisions
+        if decision.slot in requirement.decision_ids
+        and decision.resolved_by is ResolvedBy.USER
+        and decision.chosen == COMBINE_OPTION
+    }
+
+
+def _source_ref_unpicked(
+    plan: Plan, tool_context: ToolContext, previous: Plan | None
+) -> dict[str, object] | None:
+    """A new source reference must be a source option the user actually picked."""
+    picked = _answers_since_referral(tool_context)[1]
+    referral = load_referral(tool_context.state)
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_ref is None:
+            continue
+        old = (
+            next((r for r in previous.evidence_requirements if r.id == requirement.id), None)
+            if previous
+            else None
+        )
+        if (
+            isinstance(old, DatasetRequirement)
+            and old.source_ref == requirement.source_ref
+            and old.source == requirement.source
+            and old.source_exclude == requirement.source_exclude
+        ):
+            continue
+        offered = (
+            {
+                candidate.ref
+                for group in referral.ambiguous_sources
+                if " ".join(group.text.casefold().split())
+                == " ".join((requirement.source or "").casefold().split())
+                for candidate in group.candidates
+            }
+            if referral
+            and referral.kind is ReferralKind.SOURCE_NAME_AMBIGUOUS
+            and referral.requirement_id == requirement.id
+            else set()
+        )
+        if requirement.source_ref not in picked or requirement.source_ref not in offered:
+            return _invalid_plan(
+                "The source_ref must be a source reference Search offered and the user picked. Ask the user before resolving source ambiguity."
+            )
+    return None
 
 
 def _unrecordable(
-    plan: Plan, tool_context: ToolContext, *, previous: Plan | None
+    plan: Plan, tool_context: ToolContext, *, stated: Plan, previous: Plan | None
 ) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
     A plan states at least one requirement, unless it declines every ask
     (`_nothing_to_plan`). A patch carries forward what it
-    does not name, so the amended plan is checked whole for a pin the recorded
-    plan made before the turn dropped its dataset (`_dropped_seed_pinned`), for
-    a pin a pending source choice did not offer (`_choice_not_offered`), for a
+    does not name, so the amended plan is checked whole for a pin a pending
+    source choice did not offer (`_choice_not_offered`), for a
+    sum of two datasets the user was not asked to combine
+    (`_combination_unasked`, against `stated`, the plan before `_window_pins`
+    moved its pins), for a
     decline no `unsupported` answer earned (`_decline_unearned`, against
     `previous`, the plan it amends), and for a decline every `unsupported`
     answer this turn requires (`_decline_missing`).
@@ -1520,8 +1912,9 @@ def _unrecordable(
             "`removed_evidence_requirements`."
         )
     return (
-        _dropped_seed_pinned(plan.decisions, plan.evidence_requirements, tool_context)
+        _source_ref_unpicked(plan, tool_context, previous)
         or _choice_not_offered(plan, tool_context)
+        or _combination_unasked(stated, tool_context, previous=previous)
         or _decline_unearned(plan, previous, tool_context)
         or _decline_missing(plan, tool_context)
     )
@@ -1535,6 +1928,72 @@ _UNPINNED_CHOICE = "leave the source unpinned"
 def _pin_choice(spec_id: str) -> str:
     """The option a decision `propose_plan` writes for a search pin pins `spec_id` by."""
     return f"pin {spec_id}"
+
+
+@dataclass(frozen=True)
+class _MeasureChoice:
+    """How a flow is counted, as the decision `propose_plan` writes for a pin of one of its measures states it.
+
+    `options` are the measure search elected, then each it offers counting
+    the flow another way (`planner.workflow.MeasureAlternative`, axis
+    `what`), by label, and `spec_ids` the spec_id of each in the same order.
+    `chosen` is the label of the one pinned.
+    """
+
+    options: tuple[str, ...]
+    spec_ids: tuple[str, ...]
+    chosen: str
+
+
+def _measure_choices(
+    shown: Mapping[str, PinSource], *, compiled: Sequence[SelectedSource] = ()
+) -> dict[str, _MeasureChoice]:
+    """The measure choice a pin of each spec_id states, for every measure a settled source shown offers.
+
+    Families from the prior compiled plan are retained on an amendment;
+    a shown source with the same id takes precedence.
+
+    A settled source whose block elects a measure (`SelectedSource.
+    elected_measure`) and offers another way of counting it maps to the
+    choice with its own label chosen, and each of those others to the same
+    choice with that one's label chosen. A source settled only as another
+    count of one (`PinSource.other_count_of`) takes its choice from the
+    source that offered it, since its own block names its own measure as
+    if search had elected it, and states none when that source is not
+    shown. A label over `MAX_OPTION_CHARS`, a
+    repeated one and any past `MAX_DECISION_OPTIONS` are left out, and a
+    source left with one option offers no choice. Price alternatives (axis
+    `unit`) count the flow the same way in other prices and offer no choice here.
+    """
+    elections = {source.spec_id: source.elected_measure for source in compiled}
+    for spec_id, source in shown.items():
+        block = source.spec_block(spec_id) if source.settled and not source.other_count_of else None
+        if block is None:
+            continue
+        try:
+            elected = source_from_spec_block(block).elected_measure
+        except ValueError:
+            continue
+        elections[spec_id] = elected
+    choices: dict[str, _MeasureChoice] = {}
+    for spec_id, elected in elections.items():
+        if elected is None or len(elected.label) > MAX_OPTION_CHARS:
+            continue
+        labels = {elected.label: spec_id}
+        for alternative in elected.other_counts():
+            if len(alternative.label) <= MAX_OPTION_CHARS and len(labels) < MAX_DECISION_OPTIONS:
+                labels.setdefault(alternative.label, alternative.spec_id)
+        if len(labels) < 2:
+            continue
+        options, spec_ids = tuple(labels), tuple(labels.values())
+        choices[spec_id] = _MeasureChoice(options=options, spec_ids=spec_ids, chosen=elected.label)
+        for label, measure in labels.items():
+            # A source search elected states its own choice, whatever
+            # another source offers it as.
+            choices.setdefault(
+                measure, _MeasureChoice(options=options, spec_ids=spec_ids, chosen=label)
+            )
+    return choices
 
 
 def _repinned(
@@ -1553,7 +2012,8 @@ def _repinned(
     decision `propose_plan` wrote for a search pin (`planner.plan.
     is_search_pin`) to the one its moved pin takes (`search_pin_slot`): that
     decision is rewritten for its new pin, and every citation of it cites the
-    new slot, so it stays a search pin `harness.plan_display` leaves out.
+    new slot, so it stays a search pin. A pin-or-unpin choice is rewritten to
+    name the new pin; a measure choice (`_MeasureChoice`) keeps its options.
     """
     moved_decisions: list[Decision] = []
     for decision in decisions:
@@ -1565,11 +2025,13 @@ def _repinned(
             "fixes": decision.fixes.model_copy(update={"source_spec_id": pin})
         }
         if is_search_pin(decision) and decision.slot in slots:
-            update |= {
-                "slot": slots[decision.slot],
-                "options": (_pin_choice(pin), _UNPINNED_CHOICE),
-                "chosen": _pin_choice(pin),
-            }
+            update["slot"] = slots[decision.slot]
+            # A measure choice reads the same over any period.
+            if decision.chosen == _pin_choice(decision.fixes.source_spec_id or ""):
+                update |= {
+                    "options": (_pin_choice(pin), _UNPINNED_CHOICE),
+                    "chosen": _pin_choice(pin),
+                }
         moved_decisions.append(decision.model_copy(update=update))
     moved_requirements: list[EvidenceRequirement] = []
     for requirement in requirements:
@@ -1592,8 +2054,7 @@ def _unwindowed_pins(
     """`decisions` and `requirements` with every pin of a windowed copy moved back to the pin it copies.
 
     `to_origin` maps each copy's spec_id to the pin it copies over another
-    period: a seed's (`planner.plan.SeededSource.windowed_from`) or a
-    recorded pin's (`planner.plan.WindowedPin.windowed_from`).
+    period (`planner.plan.WindowedPin.windowed_from`).
     `propose_plan` reasons about a pin by the spec_id the planner was shown,
     whatever period an earlier call recorded it over (`_window_pins`), so a
     patch and the plan it amends always agree on what they pin.
@@ -1619,15 +2080,9 @@ def _unwindowed_pins(
     )
 
 
-def _copied_spec_id(copy: SeededSource | WindowedPin) -> str:
-    """The spec_id a copy of a pin over another period retrieves."""
-    return copy.source.spec_id if isinstance(copy, SeededSource) else copy.spec_id
-
-
 def _first_year_on_record(
     pin: str,
     *,
-    seed: SeededSource | None,
     shown: Mapping[str, PinSource],
     read: Mapping[str, FullHistory | None],
 ) -> FullHistory | None:
@@ -1635,29 +2090,19 @@ def _first_year_on_record(
 
     Read from the Search answer the planner was shown for `pin`
     (`planner.plan.full_history`), or else from what `propose_plan` read for
-    it over no window (`read`, `planner.plan.full_histories`), or else from
-    a seed whose identity is over no window and whose coverage is a series
-    window, which states the first year and counts no rows.
+    it over no window (`read`, `planner.plan.full_histories`).
     """
     source = shown.get(pin)
     block = source.spec_block(pin) if source is not None else None
     if block is not None and (history := full_history(block)) is not None:
         return history
-    if (history := read.get(pin)) is not None:
-        return history
-    if seed is None or seed.source.coverage_window is None:
-        return None
-    requested = (seed.source.identity or {}).get("requested_window")
-    if not isinstance(requested, Mapping) or requested.get("kind") != "all":
-        return None
-    return FullHistory(first_year=seed.source.coverage_window.start, rows=None)
+    return read.get(pin)
 
 
 def _open_window(
     plan: Plan,
     requirement: DatasetRequirement,
     *,
-    seed: SeededSource | None,
     shown: Mapping[str, PinSource],
     read: Mapping[str, FullHistory | None],
 ) -> dict[str, object]:
@@ -1684,7 +2129,7 @@ def _open_window(
     if not _rolls_from_its_start(plan, requirement):
         return period_window(requirement.period, end_open=True)
     pin = requirement.source_spec_id or ""
-    history = _first_year_on_record(pin, seed=seed, shown=shown, read=read)
+    history = _first_year_on_record(pin, shown=shown, read=read)
     if history is None and pin in read:
         raise RollingPlanError(
             RollingIssue.NEEDS_OPEN_PERIOD,
@@ -1728,16 +2173,17 @@ class _ShownDefinition:
 
     identity: Mapping[str, Any]
     groups: tuple[ResolvedGroup, ...] = ()
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
 def _identity_on_record(
     pin: str,
-    seeds: Mapping[str, SeededSource],
     *,
     shown: Mapping[str, PinSource],
     end_open: bool,
-) -> tuple[SeededSource | None, RecordedDefinition | None, Mapping[str, Any] | None]:
-    """The seed `pin` names, or else the definition on record for it, and its identity.
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> RecordedDefinition | None:
+    """The definition on record for `pin`; `None` when none is.
 
     The definition is the one a search in the conversation recorded
     (`planner.plan.recorded_identity`). For a requirement stating
@@ -1746,19 +2192,22 @@ def _identity_on_record(
     a closed requirement's pin by searching its stated years, and no search
     finds a definition with no end year.
     """
-    seed = seeds.get(pin)
-    if seed is not None:
-        return seed, None, seed.source.identity
     recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and definition_lookup is not None:
+        recorded = definition_lookup(pin)
     if recorded is None and end_open and pin in shown:
         identity = shown_identity(pin, shown[pin])
         block = shown[pin].spec_block(pin)
         recorded = (
-            _ShownDefinition(identity, block_groups(block) if block is not None else ())
+            _ShownDefinition(
+                identity,
+                block_groups(block) if block is not None else (),
+                source_from_spec_block(block).resolved_sources if block is not None else (),
+            )
             if identity is not None
             else None
         )
-    return None, recorded, recorded.identity if recorded is not None else None
+    return recorded
 
 
 def _rolls_from_its_start(plan: Plan, requirement: DatasetRequirement) -> bool:
@@ -1784,27 +2233,26 @@ def _needs_a_pin(plan: Plan, requirement: DatasetRequirement) -> bool:
 
 def _window_pins(
     plan: Plan,
-    seeded: Sequence[SeededSource],
     *,
     shown: Mapping[str, PinSource] = {},
     read: Mapping[str, FullHistory | None] = {},
-) -> tuple[Plan, list[SeededSource], list[WindowedPin]]:
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> tuple[Plan, list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
 
-    A pin's identity carries the years of the search that found it: the
-    years the user saw in Search for a seed, often every year with data, or
-    the window of the question an earlier search answered. A plan's
-    retrieval mints the pinned spec_id as it is (`compiler.compile`'s
+    A pin's identity carries the years of the search that found it, the
+    window of the question that search answered. A plan's retrieval mints
+    the pinned spec_id as it is (`compiler.compile`'s
     `_retrieve_arguments`). So a dataset requirement whose pin's identity is
     over another period is pinned instead to that identity over its own
     (`data_mcp.definition_writes.windowed_identity`, the spec_id `get_data`'s
     `scope.window` would mint), and so is the decision that fixes the pin.
 
-    The identity on record is a seed's own (`seeded`), or else the one a
-    search in the conversation recorded (`planner.plan.recorded_identity`).
-    One of a `latest` window is copied like any other: the copy replaces
-    the window whole, as `get_data`'s scope surgery does, and the translator
-    confirms the copy through Search before it is retrieved.
+    The identity on record is the one a search in the conversation recorded
+    (`planner.plan.recorded_identity`). One of a `latest` window is copied
+    like any other: the copy replaces the window whole, as `get_data`'s
+    scope surgery does, and the translator confirms the copy through Search
+    before it is retrieved.
 
     A requirement stating `period_end_open` is pinned to that identity over
     a range with no end year (`_open_window`), which dfo-apis ends at the
@@ -1816,39 +2264,40 @@ def _window_pins(
     Such a requirement needs an identity on record (`_identity_on_record`),
     unless it is unpinned and its start is fixed (`_needs_a_pin`).
 
-    Returns the moved plan and every copy it pins: of a seed, the one
-    `seeded` holds for that spec_id or a new one (`planner.plan.
-    windowed_copy`); of any other pin, a `planner.plan.WindowedPin`. Neither
-    states what Search stated for the original's years; the translator
-    reads those from Search's answer for the copy when it honours the pin
-    (`translator.discovery`).
+    Returns the moved plan and every copy it pins, each a
+    `planner.plan.WindowedPin`. A copy states nothing Search stated for the
+    original's years; the translator reads those from Search's answer for
+    the copy when it honours the pin (`translator.discovery`).
 
     One decision fixing the pin of requirements over different periods
     cannot name every copy with its one `source_spec_id`. Those
     requirements keep the pin as the planner wrote it, and the translator
-    searches for each, unless the pin is a seed's.
+    searches for each.
 
     Raises:
-        ValueError: If one decision fixes a seed's pin, or the pin of a
-            requirement stating `period_end_open`, for requirements over
-            different periods.
+        ValueError: If one decision fixes the pin of a requirement stating
+            `period_end_open` for requirements over different periods.
         RollingPlanError: If a requirement stating `period_end_open` needs an
             identity on record and has none, or `_open_window` refuses it.
     """
-    seeds = {item.source.spec_id: item for item in seeded if item.windowed_from is None}
     pinning: dict[str, str] = {}
-    copies: dict[str, SeededSource | WindowedPin | None] = {}
+    copies: dict[str, WindowedPin | None] = {}
     open_ended: set[str] = set()
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement):
             continue
         pin = requirement.source_spec_id
-        seed, recorded, identity = (
-            _identity_on_record(pin, seeds, shown=shown, end_open=requirement.period_end_open)
+        recorded = (
+            _identity_on_record(
+                pin,
+                shown=shown,
+                end_open=requirement.period_end_open,
+                definition_lookup=definition_lookup,
+            )
             if pin is not None
-            else (None, None, None)
+            else None
         )
-        if requirement.period_end_open and identity is None and _needs_a_pin(plan, requirement):
+        if requirement.period_end_open and recorded is None and _needs_a_pin(plan, requirement):
             raise RollingPlanError(
                 RollingIssue.NEEDS_OPEN_PERIOD,
                 f"{requirement.id!r} states `period_end_open`, which takes a dataset on "
@@ -1858,26 +2307,24 @@ def _window_pins(
                 requirement_ids=[requirement.id],
                 fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
             )
-        if pin is None or identity is None:
+        if pin is None or recorded is None:
             continue
         pinning[requirement.id] = pin
         if requirement.period_end_open:
             open_ended.add(requirement.id)
-            window = _open_window(plan, requirement, seed=seed, shown=shown, read=read)
+            window = _open_window(plan, requirement, shown=shown, read=read)
         else:
             window = period_window(requirement.period)
-        if identity.get("requested_window") == window:
+        if recorded.identity.get("requested_window") == window:
             copies[requirement.id] = None
-        elif seed is not None:
-            copies[requirement.id] = windowed_copy(seed, window)
-        elif recorded is not None:
+        else:
             copies[requirement.id] = windowed_pin(pin, recorded, window)
     targets: dict[str, set[str]] = {}
     for requirement in plan.evidence_requirements:
         if requirement.id not in copies:
             continue
         copy = copies[requirement.id]
-        target = pinning[requirement.id] if copy is None else _copied_spec_id(copy)
+        target = pinning[requirement.id] if copy is None else copy.spec_id
         for slot in requirement.decision_ids:
             targets.setdefault(slot, set()).add(target)
     origins = set(pinning.values())
@@ -1894,7 +2341,7 @@ def _window_pins(
                 for requirement in plan.evidence_requirements
                 if decision.slot in requirement.decision_ids
             }
-            if pin in seeds or citing & open_ended:
+            if citing & open_ended:
                 raise ValueError(
                     f"decision {decision.slot!r} fixes the pin of requirements over different "
                     "periods, which retrieve different spec_ids; give each of those requirements "
@@ -1909,20 +2356,13 @@ def _window_pins(
             if is_search_pin(decision):
                 slots[decision.slot] = search_pin_slot(decision_pins[decision.slot])
     requirement_pins = {
-        requirement_id: _copied_spec_id(copy)
-        for requirement_id, copy in copies.items()
-        if copy is not None
+        requirement_id: copy.spec_id for requirement_id, copy in copies.items() if copy is not None
     }
     if not requirement_pins and not decision_pins:
-        return plan, [], []
-    seed_copies: dict[str, SeededSource] = {}
+        return plan, []
     recorded_copies: dict[str, WindowedPin] = {}
     for copy in copies.values():
-        if isinstance(copy, SeededSource) and copy.source.spec_id not in seeds:
-            # Two seeds over one dataset copy to one spec_id over a shared
-            # period. One copy is recorded for both.
-            seed_copies.setdefault(copy.source.spec_id, copy)
-        elif isinstance(copy, WindowedPin):
+        if copy is not None:
             recorded_copies.setdefault(copy.spec_id, copy)
     decisions, requirements = _repinned(
         plan.decisions,
@@ -1934,11 +2374,7 @@ def _window_pins(
     moved = plan.model_copy(
         update={"decisions": tuple(decisions), "evidence_requirements": tuple(requirements)}
     )
-    return (
-        Plan.model_validate(moved.model_dump()),
-        list(seed_copies.values()),
-        list(recorded_copies.values()),
-    )
+    return Plan.model_validate(moved.model_dump()), list(recorded_copies.values())
 
 
 def _synthesize_source_decisions(
@@ -1949,6 +2385,8 @@ def _synthesize_source_decisions(
     settled_spec_ids: Collection[str],
     earlier_spec_ids: Collection[str] = (),
     refound_spec_ids: Collection[str] = (),
+    measures: Mapping[str, _MeasureChoice] = {},
+    user_settled: Collection[str] = (),
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """Add the `Decision` a verbatim pin of a settled search result needs, so citing it is all the model has to do.
 
@@ -1967,6 +2405,14 @@ def _synthesize_source_decisions(
     the source unpinned, the only two things true of a `DatasetRequirement`
     pinning it, and `resolved_by=planner_default` names the planner, not the
     user, as the one who settled it.
+
+    A pin of a measure a shown source offers (`measures`) gets the measure
+    decision instead: its options are the measure search elected and the
+    others counting the flow another way, by label, and it chooses the
+    pinned one's. A pin of one of those others is allowed as a settled pin
+    is, so a re-pin to a sibling measure needs no decision of the model's.
+    The user settled it (`resolved_by=user`) when the pin is in
+    `user_settled`, else the planner did.
 
     Only a requirement in this call's own `evidence_requirements` is
     examined, never one carried unchanged from `previous`; `previous.decisions`
@@ -1994,6 +2440,10 @@ def _synthesize_source_decisions(
             referral offers as the one found in place of a requirement's
             stale pin (`_refound_spec_ids`). A pin of one is settled the
             same way, with a rationale saying so.
+        measures: The measure choice a pin of each spec_id states
+            (`_measure_choices`).
+        user_settled: The spec_ids of `measures` whose measure the user
+            chose (`_user_settled_measures`).
 
     Returns:
         `decisions`/`evidence_requirements`, unchanged unless some requirement
@@ -2003,7 +2453,7 @@ def _synthesize_source_decisions(
     """
     known = {decision.slot: decision for decision in (previous.decisions if previous else ())}
     known.update({decision.slot: decision for decision in decisions})
-    pinnable = {*settled_spec_ids, *refound_spec_ids}
+    pinnable = {*settled_spec_ids, *refound_spec_ids, *measures}
 
     def _uncited_pin(requirement: EvidenceRequirement) -> str | None:
         if not isinstance(requirement, DatasetRequirement):
@@ -2047,28 +2497,99 @@ def _synthesize_source_decisions(
         )
         if slot in known:
             continue
-        known[slot] = Decision(
-            slot=slot,
-            description="Whether to pin the source a search settled on.",
-            options=(_pin_choice(pin), _UNPINNED_CHOICE),
-            chosen=_pin_choice(pin),
-            resolved_by=ResolvedBy.PLANNER_DEFAULT,
-            rationale=(
-                "A fresh search found this source in place of the one pinned before."
-                if pin in refound_spec_ids and pin not in settled_spec_ids
-                else "A search in this conversation settled on this source for the measure."
-                if pin in earlier_spec_ids
-                else "A search this turn settled on this source for the measure."
-            ),
-            fixes=DecisionFixes(source_spec_id=pin),
+        known[slot] = (
+            _measure_decision(slot, pin, measures[pin], user=pin in user_settled)
+            if pin in measures
+            else Decision(
+                slot=slot,
+                description="Whether to pin the source a search settled on.",
+                options=(_pin_choice(pin), _UNPINNED_CHOICE),
+                chosen=_pin_choice(pin),
+                resolved_by=ResolvedBy.PLANNER_DEFAULT,
+                rationale=(
+                    "A fresh search found this source in place of the one pinned before."
+                    if pin in refound_spec_ids and pin not in settled_spec_ids
+                    else "A search in this conversation settled on this source for the measure."
+                    if pin in earlier_spec_ids
+                    else "A search this turn settled on this source for the measure."
+                ),
+                fixes=DecisionFixes(source_spec_id=pin),
+            )
         )
         synthesized.append(known[slot])
     return [*decisions, *synthesized], patched_requirements
 
 
+def _measure_decision(slot: str, pin: str, choice: _MeasureChoice, *, user: bool) -> Decision:
+    """The decision `_synthesize_source_decisions` writes for a pin of `pin`, one measure of `choice`."""
+    elected = choice.options[0]
+    if user:
+        rationale = f"The user chose {choice.chosen}."
+    elif choice.chosen == elected:
+        rationale = f"Search elected {elected} for this source."
+    else:
+        rationale = f"Chosen in place of {elected}, the measure search elected."
+    return Decision(
+        slot=slot,
+        description="How the flow is counted.",
+        options=choice.options,
+        chosen=choice.chosen,
+        resolved_by=ResolvedBy.USER if user else ResolvedBy.PLANNER_DEFAULT,
+        rationale=rationale,
+        fixes=DecisionFixes(source_spec_id=pin),
+    )
+
+
+def _user_settled_measures(
+    measures: Mapping[str, _MeasureChoice], tool_context: ToolContext
+) -> frozenset[str]:
+    """The spec_ids of `measures` whose measure the user picked answering an
+    `adk_request_input` call: the orchestrator's `ask_user` offers each
+    measure under its own spec_id, so a pick names it (`_elected_spec_ids`).
+    A typed answer or an amendment at approval names no spec_id, so the
+    measure it leads to stays the planner's."""
+    return frozenset(_elected_spec_ids(tool_context) & measures.keys())
+
+
+def _user_settled_rewrites(
+    previous: Plan | None,
+    decisions: Sequence[Decision],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    measures: Mapping[str, _MeasureChoice],
+    user_settled: Collection[str],
+) -> list[Decision]:
+    """Each measure decision `previous` records as the planner's that the user has since settled, as theirs.
+
+    `_synthesize_source_decisions` writes a measure decision when a
+    requirement first pins the measure, so a pick answering an ask raised
+    after that leaves the planner's decision standing on the same pin. Only
+    a decision some requirement of the patched plan (`requirements`) cites,
+    and that this call's `decisions` do not restate, is rewritten.
+    """
+    if previous is None:
+        return []
+    restated = {decision.slot for decision in decisions}
+    cited = {slot for requirement in requirements for slot in requirement.decision_ids}
+    rewritten: list[Decision] = []
+    for decision in previous.decisions:
+        pin = decision.fixes.source_spec_id if decision.fixes is not None else None
+        choice = measures.get(pin) if pin is not None else None
+        if (
+            pin is not None
+            and choice is not None
+            and pin in user_settled
+            and is_search_pin(decision)
+            and decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
+            and decision.slot in cited
+            and decision.slot not in restated
+        ):
+            rewritten.append(_measure_decision(decision.slot, pin, choice, user=True))
+    return rewritten
+
+
 def _settled_decisions(
     drafts: Sequence[DecisionDraft],
-    requirements: Sequence[EvidenceRequirement],
     *,
     existing: Plan | None,
     requirements_after: Sequence[EvidenceRequirement],
@@ -2079,13 +2600,11 @@ def _settled_decisions(
     These checks run before the plan is touched, so a refusal records nothing
     and spends no round: a referral the user has not answered
     (`_referral_unanswered`), a draft fixing a field its requirements do not
-    settle (`planner.plan.settle_decisions`), a pin on a dataset the turn
-    dropped (`_dropped_seed_pinned`), and a user election the user never made
-    (`_election_untraceable`).
+    settle (`planner.plan.settle_decisions`), and a user election the user
+    never made (`_election_untraceable`).
 
     Args:
         drafts: This call's `decisions` argument.
-        requirements: This call's own requirements.
         existing: The plan recorded before this call.
         requirements_after: Every requirement the plan states once the call
             lands (`_requirements_after`), which a draft's fields are read off.
@@ -2098,11 +2617,7 @@ def _settled_decisions(
         decisions = settle_decisions(drafts, requirements_after)
     except UnsettledFixError as exc:
         return _fix_unsettled(exc)
-    return (
-        _dropped_seed_pinned(decisions, requirements, tool_context)
-        or _election_untraceable(decisions, tool_context)
-        or decisions
-    )
+    return _election_untraceable(decisions, tool_context) or decisions
 
 
 def _uncited_source_decisions(
@@ -2183,6 +2698,16 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "states one records it; one that omits it keeps the recorded question."
     ),
     "answer_mode": (
+        "What kind of answer the requirements add up to. `series` answers a "
+        "question that asks to see a level or a trend: a lone dataset "
+        "requirement, unread by anything else, is itself the answer, its frame "
+        "carrying one series per entity for a chart to draw. `computed` answers "
+        "a question that asks for a figure the series does not state on its "
+        "own (a difference, growth, share, quotient, rank or total), so every "
+        "dataset requirement has to feed a calculation, since one left unread "
+        "would leave the plan without the figure the question asked for. "
+        "Either way, `answered` may name a dataset requirement a calculation "
+        "reads. "
         "Required on a first draft and with `starts_new_plan`. A patch that "
         "states one switches the plan's mode and re-validates its requirements "
         "under it; one that omits it keeps the recorded mode."
@@ -2360,24 +2885,26 @@ def build_planner_tools(
     # `google.adk.tools.request_input` uses for exactly this pausing shape
     # (`REQUEST_INPUT_FUNCTION_CALL_NAME`), reused rather than duplicated so
     # `harness.studio_translate._request_input_call` recognises this pause
-    # the same way it already recognises the graph's own `clarify`/`approve`
+    # the same way it already recognises the graph's own `ask`/`approve`
     # interrupts, with no change to that recognition code. The model sees
     # and calls this tool under that reused name, not `ask_user`, so the
     # instruction above names it that way too.
     def ask_user(
         message: str,
         candidates: list[dict[str, str]] = [],  # noqa: B006
+        options: list[dict[str, str]] = [],  # noqa: B006
         recommended_spec_id: str | None = None,
         rationale: str | None = None,
     ) -> dict[str, object] | None:
-        """Ask the user a question a referral leaves to them, pausing the turn.
+        """Ask the user a question a referral or a refusal leaves to them, pausing the turn.
 
         Returns nothing here: the user's answer arrives as this call's own
-        response on your next turn, naming the `spec_id` they picked, or free
-        text if they answered outside the candidates. A `resolved_by=user`
-        decision may pin only a `spec_id` this call offered and the user
-        picked. The options offered come from the referral's candidates; with
-        none, the question says what cannot be done and asks what to change.
+        response on your next turn, naming under `spec_id` the candidate or
+        option id they picked, or free text if they answered outside them. A
+        `resolved_by=user` decision may pin only a `spec_id` this call offered
+        and the user picked. The choices offered come from the referral's
+        candidates, or from the `options` a refusal's action carries; with
+        neither, the question says what cannot be done and asks what to change.
 
         Args:
             message: The question to show the user, naming what is
@@ -2386,13 +2913,25 @@ def build_planner_tools(
             candidates: The referral's own candidates, each
                 `{"spec_id": ..., "label": ...}` -- `label` is the
                 candidate's own `sentence`, not invented text. Omit it for
-                a referral that carries none.
+                a referral that carries none. For source_name_ambiguous, use
+                each offered source's ref as spec_id and its label as label;
+                the chosen reference belongs in source_ref, never source_spec_id.
+            options: The `options` a `combination_unasked` or
+                `election_untraceable` refusal's action carries, unchanged.
+                Omit it otherwise.
             recommended_spec_id: The candidate you favour, when you favour
                 one -- must name one of `candidates`.
             rationale: Why you favour it, for the user to read, when
                 `recommended_spec_id` is given.
         """
         del message, rationale  # carried through to the wire frame, not read back here
+        if options and (candidates or options != [dict(o) for o in COMBINATION_OPTIONS]):
+            return problem(
+                ProblemCode.INVALID_ARGUMENTS,
+                "`options` must be the ones a refusal's action carries, unchanged, "
+                "and offered without `candidates`.",
+                outcome=Outcome.INVALID_INPUT,
+            )
         offered = [str(c["spec_id"]) for c in candidates if c.get("spec_id")]
         if recommended_spec_id and recommended_spec_id not in offered:
             return problem(
@@ -2451,7 +2990,6 @@ def build_planner_tools(
         declined = patch.declined
         answered = patch.answered
         existing = load_plan(tool_context.state)
-        seeded = seeded_sources(tool_context.state)
         resolved = _resolve_intent(
             existing,
             amends_version=amends_version,
@@ -2464,10 +3002,7 @@ def build_planner_tools(
             return resolved
         previous, rounds = resolved
         held_copies = windowed_pins(tool_context.state)
-        to_origin = {
-            **{copy.spec_id: copy.windowed_from for copy in held_copies.values()},
-            **{item.source.spec_id: item.windowed_from for item in seeded if item.windowed_from},
-        }
+        to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
         if to_origin:
             _, evidence_requirements = _unwindowed_pins((), evidence_requirements, to_origin)
         if previous is not None and to_origin:
@@ -2480,9 +3015,16 @@ def build_planner_tools(
                     "evidence_requirements": tuple(unwindowed_requirements),
                 }
             )
+        pins = pin_sources(tool_context.state)
+        measures = _measure_choices(
+            pins,
+            compiled=previous.workflow.sources
+            if previous is not None and previous.workflow
+            else (),
+        )
+        user_settled = _user_settled_measures(measures, tool_context)
         settled = _settled_decisions(
             patch.decisions,
-            evidence_requirements,
             existing=existing,
             requirements_after=_requirements_after(
                 previous, evidence_requirements, removed_evidence_requirements
@@ -2496,7 +3038,6 @@ def build_planner_tools(
         # `Decision` it needs written here, on the model's behalf, so
         # `Plan`'s own validator never has to refuse it for lacking one.
         # See `_synthesize_source_decisions`.
-        pins = pin_sources(tool_context.state)
         settled, evidence_requirements = _synthesize_source_decisions(
             settled,
             evidence_requirements,
@@ -2504,13 +3045,28 @@ def build_planner_tools(
             settled_spec_ids={spec_id for spec_id, source in pins.items() if source.settled},
             earlier_spec_ids={spec_id for spec_id, source in pins.items() if source.earlier_turn},
             refound_spec_ids=_refound_spec_ids(tool_context),
+            measures=measures,
+            user_settled=user_settled,
         )
+        requirements_after = _requirements_after(
+            previous, evidence_requirements, removed_evidence_requirements
+        )
+        settled = [
+            *settled,
+            *_user_settled_rewrites(
+                previous,
+                settled,
+                requirements_after,
+                measures=measures,
+                user_settled=user_settled,
+            ),
+        ]
         removed_decisions = [
             *removed_decisions,
             *_uncited_source_decisions(
                 previous,
                 settled,
-                _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+                requirements_after,
                 removed=removed_decisions,
             ),
         ]
@@ -2551,8 +3107,12 @@ def build_planner_tools(
                     asks=load_asks(tool_context.state),
                     answered=answered,
                 )
-            plan, windows, copies = _window_pins(
-                plan, seeded, shown=pins, read=full_histories(tool_context.state)
+            stated = plan
+            plan, copies = _window_pins(
+                stated,
+                shown=pins,
+                read=full_histories(tool_context.state),
+                definition_lookup=load_log(tool_context.state).recorded_alternative,
             )
         except (ValidationError, ValueError) as exc:
             # The plan-level rules: unique slots and ids, every citation naming
@@ -2562,25 +3122,19 @@ def build_planner_tools(
             # the plan does not state is a `ValueError` from `Plan.amend` itself,
             # and a first draft or restart with no `question`/`answer_mode` is
             # one raised above. `_window_pins` raises one for a decision
-            # fixing two seeded pins over different periods.
+            # fixing an open-ended pin of requirements over different periods.
             cause = _unsupported_cause(exc)
             if cause is not None:
                 record_unsupported(tool_context.state, cause.operation)
             return _invalid_data(exc)
-        blocked = _unrecordable(plan, tool_context, previous=previous)
+        blocked = _unrecordable(plan, tool_context, stated=stated, previous=previous)
         if blocked is not None:
             return blocked
-        if seeded:
-            # The seeds and the copies this plan pins. A copy that only a
-            # replaced plan pinned is let go, so however many drafts and
-            # amendments the turn makes, the state holds at most one copy per
-            # dataset requirement of the recorded plan.
-            save_seeded_sources(
-                tool_context.state,
-                [*(item for item in seeded if item.windowed_from is None), *windows],
-            )
         if copies or held_copies:
-            # Likewise the copies of pins no seed names, which hold only those this plan pins.
+            # The copies this plan pins. A copy that only a replaced plan
+            # pinned is let go, so however many drafts and amendments the
+            # turn makes, the state holds at most one copy per dataset
+            # requirement of the recorded plan.
             save_windowed_pins(tool_context.state, copies)
         save_plan(tool_context.state, plan)
         save_plan_rounds(tool_context.state, rounds)
@@ -2673,18 +3227,11 @@ def build_planner_tools(
             pin = _first_year_wanted(result)
             if pin is None or pin in full_histories(state):
                 return result
-            seeds = {
-                item.source.spec_id: item
-                for item in seeded_sources(state)
-                if item.windowed_from is None
-            }
-            _, _, identity = _identity_on_record(
-                pin, seeds, shown=pin_sources(state), end_open=True
-            )
-            if identity is None:
+            recorded = _identity_on_record(pin, shown=pin_sources(state), end_open=True)
+            if recorded is None:
                 return result
             try:
-                history = await _read_full_history(surface, identity)
+                history = await _read_full_history(surface, recorded.identity)
             except DefinitionNotResolvedError as exc:
                 return _first_year_unreadable(result, exc)
             save_full_history(state, pin, history)
@@ -2768,12 +3315,11 @@ def create_planner_agent(
             its instruction does not name them, and `propose_plan` reads
             nothing.
         question_fixed: Whether the question this planner drafts for is fixed
-            for the entry it is called in. The harness graph's own seam sets
-            this when it builds the planner (`harness.planner_seam`), since the
-            graph derives and narrates a turn's `resolve_envelope`, `depth`
-            and `question` before the planner ever runs, and a restart would
-            silently swap the question out from under that state -- see
-            `_resolve_intent`. False, the default, is the standalone
+            for the entry it is called in. `harness.planner_seam` sets
+            this when it builds the planner, since the orchestrator states
+            the plan's question in its brief before the planner ever runs,
+            and a restart would silently swap the question out from under
+            that brief (see `_resolve_intent`). False, the default, is the standalone
             planner's and `harness_pair_v1`'s own behaviour: a restart begins
             a fresh plan.
         prefix_cache: The process's shared cache of static prompt prefixes.

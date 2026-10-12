@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import ipaddress
 import logging
 import re
@@ -27,7 +26,6 @@ from fastapi.responses import JSONResponse
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.utilities.lifespan import combine_lifespans
-from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.sessions import DatabaseSessionService
 from mcp import MCPError
 from mcp.shared._httpx_utils import McpHttpClientFactory
@@ -40,24 +38,14 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.depth_hints import GeminiDepthHintExtractor
 from harness.generative import GeminiEdit
-from harness.graph import AGENT_NAME, GenerativeNodes, create_root_workflow
+from harness.graph.state import AGENT_NAME
+from harness.graph.workflow import create_root_workflow
 from harness.live_refresh import build_live_refresh, create_live_refresh_router
 from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
-from harness.scripted import (
-    ScriptedCompose,
-    ScriptedConverse,
-    ScriptedEdit,
-    ScriptedExecutor,
-    ScriptedPlannerModel,
-    ScriptedResolver,
-    ScriptedSurface,
-)
-from harness.scripted_plan import scripted_fetch_series_stats
 from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
@@ -67,14 +55,8 @@ from harness.settings import (
     Settings,
 )
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import (
-    StudioStore,
-    deterministic_ids,
-    make_recall,
-    make_recall_part,
-)
-from harness.studio_translate import _OrchestratorTranslator, _Translator
-from harness.wiring import build_generative_nodes, handing_back_planner_failures
+from harness.studio_state import StudioStore, make_recall_part, make_remove_cards
+from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
 
@@ -275,12 +257,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
     yield
-    # `StudioRunner.aclose` releases the studio executor's resources: for
-    # a real (non-scripted) server, `McpExecutor`'s long-lived
-    # per-conversation presentation-mcp clients, the one long-lived client
-    # this process opens (every other MCP call site is `async with` and
-    # closes per call). Guarded so a broken close during shutdown is logged
-    # rather than left to crash the ASGI shutdown sequence.
+    # `StudioRunner.aclose` releases the studio executor's resources, which
+    # are `McpExecutor`'s long-lived per-conversation presentation-mcp
+    # clients, the one long-lived client this process opens (every other MCP
+    # call site is `async with` and closes per call). Guarded so a broken
+    # close during shutdown is logged rather than left to crash the ASGI
+    # shutdown sequence.
     try:
         await app.state.studio.aclose()
     except Exception:
@@ -388,165 +370,113 @@ def create_app(
     live_refresh = build_live_refresh(settings=resolved_settings)
     app.state.live_refresh = live_refresh
 
-    # The studio stack: the workflow graph behind the v1 wire contract
-    # (docs/studio-contract-v1.md). Resolver/executor speak MCP to the mounts
-    # below over loopback; the generative nodes and the depth-hint extractor
-    # build their genai clients lazily, so construction here stays keyless --
-    # a missing GOOGLE_API_KEY fails the first turn, visibly, as a
-    # stream-fatal error frame. The planner node is `planner.agent`'s planner
-    # with `translator.tool.build_translate`'s translation attached to
+    # The studio stack: the orchestrator agent and its workflow behind the
+    # v1 wire contract (docs/studio-contract-v1.md). Resolver/executor speak
+    # MCP to the mounts below over loopback; the agents build their genai
+    # clients lazily, so construction here stays keyless. A missing
+    # GOOGLE_API_KEY fails the first turn, visibly, as a stream-fatal error
+    # frame. The planner node is `planner.agent`'s planner with
+    # `translator.tool.build_translate`'s translation attached to
     # `propose_plan`, behind `harness.planner_seam.PlannerSeam`.
-    # Scripted mode allows every origin: a locally served test page is the
-    # mode's whole point. A live server allows exactly the origins listed in
-    # STUDIO_CORS_ORIGINS (a browser page on another port during local
-    # testing); with the list empty it sends no CORS headers, which is the
-    # deployed posture.
-    if resolved_settings.studio_scripted or resolved_settings.studio_cors_origins:
+    # The server allows exactly the origins listed in STUDIO_CORS_ORIGINS (a
+    # browser page on another port during local testing); with the list
+    # empty it sends no CORS headers, which is the deployed posture.
+    if resolved_settings.studio_cors_origins:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"]
-            if resolved_settings.studio_scripted
-            else resolved_settings.studio_cors_origins,
+            allow_origins=resolved_settings.studio_cors_origins,
             allow_methods=["*"],
             allow_headers=["*"],
         )
-    if resolved_settings.studio_scripted:
-        # Deterministic test mode (STUDIO_SCRIPTED=true): scripted seams, no
-        # LLM, no upstream, sequential wire ids. For frontend testing. The
-        # planner and compose seams are deterministic Python, not a call to
-        # anything, so the graph still runs the real `execute_approved_plan`
-        # path, against `ScriptedSurface` rather than the mounted MCP apps.
-        deterministic_ids(True)
-        scripted_surface = ScriptedSurface()
-        studio = StudioRunner(
-            create_workflow=lambda recorder, surface_recorder: create_root_workflow(
-                resolver=ScriptedResolver(),
-                executor=recorder,
-                generative=GenerativeNodes(
-                    converse=ScriptedConverse(),
-                    planner=ScriptedPlannerModel(),
-                    compose=ScriptedCompose(),
-                ),
-                tool_surface=surface_recorder,
-                definition_surface=scripted_surface,
-                max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
-                fetch_series_stats=scripted_fetch_series_stats,
-            ),
-            executor=ScriptedExecutor(),
-            session_service=app.state.session_service,
-            edit_model=ScriptedEdit(),
-            tool_surface=scripted_surface,
-            settings=resolved_settings,
+    if resolved_settings.studio_api_token is None:
+        # PLACEHOLDER ACCESS CONTROL. Without the shared secret every
+        # non-empty bearer token is accepted, so anyone who holds the URL
+        # can drive the agent. Set STUDIO_API_TOKEN on any server that is
+        # reachable beyond the developer's machine.
+        logger.warning(
+            "STUDIO AUTH IS OPEN: STUDIO_API_TOKEN is unset, so any non-empty "
+            "bearer token is accepted. Set it before exposing this server."
         )
-    else:
-        if resolved_settings.studio_api_token is None:
-            # PLACEHOLDER ACCESS CONTROL. Without the shared secret every
-            # non-empty bearer token is accepted, so anyone who holds the URL
-            # can drive the agent. Set STUDIO_API_TOKEN on any server that is
-            # reachable beyond the developer's machine.
-            logger.warning(
-                "STUDIO AUTH IS OPEN: STUDIO_API_TOKEN is unset, so any non-empty "
-                "bearer token is accepted. Set it before exposing this server."
-            )
-        # Shared with `StudioRunner` below (`provenance=provenance`), so the
-        # approved-plan path's `get_data` writer (`_RecordingSurface`) and
-        # `McpExecutor`'s own direct-fetch writer land in the same store
-        # component assembly reads from -- see `harness.provenance`.
-        provenance = ProvenanceStore()
-        # The executor replays a rolling frame through the refresh's clients when
-        # a card draws other series than the frame's latest period was taken over.
-        executor = McpExecutor(
-            settings=resolved_settings, provenance=provenance, card_replay=live_refresh.replay
-        )
-        # The store exists before the workflow because the recall seam is
-        # bound to it (conversation resolved per request via contextvar).
-        store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
-        # Built once and threaded into both the `execute` node below and
-        # `build_generative_nodes`' planner (which reads skills through it and
-        # passes it on to the translator), so the two compile against one set
-        # of schemas, read once, rather than each fetching its own copy
-        # through a separate `McpSurface`. Opens no connection at construction.
-        tool_surface = build_tool_surface(settings=resolved_settings)
-        orchestrated = resolved_settings.studio_engine == "orchestrator"
-        # One for the process, shared by the planner and the orchestrator
-        # across every conversation (`harness.prefix_cache`).
-        prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
+    # Shared with `StudioRunner` below (`provenance=provenance`), so the
+    # approved-plan path's `get_data` writer (`_RecordingSurface`) and
+    # `McpExecutor`'s own direct-fetch writer land in the same store
+    # component assembly reads from -- see `harness.provenance`.
+    provenance = ProvenanceStore()
+    # The executor replays a rolling frame through the refresh's clients when
+    # a card draws other series than the frame's latest period was taken over.
+    executor = McpExecutor(
+        settings=resolved_settings, provenance=provenance, card_replay=live_refresh.replay
+    )
+    # The store exists before the workflow because the recall seam is
+    # bound to it (conversation resolved per request via contextvar).
+    store = StudioStore(app.state.session_service, app_name=AGENT_NAME)
+    # Built once and threaded into both the `execute` node below and
+    # `build_planner`'s planner (which reads skills through it and
+    # passes it on to the translator), so the two compile against one set
+    # of schemas, read once, rather than each fetching its own copy
+    # through a separate `McpSurface`. Opens no connection at construction.
+    tool_surface = build_tool_surface(settings=resolved_settings)
+    # One for the process, shared by the planner and the orchestrator
+    # across every conversation (`harness.prefix_cache`).
+    prefix_cache = PrefixCache() if resolved_settings.studio_prefix_cache else None
+    logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
-        def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-            generative = build_generative_nodes(
-                settings=resolved_settings,
-                model_name=resolved_settings.model_name,
-                surface=tool_surface,
-                prefix_cache=prefix_cache,
-            )
-            orchestrator = None
-            if orchestrated:
-                # The orchestrator's tools run through the same recorder and
-                # recording surface, so their steps and cards reach the
-                # wire the way the graph's do; a planner that cannot plan
-                # hands its reason back to the agent and the turn goes on.
-                if generative.planner is not None:
-                    generative = dataclasses.replace(
-                        generative, planner=handing_back_planner_failures(generative.planner)
-                    )
-                logger.info(
-                    "orchestrator thinking level: %s",
-                    resolved_settings.orchestrator_thinking_level,
-                )
-                orchestrator = create_orchestrator_agent(
-                    model_name=resolved_settings.model_name,
-                    prefix_cache=prefix_cache,
-                    thinking_level=resolved_settings.orchestrator_thinking_level,
-                    tools=build_orchestrator_tools(
-                        resolver=McpResolver(settings=resolved_settings),
-                        executor=recorder,
-                        surface=surface_recorder,
-                        dfo_faq_surface=tool_surface,
-                        recall_part=make_recall_part(store),
-                    ),
-                )
-            return create_root_workflow(
+    def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
+        # The orchestrator's tools run through the same recorder and
+        # recording surface as the `execute` node, so their steps and cards
+        # reach the wire.
+        orchestrator = create_orchestrator_agent(
+            model_name=resolved_settings.model_name,
+            prefix_cache=prefix_cache,
+            thinking_level=resolved_settings.orchestrator_thinking_level,
+            tools=build_orchestrator_tools(
                 resolver=McpResolver(settings=resolved_settings),
                 executor=recorder,
-                depth_hint_extractor=GeminiDepthHintExtractor(
-                    model_name=resolved_settings.model_name
-                ),
-                generative=generative,
-                recall=make_recall(store),
-                # The recorded wrapper, not the bare `tool_surface` above: the
-                # `execute` node must run against the same recorder that turns
-                # every plan-step call into an `activity.step` frame
-                # (`_RecordingSurface`), or the served turns go dark. The bare
-                # surface stays the one `build_generative_nodes` compiles the
-                # planner/translator schemas against and the planner reads
-                # skills through; neither is a plan step. The `seed` node
-                # stores definitions through the bare surface, off the
-                # Activity feed.
-                tool_surface=surface_recorder,
+                surface=surface_recorder,
+                dfo_faq_surface=tool_surface,
                 definition_surface=tool_surface,
-                max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
-                orchestrator=orchestrator,
-            )
-
-        studio = StudioRunner(
-            create_workflow=create_workflow,
-            executor=executor,
-            session_service=app.state.session_service,
-            store=store,
-            edit_model=GeminiEdit(model_name=resolved_settings.model_name),
-            tool_surface=tool_surface,
-            provenance=provenance,
-            settings=resolved_settings,
-            translator=_OrchestratorTranslator if orchestrated else _Translator,
-            # The agent's text and thoughts stream as they are generated.
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE) if orchestrated else None,
+                recall_part=make_recall_part(store),
+                remove_cards=make_remove_cards(store),
+            ),
         )
+        return create_root_workflow(
+            # A planner that cannot plan hands its reason back to the agent
+            # and the turn goes on.
+            planner=handing_back_planner_failures(
+                build_planner(
+                    settings=resolved_settings, surface=tool_surface, prefix_cache=prefix_cache
+                )
+            ),
+            orchestrator=orchestrator,
+            executor=recorder,
+            # The recorded wrapper, not the bare `tool_surface` above: the
+            # `execute` node must run against the same recorder that turns
+            # every plan-step call into an `activity.step` frame
+            # (`_RecordingSurface`), or the served turns go dark. The bare
+            # surface stays the one `build_planner` compiles the
+            # planner/translator schemas against and the planner reads
+            # skills through; neither is a plan step. The `seed` node
+            # stores definitions through the bare surface, off the
+            # Activity feed.
+            tool_surface=surface_recorder,
+            definition_surface=tool_surface,
+            max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
+        )
+
+    studio = StudioRunner(
+        create_workflow=create_workflow,
+        executor=executor,
+        session_service=app.state.session_service,
+        store=store,
+        edit_model=GeminiEdit(model_name=resolved_settings.model_name),
+        tool_surface=tool_surface,
+        provenance=provenance,
+    )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))
 
     # `POST /api/studio/refresh` sits on a router of its own: it takes the
-    # live-refresh principal as its bearer, runs no model, and is served in
-    # scripted mode as in live mode.
+    # live-refresh principal as its bearer and runs no model.
     if resolved_settings.live_refresh_principal is None:
         logger.warning(
             "LIVE REFRESH IS CLOSED: LIVE_REFRESH_PRINCIPAL is unset, so "

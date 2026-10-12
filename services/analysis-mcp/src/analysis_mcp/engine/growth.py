@@ -62,7 +62,6 @@ from dfo_frame_grammar.grammar import (
 from analysis_mcp.engine.columnar import (
     Groups,
     distinct,
-    frame_from_columns,
     group_rows,
     in_periods,
     keys_unique,
@@ -74,6 +73,7 @@ from analysis_mcp.engine.common import (
     FacetSelection,
     available_entity_columns,
     facet_columns,
+    frame_keeping_role_types,
     narrow_and_resolve,
     record_exclusion,
     require_single_stat_var,
@@ -434,7 +434,7 @@ def run_growth(
     # relative-growth result), and `Percent` over a share_of result.
     if change == "absolute":
         columns[UNIT_COLUMN] = unit_column(computed_rows, count=count)
-    output_frame = frame_from_columns(columns, role_keys=entity_by)
+    output_frame = frame_keeping_role_types(columns, role_keys=entity_by, source=frame)
 
     return GrowthResult(
         frame=output_frame,

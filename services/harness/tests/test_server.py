@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -23,7 +22,6 @@ from google.adk.sessions import DatabaseSessionService, InMemorySessionService
 from harness import __version__
 from harness import server as server_module
 from harness.mcp_client import McpExecutor
-from harness.scripted_plan import _RESULT_CONTENT_VERSION, _RESULT_SPEC_ID
 from harness.server import create_app
 from harness.session_store import build_session_service
 from harness.settings import (
@@ -151,7 +149,7 @@ def test_create_app_builds_session_service_without_network() -> None:
 async def test_lifespan_shutdown_closes_the_studio_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live (non-scripted) server's studio executor is `McpExecutor`,
+    """The server's studio executor is `McpExecutor`,
     which opens one long-lived presentation-mcp client per conversation and
     has nothing else on the served path to close it
     (`harness.mcp_client.McpExecutor.aclose`). `_lifespan`'s shutdown must
@@ -243,7 +241,7 @@ def test_a_chart_worker_started_from_the_console_script_module_leaves_the_harnes
     assert "harness.server not imported" in ran.stdout
 
 
-def test_a_live_server_without_a_shared_secret_logs_that_auth_is_open(
+def test_a_server_without_a_shared_secret_logs_that_auth_is_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # `configure_logging` replaces the root handlers, so the warning is read
@@ -256,7 +254,7 @@ def test_a_live_server_without_a_shared_secret_logs_that_auth_is_open(
     assert any("STUDIO AUTH IS OPEN" in w for w in warnings)
 
 
-def test_a_live_server_with_a_shared_secret_does_not_log_open_auth(
+def test_a_server_with_a_shared_secret_does_not_log_open_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     warnings: list[str] = []
@@ -264,11 +262,10 @@ def test_a_live_server_with_a_shared_secret_does_not_log_open_auth(
         server_module.logger, "warning", lambda msg, *args: warnings.append(msg % args)
     )
     create_app(settings=Settings(studio_api_token="s3cret"))
-    create_app(settings=Settings(studio_scripted=True))
     assert not any("STUDIO AUTH IS OPEN" in w for w in warnings)
 
 
-def test_the_live_execute_node_runs_against_the_recorded_surface(
+def test_the_execute_node_runs_against_the_recorded_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The `execute` node must run the approved plan against the RECORDED
@@ -854,205 +851,6 @@ async def test_prepare_tables_with_retries_raises_after_the_budget_is_exhausted(
     assert attempts == [1, 2, 3]
 
 
-async def test_scripted_mode_serves_identical_streams_for_identical_requests() -> None:
-    """STUDIO_SCRIPTED=true: no model, no upstream, sequential wire ids --
-    two runs of the same request produce identical frames except the
-    measured `duration_ms`."""
-
-    async def _run(conversation_id: str) -> list[dict]:
-        app = create_app(settings=Settings(studio_scripted=True))
-        frames: list[dict] = []
-        async with (
-            _running_lifespan(app),
-            httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
-            ) as client,
-            client.stream(
-                "POST",
-                "/api/studio/turn",
-                json={
-                    "kind": "turn.request",
-                    "schema_version": 1,
-                    "conversation_id": conversation_id,
-                    "message": "life expectancy in Kenya",
-                },
-                headers={"Authorization": "Bearer test"},
-            ) as response,
-        ):
-            assert response.status_code == 200
-            frames.extend(
-                [
-                    json.loads(line[len("data: ") :])
-                    async for line in response.aiter_lines()
-                    if line.startswith("data: ")
-                ]
-            )
-        return frames
-
-    first = await _run("conv_scripted")
-    second = await _run("conv_scripted")
-
-    def _stable(frames: list[dict]) -> list[dict]:
-        out = []
-        for frame in frames:
-            copy = dict(frame)
-            copy.pop("duration_ms", None)
-            out.append(copy)
-        return out
-
-    assert _stable(first) == _stable(second)
-    assert [f["event"] for f in first][-1] == "done"
-    assert any(f["event"] == "component.created" for f in first)
-    assert first[-1]["trace_id"] == second[-1]["trace_id"]  # sequential ids
-
-
-async def test_scripted_mode_approved_plan_card_cites_the_plan_terminal_frame() -> None:
-    """STUDIO_SCRIPTED=true, a "comprehensive" question: the plan pauses for
-    approval, and its terminal step (`aggregate`) produces an `ops_`/`ocv_`
-    frame -- `harness.scripted_plan._RESULT_SPEC_ID`/`_RESULT_CONTENT_VERSION`
-    -- never the `spec_`/`cv_` frame `ScriptedResolver`/`ScriptedExecutor` use
-    for a direct fetch. The card `write_component` writes on approval must
-    cite the frame the plan actually produced, both in the resolved
-    revision's `payload.provenance.inputs` and in the wire `provenance.inputs`."""
-    app = create_app(settings=Settings(studio_scripted=True))
-    terminal_ref = {"spec_id": _RESULT_SPEC_ID, "content_version": _RESULT_CONTENT_VERSION}
-
-    async def _run(path: str, body: dict[str, Any]) -> list[dict]:
-        frames: list[dict] = []
-        async with (
-            httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
-            ) as client,
-            client.stream(
-                "POST", path, json=body, headers={"Authorization": "Bearer test"}
-            ) as response,
-        ):
-            assert response.status_code == 200
-            frames.extend(
-                [
-                    json.loads(line[len("data: ") :])
-                    async for line in response.aiter_lines()
-                    if line.startswith("data: ")
-                ]
-            )
-        return frames
-
-    first = await _run(
-        "/api/studio/turn",
-        {
-            "kind": "turn.request",
-            "schema_version": 1,
-            "conversation_id": "conv_scripted_plan",
-            "message": "comprehensive life expectancy in Kenya",
-        },
-    )
-    plan = next(f for f in first if f["event"] == "plan.proposed")
-
-    second = await _run(
-        "/api/studio/interrupt",
-        {
-            "kind": "interrupt.response",
-            "schema_version": 1,
-            "conversation_id": "conv_scripted_plan",
-            "interrupt_id": plan["interrupt_id"],
-            "decision": "approve",
-        },
-    )
-    created = next(f for f in second if f["event"] == "component.created")
-
-    assert created["payload"]["provenance"]["inputs"] == [terminal_ref]
-    assert created["provenance"]["inputs"] == [terminal_ref]
-
-
-async def test_scripted_mode_two_entity_question_draws_one_two_series_card() -> None:
-    """With STUDIO_SCRIPTED=true, a "compare" question gets an answer from
-    the resolver's two-country frame. Its view holds both countries, and the
-    card is one line_chart that draws both: one `component.created`, two
-    series in its resolved revision and its fact summary, no plan card."""
-    app = create_app(settings=Settings(studio_scripted=True))
-    frames: list[dict] = []
-    async with (
-        httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
-        ) as client,
-        client.stream(
-            "POST",
-            "/api/studio/turn",
-            json={
-                "kind": "turn.request",
-                "schema_version": 1,
-                "conversation_id": "conv_scripted_compare",
-                "message": "compare life expectancy in Guatemala and Nigeria",
-            },
-            headers={"Authorization": "Bearer test"},
-        ) as response,
-    ):
-        assert response.status_code == 200
-        frames.extend(
-            [
-                json.loads(line[len("data: ") :])
-                async for line in response.aiter_lines()
-                if line.startswith("data: ")
-            ]
-        )
-
-    created = [f for f in frames if f["event"] == "component.created"]
-    assert len(created) == 1
-    assert created[0]["type"] == "line_chart"
-    drawn = [series["label"] for series in created[0]["payload"]["component"]["series"]]
-    assert drawn == ["Guatemala", "Nigeria"]
-    labels = [series["label"] for series in created[0]["fact_summary"]["series"]]
-    assert labels == ["Guatemala", "Nigeria"]
-
-
-async def test_scripted_mode_second_turn_asks_to_extend_the_card() -> None:
-    """With STUDIO_SCRIPTED=true, two turns run: a Kenya card, then "add
-    Guatemala to the chart". `ScriptedConverse` reads the digest it is
-    handed, names that card as `revises`, and parts the question for the
-    same variable with the card's own entity plus the new one, matching
-    what a real converse draft does with the same digest.
-    """
-    app = create_app(settings=Settings(studio_scripted=True))
-    conversation_id = "conv_scripted_revise"
-
-    async def _turn(message: str) -> list[dict]:
-        frames: list[dict] = []
-        async with (
-            httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
-            ) as client,
-            client.stream(
-                "POST",
-                "/api/studio/turn",
-                json={
-                    "kind": "turn.request",
-                    "schema_version": 1,
-                    "conversation_id": conversation_id,
-                    "message": message,
-                },
-                headers={"Authorization": "Bearer test"},
-            ) as response,
-        ):
-            assert response.status_code == 200
-            frames.extend(
-                [
-                    json.loads(line[len("data: ") :])
-                    async for line in response.aiter_lines()
-                    if line.startswith("data: ")
-                ]
-            )
-        return frames
-
-    first = await _turn("life expectancy in Kenya")
-    assert next(f for f in first if f["event"] == "component.created")["type"] == "line_chart"
-
-    second = await _turn("add Guatemala to the chart")
-    created = next(f for f in second if f["event"] == "component.created")
-    labels = [series["label"] for series in created["fact_summary"]["series"]]
-    assert labels == ["Kenya", "Guatemala"]
-    assert not any(f["event"] == "plan.proposed" for f in [*first, *second])
-
-
 async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app), base_url="http://cors.test"
@@ -1068,7 +866,7 @@ async def _preflight(app: FastAPI, origin: str) -> httpx2.Response:
 
 
 async def test_cors_origins_setting_admits_listed_origins_only() -> None:
-    """A live server answers browser preflights for the origins in
+    """The server answers browser preflights for the origins in
     STUDIO_CORS_ORIGINS and for no other; with the list empty (the deployed
     posture) it sends no CORS headers at all."""
     listed = "http://localhost:8091"
@@ -1081,14 +879,6 @@ async def test_cors_origins_setting_admits_listed_origins_only() -> None:
 
     closed = await _preflight(create_app(settings=Settings()), listed)
     assert "access-control-allow-origin" not in closed.headers
-
-
-async def test_scripted_server_allows_every_origin() -> None:
-    """Scripted mode serves a locally hosted test page from any origin."""
-    app = create_app(settings=Settings(studio_scripted=True))
-    allowed = await _preflight(app, "http://localhost:8091")
-    assert allowed.status_code == 200
-    assert allowed.headers.get("access-control-allow-origin") == "*"
 
 
 def test_cors_origins_setting_parses_a_comma_separated_env_value() -> None:

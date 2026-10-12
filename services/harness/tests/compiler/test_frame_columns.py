@@ -223,6 +223,24 @@ def test_any_other_verb_must_declare_its_predicted_roles_as_the_frame_spells_the
     ) == ("financingProvider", "financingRecipient")
 
 
+@pytest.mark.parametrize("suffix", ["_type", "_kind"])
+def test_a_verb_keeping_a_role_declares_the_roles_enrichment_column_its_input_carries(
+    suffix: str,
+) -> None:
+    # The recipient's kind or types come along with the recipient; the provider's do
+    # not, since the rank keeps no provider column.
+    assert bound_role_keys(
+        _analysis("rank"),
+        ("destination",),
+        frame=_family(),
+        input_role_keys=(
+            *FAMILY_ROLE_KEYS,
+            f"financingProvider{suffix}",
+            f"financingRecipient{suffix}",
+        ),
+    ) == ("financingRecipient", f"financingRecipient{suffix}")
+
+
 def test_the_prediction_stands_when_the_frame_is_unknown() -> None:
     assert bound_role_keys(
         _analysis("aggregate"), ("origin",), frame=None, input_role_keys=None

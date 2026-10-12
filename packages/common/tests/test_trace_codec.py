@@ -19,17 +19,33 @@ from common.materialisation.trace_codec import (
 from pydantic import BaseModel, ConfigDict
 
 
-def test_materialisation_trace_round_trips_through_the_registry() -> None:
+@pytest.mark.parametrize(
+    ("options", "members"),
+    [
+        (None, ["content_version", "spec_id", "upstream_trace"]),
+        (
+            {"format": "parquet", "groupby": {"by": ["time_period"], "op": "sum"}},
+            ["content_version", "options", "spec_id", "upstream_trace"],
+        ),
+    ],
+    ids=["without-options", "with-options"],
+)
+def test_materialisation_trace_round_trips_through_the_registry(
+    options: dict[str, Any] | None, members: list[str]
+) -> None:
+    """A trace without options encodes the members a trace had before it kept them."""
     trace = MaterialisationTrace(
         upstream_trace={"graph_revision": "rev1"},
         spec_id="spec_" + "a" * 32,
         content_version="cv_" + "b" * 32,
+        options=options,
     )
 
     record = encode_trace(trace)
 
     assert record["kind"] == "materialisation"
     assert record["kind_version"] == 1
+    assert sorted(record["trace"]) == members
     assert decode_trace(record) == trace
 
 

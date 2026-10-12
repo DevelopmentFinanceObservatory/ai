@@ -1,4 +1,4 @@
-"""`scripted_plan` and `ScriptedSurface`: the canned plan scripted mode runs.
+"""`scripted_plan` and `ScriptedSurface`: the canned plan `ScriptedPlannerModel` drafts.
 
 The pins on `scripted_plan`'s workflow are computed from `ScriptedSurface`'s
 own declared schemas at build time (`harness.scripted_plan`'s module
@@ -18,13 +18,7 @@ from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
 from compiler.surface import ProgressReport, ToolSchema
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
-from harness.scripted import (
-    SCRIPTED_MISNAMED_SPEC,
-    SCRIPTED_SPEC,
-    ScriptedConverse,
-    ScriptedPlannerModel,
-    ScriptedSurface,
-)
+from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from planner.plan import CUT_MARKER, MAX_QUESTION_CHARS, Plan, PlanStatus, cut_user_text
 from planner.workflow import ToolId
@@ -58,7 +52,7 @@ class _DriftedSurface(ScriptedSurface):
 
 
 def test_scripted_plan_validates_and_reaches_pending_approval() -> None:
-    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC, parts=1)
+    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
     assert isinstance(plan, Plan)
     assert plan.status is PlanStatus.PENDING_APPROVAL
@@ -67,7 +61,7 @@ def test_scripted_plan_validates_and_reaches_pending_approval() -> None:
 
 
 def test_an_extra_field_is_refused() -> None:
-    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC, parts=1)
+    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
     with pytest.raises(ValidationError):
         Plan.model_validate({**plan.model_dump(mode="json"), "not_a_real_field": True})
@@ -79,7 +73,7 @@ LONG_QUESTION = ("What is life expectancy in Kenya? " * 150)[:5_000]
 def test_a_question_past_the_plan_limit_is_cut_and_the_plan_still_builds() -> None:
     assert len(LONG_QUESTION) == 5_000
 
-    plan = scripted_plan(LONG_QUESTION, spec_id=SCRIPTED_SPEC, parts=1)
+    plan = scripted_plan(LONG_QUESTION, spec_id=SCRIPTED_SPEC)
 
     assert plan.status is PlanStatus.PENDING_APPROVAL
     assert plan.question == cut_user_text(LONG_QUESTION, MAX_QUESTION_CHARS)
@@ -91,9 +85,7 @@ def test_a_question_past_the_plan_limit_is_cut_and_the_plan_still_builds() -> No
 async def test_the_scripted_planner_drafts_a_plan_for_a_question_past_the_limit() -> None:
     planner = ScriptedPlannerModel()
 
-    drafted = await planner(
-        ctx=cast(Any, None), question=LONG_QUESTION, envelope={"spec_id": SCRIPTED_SPEC}
-    )
+    drafted = await planner(ctx=cast(Any, None), question=LONG_QUESTION, readings=[])
 
     assert len(drafted["plan"]["question"]) == MAX_QUESTION_CHARS
 
@@ -101,11 +93,11 @@ async def test_the_scripted_planner_drafts_a_plan_for_a_question_past_the_limit(
 def test_a_question_within_the_plan_limit_is_carried_through_unchanged() -> None:
     question = "What is life expectancy in Kenya?"
 
-    assert scripted_plan(question, spec_id=SCRIPTED_SPEC, parts=1).question == question
+    assert scripted_plan(question, spec_id=SCRIPTED_SPEC).question == question
 
 
 async def test_the_workflows_pins_match_the_surfaces_declared_schemas() -> None:
-    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC, parts=1)
+    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
     _, outcome = await execute_approved_plan(
         plan.approve(), surface=ScriptedSurface(), fetch_series_stats=scripted_fetch_series_stats
@@ -115,7 +107,7 @@ async def test_the_workflows_pins_match_the_surfaces_declared_schemas() -> None:
 
 
 async def test_a_changed_declared_schema_makes_the_surface_check_refuse() -> None:
-    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC, parts=1)
+    plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
     _, outcome = await execute_approved_plan(plan.approve(), surface=_DriftedSurface())
 
@@ -142,67 +134,7 @@ def test_a_compile_that_yields_no_workflow_raises_instead_of_returning_none(
     monkeypatch.setattr("harness.scripted_plan.compile_plan", _broken_compile)
 
     with pytest.raises(RuntimeError, match="did not compile"):
-        scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC, parts=1)
-
-
-async def test_the_misnamed_questions_analysis_step_refuses_role_ambiguous() -> None:
-    plan = scripted_plan(
-        "What's driving the misnamed indicator in Kenya?",
-        spec_id=SCRIPTED_MISNAMED_SPEC,
-        parts=1,
-    )
-
-    _, outcome = await execute_approved_plan(
-        plan.approve(), surface=ScriptedSurface(), fetch_series_stats=scripted_fetch_series_stats
-    )
-
-    assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.STEP_REFUSED
-    assert outcome.payload is not None
-    assert outcome.payload.code == "role_ambiguous"
-
-
-async def test_scripted_converse_drafts_the_entity_the_question_names() -> None:
-    """The ordinary scripted path draws one part about the country the
-    question names, with no `revises`, so the turn draws a new card."""
-    result = await ScriptedConverse()(question="life expectancy in Kenya")
-
-    assert result["revises"] is None
-    assert result["search_parts"] == [
-        {"variable": "life expectancy", "entities": [{"text": "Kenya"}]}
-    ]
-
-
-async def test_scripted_converse_names_the_newest_card_and_both_entities_to_change() -> None:
-    """An "add ... to the chart" question against a digest whose newest block
-    shows Nigeria: the draft names that block, and the part carries its
-    Nigeria plus the Guatemala the question adds."""
-    digest = {
-        "blocks": [
-            {
-                "component_id": "cmp_scripted0001",
-                "type": "line_chart",
-                "title": "Life expectancy in Nigeria",
-                "entities": ["Nigeria"],
-                "variable": ["Life Expectancy"],
-            }
-        ]
-    }
-
-    result = await ScriptedConverse()(question="add Guatemala to the chart", canvas_digest=digest)
-
-    assert result["revises"] == "cmp_scripted0001"
-    assert result["search_parts"] == [
-        {"variable": "life expectancy", "entities": [{"text": "Nigeria"}, {"text": "Guatemala"}]}
-    ]
-
-
-async def test_scripted_converse_sets_no_revises_without_a_canvas() -> None:
-    """A "to the chart" question names nothing when the conversation has no
-    cards yet, so the draft leaves the field unset and the turn appends."""
-    result = await ScriptedConverse()(question="add Guatemala to the chart")
-
-    assert result["revises"] is None
+        scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
 
 _SCRIPTED_PROGRESS = (

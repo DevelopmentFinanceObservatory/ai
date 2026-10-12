@@ -195,7 +195,7 @@ The module ships in the image (`services/harness/src/harness/recipe_backfill.py`
 | `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe and versions routes |
 | `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
 
-The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v1/` objects, so it needs object create.
+The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.
 
 ```
 uv run --package harness python -m harness.recipe_backfill               # dry run, the default

@@ -22,8 +22,8 @@ from planner.workflow import ToolId
 GET_SKILL = ToolId(server="data-mcp", name="get_skill")
 GET_SKILL_FILE = ToolId(server="data-mcp", name="get_skill_file")
 # The skill a question about DFO itself is answered from. The planner's
-# instruction names it, and converse's reply and the orchestrator's
-# `explain_dfo` load it (`harness.dfo_faq`).
+# instruction names it, and the orchestrator's `explain_dfo` loads it
+# (`harness.dfo_faq`).
 DFO_FAQ_SKILL_ID = "dfo-faq"
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ _GET_SKILL_DOC = """Load one skill: its SKILL.md verbatim, then the files it lin
         skill carries refuses `skill_not_found`.
 
         Args:
-            skill_id: An id the resolve envelope's `skills` names, or
+            skill_id: An id the search readings' `Skills named` line lists, or
                 `{dfo_faq}` for a question about DFO itself.
         """
 

@@ -26,8 +26,8 @@ import harness.studio as studio_module
 import httpx2
 import pytest
 from common.telemetry import init_telemetry
-from harness.server import create_app
-from harness.settings import Settings
+from google.genai import types
+from harness.scripted import ScriptedExecutor, ScriptedSurface
 from harness.studio import SSE_MEDIA_TYPE, StudioRunner, _sse_stream
 from harness.studio_state import ConversationState
 from harness.wire import MessageDelta
@@ -35,6 +35,8 @@ from langfuse import Langfuse
 from opentelemetry import trace
 from opentelemetry.proto.trace.v1.trace_pb2 import Span
 from starlette.responses import StreamingResponse
+
+from ..orchestrator_fakes import orchestrator_app, plan_call
 
 CONVERSATION = "conv_trace_export_01"
 AUTH = {"Authorization": "Bearer test"}
@@ -180,7 +182,20 @@ async def test_a_response_torn_down_at_a_frame_still_exports_the_turn_once_and_c
     assert [r for r in caplog.records if r.name == "opentelemetry.context"] == []
 
 
-# --- a scripted turn that pauses for approval and resumes -------------------------
+# --- a turn that pauses for approval and resumes ---------------------------------
+
+
+def _planned_app() -> Any:
+    """The studio with an agent that hands the question to the scripted
+    planner, then answers once the approved plan is handed back."""
+    app, _model = orchestrator_app(
+        plan_call(QUESTION),
+        types.Part.from_text(text="Handed to the planner."),
+        types.Part.from_text(text="Life expectancy in Kenya rose."),
+        executor=ScriptedExecutor(),
+        tool_surface=ScriptedSurface(),
+    )
+    return app
 
 
 async def _stream(client: httpx2.AsyncClient, path: str, body: dict[str, Any]) -> list[dict]:
@@ -196,16 +211,16 @@ async def _stream(client: httpx2.AsyncClient, path: str, body: dict[str, Any]) -
 async def test_a_paused_and_resumed_turn_exports_a_complete_parent_chain(
     fake_langfuse: Any,
 ) -> None:
-    """Both segments of a scripted turn run ADK's real workflow. Every span on
+    """Both segments of a turn run ADK's real workflow. Every span on
     the wire has its parent on the wire too, except `turn`, whose parent is the
     synthetic one the SDK creates for a seeded trace id; ADK's two `invocation`
     spans are exported, and nothing else without attributes is. `turn` carries
     the question and the answer as its input and output."""
     init_telemetry(service_name="harness")
-    app = create_app(settings=Settings(studio_scripted=True))
+    app = _planned_app()
     base = {"schema_version": 1, "conversation_id": CONVERSATION}
     async with httpx2.AsyncClient(
-        transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
+        transport=httpx2.ASGITransport(app=app), base_url="http://studio.test"
     ) as client:
         first = await _stream(
             client,
@@ -339,7 +354,7 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     one trace, one `turn` span ended once, the execution spans under it, and
     no cancellation on the turn's record."""
     init_telemetry(service_name="harness")
-    app = create_app(settings=Settings(studio_scripted=True))
+    app = _planned_app()
     studio: StudioRunner = app.state.studio
     at_pause = asyncio.Event()
     paused_once = False
@@ -380,7 +395,7 @@ async def test_a_client_that_leaves_at_the_approval_pause_keeps_the_turn_on_one_
     assert conversation.awaiting_answer
 
     async with httpx2.AsyncClient(
-        transport=httpx2.ASGITransport(app=app), base_url="http://scripted.test"
+        transport=httpx2.ASGITransport(app=app), base_url="http://studio.test"
     ) as client:
         resumed = await _stream(
             client,

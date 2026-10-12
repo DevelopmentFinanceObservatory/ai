@@ -1,14 +1,14 @@
-"""This service's own manifest model, stripped of every signed artifact URL.
+"""This service's own manifest model, stripped of every artifact download link.
 
 `get_data` mints a manifest from dfo-apis' mint route
 (`datasets_api.manifest_models.Manifest`). That manifest's `artifacts`
-entries carry `url`/`url_expires_at`: short-lived, signed links straight to
-the underlying bytes. Nothing that reaches a model should ever see one, so
-this module re-validates the raw mint payload against a model this service
-owns rather than reusing dfo-apis'. Reuse isn't an option regardless:
-upstream's `ArtifactEntryModel` requires `url`/`url_expires_at` with no
-default and sets `extra="forbid"`, so there is no way to express "the same
-shape minus the URL" as a subset of it.
+entries carry `url`: a stable, root-relative download link that redirects to
+the underlying bytes. A model gets the link through the artifact resource
+(`artifact_resource.py`) when it needs one, so this module re-validates the
+raw mint payload against a model this service owns rather than reusing
+dfo-apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
+requires `url` with no default and sets `extra="forbid"`, so there is no way
+to express "the same shape minus the URL" as a subset of it.
 
 `strip_manifest` is the public seam: validate a raw mint response through
 it and get back a `Manifest` with every artifact's URL gone and
@@ -22,7 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-# The templated URI a caller reads to get a freshly signed URL for one
+# The templated URI a caller reads to get the download link for one
 # artifact. The constant `artifact` host segment is deliberate: `AnyUrl`
 # normalisation lowercases the host position but preserves path segments, so
 # every variable -- `subject_id`, `content_version`, `artifact_digest` --
@@ -141,11 +141,10 @@ class SeriesStatisticsModel(BaseModel):
 
 
 class ArtifactEntry(BaseModel):
-    """One artifact, minus its signed URL and that URL's expiry.
+    """One artifact, minus its download link.
 
-    `resource_uri` is a model's replacement for the stripped URL: read it to
-    pull a freshly signed URL at fetch time, rather than trusting one that
-    could go stale. `Manifest._attach_artifact_resource_uris` derives and
+    `resource_uri` is a model's replacement for the stripped link: read it to
+    pull the link at fetch time. `Manifest._attach_artifact_resource_uris` derives and
     overwrites it after validation, so the default here only has to satisfy
     an already-stripped document that predates the field.
     """
@@ -222,10 +221,10 @@ def render_validation_errors(exc: ValidationError) -> str:
 
     `str(exc)` embeds pydantic-core's `input_value` for each failing field. For an
     `ArtifactEntry`, that's the artifact's raw, un-stripped dict -- `extra="ignore"`
-    only drops its signed `url` on a successful build, so a validation failure on the
-    same field would otherwise render that URL straight into a refusal detail.
+    only drops its `url` on a successful build, so a validation failure on the
+    same field would otherwise render that link straight into a refusal detail.
     `include_url=False` refers to pydantic's own per-error docs link
-    (errors.pydantic.dev/...), not the artifact URL; paired with `include_input=False`,
+    (errors.pydantic.dev/...), not the artifact link; paired with `include_input=False`,
     neither the docs link nor the raw input value is rendered. Capped at
     `_MAX_RENDERED_VALIDATION_ERRORS` so a payload with many failing fields can't blow
     up the refusal string.
@@ -249,7 +248,7 @@ def strip_manifest(payload: Mapping[str, Any]) -> Manifest:
             served it.
 
     Returns:
-        The same manifest, minus every artifact's `url`/`url_expires_at`.
+        The same manifest, minus every artifact's `url`.
 
     Raises:
         pydantic.ValidationError: `payload` doesn't match the manifest

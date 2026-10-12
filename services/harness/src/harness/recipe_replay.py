@@ -6,7 +6,9 @@ again on the data dfo-apis holds now:
 
 1. Every root is minted again with its recorded `options` and `scope`
    (`data_mcp.get_data_tool.mint_recorded_root`), which registers the current
-   frame of that rendering in the materialisation store. Every root is minted,
+   frame of that rendering in the materialisation store. The mint may send other
+   options than the recorded ones: a flow root recorded with its parties' types
+   or with no columns is minted with their kinds. Every root is minted,
    moved or not, because a frame older than the store's retention has left it.
    A mint dfo-apis queues does not wait: the replay answers `Pending`, and the
    next call sends the same mint, which dfo-apis answers from the operation it
@@ -15,7 +17,9 @@ again on the data dfo-apis holds now:
    groupby sum with a version of its own when it was recorded under a raw
    version, refuses `root_rendering_ambiguous`: while one StatVar contributed,
    the summed and the unsummed frame shared one pair, and the record cannot say
-   which of the two the frame was (`common.materialisation.mint_record`).
+   which of the two the frame was (`common.materialisation.mint_record`). A
+   groupby root whose frame is held under the pair that names its groupby
+   (`data_mcp.frame_materialisation.frame_ref_for`) was the sum, and replays.
 3. A tree with a rolling op-spec has its latest period resolved once, over the
    new frames of the roots a path through a rolling op-spec reads
    (`common.rolling.rolling_roots`), by analysis-mcp's `resolve_anchor`. Each rolling literal is
@@ -27,10 +31,17 @@ again on the data dfo-apis holds now:
    skipped when the store already holds that pair, so a replay cut short is
    resumed by the next one. Inputs of one node run at once, at most
    `MAX_CONCURRENT_STEPS` calls at a time. Roots are minted one at a time.
-5. The final frame's recipe is built from the store (`common.recipe.build_recipe`)
-   and the frame is published with it through the caller's `publish`
+5. The final frame's recipe is built from the store (`common.recipe.build_recipe`).
+   A root whose mint record holds the options this replay minted it with is
+   stated with the options the stored recipe recorded for it, so the replayed
+   recipe keeps the stored `normal_form_hash`. The store's mint record keeps the
+   options sent, since a `get_data` call minting the same pair shares it. The
+   frame is published with the recipe through the caller's `publish`
    (`presentation_mcp.client.PlatformAssembler.publish_frame`), unless dfo-apis
-   already holds that pair under the recipe's `replay_key`.
+   already holds that pair under the recipe's `replay_key`. dfo-apis keeps a
+   pair's first recipe, so a pair another card published first under a recipe of
+   another normal form refuses `recipe_normal_form_changed`: no render draws this
+   card on it.
 
 The module calls no model and holds no state between calls. It imports nothing
 from `planner`, `compiler`, `executor`, `translator`, `orchestrator` or the
@@ -78,11 +89,12 @@ from common.recipe import RECIPE_SCHEMA_VERSION, RecipeError, build_recipe
 from common.rolling import canonical_populations, rolling_roots
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, RowBudgetExhausted
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallBudget, CallDeadline, use_call_budget
+from data_mcp.frame_materialisation import frame_ref_for
 from data_mcp.get_data_tool import RootMint, mint_recorded_root
 from data_mcp.operations import QueuedOperation
 from dfo_frame_grammar import FrameError, RollingError, shift_period
 from fastmcp.tools import ToolResult
-from presentation_mcp.platform_contract import Refusal, RetryMode
+from presentation_mcp.platform_contract import NormalFormConflict, Refusal, RetryMode
 from pydantic import ValidationError
 
 __all__ = [
@@ -148,12 +160,13 @@ class MintRoot(Protocol):
 
 class PublishFrame(Protocol):
     """Publishes a derived frame the store holds to dfo-apis with `recipe`, and
-    says whether dfo-apis newly recorded it.
+    says whether dfo-apis newly recorded it, or that it holds the frame under a
+    recipe of another normal form.
     `presentation_mcp.client.PlatformAssembler.publish_frame` is one."""
 
     def __call__(
         self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any]
-    ) -> Awaitable[bool | Refusal]: ...
+    ) -> Awaitable[bool | Refusal | NormalFormConflict]: ...
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -365,6 +378,9 @@ class _Replay:
         self.apis = apis
         self.row_budget = row_budget
         self.root_frames: list[_Frame] = []
+        # By each root's new pair: the options its mint sent, and the options the
+        # stored recipe recorded for it.
+        self._root_options: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
         # Set for a rolling tree once its latest period is resolved.
         self.period: str | None = None
         self.anchor_key: str | None = None
@@ -432,6 +448,9 @@ class _Replay:
             # The mint confirmed the frame a moment ago, so the store has evicted
             # it since, and the next call mints it again.
             raise _Stopped(Pending(retry_after_s=RESUME_RETRY_AFTER_S, reason="busy"))
+        self._root_options.setdefault(
+            (minted.frame.spec_id, minted.frame.content_version), (minted.options, record.options)
+        )
         return _Frame(
             ref=minted.frame, rows=rows, frame_content_version=minted.frame.content_version
         )
@@ -449,8 +468,11 @@ class _Replay:
         under an unsummed version, where the first case arises. The second case
         reads dfo-apis' versions and needs no count, and dfo-apis' own frame refresh
         refuses a version that links both renderings.
+
+        A record whose frame is held under the pair that names its `groupby`
+        (`frame_ref_for`) is unambiguous: no unsummed frame was ever held there.
         """
-        if minted.dataset == record.dataset:
+        if minted.dataset == record.dataset or _names_its_groupby(record):
             return False
         if record.stat_var_count == 1 and minted.stat_var_count > 1:
             return True
@@ -482,6 +504,16 @@ class _Replay:
                 Refused(code="stored_frame_unusable", detail=str(exc), stage="verb")
             ) from exc
         return None if held is None else held.num_rows or 0
+
+    def stated_options(self, record: MintRecord) -> Mapping[str, Any]:
+        """The options the replayed recipe states for the root `record` describes:
+        the stored recipe's when `record` holds the options this replay minted the
+        root with, else `record`'s own. Two stored roots that now mint one pair
+        share the first one's, and the normal form then differs."""
+        sent, stored = self._root_options.get(
+            (record.frame.spec_id, record.frame.content_version), (None, None)
+        )
+        return stored if stored is not None and record.options == sent else record.options
 
     # The latest period
 
@@ -668,6 +700,8 @@ class _Replay:
                 )
         except RowBudgetExhausted as exc:
             raise _rows_stop(exc, stage="publish") from exc
+        if isinstance(published, NormalFormConflict):
+            raise await self._held_under_other_normal_form(frame, recipe)
         if not isinstance(published, Refusal):
             return published
         if published.retry is RetryMode.RETRY_AFTER_DELAY:
@@ -675,6 +709,31 @@ class _Replay:
                 Pending(retry_after_s=published.retry_after_s or BUSY_RETRY_AFTER_S, reason="busy")
             )
         raise _Stopped(Refused(code=published.error, detail=published.detail, stage="publish"))
+
+    async def _held_under_other_normal_form(
+        self, frame: _Frame, recipe: Mapping[str, Any]
+    ) -> _Stopped:
+        """`recipe_normal_form_changed` for `frame`, which dfo-apis holds under a
+        recipe of another normal form than `recipe`'s: no card of `recipe` is drawn
+        on it. The detail names the normal form dfo-apis holds."""
+        try:
+            held = await self.apis.read_recipe(
+                spec_id=frame.ref.spec_id, content_version=frame.ref.content_version
+            )
+        except LiveApisError as exc:
+            return _apis_stop(exc, stage="publish")
+        held_hash = (held or {}).get("normal_form_hash")
+        return _Stopped(
+            Refused(
+                code="recipe_normal_form_changed",
+                detail=(
+                    f"dfo-apis holds {frame.ref.spec_id}/{frame.ref.content_version} under a "
+                    f"recipe with the normal form {held_hash}, and the replayed recipe has "
+                    f"{recipe['normal_form_hash']}"
+                ),
+                stage="publish",
+            )
+        )
 
 
 def _parsed(recipe: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[MintRecord]]:
@@ -725,7 +784,9 @@ async def _replayed(
     frame = await replay.frame_of(replay.tree)
 
     try:
-        replayed = await build_recipe(frame.ref, store=replay.store)
+        replayed = await build_recipe(
+            frame.ref, store=replay.store, root_options=replay.stated_options
+        )
     except RecipeError as exc:
         raise _Stopped(
             Refused(code="recipe_unbuildable", detail=str(exc), stage="publish")
@@ -778,8 +839,8 @@ async def replay_recipe(
         call_tool: Calls an analysis-mcp tool by name: the eight verbs and
             `resolve_anchor`.
         store: The process's materialisation store, `common.materialisation.get_store()`.
-        apis: The dfo-apis client. `list_versions` and `find_replay` are called,
-            both under the datasets principal.
+        apis: The dfo-apis client. `list_versions`, `find_replay` and
+            `read_recipe` are called, all under the datasets principal.
         publish: Publishes the final frame with its recipe.
         row_budget: The rows replays may hold at once. Each verb call claims its
             inputs' rows, `resolve_anchor` the roots', and the publish the final
@@ -827,3 +888,15 @@ async def replay_recipe(
         )
     except _Stopped as stopped:
         return stopped.outcome
+
+
+def _names_its_groupby(record: MintRecord) -> bool:
+    """Whether `record` is a groupby root whose frame is held under the pair
+    `frame_ref_for` derives from its dataset, columns and groupby."""
+    groupby = record.options.get("groupby")
+    return groupby is not None and record.frame == frame_ref_for(
+        spec_id=record.dataset.spec_id,
+        content_version=record.dataset.content_version,
+        columns=tuple(record.options.get("columns") or ()),
+        groupby=groupby,
+    )

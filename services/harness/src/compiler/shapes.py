@@ -75,7 +75,7 @@ from planner.shapes import shared as _shared
 from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
-from compiler.evidence import open_axis_for, opens_place_axis, resolve_entity
+from compiler.evidence import named_members, named_refs, open_axis_for, opens_place_axis
 from compiler.sources import stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
@@ -303,8 +303,10 @@ def _retrieve_resolved(
 ) -> ResolvedShape | None:
     """The shape a fresh retrieval carries, with each role wrapped by its source column.
 
-    The columns kept are the ones the requirement's own entities resolve
-    under, in the source's order, as `compile._role_columns` reads them,
+    The columns kept are the ones the requirement's own entities name
+    members on (`compiler.evidence.named_members`, a named set's members on
+    its role column), in the source's order, as `compile._role_columns`
+    reads them,
     then the open entity axis `compiler.evidence.open_axis_for` matches to
     its `across`, marked `open`. A column an entity stating no role resolves
     under, or one under a place phrase, is marked `place`, as
@@ -312,7 +314,9 @@ def _retrieve_resolved(
     to every column the source resolves when none of its entities do. An
     `across` no open entity axis matches builds no shape:
     `compile._check_sources` reports it as the source's
-    `open_axis_unresolved` finding.
+    `open_axis_unresolved` finding. A column is `surplus` when the source
+    resolves an entity on it whose ref none of the requirement's entities
+    names.
 
     A requirement stating a breakdown keeps its codes' column last
     (`breakdown_column`), a role nothing in the source resolves and so no
@@ -333,19 +337,17 @@ def _retrieve_resolved(
     for entity in source.entities:
         if entity.role not in every_column:
             every_column.append(entity.role)
-    named = {entity.name.casefold() for entity in requirement.entities}
+    named = named_refs(requirement.entities, source)
     wanted: set[str] = set()
     unplaced: set[str] = set()
     phrase_by_column: dict[str, str] = {}
     for entity in requirement.entities:
-        resolved = resolve_entity(entity, source.entities)
-        if resolved is None:
-            continue
-        wanted.add(resolved.role)
-        if entity.role is None:
-            unplaced.add(resolved.role)
-        else:
-            phrase_by_column.setdefault(resolved.role, entity.role)
+        for column in {member.role for member in named_members(entity, source)}:
+            wanted.add(column)
+            if entity.role is None:
+                unplaced.add(column)
+            else:
+                phrase_by_column.setdefault(column, entity.role)
     chosen = [column for column in every_column if column in wanted]
     open_column: str | None = None
     if requirement.across is None:
@@ -364,8 +366,7 @@ def _retrieve_resolved(
         is_open = column == open_column
         is_place = column in unplaced or place_role(phrase_by_column.get(column, column))
         surplus = any(
-            entity.role == column and entity.label.casefold() not in named
-            for entity in source.entities
+            entity.role == column and entity.ref not in named for entity in source.entities
         )
         dims.append(
             RoleDimension(
@@ -510,7 +511,7 @@ def _resolved_narrowed_roles(
     `planner.shapes.filtered` finds it as an axis phrase is found
     (`planner.shapes.roles_named`). An unqualified predicate
     -- `role is None` -- names no dimension, so each of `columns` is checked
-    in turn: `resolve_entity` matches the predicate's names against that
+    in turn: `named_members` matches the predicate's names against that
     column's own source, the same way a fresh retrieval resolves its own
     entities, and a name landing on that column's literal source column
     narrows that dimension alone. A name the source cannot resolve, or that
@@ -530,11 +531,12 @@ def _resolved_narrowed_roles(
             source = sources.get(retrieve_id) if retrieve_id is not None else None
             if source is None:
                 continue
-            for name in predicate.names:
-                resolved = resolve_entity(Entity(name=name, role=None), source.entities)
-                if resolved is not None and resolved.role == column.column:
-                    narrowed.add(column.role)
-                    break
+            if any(
+                member.role == column.column
+                for name in predicate.names
+                for member in named_members(Entity(name=name, role=None), source)
+            ):
+                narrowed.add(column.role)
     return tuple(narrowed)
 
 

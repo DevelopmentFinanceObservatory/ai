@@ -11,16 +11,19 @@ import pytest
 from compiler.compile import CompileIssueCode
 from planner.plan import UnsupportedOperation
 from planner.tool_results import Outcome
-from planner.workflow import SelectedSource
+from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 from pydantic import ValidationError
 from translator.referral import (
     OUTCOME_OF,
     REFERRAL_STATE_KEY,
     Referral,
     ReferralKind,
+    WithheldSource,
     clear_referral,
+    dropped_scope,
     load_referral,
     save_referral,
+    scope_repair,
 )
 
 SourceFactory = Callable[..., SelectedSource]
@@ -35,7 +38,6 @@ SourceFactory = Callable[..., SelectedSource]
         ReferralKind.PINNED_SOURCE_NOT_FOUND,
         ReferralKind.ASK_NOT_UNDERSTOOD,
         ReferralKind.DISCOVERY_UNAVAILABLE,
-        ReferralKind.SEED_DROPPED,
         ReferralKind.NO_OPERATION_COVERS,
     ],
 )
@@ -66,7 +68,7 @@ def test_a_repair_names_its_constraint_and_permitted_change() -> None:
     assert repair.outcome is Outcome.INVALID_INPUT
     with pytest.raises(ValidationError, match="names the constraint and the permitted repair"):
         Referral(kind=ReferralKind.REQUIREMENT_NEEDS_REPAIR, reason="r", requirement_id="a")
-    with pytest.raises(ValidationError, match="names no constraint or repair"):
+    with pytest.raises(ValidationError, match="names a repair only for a scope it withholds"):
         Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", repair="x")
 
 
@@ -177,6 +179,100 @@ def test_an_unmeetable_requirement_carries_candidates_only_for_a_stated_source_n
         )
     with pytest.raises(ValidationError, match="never marked source_mismatch"):
         Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", source_mismatch=True)
+
+
+_FRANCE = ResolvedEntity(role="origin", ref="country/FRA", label="France")
+_GHANA = ResolvedEntity(role="destination", ref="country/GHA", label="Ghana")
+_KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+_AFRICA = ResolvedGroup(role="destination", label="Africa", ref="africa")
+_EVERY_RECIPIENT = (OpenEntityAxis(column="destination", member_count=266),)
+
+
+@pytest.mark.parametrize(
+    ("held", "found", "dropped"),
+    [
+        (
+            {"entities": (_FRANCE, _GHANA, _KENYA), "groups": (_AFRICA,)},
+            {"entities": (_FRANCE,), "open_entity_axes": _EVERY_RECIPIENT},
+            "'destination': the pinned source holds it to Africa; this one leaves it open "
+            "over 266 members",
+        ),
+        (
+            {"entities": (_FRANCE, _GHANA, _KENYA)},
+            {"entities": (_FRANCE, _GHANA)},
+            "'destination': the pinned source holds it to 2 named members; this one binds 1 "
+            "of those 2 members",
+        ),
+        (
+            {"entities": (_FRANCE,), "groups": (_AFRICA,)},
+            {"entities": (_FRANCE,)},
+            "'destination': the pinned source holds it to Africa; this one names no Africa there",
+        ),
+        (
+            {"entities": (_FRANCE, _GHANA, _KENYA), "groups": (_AFRICA,)},
+            {"entities": (_FRANCE, _GHANA, _KENYA)},
+            None,
+        ),
+        (
+            {"entities": (_FRANCE,), "open_entity_axes": _EVERY_RECIPIENT},
+            {"entities": (_FRANCE, _GHANA)},
+            None,
+        ),
+    ],
+    ids=["opens-a-group", "drops-named-members", "drops-a-group", "keeps-members", "narrows"],
+)
+def test_dropped_scope_names_each_column_the_found_source_widens_or_drops(
+    source: SourceFactory,
+    held: dict[str, Any],
+    found: dict[str, Any],
+    dropped: str | None,
+) -> None:
+    assert dropped_scope(source(**held), source(**found)) == ((dropped,) if dropped else ())
+
+
+@pytest.mark.parametrize(
+    ("held", "across", "repair"),
+    [
+        (
+            {"entities": (_FRANCE, _GHANA, _KENYA), "groups": (_AFRICA,)},
+            "recipient",
+            "name 'Africa' as recipient in `entities` and drop `across`",
+        ),
+        (
+            {"entities": (_FRANCE, _GHANA)},
+            "recipients",
+            "name 'Ghana' as recipient in `entities` and drop `across`",
+        ),
+        ({"entities": (_FRANCE, _GHANA, _KENYA)}, "recipient", None),
+        ({"entities": (_FRANCE,), "groups": (_AFRICA,)}, "country", None),
+    ],
+    ids=["a-group", "one-member", "several-members", "no-side"],
+)
+def test_scope_repair_names_the_one_member_the_pinned_source_held(
+    source: SourceFactory, held: dict[str, Any], across: str, repair: str | None
+) -> None:
+    assert scope_repair(source(**held), across) == repair
+
+
+def test_a_withheld_source_is_never_offered(source: SourceFactory) -> None:
+    kept, withheld = source(), source(spec_id="spec_" + "b" * 32)
+    referral = Referral(
+        kind=ReferralKind.PINNED_SOURCE_NOT_FOUND,
+        reason="r",
+        requirement_id="a",
+        candidates=(kept,),
+        withheld=(WithheldSource(source=withheld, dropped=("scope",)),),
+    )
+
+    assert referral.offered() == {"a": (kept,)}
+    with pytest.raises(ValidationError, match="withholds no sources"):
+        Referral(
+            kind=ReferralKind.SOURCE_AMBIGUOUS,
+            reason="r",
+            requirement_id="a",
+            candidates=(kept, kept),
+            withheld=referral.withheld,
+        )
 
 
 def test_a_referral_gives_a_reason() -> None:

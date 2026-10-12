@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from compiler.sources import DiscoveryStatus, pinned_stat_var, source_from_spec_block
@@ -24,15 +24,16 @@ from compiler.surface import (
     ToolSurface,
     ToolSurfaceUnavailableError,
 )
+from data_mcp import resolution
 from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefinitionStore
 from data_mcp.definition_store import set_store as set_definition_store
-from data_mcp.definition_writes import identity_definition, windowed_identity
+from data_mcp.definition_writes import windowed_identity
+from data_mcp.errors import UpstreamError
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from harness.turn_records import RecordedIdentity
 from planner.plan import (
     PLAN_STATE_KEY,
-    SEEDED_SOURCES_STATE_KEY,
-    SEEDS_STATE_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Decision,
@@ -40,7 +41,6 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
-    SeededSource,
     Unit,
     WindowedPin,
     current_discovery_time_left,
@@ -48,19 +48,17 @@ from planner.plan import (
     current_recorded_identity,
     pin_sources,
     plan_revision,
-    save_dropped_seeds,
     save_pin_sources,
-    save_seeded_sources,
     save_windowed_pins,
-    seeded_sources,
 )
-from planner.records import Period
+from planner.records import Period, ResolvedSourceMention
 from planner.tool_results import ProblemCode
-from planner.workflow import OpenEntityAxis, SelectedSource, ToolId
+from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET,
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
     DISCOVERY_STATE_KEY,
+    CutCalls,
     DefinitionNotResolvedError,
     DiscoveryLog,
     DiscoveryRecord,
@@ -68,18 +66,19 @@ from translator.discovery import (
     PartNotResolvedError,
     build_discovery_tools,
     compact_source,
+    current_cut_calls,
     described_sources,
     fetch_definitions,
     load_log,
     requirement_revision,
     resolve_definition,
+    resolve_entity_refs,
     resolved_spec,
     save_log,
-    settled_sources,
 )
 from translator.referral import ReferralKind
 
-from ..data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub, SearchStub
+from ..data_mcp_definitions import DataMcpDefinitions, GroupsSearchStub
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -93,11 +92,6 @@ ContextHolding = Callable[[Plan], Any]
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
 SPEC_THIRD = "spec_" + "c" * 32
-
-SEEDED_REQUEST_FIXTURE = (
-    Path(__file__).parents[1] / "wire_fixtures" / "studio" / "request-11-turn-seeded.json"
-)
-
 
 # Search's own answers for one dataset over three periods, keyed by the years.
 _KENYA_OVER: dict[str, dict[str, Any]] = json.loads(
@@ -227,6 +221,24 @@ async def test_the_ask_reaches_search_in_the_requirements_own_fields(
     ]
 
 
+async def test_a_named_source_reaches_search_as_an_included_source_and_moves_the_revision(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    search_calls: list[dict[str, Any]],
+    context_holding: ContextHolding,
+) -> None:
+    named = requirement(source="IDS")
+    context = context_holding(draft(evidence_requirements=[named, derived_requirement()]))
+
+    await _discover(surface, context)
+
+    (call,) = search_calls
+    assert call["parts"][0]["sources"] == [{"text": "IDS"}]
+    assert requirement_revision(named) != requirement_revision(requirement())
+
+
 async def test_an_open_period_reaches_search_from_its_first_year_on(
     surface: McpSurface,
     draft: DraftFactory,
@@ -270,6 +282,39 @@ async def test_a_stored_role_reaches_search_as_the_party_word_it_stands_for(
 
     (call,) = search_calls
     assert call["parts"][0]["entities"] == [{"text": "Kenya", **sent}]
+
+
+@pytest.mark.parametrize(
+    ("entity", "sent"),
+    [
+        (Entity(name="Africa"), {"text": "Africa"}),
+        (Entity(name="Africa", members=True), {"text": "Africa", "members": True}),
+        (
+            Entity(name="G7", role="donor", members=True),
+            {"text": "G7", "role": "donor", "members": True},
+        ),
+    ],
+    ids=["set-alone", "set-members", "party-set-members"],
+)
+async def test_a_set_reaches_search_as_its_members_only_when_the_plan_asks_for_them(
+    surface: McpSurface,
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    search_calls: list[dict[str, Any]],
+    context_holding: ContextHolding,
+    entity: Entity,
+    sent: dict[str, object],
+) -> None:
+    # "Africa" alone is the region's own figure, which search binds to its
+    # published total; "African countries" asks for each member.
+    named = requirement(entities=[entity])
+    context = context_holding(draft(evidence_requirements=[named, derived_requirement()]))
+
+    await _discover(surface, context)
+
+    (call,) = search_calls
+    assert call["parts"][0]["entities"] == [sent]
 
 
 async def test_the_unit_sent_carries_the_price_basis_and_base_year(
@@ -943,7 +988,7 @@ def test_described_sources_lists_each_dataset_once_with_every_retrieval_of_it() 
 
 def test_described_sources_lists_a_dataset_once_over_every_period_it_is_retrieved_for() -> None:
     # Search states a sentence, a coverage window and a StatVar count for each
-    # period, so the copies of one seed describe differently and share only
+    # period, so the copies of one dataset describe differently and share only
     # their identity apart from its years. Each period's own coverage, and its
     # `has_data` where that differs, is listed with its retrieval.
     wider, narrower, recent = (
@@ -1020,142 +1065,6 @@ def test_described_sources_of_one_source_is_its_compact_form() -> None:
 
     assert described_sources([source]) == [compact_source(source)]
     assert described_sources([]) == []
-
-
-def _seed_block() -> dict[str, Any]:
-    """The seeded request fixture's Spec block, a real Search API block that
-    names no year: exact coverage and no window."""
-    block = json.loads(SEEDED_REQUEST_FIXTURE.read_text())["seed_spec"][0]["spec"]
-    assert block["resolved"]["coverage"]["kind"] == "exact"
-    assert "window" not in block["resolved"]["coverage"]
-    return block
-
-
-async def test_a_pin_naming_a_seeded_spec_is_honoured_from_its_source_whatever_its_window(
-    surface: McpSurface,
-    search_calls: list[dict[str, Any]],
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-) -> None:
-    # `harness.graph`'s `seed` node records each seed's source, read from the
-    # Spec block the user saw. Each seed is one dataset the user chose, so a
-    # pin naming one is honoured from it with no `search`, whatever else the
-    # plan states, and a block with no window is every year with data.
-    block = _seed_block()
-    context = _two_dataset_context_pinning(
-        block["spec_id"],
-        draft,
-        decision,
-        pinning_decision,
-        requirement,
-        derived_requirement,
-        context_holding,
-    )
-    save_seeded_sources(context.state, [SeededSource(source=source_from_spec_block(block))])
-
-    result = await _discover(surface, context, requirement_id="req_b")
-
-    assert search_calls == []
-    assert result["status"] == "definite"
-    assert "action" not in result
-    assert result["sources"][0]["spec_id"] == block["spec_id"]
-    assert load_log(context.state).records[0].tool == "pin"
-    # The seed's whole part of the result is its description, stamped with the
-    # requirement's measure: what `tests/test_context_budget.py` holds to a ceiling.
-    plan = Plan.model_validate_json(context.state[PLAN_STATE_KEY])
-    measure = cast(DatasetRequirement, plan.requirement("req_b")).measure
-    seeded = source_from_spec_block(block).model_copy(update={"searched_as": measure})
-    assert result["sources"] == [compact_source(seeded)]
-
-
-def _copy_over(seed: SelectedSource, block: dict[str, Any]) -> SeededSource:
-    """The copy of `seed` over `block`'s years, as `planner.agent.propose_plan` records it."""
-    return SeededSource(
-        source=SelectedSource(
-            spec_id=block["spec_id"],
-            sentence=seed.sentence,
-            has_data=None,
-            identity=block["definition"]["identity"],
-        ),
-        windowed_from=seed.spec_id,
-    )
-
-
-def _context_pinning_the_copy_over_2010_to_2023(
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-) -> tuple[Any, SelectedSource, SeededSource]:
-    """A context whose `req_b` pins the copy over 2010-2023 of a seed over 2015-2023, with both."""
-    seed = source_from_spec_block(_KENYA_OVER["2015-2023"])
-    copy = _copy_over(seed, _KENYA_OVER["2010-2023"])
-    context = _two_dataset_context_pinning(
-        copy.source.spec_id,
-        draft,
-        decision,
-        pinning_decision,
-        requirement,
-        derived_requirement,
-        context_holding,
-    )
-    save_seeded_sources(context.state, [SeededSource(source=seed), copy])
-    return context, seed, copy
-
-
-async def test_a_pin_naming_a_windowed_seed_is_read_from_searchs_answer_for_its_period(
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    # `propose_plan` pins a seed over the requirement's own period and records
-    # the copy with no fact about that period. Search states them: its answer
-    # for the copy's identity is the whole source, and data-mcp stores the
-    # copy's definition as it answers, in its own store, apart from the one
-    # this process holds, as when it runs as its own service.
-    context, seed, copy = _context_pinning_the_copy_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
-    )
-    answered = _KENYA_OVER["2010-2023"]
-    windowed = copy.source.spec_id
-    held_before = context.state[SEEDED_SOURCES_STATE_KEY]
-    service = InMemoryDefinitionStore()
-    data_mcp = DataMcpDefinitions(service, served=[answered])
-
-    result = await _discover(data_mcp, context, requirement_id="req_b")
-
-    assert result["status"] == "definite"
-    recorded = load_log(context.state).sources["req_b"][windowed]
-    assert recorded == source_from_spec_block(answered).model_copy(
-        update={"searched_as": recorded.searched_as}
-    )
-    assert result["sources"] == [compact_source(recorded)]
-    # Search's facts for 2010-2023, where the seed's are for 2015-2023.
-    assert seed.coverage_window == Period(start=2015, end=2023)
-    assert recorded.coverage_window == Period(start=2010, end=2023)
-    assert recorded.has_data is True
-    assert "2010 to 2023" in recorded.sentence
-    assert recorded.sentence != seed.sentence
-    assert (seed.stat_var_member_count, recorded.stat_var_member_count) == (89, 96)
-    # Search is asked with the copy's identity alone.
-    assert data_mcp.calls == [{"spec_id": windowed, "identity": copy.source.identity}]
-    assert await service.get(windowed, schema_version=1) == identity_definition(
-        answered["definition"]
-    )
-    assert await definition_store.get(windowed, schema_version=1) is None
-    # The copy in session state is the record `propose_plan` made.
-    assert context.state[SEEDED_SOURCES_STATE_KEY] == held_before
-    assert seeded_sources(context.state)[1] == copy
 
 
 class _SearchAndResolve:
@@ -1301,8 +1210,8 @@ async def test_a_pin_leaving_the_across_side_closed_is_searched_for_as_an_open_r
     # The requirement ranks across creditors and pins a dataset the turn
     # already holds. One that leaves the creditor side open is honoured with
     # no `search`. One that totals it, as a search that named no open role
-    # finds it, cannot hold every creditor, so `search` is asked for the side
-    # as an open role instead of the pin being recorded.
+    # finds it, cannot hold every creditor, so it is set aside, recorded with
+    # no status, and `search` is asked for the side as an open role.
     creditor_axis = [{"role": "origin", "member_count": 55, "members_available": True}]
     if path == "shown-block":
         spec_id, period = SPEC_KENYA, Period(start=2015, end=2024)
@@ -1347,7 +1256,8 @@ async def test_a_pin_leaving_the_across_side_closed_is_searched_for_as_an_open_r
         assert tools == ["pin"]
         assert result["sources"][0]["open_entity_axes"] == [{"column": "origin", "members": 55}]
         return
-    assert "pin" not in tools
+    assert tools == ["pin", "search"]
+    assert load_log(context.state).records[0].status is None
     (call,) = search_calls
     (part,) = call["parts"]
     assert part["open_roles"] == ["creditor"]
@@ -1394,173 +1304,48 @@ class _UnreachableDataMcp:
     ],
     ids=["definition-store", "data-mcp"],
 )
-async def test_a_windowed_seed_search_could_not_be_asked_about_is_retryable(
+async def test_a_windowed_pin_search_could_not_be_asked_about_is_retryable(
     surface_down: Callable[[], ToolSurface],
     said: str,
     draft: DraftFactory,
-    decision: DecisionFactory,
     pinning_decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
 ) -> None:
-    context, seed, _ = _context_pinning_the_copy_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
+    answered = _KENYA_OVER["2010-2023"]
+    spec_id = answered["spec_id"]
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=Period(start=2010, end=2023)),
+                derived_requirement(),
+            ],
+        )
     )
+    copied = WindowedPin(
+        spec_id=spec_id,
+        identity=answered["definition"]["identity"],
+        windowed_from=_KENYA_OVER["2015-2023"]["spec_id"],
+    )
+    save_windowed_pins(context.state, [copied])
 
-    result = await _discover(surface_down(), context, requirement_id="req_b")
+    result = await _discover(surface_down(), context)
 
     assert result["outcome"] == "refused"
     assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
     assert result["message"].startswith(
-        f'Search could not be asked for "{seed.sentence}" over 2010 to 2023: '
+        f"Search could not be asked for {spec_id!r} over 2010 to 2023: "
     )
     assert said in result["message"]
-    assert "req_b" not in load_log(context.state).sources
+    assert "annual_debt_service" not in load_log(context.state).sources
 
 
 def _kenya_without_its_definition() -> dict[str, Any]:
     block = dict(_KENYA_OVER["2010-2023"])
     del block["definition"]
     return block
-
-
-# What Search answers for the copy's identity, how the refusal words it, and the
-# referral its action names.
-_COPY_ANSWERS: dict[str, tuple[dict[str, Any] | None, str, ReferralKind]] = {
-    "refused": (
-        None,
-        "it refuses the period (request_invalid)",
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-    ),
-    "no-data": (
-        {"status": "no_data", "parts": [{"status": "no_data", "no_data": {"reason": "no_series"}}]},
-        "it finds no data (no_series)",
-        ReferralKind.NO_DATA,
-    ),
-    "candidates": (
-        {"status": "candidates", "parts": [{"status": "candidates", "candidates": {"specs": []}}]},
-        "it answers 'candidates'",
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-    ),
-    "another-spec-id": (
-        {
-            "status": "definite",
-            "parts": [{"status": "definite", "spec": _KENYA_OVER["2015-2023"]}],
-        },
-        f"it resolves the period to another dataset ({_KENYA_OVER['2015-2023']['spec_id']})",
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-    ),
-    "no-identity": (
-        {
-            "status": "definite",
-            "parts": [{"status": "definite", "spec": _kenya_without_its_definition()}],
-        },
-        "its answer carries no definition to retrieve",
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-    ),
-}
-
-
-@pytest.mark.parametrize("answer", sorted(_COPY_ANSWERS))
-async def test_a_windowed_seed_search_does_not_resolve_to_that_dataset_is_refused(
-    answer: str,
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    # The seed resolved when the turn started; the copy is another identity,
-    # and Search's answer for it is not that one dataset. The refusal names
-    # the dataset and the period and refers the requirement back, and no
-    # source is recorded for the pin.
-    del definition_store
-    context, seed, copy = _context_pinning_the_copy_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
-    )
-    envelope, fault, kind = _COPY_ANSWERS[answer]
-    search = SearchStub(answer={copy.source.spec_id: envelope} if envelope is not None else None)
-
-    result = await _discover(DataMcpDefinitions(search=search), context, requirement_id="req_b")
-
-    message = f'Search finds no single dataset for "{seed.sentence}" over 2010 to 2023: {fault}.'
-    assert result["outcome"] == "refused"
-    assert result["code"] == ProblemCode.SEARCH_REFUSED.value
-    assert result["message"] == message
-    assert result["action"] == {
-        "call": "return_to_planner",
-        "arguments": {"kind": kind.value, "requirement_id": "req_b", "reason": message},
-    }
-    log = load_log(context.state)
-    assert "req_b" not in log.sources
-    # A period with no data is recorded with Search's reason code, which the
-    # `no_data` referral carries; it spends no search.
-    plan = Plan.model_validate_json(context.state[PLAN_STATE_KEY])
-    key = requirement_revision(cast(DatasetRequirement, plan.requirement("req_b")))
-    assert log.no_data_reason(key, "req_b") == ("no_series" if answer == "no-data" else None)
-    assert log.calls(plan_revision(plan)) == 0
-
-
-async def test_a_windowed_seed_refused_for_its_open_role_is_searched_for_afresh(
-    surface: McpSurface,
-    search_calls: list[dict[str, Any]],
-    draft: DraftFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-) -> None:
-    # Search refuses the copy `open_role_unavailable` because the StatVars its
-    # identity elects over 2010-2023 declare no creditor role. The copy on
-    # record is the same identity, so the requirement goes straight to a
-    # fresh `search` asking for every creditor, with no second resolve.
-    seed = source_from_spec_block(_KENYA_OVER["2015-2023"])
-    copy = _copy_over(seed, _KENYA_OVER["2010-2023"])
-    windowed = copy.source.spec_id
-    context = context_holding(
-        draft(
-            decisions=[pinning_decision(windowed)],
-            evidence_requirements=[
-                requirement(
-                    source_spec_id=windowed,
-                    period=Period(start=2010, end=2023),
-                    across="creditors",
-                ),
-                derived_requirement(),
-            ],
-        )
-    )
-    save_seeded_sources(context.state, [SeededSource(source=seed), copy])
-    save_windowed_pins(
-        context.state,
-        [
-            WindowedPin(
-                spec_id=windowed,
-                identity=copy.source.identity,
-                windowed_from=seed.spec_id,
-            )
-        ],
-    )
-    refusal = {
-        "code": "open_role_unavailable",
-        "title": "refused",
-        "detail": "the elected StatVars declare no creditor role",
-        "retryable": False,
-        "pointer": "/input/identity/open_roles",
-    }
-    resolving = DataMcpDefinitions(
-        InMemoryDefinitionStore(), search=SearchStub(refuse={windowed: refusal})
-    )
-
-    await _discover(_SearchAndResolve(surface, resolving), context)
-
-    assert [call["spec_id"] for call in resolving.calls] == [windowed]
-    (call,) = search_calls
-    (part,) = call["parts"]
-    assert part["open_roles"] == ["creditor"]
 
 
 class _Refusing:
@@ -1681,136 +1466,6 @@ def test_resolved_spec_names_how_a_part_is_not_the_dataset(
     assert raised.value.fault is fault
     assert raised.value.answered == answered
     assert raised.value.part == part
-
-
-# The identity the stub `search` serves for every spec block.
-_PINNED_IDENTITY = {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}}
-
-
-def _dropped(spec_id: str, identity: dict[str, Any]) -> SeededSource:
-    return SeededSource(
-        source=SelectedSource(
-            spec_id=spec_id, sentence="debt service paid by Kenya", has_data=True, identity=identity
-        )
-    )
-
-
-@pytest.mark.parametrize(
-    "dropped",
-    [
-        _dropped(SPEC_KENYA, _PINNED_IDENTITY),
-        _dropped(SPEC_THIRD, {**_PINNED_IDENTITY, "requested_window": {"kind": "all"}}),
-    ],
-    ids=["same-spec-id", "same-dataset-over-other-years"],
-)
-async def test_a_search_that_finds_a_dataset_the_turn_dropped_names_no_source(
-    surface: McpSurface,
-    draft: DraftFactory,
-    context_holding: ContextHolding,
-    dropped: SeededSource,
-) -> None:
-    # The turn dropped the dataset and told the user the plan leaves it out.
-    # An unpinned requirement for the same part of the question finds it
-    # again, under its own spec_id or the one its identity hashes to over
-    # other years; the answer is recorded and no retrieval may take it.
-    context = context_holding(draft())
-    save_dropped_seeds(context.state, [dropped])
-
-    result = await _discover(surface, context)
-
-    assert result["code"] == ProblemCode.SEED_DROPPED.value
-    assert result["detail"]["spec_ids"] == [SPEC_KENYA]
-    assert result["action"]["arguments"] == {
-        "kind": ReferralKind.SEED_DROPPED.value,
-        "requirement_id": "annual_debt_service",
-        "reason": result["message"],
-    }
-    assert "Remove this requirement" in result["message"]
-    log = load_log(context.state)
-    assert log.records[-1].blocked_by == ("seed_dropped",)
-    keys = _requirement_keys(context, "annual_debt_service")
-    assert log.selectable(requirement_keys=keys, pinned={}) == {}
-    assert log.selectable(requirement_keys=keys, pinned={"annual_debt_service": SPEC_KENYA}) == {}
-
-
-@pytest.mark.parametrize(
-    "dropped",
-    [
-        _dropped(SPEC_KENYA, _PINNED_IDENTITY),
-        _dropped(SPEC_THIRD, {**_PINNED_IDENTITY, "requested_window": {"kind": "all"}}),
-    ],
-    ids=["same-spec-id", "same-dataset-over-other-years"],
-)
-async def test_a_search_answered_before_the_drop_settles_nothing_once_its_dataset_is_dropped(
-    surface: McpSurface,
-    draft: DraftFactory,
-    context_holding: ContextHolding,
-    dropped: SeededSource,
-) -> None:
-    """The record carries no block, since the search ran before the drop, and it
-    matches the requirement across plan revisions; the drop is read where a
-    source is taken."""
-    context = context_holding(draft())
-    first = await _discover(surface, context)
-    assert first["status"] == "definite"
-    keys = _requirement_keys(context, "annual_debt_service")
-    log = load_log(context.state)
-    settled = settled_sources(context.state, log, requirement_keys=keys, pinned={})
-    assert {key: source.spec_id for key, source in settled.items()} == {
-        "annual_debt_service": SPEC_KENYA
-    }
-
-    save_dropped_seeds(context.state, [dropped])
-
-    assert log.records[-1].blocked_by == ()
-    assert settled_sources(context.state, log, requirement_keys=keys, pinned={}) == {}
-    pinned = {"annual_debt_service": SPEC_KENYA}
-    assert settled_sources(context.state, log, requirement_keys=keys, pinned=pinned) == {}
-
-
-async def test_a_dropped_dataset_does_not_block_a_search_that_finds_another(
-    surface: McpSurface,
-    draft: DraftFactory,
-    context_holding: ContextHolding,
-) -> None:
-    context = context_holding(draft())
-    save_dropped_seeds(context.state, [_dropped(SPEC_OTHER, {"stat_var": "y"})])
-
-    result = await _discover(surface, context)
-
-    assert result["status"] == "definite"
-    assert "action" not in result
-
-
-async def test_a_seed_the_seed_node_never_stored_is_not_a_pin_the_translator_honours(
-    surface: McpSurface,
-    search_calls: list[dict[str, Any]],
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-) -> None:
-    # The host's own `SEEDS_STATE_KEY` holds what the request carried; a turn
-    # that fell back to the question never wrote `SEEDED_SOURCES_STATE_KEY`, so
-    # the pin is confirmed by a fresh search like any other.
-    context = _two_dataset_context_pinning(
-        SPEC_KENYA,
-        draft,
-        decision,
-        pinning_decision,
-        requirement,
-        derived_requirement,
-        context_holding,
-    )
-    context.state[SEEDS_STATE_KEY] = json.dumps(
-        [{"spec": _spec(SPEC_KENYA, "debt service paid by Kenya"), "operations": []}]
-    )
-
-    await _discover(surface, context, requirement_id="req_b")
-
-    assert len(search_calls) == 1
 
 
 async def test_a_pin_matching_the_resolve_id_still_searches_when_the_resolve_dropped_time_text(
@@ -2520,8 +2175,144 @@ async def test_a_search_inside_a_planner_entry_takes_only_the_time_the_entry_has
     assert slow.calls == issued
     assert result["outcome"] == "refused"
     assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value
-    (record,) = load_log(context.state).records
-    assert record.transport_failed is True
+    # A search cut off is spent, marked `transport_failed`; one never issued
+    # spends nothing.
+    records = load_log(context.state).records
+    assert [record.transport_failed for record in records] == [True] * issued
+    assert result["detail"]["budget_remaining"] == DISCOVERY_CALL_BUDGET - issued
+
+
+class _HeldResolve:
+    """A surface whose `resolve_definition` answers a definite part once `release` is set."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.calls = 0
+        self.cancelled = False
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Any,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        del on_progress
+        assert tool.name == "resolve_definition"
+        self.calls += 1
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        part = {"status": "definite", "spec": {"spec_id": arguments["spec_id"]}}
+        envelope = {"parts": [part]}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+
+
+async def _cut_resolve(surface: _HeldResolve) -> None:
+    """One `resolve_definition` the entry's deadline cuts while `surface` still holds it."""
+    token = current_discovery_time_left.set(lambda: 0.01)
+    try:
+        with pytest.raises(DefinitionNotResolvedError, match="did not answer"):
+            await resolve_definition(surface, spec_id=SPEC_KENYA, identity={"seed": "x"})
+    finally:
+        current_discovery_time_left.reset(token)
+
+
+@pytest.mark.parametrize(
+    ("answered_first", "time_left"),
+    [(True, -1.0), (False, 5.0)],
+    ids=["answered-before-retry", "awaited-by-retry"],
+)
+async def test_a_resolve_cut_by_the_entry_deadline_serves_its_late_answer_to_the_retry(
+    answered_first: bool, time_left: float
+) -> None:
+    """The traced resolve answered 0.7 s after the entry cut it. A retry
+    1 s past the deadline is served that answer rather than refused, and a
+    retry with time left waits on the same call rather than issuing another."""
+    held = _HeldResolve()
+    cut_calls = CutCalls()
+    cut_calls_token = current_cut_calls.set(cut_calls)
+    try:
+        await _cut_resolve(held)
+        if answered_first:
+            held.release.set()
+            await asyncio.sleep(0)
+        else:
+            asyncio.get_running_loop().call_later(0.01, held.release.set)
+        token = current_discovery_time_left.set(lambda: time_left)
+        try:
+            part = await resolve_definition(held, spec_id=SPEC_KENYA, identity={"seed": "x"})
+        finally:
+            current_discovery_time_left.reset(token)
+    finally:
+        current_cut_calls.reset(cut_calls_token)
+        await cut_calls.close()
+
+    assert part["spec"]["spec_id"] == SPEC_KENYA
+    assert held.calls == 1
+
+
+async def test_a_cut_resolve_still_running_when_the_entry_ends_is_cancelled() -> None:
+    held = _HeldResolve()
+    cut_calls = CutCalls()
+    cut_calls_token = current_cut_calls.set(cut_calls)
+    try:
+        await _cut_resolve(held)
+        await asyncio.sleep(0)
+        running_after_cut = not held.cancelled
+    finally:
+        current_cut_calls.reset(cut_calls_token)
+        await cut_calls.close()
+
+    assert running_after_cut
+    assert held.cancelled is True
+    assert held.calls == 1
+
+
+async def test_a_resolve_whose_caller_is_cancelled_mid_await_is_cancelled_when_the_entry_ends() -> (
+    None
+):
+    held = _HeldResolve()
+    cut_calls = CutCalls()
+    cut_calls_token = current_cut_calls.set(cut_calls)
+    time_token = current_discovery_time_left.set(lambda: 5.0)
+    try:
+        caller = asyncio.ensure_future(
+            resolve_definition(held, spec_id=SPEC_KENYA, identity={"seed": "x"})
+        )
+        while not held.calls:
+            await asyncio.sleep(0)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        running_after_cancel = not held.cancelled
+    finally:
+        current_discovery_time_left.reset(time_token)
+        current_cut_calls.reset(cut_calls_token)
+        await cut_calls.close()
+
+    assert running_after_cancel
+    assert held.cancelled is True
+
+
+async def test_keeping_a_second_task_under_a_key_cancels_the_first() -> None:
+    cut_calls = CutCalls()
+    first = asyncio.ensure_future(asyncio.sleep(3600))
+    second = asyncio.ensure_future(asyncio.sleep(3600))
+
+    cut_calls.keep(b"key", first)
+    cut_calls.keep(b"key", second)
+    await asyncio.sleep(0)
+    first_cancelled = first.cancelled()
+    await cut_calls.close()
+
+    assert first_cancelled
+    assert second.cancelled()
 
 
 async def test_the_log_survives_a_round_trip_through_session_state(
@@ -2984,3 +2775,248 @@ async def test_a_spec_over_a_sets_places_resolved_again_names_the_set_only_when_
 
     again = source_from_spec_block(resolved_spec(part, spec_id=recorded.spec_id))
     assert again.groups == (recorded.groups if posted else ())
+
+
+# --- Entity refs ---------------------------------------------------------------
+
+
+def _g7_members_source() -> SelectedSource:
+    """G7 donors to Kenya as `search` binds them, labelled as the graph labels them."""
+    return SelectedSource(
+        spec_id="spec_" + "c" * 32,
+        sentence="ODA from the G7 to Kenya",
+        has_data=True,
+        entities=(
+            ResolvedEntity(role="origin", ref="country/USA", label="United States of America"),
+            ResolvedEntity(role="origin", ref="country/JPN", label="Japan"),
+            ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+        ),
+    )
+
+
+def _members_requirement(*names: str) -> DatasetRequirement:
+    return DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="official development assistance",
+        entities=[Entity(name=name, role="donor") for name in names],
+        period=Period(start=2015, end=2024),
+    )
+
+
+async def test_names_no_label_matches_are_resolved_once_and_only_a_resolved_one_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[dict[str, list[str]]] = []
+
+    async def resolve(scope: dict[str, list[str]]) -> dict[str, dict[str, object]]:
+        asked.append({role: list(names) for role, names in scope.items()})
+        outcomes: dict[str, object] = {
+            "United States": resolution.ResolvedEntity(
+                dcid="country/USA", name="United States", entity_type="Country"
+            ),
+            "Bermuda": resolution.NotFound(near_matches=[]),
+        }
+        return {role: {name: outcomes[name] for name in names} for role, names in scope.items()}
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve)
+    requirement = _members_requirement("United States", "Japan", "Bermuda")
+    key = requirement_revision(requirement)
+    source = _g7_members_source()
+
+    pairs = await resolve_entity_refs(
+        DiscoveryLog(),
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys={"oda": key},
+        sources={"oda": source},
+    )
+
+    # Japan matches its label, so only the two that do not are asked.
+    assert asked == [{"names": ["United States", "Bermuda"]}]
+    ((record, (updated,)),) = pairs
+    assert (record.tool, record.requirement_key, record.spec_ids) == (
+        "resolve",
+        key,
+        (source.spec_id,),
+    )
+    assert updated.entity_refs == {"united states": "country/USA"}
+
+    log = DiscoveryLog().with_record(record, (updated,))
+    again = await resolve_entity_refs(
+        log,
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys={"oda": key},
+        sources={"oda": updated},
+    )
+
+    assert again == ()
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        UpstreamError(status=None, code=None, detail="the graph door timed out"),
+        KeyError("results"),
+        json.JSONDecodeError("Expecting value", "<html>", 0),
+        ValueError("unrecognised resolution status 'merged'"),
+    ],
+    ids=["transport", "no-results", "not-json", "unknown-status"],
+)
+async def test_a_failed_resolve_records_the_attempt_adds_no_ref_and_is_asked_again(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    calls: list[dict[str, list[str]]] = []
+
+    async def resolve(scope: dict[str, list[str]]) -> dict[str, dict[str, object]]:
+        calls.append(scope)
+        raise error
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve)
+    requirement = _members_requirement("United States")
+    keys = {"oda": requirement_revision(requirement)}
+    source = _g7_members_source()
+
+    ((record, sources),) = await resolve_entity_refs(
+        DiscoveryLog(),
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys=keys,
+        sources={"oda": source},
+    )
+
+    assert record.transport_failed is True
+    assert sources == ()
+    # A failed resolve is not a tried one: the next translate asks again.
+    await resolve_entity_refs(
+        DiscoveryLog().with_record(record, sources),
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys=keys,
+        sources={"oda": source},
+    )
+    assert len(calls) == 2
+
+
+async def test_excluded_source_and_chosen_reference_reach_search(
+    surface, draft, requirement, derived_requirement, search_calls, context_holding
+):
+    ask = requirement(source="CRS", source_exclude=True, source_ref="provenance/CRS")
+    context = context_holding(draft(evidence_requirements=[ask, derived_requirement()]))
+    await _discover(surface, context)
+    assert search_calls[0]["parts"][0]["sources"] == [
+        {"text": "CRS", "exclude": True, "ref": "provenance/CRS"}
+    ]
+    assert requirement_revision(ask) != requirement_revision(
+        ask.model_copy(update={"source_exclude": False})
+    )
+    assert requirement_revision(ask) != requirement_revision(
+        ask.model_copy(update={"source_ref": None})
+    )
+
+
+async def test_discovery_preserves_source_name_candidates_for_the_referral(draft, context_holding):
+    groups = [
+        {
+            "text": "shared",
+            "candidates": [
+                {"ref": "provenance/a", "label": "A", "kind": "provenance"},
+                {"ref": "provenance/b", "label": "B", "kind": "provenance"},
+            ],
+        }
+    ]
+    envelope = {
+        "parts": [
+            {
+                "status": "no_data",
+                "no_data": {
+                    "category": "unresolved",
+                    "reason": "source_ambiguous",
+                    "ambiguous_sources": groups,
+                },
+            }
+        ]
+    }
+    surface = FixtureSurface(
+        schemas=[],
+        responses={
+            "search": ToolCallResult(
+                is_error=False, structured_content={}, meta={SEARCH_ENVELOPE_META_KEY: envelope}
+            )
+        },
+    )
+    context = context_holding(draft())
+    result = await _discover(surface, context)
+    assert result["ambiguous_sources"] == groups
+    assert result["action"]["arguments"]["kind"] == "source_name_ambiguous"
+    assert (
+        load_log(context.state).records[-1].ambiguous_sources[0].candidates[0].ref == "provenance/a"
+    )
+
+
+async def test_saved_alias_confirmation_survives_identity_resolution(
+    surface, draft, pinning_decision, requirement, derived_requirement, context_holding
+):
+    answered = _KENYA_OVER["2010-2023"]
+    spec_id = answered["spec_id"]
+    mention = ResolvedSourceMention(text="catalogue alias", ref="provenance/IDS")
+    recorded = RecordedIdentity(
+        identity=answered["definition"]["identity"], resolved_sources=(mention,)
+    )
+    ask = requirement(
+        source_spec_id=spec_id, source="catalogue alias", period=Period(start=2010, end=2023)
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[ask, derived_requirement()],
+        )
+    )
+    token = current_recorded_identity.set({spec_id: recorded}.get)
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+    try:
+        await _discover(_SearchAndResolve(surface, resolving), context)
+    finally:
+        current_recorded_identity.reset(token)
+    selected = load_log(context.state).sources[ask.id][spec_id]
+    assert mention in selected.resolved_sources
+
+
+@pytest.mark.parametrize(
+    ("exclude", "ref"), [(True, None), (False, "provenance/IDS"), (False, None)]
+)
+async def test_a_new_source_constraint_refreshes_an_existing_pin(
+    draft, pinning_decision, requirement, derived_requirement, context_holding, exclude, ref
+):
+    ask = requirement(
+        source="IDS", source_exclude=exclude, source_ref=ref, source_spec_id=SPEC_KENYA
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[ask, derived_requirement()],
+        )
+    )
+    block = _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window())
+    _shown(context, SPEC_KENYA, block)
+    mention = {"text": "IDS", "ref": ref, "polarity": "exclude" if exclude else "include"}
+    envelope = {
+        "parts": [{"status": "definite", "spec": block, "restatement": {"sources": [mention]}}]
+    }
+    surface = FixtureSurface(
+        schemas=[],
+        responses={
+            "search": ToolCallResult(
+                is_error=False, structured_content={}, meta={SEARCH_ENVELOPE_META_KEY: envelope}
+            )
+        },
+    )
+    result = await _discover(surface, context)
+    assert result["status"] == "definite"
+    log = load_log(context.state)
+    assert [record.tool for record in log.records] == ["search"]
+    assert log.sources[ask.id][SPEC_KENYA].resolved_sources == (
+        ResolvedSourceMention.model_validate(mention),
+    )

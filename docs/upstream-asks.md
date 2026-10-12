@@ -61,8 +61,8 @@ inflation / Kenya+Tanzania compare resolve fine.
 **Ask:** fix the non-reproducing spec ids (examples: expected
 `spec_0e8100e4…` got `spec_f85f560d…`; expected `spec_f5dde1ad…` got
 `spec_c473f804…`).
-**Meanwhile:** these turns fail safe as stream-fatal error frames with
-trace ids.
+**Meanwhile:** the search step fails with the refusal and its trace id,
+and the agent answers without that data.
 
 ## 5. `fact_summary.changed` is always empty (the Edit Card panel)
 
@@ -87,30 +87,26 @@ no breaking changes to the manifest/artifact shape without a version bump.
 
 ## 7. Ambiguous questions need a `candidates` envelope (the More Details Question panel)
 
-The clarify flow (elicitation with options, free text, Skip) can only fire
-when search returns status `candidates`. Observed live (2026-08-31,
-"spending in Kenya"): search scores two readings within tolerance —
+Search states a tie between readings only in warning prose. Observed live
+(2026-08-31, "spending in Kenya"): search scores two readings within tolerance —
 "'Government expenditure on military activities' and 'Amount of Debt:
 Government' scored within 0.0001 of each other … surfacing both as
 candidates" — but returns status `unsupported` with that tie described in
-**warning prose**. The turn dead-ends, and the user is never asked which
-reading they meant.
+**warning prose**. The turn reads it as no data unless the agent picks
+the tie out of that text.
 
 **Ask:** when interpretations tie within tolerance, return status
-`candidates` with the candidate specs. A tie narrated in warning text is
-unreadable to the clarify flow.
-**Meanwhile:** ambiguous questions close honestly as no-data; the harness's
-elicitation path is built and tested (deterministic mode exercises it) but
-unreachable live.
+`candidates` with the candidate specs, which the agent can offer the user
+through `ask_user`.
+**Meanwhile:** the tie reaches the agent only as warning text.
 
 ## 8. Skills for planner grounding
 
 **Resolved.** dfo-apis serves skills through its Skills API, and data-mcp reads
 them with `get_skill` and `get_skill_file`. The planner carries both as its own
 tools (`services/harness/src/planner/skills.py`), called through the harness's
-tool surface, and loads a skill when the resolve envelope's `skills` names one
-that bears on the question. Where the Skills API is not mounted, both tools
-refuse `capability_unavailable` and the planner drafts without the skill.
+tool surface, and loads a skill that bears on the question. Where the Skills
+API is not mounted, both tools refuse `capability_unavailable` and the planner drafts without the skill.
 
 ## 9. Frames produced by analysis-mcp are invisible to the presentation surface
 
@@ -151,8 +147,6 @@ denominator it looked for.
 **Ask:** on `denominator_not_available`, return the measure's variable
 text without the normalising phrase, the denominator as a variable text
 or StatVar, and which of the part's entities the denominator is about.
-**Meanwhile:** the harness asks a model for those three things
-(`harness.generative.GeminiDenominatorSplit`), builds the two search
-parts from the refused part, and searches again, with one model call per
-refused part and one search for all of them. With the fields above it would build the parts
-without the model call.
+**Meanwhile:** the agent reads the `no_data` reason and has to work out
+the measure and the denominator itself before it can search for them as
+two parts.

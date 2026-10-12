@@ -23,9 +23,7 @@ the words the source answered.
 and answer the narrower ask, saying so only in a warning. An answer carrying
 one of those warnings is refused as `ask_not_understood` and its record is
 never selectable, pinned or not: the source found is a source for a different
-question. An answer naming a dataset the turn dropped
-(`planner.plan.dropped_seeds`) is refused as `seed_dropped` and is not
-selectable either: the user is told the plan leaves that dataset out.
+question.
 
 Every `search` call is counted against `DISCOVERY_CALL_BUDGET` for the plan
 *revision* it serves, and a second, narrower ceiling,
@@ -34,7 +32,7 @@ spend of it, so a single requirement repeatedly searching cannot drain the
 budget a whole revision's several requirements share. A `describe` call is
 recorded the same way but does not count against either ceiling: it is
 `fetch_definitions` enriching a source the compile loop already chose, not a
-model spending the budget, and `_described_source_ids` already stops it
+model spending the budget, and `_tried_source_ids` already stops it
 repeating for the same source. Both budgets reset together when the plan is
 amended into a fresh revision. Selectability and a requirement's candidates
 are scoped
@@ -72,7 +70,7 @@ definition behind that way. A search's own timeout is counted against
 `DISCOVERY_CALL_BUDGET` exactly like an answered search, so a persistently
 slow server cannot buy the model unbounded retries; a describe's timeout is
 recorded the same way but, like every
-describe record, spends neither budget -- `_described_source_ids` is what
+describe record, spends neither budget -- `_tried_source_ids` is what
 stops a failing describe being retried on every `COMPILE_FAILED` pass within
 the same revision. The worst case the lock and the search budget buy
 together is one `search` deadline, 60 s (the `call_timeout_s` of the `search`
@@ -81,7 +79,10 @@ the budget admits, rather than one deadline per call. A turn discovering
 `DISCOVERY_CALL_BUDGET` requirements at once waits out that one deadline
 together. Inside a planner entry a call is also cut off when the entry
 needs the rest of its deadline (`_call_within_entry`), and recorded as a
-timeout. Once the search budget is spent, a caller sees the same
+timeout. A search the entry had no time left to issue (`NoTimeLeftError`)
+is not recorded and spends nothing, and refers the requirement back marked
+`not_issued`. A cut `resolve_definition` keeps running for the entry's next
+proposal to be served (`CutCalls`). Once the search budget is spent, a caller sees the same
 `budget_exhausted` refusal (`_budget_error`, action `return_to_planner`)
 whether it was spent on answers or on timeouts. The referral it names is
 the transient `discovery_unavailable` when the most recent call that spent
@@ -96,14 +97,16 @@ import json
 import logging
 import uuid
 from collections import Counter
-from collections.abc import Collection, Mapping, Sequence
-from enum import Enum, StrEnum
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from enum import StrEnum
 from typing import Any, Literal, NamedTuple, cast
 from weakref import WeakValueDictionary
 
 import rfc8785
 from common.hashed_fields import revision_content
-from compiler.evidence import open_axis_for
+from compiler.evidence import named_members, open_axis_for, source_requirement_matches
 from compiler.sources import (
     EXACT_COVERAGE,
     DiscoveryStatus,
@@ -115,35 +118,53 @@ from compiler.sources import (
     wire_groups,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
+from data_mcp import resolution
+from data_mcp.definition_store import IdentityMismatch
+from data_mcp.definition_writes import IdentityUnusable, caller_definition
+from data_mcp.errors import UpstreamError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from data_mcp.tool_errors import ToolErrorCode
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
 from planner.parties import across_party, party_role
 from planner.plan import (
+    AggregateRequirement,
     DatasetRequirement,
+    Entity,
     Plan,
     PlanStatus,
     SessionState,
     Unit,
     dataset_of,
     discovery_time_left,
+    inputs_of,
     load_plan,
-    names_dropped_seed,
     pin_sources,
     plan_revision,
     recorded_identity,
     retrieves_period,
-    seeded_source,
-    seeded_sources,
+    save_plan,
     windowed_pins,
 )
-from planner.records import Identifier, SpecId, StrictModel, warn_left_out
+from planner.records import (
+    AmbiguousSourceReading,
+    GroupBy,
+    Identifier,
+    ResolvedSourceMention,
+    SpecId,
+    StrictModel,
+    warn_left_out,
+)
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import ResolvedGroup, SelectedSource, ToolId
-from pydantic import Field, ValidationError
+from pydantic import Field, JsonValue, ValidationError
 
-from translator.referral import ReferralKind
+from translator.referral import (
+    ReferralKind,
+    WithheldSource,
+    closing_group,
+    dropped_scope,
+    scope_repair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +211,6 @@ DESCRIBE_ID_BATCH_MAX = 8
 # rides out with the answer.
 BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
 
-# What `DiscoveryRecord.blocked_by` holds for an answer that names a dataset
-# the turn dropped (`planner.plan.names_dropped_seed`).
-SEED_DROPPED_BLOCK = "seed_dropped"
-
 # The answers a pin may be honoured from. A pin the planner chose among a
 # `source_ambiguous` referral's candidates is honoured from the `candidates`
 # answer a search for the pinned requirement gives again. A `no_data`
@@ -228,8 +245,7 @@ class DiscoveryRecord(StrictModel):
     closed reason code (`compiler.sources.DiscoveryOutcome.reason`), `None`
     for every other status. `warnings` are every warning the answer carried,
     and `blocked_by` the codes among them under which `search` dropped part
-    of the ask, with `SEED_DROPPED_BLOCK` when the answer names a dataset the
-    turn dropped; a record with any is never selectable. `transport_failed`
+    of the ask; a record with any is never selectable. `transport_failed`
     marks a call whose deadline elapsed before `data-mcp` answered at all:
     `status` stays `None` on such a record, same as a `describe` call's own
     record, so a dedicated field is what tells the two apart rather than
@@ -245,20 +261,28 @@ class DiscoveryRecord(StrictModel):
     otherwise carry that order.
 
     `tool == "pin"` records a pin honoured with no `search` call
-    (`_source_from_resolve_pin`): a requirement pinning the id the turn's own
-    resolve settled on, a dataset the user handed over from Search, or a
-    dataset whose identity is on record over the requirement's period. Like
-    a `describe` record, it spends neither budget (`calls`/`requirement_calls`
-    count only `search`). It carries `status == DEFINITE` and one `spec_ids`
-    entry, or `status == NO_DATA`, Search's `reason` and no `spec_ids` when
-    Search finds no data for a seed's copy over the requirement's period
-    (`_seeded_source`).
+    (`_source_from_resolve_pin`): a requirement pinning a dataset the planner
+    was shown, or one whose identity is on record over the requirement's
+    period. Like a `describe` record, it spends neither budget
+    (`calls`/`requirement_calls` count only `search`). It carries
+    `status == DEFINITE` and one `spec_ids` entry. A `pin` record with no
+    `status` and one `spec_ids` entry records the pin's source read and set
+    aside, because it holds closed the side the requirement's `across` asks for every member of: no
+    retrieval may take it, and the sources the fresh search finds in its
+    place are offered only when they keep its scope (`DiscoveryLog.scope_kept`).
+
+    `tool == "resolve"` records the graph resolve of the requirement's
+    entity names that match no label of its one `spec_ids` source
+    (`resolve_entity_refs`), which spends no budget either; the refs it
+    found are on that source's `entity_refs`. A resolve that failed, in
+    transport or with an unreadable answer, is `transport_failed` too, with
+    the error as its `detail`.
     """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     sequence: int = 0
     revision: str
-    tool: Literal["search", "describe", "pin"]
+    tool: Literal["search", "describe", "pin", "resolve"]
     requirement_id: Identifier | None = None
     requirement_key: str | None = None
     status: DiscoveryStatus | None = None
@@ -267,6 +291,7 @@ class DiscoveryRecord(StrictModel):
     reason: str | None = None
     variable_sent: str | None = None
     warnings: tuple[PartWarning, ...] = ()
+    ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
     blocked_by: tuple[str, ...] = ()
     transport_failed: bool = False
 
@@ -302,6 +327,20 @@ def _select_definite(
         elif record.status is DiscoveryStatus.DEFINITE and not record.blocked:
             return record
     return None
+
+
+class ScopeKept(NamedTuple):
+    """The sources found in place of a pin, as a `pinned_source_not_found` referral carries them (`DiscoveryLog.scope_kept`)."""
+
+    offered: tuple[SelectedSource, ...]
+    withheld: tuple[WithheldSource, ...] = ()
+    repair: str | None = None
+
+
+class _RecordedSourceDefinition(NamedTuple):
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...]
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
 
 
 class DiscoveryLog(StrictModel):
@@ -483,6 +522,81 @@ class DiscoveryLog(StrictModel):
                 return tuple(found[spec_id] for spec_id in record.spec_ids)
         return ()
 
+    def set_aside_pin(self, requirement_key: str, requirement_id: str) -> SelectedSource | None:
+        """The pin's source `_source_from_resolve_pin` read and set aside for `requirement_id`, or `None`.
+
+        Read off the latest `pin` record at `requirement_key`, which sets a
+        source aside when it states no `status` (`DiscoveryRecord`).
+        """
+        for record in reversed(self.records):
+            if (
+                record.tool == "pin"
+                and record.requirement_key == requirement_key
+                and record.requirement_id == requirement_id
+            ):
+                if record.status is not None or not record.spec_ids:
+                    return None
+                return self.sources.get(requirement_id, {}).get(record.spec_ids[0])
+        return None
+
+    def scope_kept(
+        self, requirement: DatasetRequirement, sources: Sequence[SelectedSource]
+    ) -> ScopeKept:
+        """`sources`, found in place of `requirement`'s pin, split into those a referral offers and those it withholds.
+
+        A source that drops the scope of the pin's source set aside
+        (`set_aside_pin`, `translator.referral.dropped_scope`) is withheld,
+        and the change that keeps that scope is stated when the requirement
+        can name it (`translator.referral.scope_repair`). With no source set
+        aside, every source is offered.
+        """
+        held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
+        if held is None:
+            return ScopeKept(offered=tuple(sources))
+        offered: list[SelectedSource] = []
+        withheld: list[WithheldSource] = []
+        for source in sources:
+            if dropped := dropped_scope(held, source):
+                withheld.append(WithheldSource(source=source, dropped=dropped))
+            else:
+                offered.append(source)
+        repair = (
+            scope_repair(held, requirement.across)
+            if withheld and requirement.across is not None
+            else None
+        )
+        return ScopeKept(offered=tuple(offered), withheld=tuple(withheld), repair=repair)
+
+    def recorded_source(self, spec_id: str) -> SelectedSource | None:
+        """The source a record of this log last named `spec_id` with, or `None` when none did."""
+        for record in reversed(self.records):
+            if record.requirement_id is not None and spec_id in record.spec_ids:
+                found = self.sources.get(record.requirement_id, {}).get(spec_id)
+                if found is not None:
+                    return found
+        return None
+
+    def recorded_alternative(self, spec_id: str) -> _RecordedSourceDefinition | None:
+        """A verified sibling definition offered by a source in this session."""
+        for own in reversed(tuple(self.sources.values())):
+            for source in reversed(tuple(own.values())):
+                identities = (
+                    {a.spec_id: a.identity for a in source.elected_measure.alternatives}
+                    if source.elected_measure is not None
+                    else {}
+                )
+                identity = identities.get(spec_id)
+                if identity is None:
+                    continue
+                try:
+                    caller_definition(
+                        {"schema_version": 1, "spec_id": spec_id, "identity": identity}
+                    )
+                except (IdentityMismatch, IdentityUnusable):
+                    continue
+                return _RecordedSourceDefinition(identity, source.groups, source.resolved_sources)
+        return None
+
     def stale_pin_sources(
         self, requirement_key: str, requirement_id: str, pinned_spec_id: str
     ) -> tuple[SelectedSource, ...] | None:
@@ -588,33 +702,6 @@ def dataset_keys(plan: Plan) -> DatasetKeys:
         pinned={r.id: r.source_spec_id for r in datasets if r.source_spec_id is not None},
         across=frozenset(r.id for r in datasets if r.across is not None),
     )
-
-
-def settled_sources(
-    state: SessionState,
-    log: DiscoveryLog,
-    *,
-    requirement_keys: Mapping[str, str],
-    pinned: Mapping[str, str],
-    across: Collection[str] = (),
-) -> dict[str, SelectedSource]:
-    """The sources a retrieval may name in this turn, by requirement id.
-
-    They are `log.selectable`'s, less any that is a dataset the turn dropped
-    (`planner.plan.names_dropped_seed`). A search recorded before the drop
-    carries no block for it, and a record matches a requirement across plan
-    revisions, so the drop is checked here, where a source is taken, for
-    every record whenever it was written. A requirement left without a
-    source is discovered again, and that search's answer is refused as
-    `seed_dropped`.
-    """
-    return {
-        requirement_id: source
-        for requirement_id, source in log.selectable(
-            requirement_keys=requirement_keys, pinned=pinned, across=across
-        ).items()
-        if not names_dropped_seed(state, spec_id=source.spec_id, identity=source.identity)
-    }
 
 
 def load_log(state: SessionState) -> DiscoveryLog:
@@ -949,8 +1036,9 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
     """Return the content hash identifying this dataset requirement's own searched content.
 
     Covers exactly what `_search_part` sends to `search` -- `measure`,
-    `entities`, `period`, `unit`, and the open role `across` asks for
-    (`_open_roles`), stated only when there is one -- plus `source_spec_id`,
+    `entities`, `period`, `unit`, the open role `across` asks for
+    (`requirement_open_roles`) and the `source` the question names, each
+    stated only when there is one -- plus `source_spec_id`,
     the pin `selectable` honours. Never `decision_ids`, `coverage` or `id`, none of
     which affects what is searched or what a pin resolves to. Canonical JSON
     (RFC 8785) under SHA-256, the same discipline `plan_revision` uses for the
@@ -963,8 +1051,14 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
     content = revision_content(
         requirement, include={"measure", "entities", "period", "unit", "source_spec_id"}
     )
-    if open_roles := _open_roles(requirement):
+    if open_roles := requirement_open_roles(requirement):
         content["open_roles"] = open_roles
+    if requirement.source is not None:
+        content["source"] = requirement.source
+    if requirement.source_ref is not None:
+        content["source_ref"] = requirement.source_ref
+    if requirement.source_exclude:
+        content["source_exclude"] = True
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
@@ -1065,19 +1159,27 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
     Sends the named entities, and the side of a flow `across` covers as an
-    open role (`_open_roles`). Never carries `source`: data-mcp refuses a
-    search naming one without a unit, and ignores it when a unit is also
-    given, so there is nothing for stating it to buy.
+    open role (`requirement_open_roles`). A `source`, the publisher or dataset
+    the question names in the user's own words, goes as one included
+    `sources` entry, with its chosen reference and exclusion flag when stated.
 
     An entity's role goes as the `PARTY_ROLES` word it stands for
     (`party_role`), each a word of `search`'s role lexicon. A role standing
     for none, which only a plan read back from session state can hold, goes
     unstated.
+
+    An entity with `members` set asks for each member of the set it names
+    (`"members": true`). A set named without it goes as one entity, which
+    search binds to the set's own published figure where the source has one.
     """
     entities = []
     for entity in requirement.entities:
-        role = party_role(entity.role) if entity.role is not None else None
-        entities.append({"text": entity.name, **({"role": role} if role is not None else {})})
+        sent: dict[str, object] = {"text": entity.name}
+        if entity.role is not None and (role := party_role(entity.role)) is not None:
+            sent["role"] = role
+        if entity.members:
+            sent["members"] = True
+        entities.append(sent)
     part: dict[str, object] = {"variable": variable}
     if entities:
         part["entities"] = entities
@@ -1089,12 +1191,19 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     )
     if requirement.unit is not None:
         part["unit"] = _unit_phrase(requirement.unit)
-    if open_roles := _open_roles(requirement):
+    if open_roles := requirement_open_roles(requirement):
         part["open_roles"] = open_roles
+    if requirement.source is not None:
+        mention: dict[str, object] = {"text": requirement.source}
+        if requirement.source_ref is not None:
+            mention["ref"] = requirement.source_ref
+        if requirement.source_exclude:
+            mention["exclude"] = True
+        part["sources"] = [mention]
     return part
 
 
-def _open_roles(requirement: DatasetRequirement) -> list[str]:
+def requirement_open_roles(requirement: DatasetRequirement) -> list[str]:
     """The role `search` is asked to hold open for `requirement`, its `across` when that names a side of a flow.
 
     The role goes as the `PARTY_ROLES` word `across` stands for, so "lenders"
@@ -1156,23 +1265,30 @@ def _bare_dcid(ref: str) -> str:
     return ref.removeprefix("dcid:")
 
 
-def _described_source_ids(
-    log: DiscoveryLog, requirement_key: str, requirement_id: str
+def _tried_source_ids(
+    log: DiscoveryLog,
+    requirement_key: str,
+    requirement_id: str,
+    *,
+    tool: Literal["describe", "resolve"],
+    counting_failed: bool,
 ) -> frozenset[str]:
-    """The `spec_id`s `requirement_id` already tried a `describe` fetch for, at `requirement_key`.
+    """The `spec_id`s `requirement_id` already tried a `tool` call for, at `requirement_key`.
 
-    Counts a failed or timed-out attempt the same as a successful one:
-    `fetch_definitions` tries each source once per `requirement_key`,
-    whatever the outcome, rather than re-hitting a failing `describe` on
-    every `COMPILE_FAILED` retry `propose_operations` makes within the same
-    revision.
+    With `counting_failed`, a failed or timed-out attempt counts the same as a
+    successful one: `fetch_definitions` tries each source once per
+    `requirement_key`, whatever the outcome, so a failing `describe` is not
+    re-hit on every `COMPILE_FAILED` retry `propose_operations` makes within
+    the same revision. Without it, a `transport_failed` attempt is left out, so
+    the next call tries again.
     """
     return frozenset(
         spec_id
         for record in log.records
-        if record.tool == "describe"
+        if record.tool == tool
         and record.requirement_id == requirement_id
         and record.requirement_key == requirement_key
+        and (counting_failed or not record.transport_failed)
         for spec_id in record.spec_ids
     )
 
@@ -1268,7 +1384,7 @@ async def fetch_definitions(
     definitions for a `candidates` answer's own entries can pass those
     instead.
 
-    `log` is read only, for `_described_source_ids`'s skip check: a source
+    `log` is read only, for `_tried_source_ids`'s skip check: a source
     already tried this revision's `requirement_key` is left out, success or
     failure alike. This function neither reads nor writes session state and
     takes no lock -- it returns the `(DiscoveryRecord, sources)` pair each
@@ -1297,7 +1413,13 @@ async def fetch_definitions(
         if requirement_id in requirement_keys
         and (dcid := pinned_stat_var(source.identity)) is not None
         and source.spec_id
-        not in _described_source_ids(log, requirement_keys[requirement_id], requirement_id)
+        not in _tried_source_ids(
+            log,
+            requirement_keys[requirement_id],
+            requirement_id,
+            tool="describe",
+            counting_failed=True,
+        )
     ]
     pairs: list[DescribedPair] = []
     for start in range(0, len(pending), DESCRIBE_ID_BATCH_MAX):
@@ -1354,6 +1476,106 @@ async def apply_definitions(state: SessionState, pairs: Sequence[DescribedPair])
             log = log.with_record(record, sources)
         save_log(state, log)
         return log
+
+
+def _unmatched_names(requirement: DatasetRequirement, source: SelectedSource) -> tuple[str, ...]:
+    """The names `requirement` gives entities that name nothing `source` holds (`named_members`)."""
+    return tuple(
+        entity.name for entity in requirement.entities if not named_members(entity, source)
+    )
+
+
+async def resolve_entity_refs(
+    log: DiscoveryLog,
+    *,
+    revision: str,
+    requirements: Sequence[DatasetRequirement],
+    requirement_keys: Mapping[str, str],
+    sources: Mapping[str, SelectedSource],
+) -> tuple[DescribedPair, ...]:
+    """Resolve the entity names each source matches by no label to graph refs, one pair per source.
+
+    `sources` names, per requirement id, the source the requirement settled
+    on. A name that names nothing the source holds (`named_members`), such
+    as "United States" beside an entity labelled "United States of
+    America", is resolved through the graph's resolve door in process
+    (`data_mcp.resolution.resolve_entities`), every requirement's names in
+    one call. Only a `resolved` outcome counts: a region, a group, an
+    ambiguous name or one the graph lacks maps to nothing, and the
+    evidence check reports it as missing. The refs found are
+    recorded on the source (`SelectedSource.entity_refs`), so compile and
+    the run-time evidence check both compare refs.
+
+    Each source is resolved once per `requirement_key` (`_tried_source_ids`).
+    A resolve that fails, in transport or with a response of an unknown
+    shape, is logged with the names and requirements, records the attempt as
+    `transport_failed` with the error as its `detail`, and adds no ref; the
+    next translate asks again. Like `fetch_definitions`, this reads `log`
+    only and returns pairs for `apply_definitions` to apply under
+    `discovery_lock`.
+    """
+    pending = [
+        (requirement, requirement_keys[requirement.id], source, names)
+        for requirement in requirements
+        if requirement.id in requirement_keys
+        and (source := sources.get(requirement.id)) is not None
+        and (names := _unmatched_names(requirement, source))
+        and source.spec_id
+        not in _tried_source_ids(
+            log,
+            requirement_keys[requirement.id],
+            requirement.id,
+            tool="resolve",
+            counting_failed=False,
+        )
+    ]
+    if not pending:
+        return ()
+    asked = list(dict.fromkeys(name for *_, names in pending for name in names))
+    requirement_ids = [requirement.id for requirement, *_ in pending]
+    failure: str | None = None
+    outcomes: dict[str, resolution.ResolutionOutcome] = {}
+    try:
+        outcomes = (await resolution.resolve_entities({"names": asked})).get("names", {})
+    except UpstreamError as exc:
+        failure = str(exc)
+        logger.warning(
+            "entity names %s of requirements %s unresolved: %s", asked, requirement_ids, exc
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        # A resolve answer of a shape `resolve_entities` does not read: a missing
+        # `results`, a body that is not JSON, a status it does not know, or one result
+        # too few.
+        failure = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "entity names %s of requirements %s unresolved: the resolve answer was unreadable (%s)",
+            asked,
+            requirement_ids,
+            failure,
+        )
+    refs = {
+        name: outcome.dcid
+        for name, outcome in outcomes.items()
+        if isinstance(outcome, resolution.ResolvedEntity)
+    }
+    pairs: list[DescribedPair] = []
+    for requirement, key, source, names in pending:
+        record = DiscoveryRecord(
+            revision=revision,
+            tool="resolve",
+            requirement_id=requirement.id,
+            requirement_key=key,
+            spec_ids=(source.spec_id,),
+            detail=failure,
+            transport_failed=failure is not None,
+        )
+        found = {name.casefold(): refs[name] for name in names if name in refs}
+        if not found:
+            pairs.append((record, ()))
+            continue
+        updated = source.model_copy(update={"entity_refs": {**source.entity_refs, **found}})
+        pairs.append((record, (updated,)))
+    return tuple(pairs)
 
 
 def _ready_to_search(
@@ -1423,20 +1645,79 @@ class DefinitionNotResolvedError(RuntimeError):
     identity (`refused`) or answered it with no part, and the message says
     so in words a user reads, naming the refusal's code when it states one.
     `code` is that code, `None` when the refusal states none or nothing was
-    refused.
+    refused. `not_issued` is whether the call was never made, the planner
+    entry having no time left for it (`NoTimeLeftError`).
     """
 
     def __init__(
-        self, message: str, *, retryable: bool, refused: bool = False, code: str | None = None
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        refused: bool = False,
+        code: str | None = None,
+        not_issued: bool = False,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.refused = refused
         self.code = code
+        self.not_issued = not_issued
+
+
+class CutCalls:
+    """The calls a planner entry cut off at its deadline and left running, by tool and arguments.
+
+    A `resolve_definition` the entry's deadline cuts is shielded rather than
+    cancelled, since Search often answers it moments later (a cold member
+    walk) and the definition it stores is the same whichever call stores it.
+    The next call with the same tool and arguments in the same entry takes
+    the kept task (`_call_within_entry`) and is served its answer once it
+    has one. A call is kept from the moment it is issued until it finishes,
+    so a caller cancelled mid-await leaves it here too. `close` cancels
+    whatever is still kept, so no call outlives the entry.
+    `harness.planner_seam.PlannerSeam.__call__` opens one per entry through
+    `current_cut_calls`.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[bytes, asyncio.Task[ToolCallResult]] = {}
+
+    def keep(self, key: bytes, task: asyncio.Task[ToolCallResult]) -> None:
+        """Hold `task` for the next call `key` names, cancelling another task held there."""
+        held = self._tasks.get(key)
+        if held is not None and held is not task:
+            held.cancel()
+        self._tasks[key] = task
+
+    def release(self, key: bytes, task: asyncio.Task[ToolCallResult]) -> None:
+        """Stop holding `task` under `key`; a different task held there stays."""
+        if self._tasks.get(key) is task:
+            del self._tasks[key]
+
+    def take(self, key: bytes) -> asyncio.Task[ToolCallResult] | None:
+        """The task kept for `key`, no longer kept; `None` when none is."""
+        return self._tasks.pop(key, None)
+
+    async def close(self) -> None:
+        """Cancel every kept task and wait for each to finish."""
+        tasks = list(self._tasks.values())
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# The `CutCalls` of the planner entry the current call runs in; unset outside one.
+current_cut_calls: ContextVar[CutCalls | None] = ContextVar("cut_calls", default=None)
 
 
 async def _call_within_entry(
-    surface: ToolSurface, *, tool: ToolId, arguments: Mapping[str, object]
+    surface: ToolSurface,
+    *,
+    tool: ToolId,
+    arguments: Mapping[str, object],
+    keep_when_cut: bool = False,
 ) -> ToolCallResult:
     """Call `tool` on `surface`, cut off when the planner entry it serves needs the time.
 
@@ -1445,6 +1726,11 @@ async def _call_within_entry(
     `call_timeout_s`, caps it as everywhere else. With no time left the call is
     not issued. Outside an entry it takes the row's timeout alone.
 
+    With `keep_when_cut` and an entry holding `current_cut_calls`, a cut call
+    keeps running there, and a later call with the same `tool` and
+    `arguments` waits on it within the time then left. A kept call that has
+    answered by then serves that answer even with no time left.
+
     Raises:
         ToolSurfaceUnavailableError: If the call did not complete, including
             one cut off for, or never issued for lack of, the entry's time.
@@ -1452,17 +1738,95 @@ async def _call_within_entry(
     time_left = discovery_time_left()
     if time_left is None:
         return await surface.call_tool(tool=tool, arguments=arguments)
+    cut_calls = current_cut_calls.get() if keep_when_cut else None
+    if cut_calls is None:
+        if time_left <= 0:
+            raise _no_time_left(tool)
+        try:
+            async with asyncio.timeout(time_left):
+                return await surface.call_tool(tool=tool, arguments=arguments)
+        except TimeoutError as exc:
+            raise _cut_off(tool, time_left) from exc
+
+    key = rfc8785.dumps({"tool": tool.name, "arguments": dict(arguments)})
+    task = cut_calls.take(key)
+    if task is not None and task.done():
+        return task.result()
     if time_left <= 0:
-        raise ToolSurfaceUnavailableError(
-            f"{tool.name!r} was not called: the planner entry has no time left for it"
-        )
+        if task is not None:
+            cut_calls.keep(key, task)
+        raise _no_time_left(tool)
+    if task is None:
+        task = asyncio.ensure_future(surface.call_tool(tool=tool, arguments=arguments))
+    # Held while awaited, so a cut or a cancelled caller leaves it for the
+    # entry's `CutCalls.close`; a finished call is served or raised here.
+    cut_calls.keep(key, task)
     try:
         async with asyncio.timeout(time_left):
-            return await surface.call_tool(tool=tool, arguments=arguments)
+            return await asyncio.shield(task)
     except TimeoutError as exc:
-        raise ToolSurfaceUnavailableError(
-            f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left"
-        ) from exc
+        raise _cut_off(tool, time_left) from exc
+    finally:
+        if task.done():
+            cut_calls.release(key, task)
+
+
+class NoTimeLeftError(ToolSurfaceUnavailableError):
+    """A call `_call_within_entry` never issued, the planner entry having no time left for it."""
+
+
+def _no_time_left(tool: ToolId) -> NoTimeLeftError:
+    return NoTimeLeftError(
+        f"{tool.name!r} was not called: the planner entry has no time left for it"
+    )
+
+
+def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
+    return ToolSurfaceUnavailableError(
+        f"{tool.name!r} did not answer in the {time_left:.0f} s the planner entry had left"
+    )
+
+
+class ResolvedAnswers:
+    """The `resolve_definition` answers one translation has had, by arguments.
+
+    `translator.tool.build_translate`'s translation opens one
+    (`resolving_once`), so the group rewrite (`name_pinned_groups`) and
+    discovery after it read a pin's identity off one call. An answer is kept
+    whatever it says, a refusal included; a call that did not complete is
+    not kept, so the next asks again. Concurrent callers with the same
+    arguments wait on the first.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[bytes, ToolCallResult] = {}
+        self._locks: dict[bytes, asyncio.Lock] = {}
+
+    async def answer(
+        self, key: bytes, call: Callable[[], Awaitable[ToolCallResult]]
+    ) -> ToolCallResult:
+        """The answer kept under `key`, or `call`'s, kept once it completes."""
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            if key not in self._answers:
+                self._answers[key] = await call()
+            return self._answers[key]
+
+
+# The `ResolvedAnswers` of the translation the current call runs in; unset outside one.
+current_resolved_answers: ContextVar[ResolvedAnswers | None] = ContextVar(
+    "resolved_answers", default=None
+)
+
+
+@contextmanager
+def resolving_once() -> Iterator[ResolvedAnswers]:
+    """Serve each identity `resolve_definition` is asked for once, inside the block."""
+    answers = ResolvedAnswers()
+    token = current_resolved_answers.set(answers)
+    try:
+        yield answers
+    finally:
+        current_resolved_answers.reset(token)
 
 
 async def resolve_definition(
@@ -1474,12 +1838,17 @@ async def resolve_definition(
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
 
+    Inside `resolving_once` an identity already answered is served that
+    answer (`ResolvedAnswers`).
+
     `groups`, the sets a role's places were asked for as, are posted beside
     the identity (`compiler.sources.wire_groups`), so Search names them again.
-    Search keeps a posted set only when it names a graph node whose members
-    are the identity's places on that role (dfo-apis
-    `resubmit_request.resubmit_named_groups`). A set with no node, such as
-    the G7, is dropped: its places still bind, and its name is lost.
+    Search keeps a posted set when the role binds the one party the dataset
+    publishes as its total, and answers with that `total`; otherwise only
+    when it names a graph node whose members are the identity's places on
+    that role (dfo-apis `resubmit_request.resubmit_named_groups`). A
+    members-bound set with no node, such as the G7 read as its members, is
+    dropped: its places still bind, and its name is lost.
 
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
@@ -1493,10 +1862,22 @@ async def resolve_definition(
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
     if groups:
         arguments["entity_groups"] = wire_groups(groups)
+
+    def call() -> Awaitable[ToolCallResult]:
+        return _call_within_entry(
+            surface, tool=RESOLVE_DEFINITION, arguments=arguments, keep_when_cut=True
+        )
+
+    answers = current_resolved_answers.get()
     try:
-        answer = await _call_within_entry(surface, tool=RESOLVE_DEFINITION, arguments=arguments)
+        if answers is None:
+            answer = await call()
+        else:
+            answer = await answers.answer(rfc8785.dumps(arguments), call)
     except ToolSurfaceUnavailableError as exc:
-        raise DefinitionNotResolvedError(str(exc), retryable=True) from exc
+        raise DefinitionNotResolvedError(
+            str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
+        ) from exc
     if answer.is_error:
         refusal = answer.structured_content or {}
         if refusal.get("retry_mode") == "retry_after_delay":
@@ -1575,146 +1956,6 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
     return spec
 
 
-def _copy_fault(exc: PartNotResolvedError) -> str:
-    """What Search answered for a seed's copy over a period, when it is not that dataset."""
-    if exc.fault is PartFault.ANOTHER_DATASET:
-        named = f" ({exc.answered})" if exc.answered else ""
-        return f"it resolves the period to another dataset{named}"
-    if exc.fault is PartFault.NO_DEFINITION:
-        return "its answer carries no definition to retrieve"
-    reason = _no_data_reason(exc.part)
-    if reason is not None:
-        return f"it finds no data ({reason})"
-    return f"it answers {exc.part.get('status')!r}"
-
-
-def _no_data_reason(part: Mapping[str, Any]) -> str | None:
-    """The reason code of a `no_data` part, `None` for any other part or one stating none."""
-    no_data = part.get("no_data")
-    if part.get("status") != DiscoveryStatus.NO_DATA.value or not isinstance(no_data, Mapping):
-        return None
-    reason = no_data.get("reason")
-    return reason if isinstance(reason, str) else None
-
-
-class _FreshSearch(Enum):
-    """A pin reader's answer that only a fresh `search` can source the requirement.
-
-    The readers after it would post an identity Search has refused, so
-    `_source_from_resolve_pin` skips them.
-    """
-
-    NEEDED = "needed"
-
-
-async def _seeded_source(
-    tool_context: ToolContext,
-    *,
-    plan: Plan,
-    requirement: DatasetRequirement,
-    surface: ToolSurface,
-) -> SelectedSource | dict[str, object] | _FreshSearch | None:
-    """The source of the dataset the user handed over from Search that `requirement` pins.
-
-    `None` when its pin names none (`planner.plan.seeded_sources`). A seed
-    is returned as the `seed` node read it from Search.
-
-    A copy of a seed over another window (`SeededSource.windowed_from`, which
-    `planner.agent.propose_plan` pins) is recorded with its identity and the
-    seed's sentence as a name, and no fact about its own period. Search
-    states those: the identity is resolved here through data-mcp
-    (`resolve_definition`), which stores its definition for the plan's
-    `get_data`, and the whole source is read from Search's part
-    (`resolved_spec`, `compiler.sources.source_from_spec_block`), so its
-    sentence, coverage and member counts are the ones Search states for that
-    period. Nothing is written back to session state, so every call
-    asks Search again.
-
-    A copy that cannot be read that way is the problem returned, naming the
-    dataset and the period. When data-mcp or Search could not be reached it
-    is `SURFACE_UNAVAILABLE` with no `action`, which the translator refers
-    back as `discovery_unavailable`, since the same plan can succeed later.
-    Every other answer is final for this period, so the problem is
-    `SEARCH_REFUSED` with a `return_to_planner` action: `no_data` when Search
-    finds no data for the period, recorded with Search's reason code so the
-    referral carries it; `requirement_unmeetable` when Search refuses the
-    identity, answers it with anything but that one dataset, or answers with
-    a block that is not usable as a source, since the dataset the
-    requirement is pinned to cannot serve its period and what to change is
-    the user's to choose.
-
-    Search refusing the copy `open_role_unavailable` is the exception. The
-    identity holds open a role the StatVars it elects do not declare, so
-    every resolve of it refuses the same way, the copy on record
-    (`_recorded_source`) included. That answer is `_FreshSearch.NEEDED`,
-    and the fresh `search` asks for the role again when the requirement's
-    `across` names a side of a flow (`_open_roles`).
-    """
-    seeded = seeded_source(seeded_sources(tool_context.state), requirement.source_spec_id)
-    if seeded is None:
-        return None
-    source = seeded.source
-    spec_id = source.spec_id
-    if seeded.windowed_from is None or source.identity is None:
-        return source
-    window = source.identity.get("requested_window")
-    window = window if isinstance(window, Mapping) else {}
-    start, end = window.get("start_year"), window.get("end_year")
-    years = f"from {start} on" if end is None else f"over {start} to {end}"
-    asked = f'"{source.sentence}" {years}'
-    kind = ReferralKind.REQUIREMENT_UNMEETABLE
-    no_data_reason: str | None = None
-    try:
-        part = await resolve_definition(
-            surface, spec_id=spec_id, identity=source.identity, groups=source.groups
-        )
-        return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
-    except DefinitionNotResolvedError as exc:
-        if exc.retryable:
-            return problem(
-                ProblemCode.SURFACE_UNAVAILABLE,
-                f"Search could not be asked for {asked}: {exc}",
-                outcome=Outcome.REFUSED,
-            )
-        if exc.code == ToolErrorCode.OPEN_ROLE_UNAVAILABLE:
-            return _FreshSearch.NEEDED
-        if not exc.refused:
-            fault = "it returns nothing"
-        else:
-            fault = f"it refuses the period ({exc.code})" if exc.code else "it refuses the period"
-    except PartNotResolvedError as exc:
-        fault = _copy_fault(exc)
-        if exc.part.get("status") == DiscoveryStatus.NO_DATA.value:
-            kind = ReferralKind.NO_DATA
-            no_data_reason = _no_data_reason(exc.part)
-    except ValueError as exc:
-        fault = f"its answer cannot be read ({exc})"
-    message = f"Search finds no single dataset for {asked}: {fault}."
-    if kind is ReferralKind.NO_DATA:
-        async with discovery_lock(tool_context.state):
-            log = load_log(tool_context.state)
-            log = log.with_record(
-                DiscoveryRecord(
-                    revision=plan_revision(plan),
-                    tool="pin",
-                    requirement_id=requirement.id,
-                    requirement_key=requirement_revision(requirement),
-                    status=DiscoveryStatus.NO_DATA,
-                    detail=message,
-                    reason=no_data_reason,
-                    variable_sent=requirement.measure,
-                )
-            )
-            save_log(tool_context.state, log)
-    return _referred_answer(
-        requirement,
-        kind=kind,
-        code=ProblemCode.SEARCH_REFUSED,
-        message=message,
-        detail={"spec_id": spec_id, "seed": seeded.windowed_from},
-    )
-
-
 async def _recorded_source(
     tool_context: ToolContext, *, requirement: DatasetRequirement, surface: ToolSurface
 ) -> SelectedSource | dict[str, object] | None:
@@ -1731,36 +1972,47 @@ async def _recorded_source(
     Search's part (`resolved_spec`), so its sentence, coverage and member
     counts are the ones Search states for that period.
 
-    `None` when no such identity is on record, when it names a dataset the
-    turn dropped (`planner.plan.names_dropped_seed`), or when Search does
-    not answer it with that one dataset: the caller then searches as for a
-    pin with nothing on record. When data-mcp or Search could not be
-    reached it is `SURFACE_UNAVAILABLE` with no `action`, as for a seed's
-    copy (`_seeded_source`).
+    `None` when no such identity is on record, or when Search does not
+    answer it with that one dataset: the caller then searches as for a pin
+    with nothing on record. When data-mcp or Search could not be reached it
+    is `SURFACE_UNAVAILABLE` with no `action`, which the translator refers
+    back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = windowed_pins(tool_context.state).get(spec_id) or recorded_identity(spec_id)
+    recorded = (
+        windowed_pins(tool_context.state).get(spec_id)
+        or recorded_identity(spec_id)
+        or load_log(tool_context.state).recorded_alternative(spec_id)
+    )
     identity = recorded.identity if recorded is not None else None
     if (
         recorded is None
         or identity is None
         or not retrieves_period(identity.get("requested_window"), requirement)
-        or names_dropped_seed(tool_context.state, spec_id=spec_id, identity=identity)
     ):
         return None
     try:
         part = await resolve_definition(
             surface, spec_id=spec_id, identity=identity, groups=recorded.groups
         )
-        return source_from_spec_block(resolved_spec(part, spec_id=spec_id))
+        resolved_spec(part, spec_id=spec_id)
+        source = outcome_from_envelope({"parts": [part]}).sources[0]
+        # Resolving an immutable pin may restate the canonical source label.
+        # Keep the original aliases/exclusions that produced this identity.
+        return source.model_copy(
+            update={
+                "resolved_sources": source.resolved_sources
+                + tuple(getattr(recorded, "resolved_sources", ()))
+            }
+        )
     except DefinitionNotResolvedError as exc:
         if not exc.retryable:
             return None
-        return problem(
-            ProblemCode.SURFACE_UNAVAILABLE,
+        return _unavailable(
+            requirement,
             f"Search could not be asked for {spec_id!r} over {requirement.period.start} to "
             f"{requirement.period.end}: {exc}",
-            outcome=Outcome.REFUSED,
+            exc.not_issued,
         )
     except (PartNotResolvedError, ValueError):
         return None
@@ -1778,10 +2030,9 @@ def _resolve_pin_block(
     which one the search that returned it was about. `None` too when the
     search part that returned it carries a code in `BLOCKING_WARNING_CODES`,
     since one means the search dropped part of the ask and answered a
-    narrower one, and when no block was carried forward for it (a clarify
-    re-entry, which re-searches nothing). An earlier turn's source reads the
-    block that turn stored (`PinSource.spec_block`). The compiler checks the
-    reused source's entities and window against the requirement.
+    narrower one, and when no block was carried forward for it. An earlier
+    turn's source reads the block that turn stored (`PinSource.spec_block`).
+    The compiler checks the reused source's entities and window against the requirement.
     """
     pin = requirement.source_spec_id
     if pin is None:
@@ -1825,15 +2076,7 @@ async def _source_from_resolve_pin(
 ) -> dict[str, object] | None:
     """Build and record `requirement`'s source from what this turn already holds, no `search` call.
 
-    A pin naming a dataset the user handed over from Search, or the copy of
-    one over the requirement's own period that `propose_plan` pinned
-    instead, is honoured from that dataset's source (`_seeded_source`), on a
-    plan of any size; a seed's identity already carries the requirement's
-    period, or every year with data when its window is the user's own. A
-    problem `_seeded_source` met is returned as it is. Its
-    `_FreshSearch.NEEDED` returns `None` before the readers below run.
-
-    Otherwise the source is the pinned dataset's block as the planner was
+    The source is the pinned dataset's block as the planner was
     shown it (`_block_source`), when it parses as a source whose
     `coverage_kind` is `exact` and whose `coverage_window` equals
     `requirement.period`. That check exists because a search's identity
@@ -1850,55 +2093,264 @@ async def _source_from_resolve_pin(
     nothing on record, which `search` itself must confirm.
 
     A requirement whose `across` asks for every member of a side of a flow
-    (`_open_roles`) takes the source only when it leaves that side open
-    (`compiler.evidence.open_axis_for`). Otherwise this returns `None` too,
+    (`requirement_open_roles`) takes the source only when it leaves that side open
+    (`compiler.evidence.open_axis_for`). Otherwise the source is recorded
+    as set aside (`DiscoveryLog.set_aside_pin`) and this returns `None` too,
     and the fresh `search` asks for the side as an open role, which elects
-    a source broken down by it where one exists.
+    a source broken down by it where one exists. A source that search finds
+    in the pin's place and that drops the set-aside source's scope is
+    withheld from the referral (`DiscoveryLog.scope_kept`).
+
+    When none of the readers above holds the pin's source, the source a
+    search recorded for its `spec_id` (`DiscoveryLog.recorded_source`) is
+    read for that check alone, so a pin of a source the translator found
+    itself is set aside too. It never honours the pin: its identity carries
+    the window of the search that found it.
     """
-    source = await _seeded_source(tool_context, plan=plan, requirement=requirement, surface=surface)
-    if source is _FreshSearch.NEEDED:
+    read = await _pin_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    if read is None or isinstance(read, dict):
+        return read
+    source, honoured = read
+    holds_closed = _holds_closed(requirement, source)
+    if not honoured and not holds_closed:
         return None
-    if source is None:
-        source = _block_source(tool_context, plan=plan, requirement=requirement)
-    if source is None:
-        source = await _recorded_source(tool_context, requirement=requirement, surface=surface)
-    if source is None:
+    if holds_closed:
+        set_aside = DiscoveryRecord(
+            revision=plan_revision(plan),
+            tool="pin",
+            requirement_id=requirement_id,
+            requirement_key=requirement_revision(requirement),
+            spec_ids=(source.spec_id,),
+            variable_sent=requirement.measure,
+            detail=f"set aside: it holds closed the {requirement.across!r} side `across` asks for",
+        )
+        async with discovery_lock(tool_context.state):
+            log = load_log(tool_context.state)
+            save_log(tool_context.state, log.with_record(set_aside, (source,)))
         return None
-    if isinstance(source, dict):
-        return source
-    across = requirement.across
-    if (
-        across is not None
-        and _open_roles(requirement)
-        and isinstance(open_axis_for(across, source.open_entity_axes), str)
-    ):
-        return None
-    variable = requirement.measure
-    source = source.model_copy(update={"searched_as": variable})
-    revision = plan_revision(plan)
-    key = requirement_revision(requirement)
-    record = DiscoveryRecord(
-        revision=revision,
-        tool="pin",
-        requirement_id=requirement_id,
-        requirement_key=key,
-        status=DiscoveryStatus.DEFINITE,
-        spec_ids=(source.spec_id,),
-        variable_sent=variable,
+    log = await _record_honoured_pin(
+        tool_context, plan=plan, requirement=requirement, source=source
     )
-    async with discovery_lock(tool_context.state):
-        log = load_log(tool_context.state)
-        log = log.with_record(record, (source,))
-        save_log(tool_context.state, log)
     return ok(
         requirement_id=requirement_id,
         status=DiscoveryStatus.DEFINITE.value,
-        searched_as=variable,
+        searched_as=requirement.measure,
         sources=[compact_source(source, selectable=True)],
         detail=None,
         warnings=[],
-        budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(revision),
+        budget_remaining=DISCOVERY_CALL_BUDGET - log.calls(plan_revision(plan)),
     )
+
+
+async def _pin_source(
+    tool_context: ToolContext,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    surface: ToolSurface,
+) -> tuple[SelectedSource, bool] | dict[str, object] | None:
+    """The source `requirement`'s pin names, and whether it is honoured, read as `_source_from_resolve_pin` describes.
+
+    The source is stamped with the requirement's `measure` as `searched_as`.
+    Honoured means the block or identity reader holds it over the
+    requirement's period. A source read only off the discovery log
+    (`DiscoveryLog.recorded_source`) is not honoured, and serves the scope
+    check alone. `None` when no reader holds a source; a problem a reader
+    met is returned as it is.
+    """
+    source: SelectedSource | dict[str, object] | None = _block_source(
+        tool_context, plan=plan, requirement=requirement
+    )
+    if source is None:
+        source = await _recorded_source(tool_context, requirement=requirement, surface=surface)
+    if isinstance(source, dict):
+        return source
+    honoured = source is not None
+    if source is None and requirement.source_spec_id is not None:
+        source = load_log(tool_context.state).recorded_source(requirement.source_spec_id)
+    if source is None:
+        return None
+    if requirement.source is not None and not source_requirement_matches(
+        requirement=requirement, source=source
+    ):
+        # Refresh an unconfirmed source constraint while retaining the pin's
+        # scope, so a replacement cannot silently widen a closed group.
+        honoured = False
+    return source.model_copy(update={"searched_as": requirement.measure}), honoured
+
+
+def _holds_closed(requirement: DatasetRequirement, source: SelectedSource) -> bool:
+    """Whether `source` holds closed the side of a flow `requirement`'s `across` asks every member of."""
+    across = requirement.across
+    return (
+        across is not None
+        and bool(requirement_open_roles(requirement))
+        and isinstance(open_axis_for(across, source.open_entity_axes), str)
+    )
+
+
+async def _record_honoured_pin(
+    tool_context: ToolContext,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    source: SelectedSource,
+) -> DiscoveryLog:
+    """Record `source` as the `definite` source of `requirement`'s pin in `plan`, no `search` spent."""
+    record = DiscoveryRecord(
+        revision=plan_revision(plan),
+        tool="pin",
+        requirement_id=requirement.id,
+        requirement_key=requirement_revision(requirement),
+        status=DiscoveryStatus.DEFINITE,
+        spec_ids=(source.spec_id,),
+        variable_sent=requirement.measure,
+    )
+    async with discovery_lock(tool_context.state):
+        log = load_log(tool_context.state).with_record(record, (source,))
+        save_log(tool_context.state, log)
+    return log
+
+
+class NamedGroup(NamedTuple):
+    """A group `name_pinned_groups` named on a requirement in place of its `across`."""
+
+    requirement_id: str
+    entity: Entity
+    across: str
+
+
+async def name_pinned_groups(
+    tool_context: ToolContext, *, surface: ToolSurface
+) -> tuple[NamedGroup, ...]:
+    """Name the group a pin holds a requirement's `across` side to, in place of that `across`, on the draft.
+
+    A dataset requirement whose `across` asks for every member of a side of
+    a flow (`requirement_open_roles`), and whose pinned source holds that side closed
+    to one group (`translator.referral.closing_group`), names the group in
+    `entities` under the side's `PARTY_ROLES` word and drops `across`. The
+    pin stays. A source a search could find in the pin's place either leaves
+    the side open, dropping the group, or holds it to the same group
+    (`translator.referral.dropped_scope`), so no search is spent to learn
+    that. A named group is read as the pinned source binds it, as its
+    members or as its published total (`compiler.evidence.named_members`),
+    and every reader sums the side away, so either reading gives the
+    group's figure. A side held to named
+    members alone is left as it is: widening it changes the scope, which the
+    planner decides (`DiscoveryLog.scope_kept`).
+
+    The side turns from open to named, so a requirement is rewritten only
+    when every requirement reading it sums that side away
+    (`_summed_by_every_reader`), and only when the plan still validates with
+    it rewritten: a decision the requirement cites may fix its `across` or
+    `entities`. A requirement left as it is, with the reason logged, takes
+    discovery's set-aside path and the referral that withholds the pin.
+
+    The draft is saved in place, at its version, so the plan the user
+    approves names the group. A pin whose source is honoured is recorded
+    for the rewritten requirement (`_record_honoured_pin`), so discovery
+    reads nothing again. Returns each group named, in the plan's order;
+    empty when there is no draft or nothing to name.
+    """
+    plan = current_draft(tool_context)
+    if isinstance(plan, dict):
+        return ()
+    named: list[NamedGroup] = []
+    honoured: list[tuple[DatasetRequirement, SelectedSource]] = []
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        found = await _group_named(
+            tool_context, plan=plan, requirement=requirement, surface=surface
+        )
+        if found is None:
+            continue
+        group, source = found
+        try:
+            plan, rewritten = _with_group_named(plan, requirement, group.entity)
+        except ValueError as exc:
+            logger.info(
+                "left %r with across %r: naming %r in its place does not validate: %s",
+                requirement.id,
+                group.across,
+                group.entity.name,
+                exc,
+            )
+            continue
+        named.append(group)
+        if source is not None:
+            honoured.append((rewritten, source))
+    if not named:
+        return ()
+    save_plan(tool_context.state, plan)
+    for requirement, source in honoured:
+        await _record_honoured_pin(tool_context, plan=plan, requirement=requirement, source=source)
+    return tuple(named)
+
+
+def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
+    """Whether every requirement reading `requirement_id` is an aggregate grouped by no entity.
+
+    Such an aggregate sums every role away, so it computes the same figure
+    whether a side is open or names a group's members. Any other reader
+    treats the two apart: an aggregate grouped by entity keeps a named side
+    per member where it summed an open one, and a rank, a share, a quotient,
+    a join or a filter keys or narrows by the side. True when nothing reads
+    `requirement_id`.
+    """
+    return all(
+        isinstance(reader, AggregateRequirement) and GroupBy.ENTITY not in reader.group_by
+        for reader in plan.evidence_requirements
+        if requirement_id in inputs_of(reader)
+    )
+
+
+def _with_group_named(
+    plan: Plan, requirement: DatasetRequirement, entity: Entity
+) -> tuple[Plan, DatasetRequirement]:
+    """`plan` with `requirement` naming `entity` in place of its `across`, and that requirement.
+
+    Raises:
+        ValueError: If the rewritten requirement or plan does not validate.
+    """
+    rewritten = DatasetRequirement.model_validate(
+        {**requirement.model_dump(), "entities": [*requirement.entities, entity], "across": None}
+    )
+    requirements = [
+        rewritten if item.id == requirement.id else item for item in plan.evidence_requirements
+    ]
+    rebuilt = Plan.model_validate(
+        {**plan.model_dump(), "evidence_requirements": [item.model_dump() for item in requirements]}
+    )
+    return rebuilt, rewritten
+
+
+async def _group_named(
+    tool_context: ToolContext,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    surface: ToolSurface,
+) -> tuple[NamedGroup, SelectedSource | None] | None:
+    """The group `requirement`'s pin holds its `across` side to, and the pin's source when it is honoured.
+
+    `None` when a requirement reading it keeps the side apart
+    (`_summed_by_every_reader`), or when the pin's source cannot be read,
+    leaves the side open, or holds it to anything but one group.
+    """
+    across = requirement.across
+    role = party_role(across) if across is not None else None
+    if across is None or role is None or not _summed_by_every_reader(plan, requirement.id):
+        return None
+    read = await _pin_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    if read is None or isinstance(read, dict):
+        return None
+    source, honoured = read
+    label = closing_group(source, across) if _holds_closed(requirement, source) else None
+    if label is None:
+        return None
+    group = NamedGroup(requirement.id, Entity(name=label, role=role), across)
+    return group, source if honoured else None
 
 
 async def _discovery_start(
@@ -1966,6 +2418,41 @@ def _referred_answer(
     )
 
 
+def _unavailable(
+    requirement: DatasetRequirement,
+    message: str,
+    not_issued: bool,
+    *,
+    detail: dict[str, JsonValue] | None = None,
+) -> dict[str, object]:
+    """The problem for a data-service call about `requirement` that did not complete.
+
+    A call the planner entry had no time left to issue (`not_issued`)
+    refers the requirement back as `discovery_unavailable` marked
+    `not_issued`, which the planner seam ends the entry on as its deadline.
+    Any other failure names no `action`, and `translator.mechanical` refers
+    it back as `discovery_unavailable` unmarked.
+    """
+    action = None
+    if not_issued:
+        action = Action(
+            call="return_to_planner",
+            arguments={
+                "kind": ReferralKind.DISCOVERY_UNAVAILABLE.value,
+                "requirement_id": requirement.id,
+                "reason": message,
+                "not_issued": True,
+            },
+        )
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        message,
+        outcome=Outcome.REFUSED,
+        action=action,
+        detail=detail,
+    )
+
+
 def _ask_not_understood(
     requirement: DatasetRequirement,
     part: Mapping[str, object],
@@ -1987,28 +2474,6 @@ def _ask_not_understood(
             "the requirement states, so it is not selectable."
         ),
         detail={"dropped": dropped, "warnings": warnings, "budget_remaining": budget_remaining},
-    )
-
-
-def _answered_with_dropped_seed(
-    requirement: DatasetRequirement, *, left_out: Sequence[SelectedSource], budget_remaining: int
-) -> dict[str, object]:
-    """The refusal for an answer offering `left_out`, datasets the turn dropped."""
-    named = ", ".join(f"{source.sentence!r} ({source.spec_id})" for source in left_out)
-    return _referred_answer(
-        requirement,
-        kind=ReferralKind.SEED_DROPPED,
-        code=ProblemCode.SEED_DROPPED,
-        message=(
-            f"search answered {requirement.id!r} with a dataset this turn dropped: {named}. "
-            "The user is told that this plan leaves it out, why, and to search for it "
-            "again, so it is not a source in this turn. Remove this requirement and what "
-            "reads it, and plan the rest of the question."
-        ),
-        detail={
-            "spec_ids": [source.spec_id for source in left_out],
-            "budget_remaining": budget_remaining,
-        },
     )
 
 
@@ -2075,26 +2540,33 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         try:
             answer = await _call_within_entry(surface, tool=SEARCH, arguments={"parts": [part]})
         except ToolSurfaceUnavailableError as exc:
-            # A timeout still spends the call: recorded, so it counts
-            # against the budget exactly like an answer, and marked
-            # `transport_failed` so it can never be selected. The reservation
-            # this call made is released in the same locked section as that
-            # record's commit, inside `_record_search`.
-            log = await _finish(
-                DiscoveryRecord(
-                    revision=revision,
-                    tool="search",
-                    requirement_id=requirement_id,
-                    requirement_key=key,
-                    variable_sent=variable,
-                    detail=str(exc),
-                    transport_failed=True,
+            if isinstance(exc, NoTimeLeftError):
+                # Never issued, so nothing is spent: no record, and the
+                # reservation is released alone, under the lock.
+                async with discovery_lock(tool_context.state):
+                    reservations.release(revision, requirement_id)
+                    log = load_log(tool_context.state)
+            else:
+                # A timeout still spends the call: recorded, so it counts
+                # against the budget exactly like an answer, and marked
+                # `transport_failed` so it can never be selected. The
+                # reservation this call made is released in the same locked
+                # section as that record's commit, inside `_record_search`.
+                log = await _finish(
+                    DiscoveryRecord(
+                        revision=revision,
+                        tool="search",
+                        requirement_id=requirement_id,
+                        requirement_key=key,
+                        variable_sent=variable,
+                        detail=str(exc),
+                        transport_failed=True,
+                    )
                 )
-            )
-            return problem(
-                ProblemCode.SURFACE_UNAVAILABLE,
+            return _unavailable(
+                requirement,
                 str(exc),
-                outcome=Outcome.REFUSED,
+                isinstance(exc, NoTimeLeftError),
                 detail={"budget_remaining": DISCOVERY_CALL_BUDGET - log.calls(revision)},
             )
         except BaseException:
@@ -2150,16 +2622,6 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         blocked_by = tuple(
             dict.fromkeys(w.code for w in outcome.warnings if w.code in BLOCKING_WARNING_CODES)
         )
-        # Each source the answer offers for the requirement that is a dataset
-        # the turn dropped. A `no_data` answer's nearest series are never sources.
-        left_out = [
-            source
-            for source in sources
-            if outcome.status in _PIN_HONOURING
-            and names_dropped_seed(
-                tool_context.state, spec_id=source.spec_id, identity=source.identity
-            )
-        ]
         log = await _finish(
             record.model_copy(
                 update={
@@ -2167,8 +2629,9 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                     "spec_ids": tuple(s.spec_id for s in sources),
                     "detail": outcome.detail,
                     "reason": outcome.reason,
+                    "ambiguous_sources": outcome.ambiguous_sources,
                     "warnings": outcome.warnings,
-                    "blocked_by": (*blocked_by, *((SEED_DROPPED_BLOCK,) if left_out else ())),
+                    "blocked_by": blocked_by,
                 }
             ),
             sources,
@@ -2176,19 +2639,13 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         warnings = [w.model_dump(mode="json", exclude_none=True) for w in outcome.warnings]
         budget_remaining = DISCOVERY_CALL_BUDGET - log.calls(revision)
 
-        if blocked_by or left_out:
-            return (
-                _ask_not_understood(
-                    requirement,
-                    part,
-                    blocked_by=blocked_by,
-                    warnings=warnings,
-                    budget_remaining=budget_remaining,
-                )
-                if blocked_by
-                else _answered_with_dropped_seed(
-                    requirement, left_out=left_out, budget_remaining=budget_remaining
-                )
+        if blocked_by:
+            return _ask_not_understood(
+                requirement,
+                part,
+                blocked_by=blocked_by,
+                warnings=warnings,
+                budget_remaining=budget_remaining,
             )
 
         # A pin is only honoured from an answer a pin may be taken from, the
@@ -2212,7 +2669,11 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         # stopping the loop.
         action: Action | None = None
         if not pin_honoured:
-            hint_kind = _HINT_KIND.get(outcome.status)
+            hint_kind = (
+                ReferralKind.SOURCE_NAME_AMBIGUOUS
+                if outcome.ambiguous_sources
+                else _HINT_KIND.get(outcome.status)
+            )
             if hint_kind is not None:
                 reason = f"discover_source answered {outcome.status.value} for {requirement_id!r}"
                 if outcome.detail:
@@ -2234,6 +2695,19 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             # two-plus sources are the real alternative worth naming when
             # this action replaces the `source_ambiguous` hint.
             instead = f" This search found {len(honoured)} source(s) instead." if honoured else ""
+            scope = log.scope_kept(requirement, [s for s in sources if s.spec_id in honoured])
+            if scope.withheld:
+                instead += (
+                    f" {len(scope.withheld)} of them drop the scope the pinned source held and "
+                    "are withheld; "
+                    + (
+                        f"{len(scope.offered)} keep it."
+                        if scope.offered
+                        else f"none keeps it, so {scope.repair}."
+                        if scope.repair
+                        else "none keeps it, so ask the user how to proceed."
+                    )
+                )
             action = Action(
                 call="return_to_planner",
                 arguments={
@@ -2261,6 +2735,9 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                 for s in sources
             ],
             "detail": outcome.detail,
+            "ambiguous_sources": [
+                group.model_dump(mode="json") for group in outcome.ambiguous_sources
+            ],
             "warnings": warnings,
             "budget_remaining": budget_remaining,
         }

@@ -238,7 +238,9 @@ class BreakdownDimension(TitlelessEnum):
 class Breakdown(StrictModel):
     """One classification a retrieval keeps, its codes rolled up to one level."""
 
-    dimension: BreakdownDimension = Field(description="The classification.")
+    dimension: BreakdownDimension = Field(
+        description="The classification. `sector` is the OECD CRS purpose codes."
+    )
     level: int = Field(
         ge=0,
         description="The level codes roll up to: 0 is the top (the ten sector groups).",
@@ -520,7 +522,12 @@ class PlaceLevel(TaggedModel):
         description=(
             "The one level of place to keep, by Data Commons type: 'Country', 'Continent', "
             "'AdministrativeArea1' (states, provinces), 'AdministrativeArea2' (districts, "
-            "counties), 'City', or 'EurostatNUTS1' to 'EurostatNUTS3'."
+            "counties), 'City', or 'EurostatNUTS1' to 'EurostatNUTS3'. A requirement that "
+            "names no place retrieves every place with data at every level: the world, UN "
+            "regions ('UNGeoRegion'), World Bank groups ('ProvisionalNode'), countries and "
+            "their subdivisions. Regions and groups contain one another, so their types name "
+            "no level. A place is at a level when this type is one of its types, except that "
+            "a place carrying a Eurostat NUTS type is not a country."
         )
     )
 
@@ -557,6 +564,7 @@ class EvidenceIssueCode(TitlelessEnum):
     ENTITY_ROLE_AMBIGUOUS = "entity_role_ambiguous"
     ENTITY_ROLE_MISMATCH = "entity_role_mismatch"
     ENTITY_ROLE_UNVERIFIED = "entity_role_unverified"
+    GROUP_READ_AS_TOTAL = "group_read_as_total"
     OPEN_AXIS_UNRESOLVED = "open_axis_unresolved"
     WINDOW_SHORT = "window_short"
     PERIOD_UNVERIFIED = "period_unverified"
@@ -602,3 +610,26 @@ class EvidenceIssue(StrictModel):
         default=None,
         description="What was required, when this finding compares an expectation to an observation.",
     )
+
+
+class ResolvedSourceMention(StrictModel):
+    """The source constraint Search resolved for the part producing a source."""
+
+    text: str | None = None
+    ref: str | None = None
+    polarity: Literal["include", "exclude"] = "include"
+
+
+class SourceNameCandidate(StrictModel):
+    """An admitted source reference offered for ambiguous source wording."""
+
+    ref: str
+    label: str
+    kind: str
+
+
+class AmbiguousSourceReading(StrictModel):
+    """One ambiguous wording and the source references Search offers for it."""
+
+    text: str
+    candidates: tuple[SourceNameCandidate, ...]

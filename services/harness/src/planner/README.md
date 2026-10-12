@@ -18,12 +18,12 @@ tests live in `services/harness/tests/planner/`.
 Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 `create_planner_agent()`:
 
-| Tool                | Behaviour                                                                                    |
-| ------------------- | -------------------------------------------------------------------------------------------- |
-| `adk_request_input` | Asks the user to choose among a referral's candidates, suspending the turn until they answer |
-| `propose_plan`      | Records a drafted plan as a `DRAFT`. Called again for every revision                         |
-| `reject_plan`       | Marks the current plan `REJECTED`, which blocks `submit_plan` until a new version            |
-| `submit_plan`       | Declares the current plan's compiled workflow ready for the user's answer                    |
+| Tool                | Behaviour                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `adk_request_input` | Asks the user to choose among a referral's candidates or a refusal's options, suspending the turn until they answer |
+| `propose_plan`      | Records a drafted plan as a `DRAFT`. Called again for every revision                                                |
+| `reject_plan`       | Marks the current plan `REJECTED`, which blocks `submit_plan` until a new version                                   |
+| `submit_plan`       | Declares the current plan's compiled workflow ready for the user's answer                                           |
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
@@ -46,11 +46,9 @@ passes the same surface translation discovers on. Without a surface, as the
 standalone eval agents build it, the planner has neither tool and the
 instruction says nothing about skills.
 
-The resolve envelope's `skills` field names the skills that apply to its
-results, by id and description, and the planner loads one when its
-description bears on the question. A question about DFO itself starts with
-`get_skill`, whose `skill_id` description names the one skill no search result
-carries, `dfo-faq`. Both tools answer with data-mcp's text, a refusal
+The planner loads a skill when its description bears on the question. A
+question about DFO itself starts with `get_skill`, whose `skill_id`
+description names the one skill no search result carries, `dfo-faq`. Both tools answer with data-mcp's text, a refusal
 included, so a deployment with no Skills API answers `capability_unavailable`
 and the planner drafts without the skill.
 
@@ -120,28 +118,61 @@ check; `resolved_by=user` is model-self-reported, so `Plan`'s own
 validators cannot verify it, having no session to read. `propose_plan`
 checks it instead, against what the user chose: every spec_id the user
 picked answering the planner's `adk_request_input` tool call (read from the
-session's event history, and not merely one it offered), and every dataset
-the user handed to Studio from Search (`planner.plan.seeded_sources`). A
+session's event history, and not merely one it offered). A
 `resolved_by=user` source pin naming anything else -- never offered, offered
 but not chosen, or offered with no answer on record yet -- is refused there,
 before a plan carrying it ever reaches this validator.
+`propose_plan` also refuses a `SumOfRequirement` adding two datasets unless
+it cites a decision resolved by `user` (`combination_unasked`): whether two
+datasets add up without counting a flow twice, as ODA loans count in both
+aid and debt flows, is the user's to settle. Tables of a provider's flows,
+the OECD and ONE aid tables whose provenance Search serves with account
+`provider` (`compiler.sources.PROVIDER_ACCOUNT`), are the exception: their
+skill says how they add up, so a sum of them needs no user decision. Its
+sides read one dataset, or only those tables, when every dataset
+requirement they read pins a source whose provenance states it: a
+block the planner was shown, or a source the translator's discovery
+recorded. The check reads the pins the planner wrote, before `propose_plan`
+moves a pin to its copy over the requirement's period. A `user` decision a
+`SumOfRequirement` cites needs the user's pick on a combination ask: the
+`combination_unasked` refusal's action carries the ask's options
+(`planner.agent.COMBINATION_OPTIONS`), Studio shows them with no free-text
+box, and the pick comes back as the option's id. A combination ask asks about
+the sum the `combination_unasked` refusal before it names in its `detail`:
+the requirement id and the datasets its sides read. Each refusal binds the
+first ask after it and no other, so a second ask with no new refusal before
+it asks about nothing. A dataset requirement whose dataset no pin states
+reads a dataset of its own, named `spec:<source_spec_id>` for a pin whose
+dataset the turn cannot read and `requirement:<id>:<revision>` for an
+unpinned requirement, where the revision is the
+`translator.discovery.requirement_revision()` hash of what it asks for. A pick
+over one unknown side settles nothing for a sum over another, nor for the same
+requirement id asking for something else. A sum over datasets that
+are not all tables of a provider's flows passes `combination_unasked` only when the
+user's latest pick for that requirement over those datasets is `add them`
+and the sum cites a `user` decision whose `chosen` is `add them`. Typed
+text, a skip, an answer to another question, or a pick for another sum or
+for the same sum over other datasets does not count. A Studio turn opens its
+own session, so a sum the amended plan already stated unchanged, over the
+same datasets and citing the same `user` decisions to add them, keeps its
+sum without a new ask, unless the user has answered any combination ask in
+the session, about this sum, another, or nothing, with anything but
+`add them`.
 
-A turn that starts from Search carries seeds: the datasets the user saw,
-each with the operations the question asked of it. The planner's brief lists
-them with their open entity axes, and the plan gives each its own dataset
-requirement pinned to the seed's spec_id. `propose_plan` moves that pin to
-the seed's identity over the requirement's own period
-(`_window_pins`, `data_mcp.definition_writes.windowed_identity`), so
-the plan retrieves the years it states, and records the copy beside the seed.
-One decision cannot fix a seed over two periods. When Search's answer for a
-seed's identity is not the seed's dataset, the turn drops it
-(`planner.plan.dropped_seeds`) and tells the user the plan leaves it out; `propose_plan` then refuses any plan that
-pins it or its copy, whoever the decision says resolved it, as
-`seed_dropped`, and checks an amended plan whole, since a patch carries
-forward what it does not name. `planner.plan.names_dropped_seed` is the one
-rule for which dataset that is, asked here of a pin and by the translator of
-a source; a seed the turn still holds is never read as dropped. Each requirement cites
-the decisions that fixed it
+While a `pinned_source_not_found` referral withholds the sources found in
+place of a pin, because they drop the pinned source's scope, `propose_plan`
+refuses the requirement unpinned with its `entities` and `across` unchanged
+(`source_not_offered`): the translator's fresh search would settle on a
+withheld source. The planner makes the referral's `repair` or asks the user.
+
+A pin's identity carries the years of the search that found it.
+`propose_plan` moves each pin whose identity is on record to that identity
+over the requirement's own period (`_window_pins`,
+`data_mcp.definition_writes.windowed_identity`), so the plan retrieves the
+years it states, and records the copy beside the original. One decision
+cannot fix a pin over two periods.
+
+Each requirement cites the decisions that fixed it
 in `decision_ids` and, if derived, names the requirements it reads: the
 requirements form a DAG, and a comparison is terminal: nothing may read one.
 Under `answer_mode="computed"`, every dataset requirement has to feed some
@@ -225,12 +256,12 @@ after review cannot be declared ready on the strength of the old look at it.
 version, revision and summary of whatever the current plan already is, and
 calling it again with the same version reports the same thing again. Approving
 the revision it reports, and running what an approved plan compiles to, is the
-harness graph's business.
+harness workflow's business.
 
 **The planner never writes `PENDING_APPROVAL`.** It writes `DRAFT` when it
 proposes and `REJECTED` when the user declines. The status that says a plan is
 ready to approve is the translator's alone, minted by `Plan.with_translation`,
-which refuses anything but a `DRAFT`; `APPROVED` is the harness graph's to
+which refuses anything but a `DRAFT`; `APPROVED` is the harness workflow's to
 write, once the user answers. ADK has no per-key owner for session state, so
 this is an invariant a test holds rather than the framework.
 
@@ -255,10 +286,10 @@ plan at version 1 instead. The wording of `question` plays no part in that
 choice, so a reworded question cannot be read as a new plan.
 
 **`question_fixed` holds the turn's question against a restart.**
-`create_planner_agent(..., question_fixed=True)` -- the harness graph's own
-seam builds the planner this way, since the graph derives and narrates a turn's
-`resolve_envelope`, `depth` and `question` before the planner ever runs, and a
-restart would silently swap the question out from under that state. Under it,
+`create_planner_agent(..., question_fixed=True)`. The harness's planner
+seam builds the planner this way, since the orchestrator's `plan` brief fixes
+a turn's `question` before the planner ever runs, and a restart would
+silently swap the question out from under the plan the workflow holds. Under it,
 `starts_new_plan` with a plan already recorded is refused with
 `question_fixed` rather than beginning a fresh plan, records nothing, and is
 how the model tells the harness the user's reply asks a different question:

@@ -32,9 +32,16 @@ class AgentSettings(BaseServiceSettings):
     (`harness.planner_seam.PlannerSeam.__call__`), wall-clock, from the
     call's start. A correction round inside the same entry shares it; a
     resume after a user answer gets a fresh one, since that is its own
-    `__call__`. 60s is a little under 3x the two measured LOW-thinking turns
-    this was checked against (20.9s, 24.4s), leaving room for a legitimate
-    referral-plus-correction entry.
+    `__call__`. 70s sets the time a discovery call inside the entry may
+    take against the services beneath it. That call gets the deadline less
+    `harness.planner_seam._NEXT_MODEL_CALL_MARGIN_S` (10s) less the
+    generations before it, about 6s for the first, so 54s, which is not
+    below dfo-apis' `request_timeout_s` (45s) for a search. A
+    `resolve_definition` re-reads a family's members, which dfo-apis allows
+    `resubmit_full_read_timeout_s` (90s), data-mcp `RESUBMIT_CALL_BUDGET_S`
+    (100s), and the harness capability row `call_timeout_s` (110s). One cut
+    at the entry's 54s keeps running for the entry's next proposal
+    (`translator.discovery.CutCalls`).
 
     `PLANNER_ENTRY_DEADLINE_SECONDS_SAMPLED` is the deadline an entry drawn
     for `THINKING_SAMPLE_RATE` sampling gets instead: a sampled turn runs at
@@ -43,8 +50,7 @@ class AgentSettings(BaseServiceSettings):
     refuse a turn for having been sampled rather than for taking too long.
     240s clears a measured default-thinking generation of 79.92s (20,348
     reasoning tokens) with room for a multi-generation entry (a referral plus
-    a correction round), the same margin `PLANNER_ENTRY_DEADLINE_SECONDS`
-    keeps over its own LOW-thinking measurements.
+    a correction round).
 
     `THINKING_SAMPLE_RATE` is the share of turns `harness.planner_seam.
     PlannerSeam` runs the planner at the model's default thinking level
@@ -53,7 +59,7 @@ class AgentSettings(BaseServiceSettings):
     """
 
     planner_model_name: str = _PINNED_AGENT_MODEL
-    planner_entry_deadline_seconds: float = 60.0
+    planner_entry_deadline_seconds: float = 70.0
     planner_entry_deadline_seconds_sampled: float = 240.0
     thinking_sample_rate: float = 0.05
 

@@ -1,9 +1,11 @@
 """The studio routes end-to-end over real HTTP, with scripted seams.
 
-Everything runs against a FastAPI app through httpx2's ASGI transport -- real
-routing, real SSE streaming, real ADK run/resume mechanics -- with the graph's
-resolver and executor scripted (no model, no MCP server), following
-`test_graph.py`'s fakes. Every frame read off the wire is also validated
+Everything runs against a FastAPI app through httpx2's ASGI transport, with
+real routing, real SSE streaming and real ADK run/resume mechanics, on the
+orchestrator topology `orchestrator_fakes.orchestrator_app` wires as
+`harness.server` does. The agent's model answers from a script, and search,
+the executor, the planner and the plan's tool surface are scripted (no
+model, no MCP server). Every frame read off the wire is also validated
 against `harness.wire.STUDIO_FRAME_ADAPTER`, so a test that passes here has
 also proven its stream contract-valid.
 
@@ -18,6 +20,7 @@ single-use (delta 7); the composition manifest is server-owned with
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -43,7 +46,6 @@ from compiler.surface import (
     ToolSurface,
 )
 from data_mcp.definition_store import (
-    DefinitionStoreUnavailable,
     InMemoryDefinitionStore,
     canonicalize,
     spec_id_for,
@@ -54,53 +56,40 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, InMemorySessionService
+from google.genai import types
 from harness.conversation import current_conversation_id
-from harness.graph import (
+from harness.graph.state import (
     AGENT_NAME,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    GenerativeNodes,
-    create_root_workflow,
+    frame_id_for,
 )
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
-from harness.scripted import (
-    ScriptedCompose,
-    ScriptedConverse,
-    ScriptedPlannerModel,
-    ScriptedSurface,
-)
-from harness.scripted import ScriptedExecutor as MessagePathScriptedExecutor
-from harness.scripted import ScriptedResolver as MessagePathScriptedResolver
-from harness.scripted_plan import scripted_fetch_series_stats
+from harness.scripted import ScriptedSurface
 from harness.settings import Settings
 from harness.studio import (
-    StudioRunner,
     _acquire_or_conflict,
     _end_stream,
     _keep_turn_records,
     _sse_stream,
     _unwind,
-    create_studio_router,
 )
 from harness.studio_state import (
-    _KEY_COMPOSITION,
     ConversationState,
     StudioStore,
     _PendingInterrupt,
     land_component,
-    make_recall,
 )
-from harness.studio_translate import _RecordingExecutor
+from harness.studio_translate import _RecordingExecutor, _stream_fatal
 from harness.tool_contracts import ResolverError
 from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_SEED_SPEC_BYTES,
     MAX_TURN_REQUEST_BYTES,
-    STUDIO_FRAME_ADAPTER,
     ActivityStep,
     ComponentType,
     CompositionActor,
@@ -133,15 +122,35 @@ from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 
-from .data_mcp_definitions import DataMcpDefinitions
+from .orchestrator_fakes import (
+    AUTH,
+    CONVERSATION,
+    CannedSearch,
+    ScriptLlm,
+    call,
+    chart,
+    definite_envelope,
+    fetch_call,
+    make_charts_call,
+    orchestrator_app,
+    plan_call,
+    request_text,
+    search_call,
+    stream,
+    studio_client,
+    turn_body,
+)
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
 
 SPEC_A = "spec_" + "a" * 32
-SPEC_B = "spec_" + "b" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
-AUTH = {"Authorization": "Bearer test-token"}
-CONVERSATION = "conv_01test0000"
+# The frame a `fetch` of SPEC_A registers when `get_data` answers with REF_A.
+FRAME_A = frame_id_for(REF_A)
+# The frame `ScriptedSurface`'s plan hands back to the agent once it has run.
+PLAN_FRAME = frame_id_for({"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32})
+# The PRINCIPAL `AUTH`'s bearer token resolves to.
+PRINCIPAL = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
 # A write token as the platform issues one on a create: the grant a later
 # revise of that component must present.
 WRITE_TOKEN = "cmw_" + "t" * 22
@@ -185,6 +194,8 @@ COMPONENT = {
         "citation": "Test source (2026).",
     },
 }
+
+_VIEW = {"outcome": "ok", "frame_refs": [], "view": {"dimensions": {"stat_var": ["dcid:Aid"]}}}
 
 
 def _get_data_manifest(*, spec_id: str = SPEC_A) -> dict[str, Any]:
@@ -270,41 +281,12 @@ def _fixture_surface(schemas: list[ToolSchema], *, analysis_tool: str) -> ToolSu
     )
 
 
-def _envelope(**overrides: Any) -> dict[str, Any]:
-    envelope: dict[str, Any] = {
-        "status": "definite",
-        "spec_id": SPEC_A,
-        "choice_points": 0,
-        "parts": 1,
-        "warnings": [],
-        "candidates": [],
-    }
-    envelope.update(overrides)
-    return envelope
-
-
-class ScriptedResolver:
-    def __init__(self, envelopes: list[dict[str, Any]]) -> None:
-        self.envelopes = envelopes
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(
-        self,
-        *,
-        question: str,
-        spec_id: str | None = None,
-        wide: bool = False,
-        parts: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        self.calls.append({"question": question, "spec_id": spec_id, "wide": wide, "parts": parts})
-        index = min(len(self.calls) - 1, len(self.envelopes) - 1)
-        return self.envelopes[index]
-
-
 class ScriptedExecutor:
-    """`strict=True` fails the test on an unexpected extra call. The permissive
-    default answers every call, so a route making calls the script never
-    anticipated passes unnoticed."""
+    """Answers each call with the next of `results`, then by tool: `get_data`
+    with REF_A, `describe_frame` with `_VIEW`, a create with a copy of
+    COMPONENT, anything else with REF_A. `strict=True` fails the test on a
+    call past `results`, so a route making calls the script never
+    anticipated cannot pass unnoticed."""
 
     def __init__(
         self, results: list[dict[str, Any]] | None = None, *, strict: bool = False
@@ -321,15 +303,97 @@ class ScriptedExecutor:
             return self.results[len(self.calls) - 1]
         if self.strict:
             raise AssertionError(f"unscripted executor call #{len(self.calls)}: {tool}({args})")
-        return {"outcome": "ok", "frame_refs": [REF_A]}
+        if tool == "describe_frame":
+            return _VIEW
+        if tool == "write_component":
+            return {"outcome": "ok", "frame_refs": [], "component": copy.deepcopy(COMPONENT)}
+        return {"outcome": "ok", "frame_refs": [REF_A], "summary": "fetched"}
+
+
+def _card_results(component: Mapping[str, Any] = COMPONENT, **write: Any) -> list[dict[str, Any]]:
+    """The executor's answers to one `_card` turn: the fetch, the chart's
+    frame description, and the write landing `component` (with `write`'s
+    extra keys, e.g. a `write_token`)."""
+    return [
+        {"outcome": "ok", "frame_refs": [REF_A], "summary": "fetched"},
+        _VIEW,
+        {"outcome": "ok", "frame_refs": [], "component": copy.deepcopy(dict(component)), **write},
+    ]
+
+
+def _text(text: str) -> types.Part:
+    return types.Part.from_text(text=text)
+
+
+def _card(
+    *, title: str = "Aid to Kenya", type_: str = "stat_card", charts: int = 1
+) -> tuple[types.Part, ...]:
+    """A turn that searches, fetches SPEC_A and draws `charts` cards on its
+    frame. Its search needs a `_search()` envelope."""
+    drawn = [
+        chart(FRAME_A, type_=type_, title=title if index == 0 else f"{title} ({index + 1})")
+        for index in range(charts)
+    ]
+    return (
+        search_call("kenya oda 2023", "aid to Kenya"),
+        fetch_call(SPEC_A),
+        make_charts_call(*drawn),
+        _text("Here is the card."),
+    )
+
+
+def _plan(brief: str = "q with forks", *after: types.Part) -> tuple[types.Part, ...]:
+    """A turn that hands `brief` to the planner and pauses on its plan;
+    `after` is what the agent does once an approved plan is handed back."""
+    return (plan_call(brief), _text("Handed to the planner."), *after)
+
+
+def _charts_the_plan() -> tuple[types.Part, ...]:
+    """What the agent does with an approved plan handed back: one card on
+    its frame, then its answer."""
+    return (
+        make_charts_call(chart(PLAN_FRAME, type_="stat_card", title="Aid to Kenya")),
+        _text("Charted."),
+    )
+
+
+def _ask(*options: str) -> tuple[types.Part, ...]:
+    """A turn that asks the user which reading they meant."""
+    return (
+        call(
+            "ask_user",
+            question="Which reading?",
+            options=[{"label": option} for option in options or ("A", "B")],
+        ),
+        _text("Asked."),
+    )
+
+
+def _search(turns: int = 1) -> CannedSearch:
+    """Search answering `turns` searches with one definite part reading SPEC_A."""
+    return CannedSearch(*[definite_envelope(spec_id=SPEC_A) for _ in range(turns)])
+
+
+class _HangingResolver:
+    """Never answers, so a `/turn` stream that searches stays open
+    indefinitely. The cancel and cross-instance tests hold A's stream open
+    with it, so no request races A's own completion."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 # The session service backend every route-exercising test in this module
 # builds its store and runner over: `_new_session_service` is the one seam
-# `session_service_backend` (below) switches, so the whole suite -- `_app`'s
-# default and each inline `StudioRunner(...)` a test builds directly -- runs
-# through `InMemorySessionService` and a sqlite-backed `DatabaseSessionService`
-# without any call site naming which one it is under.
+# `session_service_backend` (below) switches, so the whole suite runs
+# through `InMemorySessionService` and a sqlite-backed
+# `DatabaseSessionService` without any call site naming which one it is
+# under.
 class _SessionServiceBackend:
     factory: Callable[[], BaseSessionService] = staticmethod(InMemorySessionService)
 
@@ -359,79 +423,49 @@ def session_service_backend(
 
 
 def _app(
-    resolver: ScriptedResolver,
-    executor: ScriptedExecutor,
-    *,
+    *script: types.Part,
+    resolver: Any = None,
+    executor: Any = None,
+    planner: Any = None,
+    tool_surface: ToolSurface | None = None,
     settings: Settings | None = None,
     edit_model: Any | None = None,
-    generative: GenerativeNodes | None = None,
-    tool_surface: ToolSurface | None = None,
     session_service: BaseSessionService | None = None,
     store: StudioStore | None = None,
     served: Sequence[Mapping[str, Any]] = (),
 ) -> FastAPI:
-    # Mirrors server.py's wiring: the store exists first so the recall seam
-    # can resolve the current conversation per request. A caller naming no
-    # `generative` still gets a working `planner` node -- the node has no
-    # scripted stand-in of its own, unlike compose/narrate/converse/refusal --
-    # so any test whose plan reaches choice_points > 0 can pause on a real
-    # plan.proposed frame without caring about its content. `session_service`
-    # defaults to this test's own backend (`session_service_backend`); a
-    # cross-instance test passes one explicitly, shared with a second `_app`,
-    # to build two `StudioRunner`s over one database service. `store`
-    # defaults to a fresh one over `session_service`; a test that needs its
-    # own clock (a segment TTL scenario) builds one and passes it instead.
-    # `served` are the seeds or Spec blocks the Search API answers each
-    # seed's identity with (`DataMcpDefinitions`).
-    session_service = session_service or _new_session_service()
-    store = store or StudioStore(session_service, app_name=AGENT_NAME)
-    resolved_settings = settings or Settings()
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=resolver,
-            executor=recorder,
-            generative=generative or GenerativeNodes(planner=ScriptedPlannerModel()),
-            recall=make_recall(store),
-            tool_surface=surface,
-            definition_surface=DataMcpDefinitions(served=served),
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
+    """`orchestrator_app` over this test's session backend, its agent's
+    model answering from `script` and kept as `app.state.model`. The
+    executor defaults to this module's `ScriptedExecutor`; the planner to
+    `ScriptedPlannerModel`. A cross-instance test passes one
+    `session_service`, shared with a second `_app`; a segment TTL scenario
+    passes its own `store` with its own clock."""
+    app, model = orchestrator_app(
+        *script,
+        resolver=resolver,
+        executor=executor or ScriptedExecutor(),
+        planner=planner,
         tool_surface=tool_surface,
+        session_service=session_service or _new_session_service(),
         store=store,
+        settings=settings,
         edit_model=edit_model,
-        settings=resolved_settings,
+        served=served,
     )
-    app = FastAPI()
-    app.state.studio = studio
-    app.include_router(create_studio_router(studio, settings=resolved_settings))
+    app.state.model = model
     return app
 
 
-def _plan_generative() -> GenerativeNodes:
-    """The scripted planner + compose pair `server.py` wires for
-    `STUDIO_SCRIPTED=true`: a test that needs an approved-plan turn to
-    produce a real component pairs this with `tool_surface=ScriptedSurface()`.
-    `executor`'s own scripting then answers `compose`'s `describe_frame` and
-    `write_component` calls, the plan's own steps running through the
-    surface invisibly to it."""
-    return GenerativeNodes(planner=ScriptedPlannerModel(), compose=ScriptedCompose())
+def _model(app: FastAPI) -> ScriptLlm:
+    return app.state.model
 
 
 def _client(app: FastAPI) -> httpx2.AsyncClient:
-    return httpx2.AsyncClient(
-        transport=httpx2.ASGITransport(app=app), base_url="http://studio.test"
-    )
+    return studio_client(app)
 
 
 def _turn_body(message: str = "kenya oda 2023") -> dict[str, Any]:
-    return {
-        "kind": "turn.request",
-        "schema_version": 1,
-        "conversation_id": CONVERSATION,
-        "message": message,
-    }
+    return turn_body(message)
 
 
 def _interrupt_body(interrupt_id: str, decision: str, payload: Any = None) -> dict[str, Any]:
@@ -452,16 +486,7 @@ async def _stream(
 ) -> list[dict[str, Any]]:
     """POST and read the SSE stream to its end; every frame must be
     contract-valid."""
-    frames: list[dict[str, Any]] = []
-    async with client.stream("POST", path, json=body, headers=AUTH) as response:
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("text/event-stream")
-        async for line in response.aiter_lines():
-            if line.startswith("data: "):
-                frame = json.loads(line[len("data: ") :])
-                STUDIO_FRAME_ADAPTER.validate_python(frame)
-                frames.append(frame)
-    return frames
+    return await stream(client, path, body)
 
 
 def _events(frames: list[dict[str, Any]]) -> list[str]:
@@ -474,22 +499,24 @@ def _frame(frames: list[dict[str, Any]], event: str) -> dict[str, Any]:
     return matches[-1]
 
 
+async def _conversation_with_component(client: httpx2.AsyncClient) -> dict[str, Any]:
+    """Run one `_card` turn; return the final manifest."""
+    frames = await _stream(client, "/api/studio/turn", _turn_body())
+    return _frame(frames, "done")["composition"]
+
+
 # --- auth ---------------------------------------------------------------------
 
 
 async def test_a_request_without_a_bearer_token_is_401() -> None:
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         response = await client.post("/api/studio/turn", json=_turn_body())
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
 
 
 async def test_a_wrong_shared_secret_is_401() -> None:
-    app = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
-        settings=Settings(studio_api_token="right"),
-    )
+    app = _app(settings=Settings(studio_api_token="right"))
     async with _client(app) as client:
         response = await client.post(
             "/api/studio/turn",
@@ -499,139 +526,29 @@ async def test_a_wrong_shared_secret_is_401() -> None:
     assert response.status_code == 401
 
 
-# --- the direct-fetch turn ------------------------------------------------------
-
-
-async def test_the_resolve_step_names_every_search_part() -> None:
-    parts = [
-        {"variable": "life expectancy", "status": "definite"},
-        {"variable": "health spending", "status": "candidates"},
-    ]
-    envelope = _envelope(parts=2, part_digests=parts)
-    executor = ScriptedExecutor([{"outcome": "ok", "frame_refs": [REF_A]}])
-    async with _client(_app(ScriptedResolver([envelope]), executor)) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    resolve = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve")
-    assert resolve["detail"] == (
-        "resolved: definite — 2 parts: life expectancy: definite; health spending: candidates"
-    )
-
-
-class _PerHeadConverse:
-    async def __call__(self, *, question: str, **_digests: Any) -> dict[str, Any]:
-        return {
-            "text": "on it",
-            "search_parts": [{"variable": "debt service per head"}],
-            "about": "data",
-        }
-
-
-class _MeasureAndPopulation:
-    async def __call__(
-        self, *, question: str, part: dict[str, Any], message: str
-    ) -> dict[str, Any]:
-        return {"measure": "debt service", "denominator": "population", "denominator_entities": []}
-
-
-@pytest.mark.parametrize(
-    ("population", "detail"),
-    [
-        pytest.param(
-            {"variable": "population", "status": "definite", "candidates": []},
-            "resolved: definite — 2 parts: debt service: definite; population: definite"
-            ' — searched again as 2 parts in place of "debt service per head"',
-            id="kept",
-        ),
-        pytest.param(
-            {"variable": "population", "status": "unsupported", "candidates": []},
-            'resolved: unsupported — searched again as 2 parts in place of "debt service per head"'
-            ": debt service: definite; population: unsupported — denominator_not_available",
-            id="not-kept",
-        ),
-    ],
-)
-async def test_the_resolve_step_says_a_part_was_searched_again_as_two(
-    population: dict[str, Any], detail: str
-) -> None:
-    refused = _envelope(
-        status="unsupported",
-        spec_id=None,
-        warnings=[{"severity": "warn", "message": "denominator_not_available"}],
-        part_digests=[
-            {
-                "variable": "debt service per head",
-                "status": "unsupported",
-                "reason": "denominator_not_available",
-            }
-        ],
-    )
-    again = _envelope(
-        parts=2,
-        part_digests=[{"variable": "debt service", "status": "definite"}, population],
-    )
-    generative = GenerativeNodes(
-        converse=_PerHeadConverse(),
-        planner=ScriptedPlannerModel(),
-        denominator_split=_MeasureAndPopulation(),
-    )
-    app = _app(ScriptedResolver([refused, again]), ScriptedExecutor(), generative=generative)
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("debt service per head"))
-
-    steps = [f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve"]
-    assert [(step["tool"], step["detail"]) for step in steps] == [("search", detail)]
-
-
-class _UnitConverse:
-    async def __call__(self, *, question: str, **_digests: Any) -> dict[str, Any]:
-        return {
-            "text": "on it",
-            "search_parts": [{"variable": "debt service", "unit": "per head"}],
-            "about": "data",
-        }
-
-
-async def test_the_resolve_step_says_a_unit_was_searched_as_part_of_the_measure() -> None:
-    unread = _envelope(
-        status="no_data",
-        spec_id=None,
-        part_digests=[
-            {"variable": "debt service", "status": "no_data", "reason": "unit_not_resolved"}
-        ],
-    )
-    resolved = _envelope(part_digests=[{"variable": "debt service per head", "status": "definite"}])
-    generative = GenerativeNodes(
-        converse=_UnitConverse(), denominator_split=_MeasureAndPopulation()
-    )
-    app = _app(ScriptedResolver([unread, resolved]), ScriptedExecutor(), generative=generative)
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("debt service per head"))
-
-    step = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve")
-    assert step["detail"] == (
-        'resolved: no_data — searched again with the unit in the measure: "debt service per head"'
-    )
+# --- a search, fetch and chart turn ----------------------------------------------
 
 
 async def test_a_definite_turn_streams_steps_text_and_done() -> None:
-    executor = ScriptedExecutor([{"outcome": "ok", "frame_refs": [REF_A]}], strict=True)
-    async with _client(_app(ScriptedResolver([_envelope()]), executor)) as client:
+    executor = ScriptedExecutor(_card_results()[:2], strict=True)
+    app = _app(
+        search_call("kenya oda 2023", "aid to Kenya"),
+        fetch_call(SPEC_A),
+        _text("Kenya received aid."),
+        resolver=_search(),
+        executor=executor,
+    )
+    async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body())
 
-    # A definite resolve fetches once and asks the executor for nothing else.
-    assert [call["tool"] for call in executor.calls] == ["get_data"]
+    # One fetch, which describes its frame, and nothing else asked of the executor.
+    assert [call["tool"] for call in executor.calls] == ["get_data", "describe_frame"]
     events = _events(frames)
     assert events[-1] == "done"
     assert "suggestions" in events
-    resolve = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "resolve")
-    assert resolve["status"] == "complete"
-    fetch_step = next(
-        f for f in frames if f["event"] == "activity.step" and f.get("tool") == "get_data"
-    )
-    assert fetch_step["status"] == "complete"
-    complete = _frame(frames, "message.complete")
-    assert "1 frame(s)" in complete["text"]
+    fetch_step = [f for f in frames if f["event"] == "activity.step" and f.get("tool") == "fetch"]
+    assert fetch_step[-1]["status"] == "complete"
+    assert _frame(frames, "message.complete")["text"] == "Kenya received aid."
     done = _frame(frames, "done")
     assert done["trace_id"].startswith("tr_")
     assert "composition" not in done  # nothing moved; null is elided
@@ -639,34 +556,13 @@ async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
-async def test_a_compose_seam_describes_each_frame_and_writes_the_chosen_intents() -> None:
-    """With a compose model injected, the card comes from `write_component`,
-    not from the fetch: each frame is described first, every intent is
-    written, and a refused write fails its step while the turn completes."""
-    seen: dict[str, Any] = {}
-    kept = {"type": "stat_card", "title": "Aid to Kenya", "frame_ref": REF_A}
-    dropped = {"type": "line_chart", "title": "Aid over time", "frame_ref": REF_A}
-
-    async def compose(
-        *,
-        question: str,
-        frame_refs: list[dict[str, Any]],
-        frame_views: list[dict[str, Any]],
-        frame_provenance: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        seen.update(
-            question=question,
-            frame_refs=frame_refs,
-            frame_views=frame_views,
-            frame_provenance=frame_provenance,
-        )
-        return {"intents": [kept, dropped]}
-
+async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line() -> None:
+    """Each chart of one `make_charts` call is its own write and its own
+    Activity line: a refused write fails its line while the turn completes,
+    and the card that landed names the line it came from."""
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            _VIEW,
-            {"outcome": "ok", "frame_refs": [], "component": COMPONENT, "summary": "created"},
+            *_card_results(),
             {
                 "outcome": "refusal",
                 "refusal": {
@@ -675,40 +571,24 @@ async def test_a_compose_seam_describes_each_frame_and_writes_the_chosen_intents
                     "message": "line_chart needs a period dimension",
                 },
             },
-        ],
-        strict=True,
+        ]
     )
-    app = _app(
-        ScriptedResolver([_envelope()]), executor, generative=GenerativeNodes(compose=compose)
-    )
+    app = _app(*_card(charts=2), resolver=_search(), executor=executor)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body())
 
-    assert [c["tool"] for c in executor.calls] == [
-        "get_data",
-        "describe_frame",
-        "write_component",
-        "write_component",
-    ]
-    assert executor.calls[1]["args"] == {"frame_ref": REF_A}
-    assert executor.calls[2]["args"] == {"intent": kept}
-    assert executor.calls[3]["args"] == {"intent": dropped}
-    assert seen == {
-        "question": "kenya oda 2023",
-        "frame_refs": [REF_A],
-        "frame_views": [{"available": True, "view": _VIEW["view"]}],
-        "frame_provenance": [{"step": 0, "tool": "get_data", "is_final_step": True}],
-    }
-
-    writes = [
+    writes = [c for c in executor.calls if c["tool"] == "write_component"]
+    assert [w["args"]["intent"]["title"] for w in writes] == ["Aid to Kenya", "Aid to Kenya (2)"]
+    assert all(w["args"]["intent"]["frame_ref"] == REF_A for w in writes)
+    lines = [
         f for f in frames if f["event"] == "activity.step" and f.get("tool") == "write_component"
     ]
-    assert [w["status"] for w in writes] == ["complete", "failed"]
-    assert writes[0]["produced"] == {"component_id": "cmp_01test0001", "revision": 1}
-    assert "period dimension" in writes[1]["detail"]
+    assert [line["status"] for line in lines] == ["complete", "failed"]
+    assert lines[0]["produced"] == {"component_id": "cmp_01test0001", "revision": 1}
+    assert "period dimension" in lines[1]["detail"]
     (created,) = [f for f in frames if f["event"] == "component.created"]
     assert created["component_id"] == "cmp_01test0001"
-    assert created["created_from"]["step_id"] == writes[0]["step_id"]
+    assert created["created_from"]["step_id"] == lines[0]["step_id"]
     done = _frame(frames, "done")
     assert [b["component_id"] for b in done["composition"]["blocks"]] == ["cmp_01test0001"]
 
@@ -716,10 +596,10 @@ async def test_a_compose_seam_describes_each_frame_and_writes_the_chosen_intents
 async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_reports(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A question routed to the planner opens "Working on a plan" as the
-    draft starts and completes it before the plan card. The seam's
-    `on_progress` reports, relayed only once the draft is done, never
-    reach the wire (see `harness.studio_translate`'s module docstring)."""
+    """A plan call opens "Working on a plan" as the draft starts and
+    completes it before the plan card. The seam's `on_progress` reports,
+    relayed only once the draft is done, never reach the wire (see
+    `harness.studio_translate`'s module docstring)."""
 
     class ProgressPlanner(ScriptedPlanner):
         async def __call__(self, *, on_progress: Any = None, **kwargs: Any) -> dict[str, Any]:
@@ -728,16 +608,14 @@ async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_repo
                 on_progress({"agent": "dfo_planner", "tools": ["submit_plan"]})
             return await super().__call__(**kwargs)
 
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    planner = ProgressPlanner(real_schemas)
-    app = _app(resolver, ScriptedExecutor(), generative=GenerativeNodes(planner=planner))
+    app = _app(*_plan(), planner=ProgressPlanner(real_schemas))
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
 
     lines = [
         (index, frame["label"], frame["status"])
         for index, frame in enumerate(frames)
-        if frame["event"] == "activity.step" and frame["step_id"] != "resolve"
+        if frame["event"] == "activity.step" and frame["label"] != "Reading your question"
     ]
     assert [(label, status) for _, label, status in lines] == [
         ("Working on a plan", "running"),
@@ -775,12 +653,9 @@ async def test_a_crash_mid_execute_reports_the_finished_steps_on_the_failing_tur
                 )
             raise RuntimeError("analysis mount went away")
 
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
-    planner = ScriptedPlanner(real_schemas)
     app = _app(
-        resolver,
-        ScriptedExecutor(),
-        generative=GenerativeNodes(planner=planner),
+        *_plan(),
+        planner=ScriptedPlanner(real_schemas),
         tool_surface=DiesOnTheSecondCall(),
     )
     async with _client(app) as client:
@@ -806,7 +681,7 @@ async def test_a_cancelled_turn_keeps_its_recorded_steps_out_of_the_next_turn(
     real_schemas: list[ToolSchema],
 ) -> None:
     """A step that finished while a later one hung was recorded and never
-    translated, because no graph event follows a cancel. It dies with its
+    translated, because no workflow event follows a cancel. It dies with its
     turn: the next turn's stream carries only its own steps and cards."""
 
     class HangsOnTheSecondCall:
@@ -832,14 +707,7 @@ async def test_a_cancelled_turn_keeps_its_recorded_steps_out_of_the_next_turn(
             raise AssertionError("unreachable")
 
     surface = HangsOnTheSecondCall()
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
-    planner = ScriptedPlanner(real_schemas)
-    app = _app(
-        resolver,
-        ScriptedExecutor(),
-        generative=GenerativeNodes(planner=planner),
-        tool_surface=surface,
-    )
+    app = _app(*_plan(), planner=ScriptedPlanner(real_schemas), tool_surface=surface)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -865,32 +733,28 @@ async def test_a_cancelled_turn_keeps_its_recorded_steps_out_of_the_next_turn(
     assert cancel.status_code == 204
     assert _frame(cancelled, "error")["error"]["error"] == "cancelled"
     assert "component.created" not in _events(second)
+    step_tools = {f.get("tool") for f in second if f["event"] == "activity.step"}
+    assert not step_tools & {"get_data", "growth"}
     assert _events(second)[-1] == "done"
 
 
 async def test_a_malformed_drafted_plan_ends_the_turn_as_an_error_not_a_silent_success() -> None:
     """A draft the seam could not itself validate must not reach the approve
-    gate or the executor. `graph.py`'s `planner` node validates the seam's
-    record as a `planner.plan.Plan` before writing it to state; the
-    compiler's capability table restricts the tool vocabulary structurally
-    once `execute` runs through it, so this test covers Pydantic validation
-    of the drafted plan's shape itself, proven at the graph level by
-    `test_graph.py::test_the_planner_node_raises_on_a_malformed_plan_rather_than_constructing_one`.
-    """
+    gate or the executor. `harness.graph.planning`'s `planner` node validates the seam's
+    record as a `planner.plan.Plan` before writing it to state, outside
+    `handing_back_planner_failures`, which hands back only a seam's own
+    `PlannerSeamError`."""
 
     async def drafts_badly(**kwargs: Any) -> dict[str, Any]:
         return {"plan": {"decisions": "not-a-list"}, "summary": {}}
 
     executor = ScriptedExecutor(strict=True)
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
-        generative=GenerativeNodes(planner=drafts_badly),
-    )
+    app = _app(*_plan(), executor=executor, planner=drafts_badly)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
 
     assert _events(frames)[-1] == "error"
+    assert "plan.proposed" not in _events(frames)
     assert executor.calls == []
 
 
@@ -898,22 +762,15 @@ async def test_a_malformed_drafted_plan_ends_the_turn_as_an_error_not_a_silent_s
 
 
 async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> None:
-    """The scripted planner/surface/compose trio -- `harness.scripted`'s
-    production seams, the same ones `server.py` wires for
-    `STUDIO_SCRIPTED=true` -- draft the plan and run it; `executor` serves
-    only `compose`'s `describe_frame`/`write_component` calls, since
-    the plan's own steps run through `tool_surface`."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
+    """The scripted planner and surface (`harness.scripted`'s seams)
+    draft the plan and run it, and once it is handed back the agent charts
+    its frame. `executor` serves only the hand-back's `describe_frame` and the
+    chart's `write_component`, since the plan's own steps run through
+    `tool_surface`."""
+    executor = ScriptedExecutor()
     app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(planner=ScriptedPlannerModel(), compose=ScriptedCompose()),
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=executor,
         tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
@@ -941,7 +798,7 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
     events = _events(second)
     assert events[-1] == "done"
     # The plan's own two steps ran through `tool_surface`, invisibly to this
-    # `executor`; its two calls are `compose`'s describe-then-write.
+    # `executor`: it saw the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
     created = _frame(second, "component.created")
     assert created["component_id"] == "cmp_01test0001"
@@ -977,11 +834,11 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
     otlp_spans: InMemorySpanExporter,
 ) -> None:
     """`/turn` and the `/interrupt` that resumes it are separate requests on
-    separate tasks. Spans and events made in the resolve node of the first
-    segment and in the executor of the resumed one all nest under the one
-    `turn` span, whose `dfo.external_id` is the turn's wire `trace_id`."""
+    separate tasks. Spans and events made in the search of the first segment
+    and in the executor of the resumed one all nest under the one `turn`
+    span, whose `dfo.external_id` is the turn's wire `trace_id`."""
 
-    class ProbingResolver(ScriptedResolver):
+    class ProbingSearch(CannedSearch):
         async def __call__(self, **kwargs: Any) -> dict[str, Any]:
             with otel_trace.get_tracer("test.probe").start_as_current_span("resolve_probe"):
                 return await super().__call__(**kwargs)
@@ -991,18 +848,14 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
             self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
         ) -> dict[str, Any]:
             with otel_trace.get_tracer("test.probe").start_as_current_span("executor_probe"):
-                record_event("compose.write_refused", metadata={"tool": tool})
+                record_event("executor.probed", metadata={"tool": tool})
                 return await super().__call__(tool=tool, args=args)
 
     app = _app(
-        ProbingResolver([_envelope(choice_points=2)]),
-        ProbingExecutor(
-            [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            ]
-        ),
-        generative=_plan_generative(),
+        search_call("q with forks", "aid to Kenya"),
+        *_plan("q with forks", *_charts_the_plan()),
+        resolver=ProbingSearch(definite_envelope(spec_id=SPEC_A)),
+        executor=ProbingExecutor(),
         tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
@@ -1021,7 +874,7 @@ async def test_a_turn_paused_for_approval_exports_as_one_trace(
     assert len(executor_probes) == 2  # describe_frame, then write_component
     # `turn` is the only root: the probes of both segments sit below it.
     assert [span.name for span in spans if span.parent is None] == ["turn"]
-    assert [event.name for event in executor_probes[-1].events] == ["compose.write_refused"]
+    assert [event.name for event in executor_probes[-1].events] == ["executor.probed"]
 
 
 async def test_every_stream_flushes_telemetry_before_the_response_ends(
@@ -1033,7 +886,7 @@ async def test_every_stream_flushes_telemetry_before_the_response_ends(
         flushes.append("flush")
 
     monkeypatch.setattr(studio_module, "flush_telemetry", flush)
-    app = _app(ScriptedResolver([_envelope(choice_points=2)]), ScriptedExecutor())
+    app = _app(*_plan())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert flushes == ["flush"]  # the stream that paused for approval
@@ -1056,7 +909,7 @@ async def test_stopping_a_paused_turn_ends_its_span_and_flushes_after_it(
         finished_at_flush.append([span.name for span in otlp_spans.get_finished_spans()])
 
     monkeypatch.setattr(studio_module, "flush_telemetry", flush)
-    app = _app(ScriptedResolver([_envelope(choice_points=2)]), ScriptedExecutor())
+    app = _app(*_plan())
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert len(finished_at_flush) == 1  # the stream that paused
@@ -1082,7 +935,7 @@ async def test_cancelling_an_idle_conversation_flushes_nothing(
         flushes.append("flush")
 
     monkeypatch.setattr(studio_module, "flush_telemetry", flush)
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         cancel = await client.post(
             "/api/studio/cancel",
             json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -1208,13 +1061,10 @@ async def test_a_planner_seams_own_labels_and_decisions_reach_the_plan_card(
     an `activity.step` frame with a real `duration_ms`, not merely a subset
     of them.
     """
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor()
     planner = ScriptedPlanner(real_schemas)
     app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(planner=planner),
+        *_plan(),
+        planner=planner,
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
     async with _client(app) as client:
@@ -1239,8 +1089,8 @@ async def test_a_planner_seams_own_labels_and_decisions_reach_the_plan_card(
     # The revision key matched, so `approve` routed "approved" and the turn
     # ran to completion with no error -- proof the gate itself works.
     assert _events(second)[-1] == "done"
-    # The seam saw the resolve envelope, which is what makes its plan runnable.
-    assert planner.calls[0]["envelope"]["status"] == "definite"
+    # The seam drafted for the agent's brief.
+    assert planner.calls[0]["question"] == "q with forks"
     # Every step of the two-step workflow produced its own activity frame,
     # each timed by `_RecordingSurface` -- not merely "some frames exist".
     steps = [
@@ -1288,13 +1138,9 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     `running` frame carrying data-mcp's report; once the call answers, the
     line says so, then completes on the same `step_id`. Studio keeps one
     Activity line per step, so the plan's two steps still read as two
-    lines."""
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
-        tool_surface=_PollsOnceSurface(),
-    )
+    lines. A plan step's surface call is the only place progress reaches
+    the wire: the agent's `fetch` calls `get_data` with none."""
+    app = _app(*_plan(), tool_surface=_PollsOnceSurface())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -1313,32 +1159,6 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     plan_lines = {step_id for step_id, tool, *_ in steps if tool in ("get_data", "aggregate")}
     assert len(plan_lines) == len(plan["steps"]) == 2
     assert _events(second)[-1] == "done"
-
-
-class _ReportingScriptedExecutor(ScriptedExecutor):
-    """`ScriptedExecutor`, whose `get_data` sends one progress report first."""
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        if tool == "get_data" and on_progress is not None:
-            on_progress(ProgressReport(progress=12, message=_POLLING))
-        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
-
-
-async def test_a_direct_fetch_streams_its_report_on_the_line_it_completes() -> None:
-    """The no-plan path: `fetch`'s own `get_data` call reports through the
-    executor, and its final frame reuses the running frame's `step_id`."""
-    app = _app(ScriptedResolver([_envelope()]), _ReportingScriptedExecutor())
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    get_data = [step for step in _tool_steps(frames) if step[1] == "get_data"]
-    assert [(status, detail) for _, _, status, detail in get_data] == [
-        ("running", _POLLING),
-        ("complete", None),
-    ]
-    assert get_data[0][0] == get_data[1][0]
 
 
 class _PollsThenHangsSurface(ScriptedSurface):
@@ -1395,12 +1215,7 @@ async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
     ends on a `failed` frame before the turn moves on, so Studio shows no
     step waiting after the run is over."""
     monkeypatch.setattr("executor.run.step_budget_s", lambda *_args, **_kwargs: 0.2)
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
-        tool_surface=surface,
-    )
+    app = _app(*_plan(), tool_surface=surface)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -1421,12 +1236,7 @@ async def test_planner_lines_and_plan_step_lines_never_share_a_step_id_across_an
     """Studio resumes an approved turn into the Activity entry the plan was
     drafted in and matches lines by `step_id`, so a plan step's id must
     differ from every planner line's id in the segment before it."""
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=GenerativeNodes(planner=ScriptedPlannerModel(), compose=ScriptedCompose()),
-        tool_surface=ScriptedSurface(),
-    )
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -1576,14 +1386,12 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
 
 
 async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
+    executor = ScriptedExecutor()
+    app = _app(
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=executor,
+        tool_surface=ScriptedSurface(),
     )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan_v1 = _frame(first, "plan.proposed")
@@ -1610,14 +1418,13 @@ async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
 
     assert _events(third)[-1] == "done"
     # The plan's own steps ran through `tool_surface`; `executor` only saw
-    # `compose`'s describe-then-write.
+    # the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
 
 
 async def test_reject_ends_the_turn_without_computing() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
     executor = ScriptedExecutor()
-    async with _client(_app(resolver, executor)) as client:
+    async with _client(_app(*_plan(), executor=executor)) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
 
@@ -1725,13 +1532,10 @@ async def test_a_stale_plan_card_cannot_approve_a_later_plan(
     the amend that requested card 2, so
     replaying it 404s rather than reaching for whatever plan is now pending,
     and only card 2's own id approves card 2."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor()
     planner = _UnrelatedPlansPlanner(["first measure", "second measure"], real_schemas)
     app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(planner=planner),
+        *_plan(),
+        planner=planner,
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
     async with _client(app) as client:
@@ -1875,13 +1679,11 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     with the same revision the first card carried -- not merely a refusal
     sentence that says so.
     """
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
     executor = ScriptedExecutor()
-    planner = _RefusingAmendPlanner(schemas=real_schemas)
     app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(planner=planner),
+        *_plan("kenya debt"),
+        executor=executor,
+        planner=_RefusingAmendPlanner(schemas=real_schemas),
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
     async with _client(app) as client:
@@ -1913,7 +1715,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
         )
 
     assert _events(third)[-1] == "done"
-    assert executor.calls == []
+    assert "write_component" not in [c["tool"] for c in executor.calls]
 
 
 _QUESTION_FIXED_TEXT = (
@@ -1951,7 +1753,7 @@ class _RestartRefusingPlanner(_RefusingAmendPlanner):
 async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_duplicate_id(
     real_schemas: list[ToolSchema],
 ) -> None:
-    """A restart the graph's `question_fixed` pair refuses (`QUESTION_FIXED`)
+    """A restart the planner's `question_fixed` pair refuses (`QUESTION_FIXED`)
     reaches the wire exactly like a `BUDGET_EXHAUSTED` refusal (see
     `test_a_refused_amendment_still_offers_the_pending_version_for_approval`,
     just above): the same pending plan is re-offered, under the same
@@ -1959,17 +1761,16 @@ async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_d
     (`harness.studio_translate`) neither regresses `latest_plan_version` nor
     mints a second wire id for a version it already gave one to -- and no
     `plan.versioned` frame fires, since nothing was recorded to supersede
-    the first card with. `ctx.state["question"]` is what the graph derives
-    and narrates before the planner ever runs; the refused restart records
-    nothing, so the second call sees the same `question` the first one did.
+    the first card with. The planner drafts for the agent's brief; the
+    refused restart records nothing, so the second call sees the same brief
+    the first one did.
     """
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
     executor = ScriptedExecutor()
     planner = _RestartRefusingPlanner(schemas=real_schemas)
     app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(planner=planner),
+        *_plan("kenya debt"),
+        executor=executor,
+        planner=planner,
         tool_surface=_fixture_surface(real_schemas, analysis_tool="growth"),
     )
     async with _client(app) as client:
@@ -1998,7 +1799,7 @@ async def test_an_amend_that_restarts_is_refused_with_no_version_regression_or_d
         )
 
     assert _events(third)[-1] == "done"
-    assert executor.calls == []
+    assert "write_component" not in [c["tool"] for c in executor.calls]
     assert planner.questions_seen == ["kenya debt", "kenya debt"]
 
 
@@ -2011,20 +1812,7 @@ async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> N
     below covers."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_plan(), session_service=session_service, store=store)
 
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body())
@@ -2033,12 +1821,11 @@ async def test_an_approval_is_recorded_with_its_approver_and_its_revision() -> N
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    conversation = store.current(principal, CONVERSATION)
+    conversation = store.current(PRINCIPAL, CONVERSATION)
     assert len(conversation.approvals) == 1
     record = conversation.approvals[0]
     assert record.decision == "approved"
-    assert record.approver == principal
+    assert record.approver == PRINCIPAL
     assert record.plan_version == 1
     assert record.revision == plan["revision"]
     assert len(record.revision) == 64  # a sha256 hex digest
@@ -2056,21 +1843,12 @@ async def test_an_interrupt_under_a_closed_token_gate_records_auth_enforced() ->
     draw."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
+    app = _app(
+        *_plan(),
         session_service=session_service,
         store=store,
+        settings=Settings(studio_api_token="test-token"),
     )
-    app = FastAPI()
-    settings = Settings(studio_api_token="test-token")
-    app.include_router(create_studio_router(studio, settings=settings))
 
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body())
@@ -2079,12 +1857,11 @@ async def test_an_interrupt_under_a_closed_token_gate_records_auth_enforced() ->
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    conversation = store.current(principal, CONVERSATION)
+    conversation = store.current(PRINCIPAL, CONVERSATION)
     assert len(conversation.approvals) == 1
     record = conversation.approvals[0]
     assert record.auth_enforced is True
-    assert record.approver == principal
+    assert record.approver == PRINCIPAL
 
 
 async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for_a_retry(
@@ -2097,24 +1874,9 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
     This breaks construction on purpose and checks the entry survives, the
     conversation lock is released rather than left held, and a second,
     unpatched attempt still succeeds."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor()
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=resolver,
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_plan(), session_service=session_service, store=store)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("approval record construction failed")
@@ -2132,8 +1894,7 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
                     _interrupt_body(plan["interrupt_id"], "approve"),
                 )
 
-        principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-        conversation = store.current(principal, CONVERSATION)
+        conversation = store.current(PRINCIPAL, CONVERSATION)
         assert plan["interrupt_id"] in conversation.pending
         assert conversation.approvals == []
         assert not conversation.lock.locked()
@@ -2150,66 +1911,58 @@ async def test_a_raise_building_the_approval_record_leaves_the_pending_entry_for
     assert plan["interrupt_id"] not in conversation.pending
 
 
-# --- the clarify flow -------------------------------------------------------------
+async def test_a_raise_before_the_turn_streams_releases_the_conversation_lock() -> None:
+    """The per-turn session cannot be created, so `/turn` raises before its
+    stream starts and the lock the claim took is released."""
+    store = StudioStore(_new_session_service(), app_name=AGENT_NAME)
+    app = _app(_text("Hello."), store=store)
+
+    async def _unavailable(**kwargs: Any) -> None:
+        raise RuntimeError("session backend unavailable")
+
+    app.state.studio._ensure_session = _unavailable
+    async with _client(app) as client:
+        with pytest.raises(RuntimeError, match="session backend unavailable"):
+            await _stream(client, "/api/studio/turn", _turn_body("hi"))
+
+    assert not store.current(PRINCIPAL, CONVERSATION).lock.locked()
 
 
-async def test_candidates_elicit_and_the_answer_resumes() -> None:
-    resolver = ScriptedResolver(
-        [
-            _envelope(
-                status="candidates",
-                spec_id=None,
-                candidates=[
-                    {"spec_id": SPEC_A, "label": "reading A"},
-                    {"spec_id": SPEC_B, "label": "reading B"},
-                ],
-            ),
-            _envelope(spec_id=SPEC_B),
-        ]
-    )
-    executor = ScriptedExecutor()
-    async with _client(_app(resolver, executor)) as client:
+# --- asks the agent puts to the user ---------------------------------------------
+
+
+async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
+    app = _app(*_ask("reading A", "reading B"), _text("You meant reading B."))
+    async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
 
         assert _events(first)[-1] == "elicitation.request"
         elicitation = _frame(first, "elicitation.request")
         assert elicitation["input"] == "single_select"
-        assert [option["id"] for option in elicitation["options"]] == [SPEC_A, SPEC_B]
+        assert [option["label"] for option in elicitation["options"]] == ["reading A", "reading B"]
 
         second = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(elicitation["interrupt_id"], "answer", SPEC_B),
+            _interrupt_body(elicitation["interrupt_id"], "answer", elicitation["options"][1]["id"]),
         )
 
     assert _events(second)[-1] == "done"
-    assert resolver.calls[-1]["spec_id"] == SPEC_B
+    assert _frame(second, "message.complete")["text"] == "You meant reading B."
+    assert "The user chose: reading B" in request_text(_model(app).requests[-1])
 
 
 async def test_stop_during_a_pause_invalidates_the_ask_it_left_behind() -> None:
     """POST /cancel while the turn is paused on an elicitation: by then the
     stream that emitted the pause has already ended, so `cancel_event` is
     back to `None` and cannot be the signal cancel acts on. The fix must
-    still refuse a later `/interrupt` on that id, and must not resume graph
-    execution -- proven here by the resolver never seeing the second call
-    `spec_id=SPEC_B` would have produced."""
-    resolver = ScriptedResolver(
-        [
-            _envelope(
-                status="candidates",
-                spec_id=None,
-                candidates=[
-                    {"spec_id": SPEC_A, "label": "reading A"},
-                    {"spec_id": SPEC_B, "label": "reading B"},
-                ],
-            ),
-            _envelope(spec_id=SPEC_B),
-        ]
-    )
-    executor = ScriptedExecutor()
-    async with _client(_app(resolver, executor)) as client:
+    still refuse a later `/interrupt` on that id, and must not resume the
+    workflow. The test proves it by checking the agent's model is not asked again."""
+    app = _app(*_ask("reading A", "reading B"))
+    async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
+        asked = len(_model(app).requests)
 
         # The pause already ended the stream that armed cancel_event, same
         # as production: a Stop press only ever reaches this route after
@@ -2223,13 +1976,15 @@ async def test_stop_during_a_pause_invalidates_the_ask_it_left_behind() -> None:
 
         replay = await client.post(
             "/api/studio/interrupt",
-            json=_interrupt_body(elicitation["interrupt_id"], "answer", SPEC_B),
+            json=_interrupt_body(
+                elicitation["interrupt_id"], "answer", elicitation["options"][1]["id"]
+            ),
             headers=AUTH,
         )
 
     assert replay.status_code == 404
     assert replay.json()["error"] == "not_found"
-    assert len(resolver.calls) == 1  # the resumed call never happened
+    assert len(_model(app).requests) == asked  # the resumed turn never ran
 
 
 async def test_a_raise_building_the_elicitation_frame_leaves_no_orphaned_pending_entry(
@@ -2243,34 +1998,9 @@ async def test_a_raise_building_the_elicitation_frame_leaves_no_orphaned_pending
     with, so the entry would sit in `pending` unresolvable. This breaks
     construction on purpose and checks nothing is left behind, and that a
     later, unpatched turn still reaches a real elicitation clean."""
-    resolver = ScriptedResolver(
-        [
-            _envelope(
-                status="candidates",
-                spec_id=None,
-                candidates=[
-                    {"spec_id": SPEC_A, "label": "reading A"},
-                    {"spec_id": SPEC_B, "label": "reading B"},
-                ],
-            ),
-        ]
-    )
-    executor = ScriptedExecutor()
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=resolver,
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_ask(), *_ask(), session_service=session_service, store=store)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("elicitation frame construction failed")
@@ -2285,8 +2015,7 @@ async def test_a_raise_building_the_elicitation_frame_leaves_no_orphaned_pending
         # transport (SSE headers are already on the wire by then).
         assert _events(first)[-1] == "error"
 
-        principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-        conversation = store.current(principal, CONVERSATION)
+        conversation = store.current(PRINCIPAL, CONVERSATION)
         assert conversation.pending == {}
         assert not conversation.lock.locked()
 
@@ -2304,7 +2033,7 @@ async def test_an_unknown_interrupt_id_is_a_404_tool_error() -> None:
     """A known conversation with no such pending interrupt -- distinct from
     `test_an_unknown_conversation_is_a_404_on_interrupt` below, which the
     store never held at all."""
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         await _stream(client, "/api/studio/turn", _turn_body())
         response = await client.post(
             "/api/studio/interrupt",
@@ -2316,7 +2045,7 @@ async def test_an_unknown_interrupt_id_is_a_404_tool_error() -> None:
 
 
 async def test_an_unknown_conversation_is_a_404_on_interrupt() -> None:
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         response = await client.post(
             "/api/studio/interrupt",
             json=_interrupt_body("int_nonexistent", "approve"),
@@ -2332,7 +2061,7 @@ async def test_an_unknown_conversation_is_a_404_on_turn_with_a_component_ref() -
     """A `/turn` naming a `component_ref` on a conversation the store never
     held refers to state the server never had -- refused rather than
     silently starting a new, empty conversation under it."""
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         body = _turn_body()
         body["component_ref"] = {"intent": "follow_up", "component_id": "cmp_ghost", "revision": 1}
         response = await client.post("/api/studio/turn", json=body, headers=AUTH)
@@ -2345,7 +2074,7 @@ async def test_an_unknown_conversation_is_a_404_on_turn_with_a_component_ref() -
 async def test_a_follow_up_on_a_card_the_conversation_never_held_is_a_404() -> None:
     """A `follow_up` naming a card this conversation never stored would run as
     a plain turn with no card in view; refused, so the client sees it."""
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         await _stream(client, "/api/studio/turn", _turn_body())
         body = _turn_body("tell me more about this")
         body["component_ref"] = {"intent": "follow_up", "component_id": "cmp_ghost", "revision": 1}
@@ -2357,14 +2086,7 @@ async def test_a_follow_up_on_a_card_the_conversation_never_held_is_a_404() -> N
 
 
 async def test_a_follow_up_on_a_stored_card_runs_the_turn() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         await _conversation_with_component(client)
         body = _turn_body("tell me more about this")
@@ -2378,8 +2100,7 @@ async def test_a_follow_up_on_a_stored_card_runs_the_turn() -> None:
 
 
 async def test_a_wire_interrupt_id_is_single_use() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    async with _client(_app(resolver, ScriptedExecutor())) as client:
+    async with _client(_app(*_plan())) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
         await _stream(
@@ -2395,8 +2116,7 @@ async def test_a_wire_interrupt_id_is_single_use() -> None:
 
 
 async def test_answering_a_plan_interrupt_is_a_422_binding_error() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    async with _client(_app(resolver, ScriptedExecutor())) as client:
+    async with _client(_app(*_plan())) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
         response = await client.post(
@@ -2480,14 +2200,11 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     clock), without a second `ApprovalRecord` and past every `seq` A's dead
     attempt may already have sent."""
     clock = [1_000.0]
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
     store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
     store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
     app_a = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
         store=store_a,
@@ -2498,23 +2215,11 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
         plan = _frame(first, "plan.proposed")
 
         probe = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
-        saved_seq = (await probe.load(principal, CONVERSATION)).seq
+        saved_seq = (await probe.load(PRINCIPAL, CONVERSATION)).seq
 
         await _approve_plan_then_hang(client_a, app_a, plan)
 
-    app_b = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(
-            [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            ]
-        ),
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
-        session_service=session_service,
-        store=store_b,
-    )
+    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
     async with _client(app_b) as client_b:
         busy = await client_b.post(
             "/api/studio/interrupt",
@@ -2535,7 +2240,7 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     assert _events(resumed)[-1] == "done"
     assert resumed[0]["seq"] >= saved_seq + 1000
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert len(reloaded.approvals) == 1
     assert plan["interrupt_id"] not in reloaded.pending
@@ -2552,9 +2257,7 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused(
     store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
     store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
     app_a = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
         store=store_a,
@@ -2566,9 +2269,6 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused(
         await _approve_plan_then_hang(client_a, app_a, plan)
 
     app_b = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
         store=store_b,
@@ -2585,9 +2285,7 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused(
     assert mismatched.status_code == 409
     body = mismatched.json()
     assert body["error"] == "edit_conflict"
-
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert plan["interrupt_id"] in reloaded.pending
     assert reloaded.pending[plan["interrupt_id"]].answer == {"decision": "approve", "payload": None}
@@ -2602,16 +2300,11 @@ async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and
     than each resuming its own segment of the turn."""
     session_service = sqlite_session_service(tmp_path / "shared.db")
     app_a = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
     app_b = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
@@ -2650,20 +2343,16 @@ async def test_a_resumed_segments_stream_fatal_error_leaves_no_resuming_entry(
     drops its resuming entry through `release`'s own `drop_resuming`, the
     same as a clean `done`, so a later retry of the same answer is refused
     the same way an unknown interrupt id is."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
 
     class _BoomExecutor(ScriptedExecutor):
         async def __call__(
             self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
         ) -> dict[str, Any]:
-            raise RuntimeError("compose call failed")
+            raise RuntimeError("describe_frame call failed")
 
-    app = _app(
-        resolver,
-        _BoomExecutor(),
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
-    )
+    # The resumed segment's hand-back describes the plan's frame through the
+    # executor, which raises.
+    app = _app(*_plan(), executor=_BoomExecutor(), tool_surface=ScriptedSurface())
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
@@ -2686,16 +2375,6 @@ async def test_a_resumed_segments_stream_fatal_error_leaves_no_resuming_entry(
 # --- the composition routes ---------------------------------------------------------
 
 
-async def _conversation_with_component(client: httpx2.AsyncClient) -> dict[str, Any]:
-    """Run one plan turn that creates COMPONENT; return the final manifest."""
-    frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
-    plan = _frame(frames, "plan.proposed")
-    resumed = await _stream(
-        client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
-    )
-    return _frame(resumed, "done")["composition"]
-
-
 def _mutation_body(manifest: dict[str, Any], operations: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "kind": "composition.mutate",
@@ -2708,14 +2387,7 @@ def _mutation_body(manifest: dict[str, Any], operations: list[dict[str, Any]]) -
 
 
 async def test_pin_mints_a_user_revision() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
         response = await client.post(
@@ -2732,14 +2404,7 @@ async def test_pin_mints_a_user_revision() -> None:
 
 
 async def test_a_stale_expected_revision_is_an_edit_conflict_and_applies_nothing() -> None:
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
         body = _mutation_body(manifest, [{"op": "remove", "component_id": "cmp_01test0001"}])
@@ -2766,14 +2431,7 @@ async def test_two_same_instance_compositions_give_one_success_and_one_conflict(
     interleave at `load`. One call succeeds; the other's `expected_revision`
     is stale, so it returns `edit_conflict` rather than a second silent 200
     that drops one edit."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
 
@@ -2828,20 +2486,10 @@ async def test_a_persistently_stale_composition_is_an_edit_conflict_and_applies_
     route answers 409 rather than retrying forever, and the live
     conversation is left holding the last manifest it fetched, not the
     caller's rejected pin."""
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
     app = _app(
-        resolver,
-        executor,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
+        *_card(),
+        resolver=_search(),
         session_service=session_service,
     )
     store_b = StudioStore(session_service, app_name=AGENT_NAME)
@@ -2862,9 +2510,9 @@ async def test_a_persistently_stale_composition_is_an_edit_conflict_and_applies_
             attempts += 1
             session_service.append_event = real_append_event
             try:
-                await store_b.load(principal, CONVERSATION)
-                store_b.current(principal, CONVERSATION).seq = attempts
-                await store_b.save(principal, CONVERSATION)
+                await store_b.load(PRINCIPAL, CONVERSATION)
+                store_b.current(PRINCIPAL, CONVERSATION).seq = attempts
+                await store_b.save(PRINCIPAL, CONVERSATION)
             finally:
                 session_service.append_event = append_event_then_interfere
             return await real_append_event(session, event)
@@ -2880,9 +2528,9 @@ async def test_a_persistently_stale_composition_is_an_edit_conflict_and_applies_
     assert response.status_code == 409
     assert response.json()["error"] == "edit_conflict"
     assert attempts == studio_state_module._COMPOSITION_MUTATE_RETRY_ATTEMPTS
-    live = app.state.studio.store.current(principal, CONVERSATION)
+    live = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert live.composition.blocks[0].pinned is False
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.blocks[0].pinned is False
 
 
@@ -2890,7 +2538,7 @@ async def test_an_unknown_composition_id_is_a_404_tool_error() -> None:
     """A known conversation with no such composition -- distinct from
     `test_an_unknown_conversation_is_a_404_on_composition` below, which the
     store never held at all."""
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         await _stream(client, "/api/studio/turn", _turn_body())
         response = await client.post(
             "/api/studio/composition",
@@ -2908,7 +2556,7 @@ async def test_an_unknown_composition_id_is_a_404_tool_error() -> None:
 
 
 async def test_an_unknown_conversation_is_a_404_on_composition() -> None:
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         response = await client.post(
             "/api/studio/composition",
             json={
@@ -2929,22 +2577,6 @@ async def test_an_unknown_conversation_is_a_404_on_composition() -> None:
 # --- failures reach the stream as error frames ---------------------------------------
 
 
-async def test_a_crashing_resolver_becomes_a_stream_fatal_error_frame() -> None:
-    class BrokenResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            raise RuntimeError("resolver exploded")
-
-    async with _client(_app(BrokenResolver(), ScriptedExecutor())) as client:  # type: ignore[arg-type]
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    assert _events(frames)[-1] == "error"
-    error = _frame(frames, "error")["error"]
-    assert error["error"] == "transient_unavailable"
-    assert "done" not in _events(frames)
-
-
 def _timeout_error(tool: str, arguments: dict[str, Any] | None = None) -> MCPError:
     """What `mcp_client._call_tool` raises when a per-tool deadline elapses:
     the same `MCPError` the transport raises, tagged with which tool hit it
@@ -2958,143 +2590,48 @@ def _timeout_error(tool: str, arguments: dict[str, Any] | None = None) -> MCPErr
     return error
 
 
-async def test_a_first_search_timeout_is_transient_and_names_the_tool() -> None:
-    class TimeoutResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            raise _timeout_error("search", {"question": question})
-
-    async with _client(_app(TimeoutResolver(), ScriptedExecutor())) as client:  # type: ignore[arg-type]
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    error = _frame(frames, "error")["error"]
-    assert error["error"] == "transient_unavailable"
-    assert error["retry"] == "retry_after_delay"
-    assert error["retry_after_seconds"] == 30
-    assert "search" in error["detail"]
-    assert "timed out" in error["detail"]
+def _fatal(conversation: ConversationState, exc: Exception) -> dict[str, Any]:
+    """The wire `error` of the stream-fatal frame `exc` ends a fresh turn of
+    `conversation` with."""
+    conversation.begin_turn()
+    frame = _stream_fatal(conversation, exc)
+    return frame.model_dump(mode="json", exclude_none=True)["error"]
 
 
-async def test_a_repeat_search_timeout_in_the_same_conversation_stops_advising_the_wait() -> None:
-    """The first timeout on a call advises the pinned wait; the SAME call
-    (same tool, same question) timing out again, later in the same
-    conversation, says that wait already bought nothing instead of
-    repeating the advice."""
+@pytest.mark.parametrize(
+    ("tool", "arguments", "retry"),
+    [
+        ("search", {"question": "kenya oda 2023"}, "do_not_retry"),
+        ("search", {"question": "mali oda 2024"}, "retry_after_delay"),
+        ("get_data", {"spec_id": SPEC_A}, "retry_after_delay"),
+    ],
+    ids=["same-call", "different-arguments", "different-tool"],
+)
+def test_a_timeout_is_advised_the_wait_unless_the_same_call_timed_out_before(
+    tool: str, arguments: dict[str, Any], retry: str
+) -> None:
+    """The first timeout on a call is transient and advises the pinned wait.
+    The conversation remembers each timed-out call by its tool and its own
+    arguments: the same call timing out again says the wait bought nothing,
+    while a different search, or another tool, is a first occurrence: evidence
+    the service is slow, and still worth the wait."""
+    conversation = ConversationState(conversation_id=CONVERSATION)
 
-    class TimeoutResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            raise _timeout_error("search", {"question": question})
+    first = _fatal(conversation, _timeout_error("search", {"question": "kenya oda 2023"}))
+    again = _fatal(conversation, _timeout_error(tool, arguments))
 
-    app = _app(TimeoutResolver(), ScriptedExecutor())  # type: ignore[arg-type]
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body())
-        second = await _stream(
-            client, "/api/studio/turn", _turn_body()
-        )  # same question -> a repeat
-
-    first_error = _frame(first, "error")["error"]
-    assert first_error["retry"] == "retry_after_delay"
-
-    second_error = _frame(second, "error")["error"]
-    assert second_error["error"] == "transient_unavailable"
-    assert second_error["retry"] == "do_not_retry"
-    assert second_error.get("retry_after_seconds") is None
-    assert "did not help" in second_error["detail"]
-
-
-async def test_a_repeat_tool_with_different_arguments_is_not_a_repeat() -> None:
-    """The repeat memory is keyed by the call's own arguments too: a
-    DIFFERENT search timing out after an earlier one, in the same
-    conversation, is evidence the service itself is slow -- still worth
-    advising the pinned wait -- not proof that waiting doesn't help THIS
-    query."""
-
-    class TimeoutResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            raise _timeout_error("search", {"question": question})
-
-    app = _app(TimeoutResolver(), ScriptedExecutor())  # type: ignore[arg-type]
-    async with _client(app) as client:
-        await _stream(client, "/api/studio/turn", _turn_body("kenya oda 2023"))
-        second = await _stream(client, "/api/studio/turn", _turn_body("mali oda 2024"))
-
-    second_error = _frame(second, "error")["error"]
-    assert second_error["retry"] == "retry_after_delay"
-    assert second_error["retry_after_seconds"] == 30
+    assert first["error"] == "transient_unavailable"
+    assert first["retry"] == "retry_after_delay"
+    assert first["retry_after_seconds"] == 30
+    assert "search timed out" in first["detail"]
+    assert again["error"] == "transient_unavailable"
+    assert again["retry"] == retry
+    assert again.get("retry_after_seconds") == (30 if retry == "retry_after_delay" else None)
+    assert tool in again["detail"]
+    assert ("did not help" in again["detail"]) is (retry == "do_not_retry")
 
 
-async def test_a_timeout_on_a_different_tool_is_not_a_repeat() -> None:
-    """The per-conversation timeout memory is keyed by tool (and
-    arguments): a `get_data` timeout after a `search` timeout is still a
-    first occurrence for `get_data`."""
-
-    class SearchTimeoutOnceResolver:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            self.calls += 1
-            if self.calls == 1:
-                raise _timeout_error("search", {"question": question})
-            return _envelope()
-
-    class GetDataTimeoutExecutor:
-        async def __call__(
-            self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-        ) -> dict[str, Any]:
-            raise _timeout_error("get_data", args)
-
-    app = _app(SearchTimeoutOnceResolver(), GetDataTimeoutExecutor())  # type: ignore[arg-type]
-    async with _client(app) as client:
-        await _stream(client, "/api/studio/turn", _turn_body())  # search times out first
-        second = await _stream(client, "/api/studio/turn", _turn_body("again"))
-
-    second_error = _frame(second, "error")["error"]
-    assert "get_data" in second_error["detail"]
-    assert second_error["retry"] == "retry_after_delay"
-    assert second_error["retry_after_seconds"] == 30
-
-
-async def test_a_write_component_timeout_is_never_advised_a_retry() -> None:
-    """The write was sent, so the platform may have stored the component, and a
-    retry can store a second draft."""
-
-    async def compose(**_: Any) -> dict[str, Any]:
-        return {"intents": [{"type": "stat_card", "title": "Aid to Kenya", "frame_ref": REF_A}]}
-
-    class WriteTimeoutExecutor:
-        async def __call__(
-            self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-        ) -> dict[str, Any]:
-            if tool == "get_data":
-                return {"outcome": "ok", "frame_refs": [REF_A]}
-            if tool == "describe_frame":
-                return _VIEW
-            raise _timeout_error(tool, args)
-
-    app = _app(
-        ScriptedResolver([_envelope()]),
-        WriteTimeoutExecutor(),  # type: ignore[arg-type]
-        generative=GenerativeNodes(compose=compose),
-    )
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    error = _frame(frames, "error")["error"]
-    assert error["error"] == "transient_unavailable"
-    assert error["retry"] == "do_not_retry"
-    assert error.get("retry_after_seconds") is None
-    assert "may already exist" in error["detail"]
-
-
-async def test_a_surface_changed_refusal_reaches_the_wire_as_do_not_retry() -> None:
+def test_a_surface_changed_refusal_reaches_the_wire_as_do_not_retry() -> None:
     """`executor.outcomes.RefusalKind.SURFACE_CHANGED` -- a plan step whose
     tool has changed since the plan was compiled -- has no member of its own
     in `harness.wire.ErrorCode`. `_stream_fatal` must not fall back to
@@ -3103,32 +2640,51 @@ async def test_a_surface_changed_refusal_reaches_the_wire_as_do_not_retry() -> N
     carry `capability_unavailable`/`do_not_retry` and no `retry_after_seconds`,
     honouring the refusal's own declared `retry_mode` instead of discarding
     it."""
+    refused = ResolverError(
+        "surface changed",
+        refusal={
+            "code": "surface_changed",
+            "retry_mode": "do_not_retry",
+            "message": "a plan step's tool has changed since the plan was compiled",
+        },
+    )
 
-    class SurfaceChangedResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            raise ResolverError(
-                "surface changed",
-                refusal={
-                    "code": "surface_changed",
-                    "retry_mode": "do_not_retry",
-                    "message": "a plan step's tool has changed since the plan was compiled",
-                },
-            )
+    error = _fatal(ConversationState(conversation_id=CONVERSATION), refused)
 
-    async with _client(
-        _app(SurfaceChangedResolver(), ScriptedExecutor())  # type: ignore[arg-type]
-    ) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body())
-
-    assert _events(frames)[-1] == "error"
-    error = _frame(frames, "error")["error"]
     assert error["error"] == "capability_unavailable"
     assert error["retry"] == "do_not_retry"
-    # `exclude_none=True` on the wire frame drops an absent field entirely.
     assert "retry_after_seconds" not in error
-    assert "done" not in _events(frames)
+
+
+async def test_a_write_component_timeout_is_never_advised_a_retry() -> None:
+    """The write was sent, so the platform may have stored the component, and a
+    retry can store a second draft. An Edit Card write is a call no agent
+    tool answers, so its timeout ends the stream."""
+
+    class WriteTimeoutExecutor(ScriptedExecutor):
+        async def __call__(
+            self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+        ) -> dict[str, Any]:
+            if tool == "write_component" and "component_id" in args:
+                self.calls.append({"tool": tool, "args": args})
+                raise _timeout_error(tool, args)
+            return await super().__call__(tool=tool, args=args)
+
+    executor = WriteTimeoutExecutor([*_card_results(write_token=WRITE_TOKEN), _described(), _VIEW])
+    edit_model = ScriptedEditModel(
+        {"text": "Renamed the card.", "patch": {"title": "Aid to Kenya, 2018"}, "recreate": None}
+    )
+    app = _app(*_card(), resolver=_search(), executor=executor, edit_model=edit_model)
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
+
+    assert executor.calls[-1]["tool"] == "write_component"
+    error = _frame(frames, "error")["error"]
+    assert error["error"] == "transient_unavailable"
+    assert error["retry"] == "do_not_retry"
+    assert error.get("retry_after_seconds") is None
+    assert "may already exist" in error["detail"]
 
 
 # --- heartbeats (delta 3) -------------------------------------------------------
@@ -3160,25 +2716,8 @@ async def test_cancel_aborts_a_streaming_turn_with_a_cancelled_error_frame() -> 
     """POST /api/studio/cancel while a turn streams: the stream ends with a
     stream-fatal `cancelled` error frame and no `done` follows."""
 
-    class HangingResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            await asyncio.Event().wait()  # never resolves
-            raise AssertionError("unreachable")
-
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=HangingResolver(),  # type: ignore[arg-type]
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=_new_session_service(),
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_card(), resolver=_HangingResolver())
+    studio = app.state.studio
 
     async def _armed() -> None:
         while not any(
@@ -3207,7 +2746,7 @@ async def test_cancelling_an_idle_conversation_is_a_no_op_204() -> None:
     """The conversation id here was never created by a `/turn`, so this also
     pins the unknown-conversation case: `/cancel`'s contract is an idempotent
     no-op, unlike `/interrupt` and `/composition`'s 404."""
-    async with _client(_app(ScriptedResolver([_envelope()]), ScriptedExecutor())) as client:
+    async with _client(_app()) as client:
         response = await client.post(
             "/api/studio/cancel",
             json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
@@ -3398,12 +2937,7 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
     `/interrupt` that answers the plan streams at once."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        session_service=session_service,
-        store=store,
-    )
+    app = _app(*_plan(), session_service=session_service, store=store)
     releasing = asyncio.Event()
     real_release = store.release
     real_get_session = session_service.get_session
@@ -3462,8 +2996,7 @@ async def test_a_client_that_leaves_at_the_pause_frame_still_releases_the_segmen
         if line.startswith("data: ")
     ]
     plan = _frame(first, "plan.proposed")
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    ledger = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert ledger is not None
     assert ledger.segment is None
 
@@ -3512,9 +3045,6 @@ def _described(revision: int = 1, *, stored_intent: dict[str, Any] | None = None
     }
 
 
-_VIEW = {"outcome": "ok", "frame_refs": [], "view": {"dimensions": {"stat_var": ["dcid:Aid"]}}}
-
-
 class ScriptedEditModel:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
@@ -3533,13 +3063,7 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
     }
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {
-                "outcome": "ok",
-                "frame_refs": [REF_A],
-                "component": COMPONENT,
-                "write_token": WRITE_TOKEN,
-            },
+            *_card_results(write_token=WRITE_TOKEN),
             _described(),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": revised_component},
@@ -3554,11 +3078,10 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
         }
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -3574,7 +3097,7 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
     assert manifest["blocks"][0]["title"] == "Aid to Kenya, 2018-2024"
     assert edit_model.calls[0]["stored_intent"] == STORED_INTENT
     # the edit turn's exact call sequence and the write's exact arguments
-    assert [c["tool"] for c in executor.calls[2:]] == [
+    assert [c["tool"] for c in executor.calls[3:]] == [
         "describe_component",
         "describe_frame",
         "write_component",
@@ -3587,11 +3110,15 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
 
 
 async def _edit_without_a_write_token(
-    patch: dict[str, Any], *, stored_intent: dict[str, Any] = STORED_INTENT
+    patch: dict[str, Any],
+    *,
+    stored_intent: dict[str, Any] = STORED_INTENT,
+    removed: bool = False,
 ) -> tuple[list[dict[str, Any]], ScriptedExecutor]:
     """An Edit Card patch on a card this conversation holds no write
     token for: its create returned none, as a fork, a gallery card or a
-    card made before tokens would."""
+    card made before tokens would. `removed` takes the card off the canvas
+    before the edit."""
     recreated = {
         **COMPONENT,
         "component_id": "cmp_01test0002",
@@ -3604,8 +3131,7 @@ async def _edit_without_a_write_token(
     }
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(stored_intent=stored_intent),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": recreated},
@@ -3614,14 +3140,20 @@ async def _edit_without_a_write_token(
     )
     edit_model = ScriptedEditModel({"text": "Renamed the card.", "patch": patch, "recreate": None})
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
-        await _conversation_with_component(client)
+        manifest = await _conversation_with_component(client)
+        if removed:
+            response = await client.post(
+                "/api/studio/composition",
+                json=_mutation_body(manifest, [{"op": "remove", "component_id": "cmp_01test0001"}]),
+                headers=AUTH,
+            )
+            assert response.json()["blocks"] == []
         frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
     return frames, executor
 
@@ -3651,6 +3183,16 @@ async def test_an_edit_patch_on_a_card_holding_no_write_token_recreates_it_in_it
             }
         },
     }
+
+
+async def test_a_card_rebuilt_after_it_left_the_canvas_is_not_put_back_on_it() -> None:
+    frames, _ = await _edit_without_a_write_token(
+        {"title": "Aid to Kenya, 2018-2024"}, removed=True
+    )
+
+    assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
+    assert "composition.updated" not in _events(frames)
+    assert _frame(frames, "done")["composition"]["blocks"] == []
 
 
 async def test_a_rebuilt_card_is_reported_as_a_new_card() -> None:
@@ -3685,19 +3227,17 @@ async def test_a_patch_naming_a_create_only_field_is_refused_before_any_write() 
     )
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(),
             _VIEW,
         ],
         strict=True,
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -3805,7 +3345,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
 ) -> None:
     """A studio create then an Edit Card revise, through the real
     `McpExecutor` over a platform that issues `cmw_` tokens: the revise
-    presents the create's token, and no SSE frame, digest, recall answer,
+    presents the create's token, and no SSE frame, digest,
     turn record, executor record or state repr carries it. The ledger
     holds it apart from the component digest entries."""
     platform = _TokenIssuingPlatform()
@@ -3821,9 +3361,8 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         return drained
 
     monkeypatch.setattr(_RecordingExecutor, "drain", _drain_and_keep)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     provenance = ProvenanceStore()
-    provenance.put(conversation=f"{principal}/{CONVERSATION}", manifest={}, **REF_A)
+    provenance.put(conversation=f"{PRINCIPAL}/{CONVERSATION}", manifest={}, **REF_A)
     session_service = _new_session_service()
     edit_model = ScriptedEditModel(
         {
@@ -3832,11 +3371,12 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
             "recreate": None,
         }
     )
+    # The plan's steps run through `tool_surface`, so the platform sees only
+    # the hand-back's frame description, the chart's create and the revise.
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        McpExecutor(settings=Settings(), provenance=provenance),
+        *_plan("q with forks", *_charts_the_plan()),
+        executor=McpExecutor(settings=Settings(), provenance=provenance),
         edit_model=edit_model,
-        generative=_plan_generative(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
@@ -3856,7 +3396,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
     assert revise[1]["component_id"] == component_id
     assert revise[1]["write_token"] == token
 
-    conversation = app.state.studio.store.current(principal, CONVERSATION)
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.write_tokens == {component_id: token}
     client_visible = [
         *created,
@@ -3864,8 +3404,6 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         *edited,
         conversation.canvas_digest_state(focus=component_id),
         conversation.conversation_digest_state(),
-        conversation.recall_state(scope="canvas", query="aid kenya"),
-        conversation.recall_state(scope="conversation", query="rename"),
         conversation.components,
         conversation.turns,
     ]
@@ -3883,7 +3421,7 @@ async def test_a_write_token_reaches_the_revise_and_nothing_the_client_sees(
         [(r.structured_content, [block.text for block in r.content]) for r in platform.results]
     )
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded.write_tokens == {component_id: token}
     assert "cmw_" not in json.dumps(reloaded.components)
 
@@ -3903,10 +3441,8 @@ async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None
     third = {**COMPONENT, "component_id": "cmp_01test0003"}
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": third},
+            *_card_results(),
+            *_card_results(third),
             _described(),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": recreated},
@@ -3925,22 +3461,17 @@ async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None
         }
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        *_card(),
+        resolver=_search(2),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
         # A second card, pinned by the user, so the replacement has a
         # neighbour whose slot and pin it must leave alone.
-        second = await _stream(client, "/api/studio/turn", _turn_body("another with forks"))
-        plan = _frame(second, "plan.proposed")
-        resumed = await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
-        )
-        before = _frame(resumed, "done")["composition"]
+        before = await _conversation_with_component(client)
         pinned = await client.post(
             "/api/studio/composition",
             json=_mutation_body(before, [{"op": "pin", "component_id": "cmp_01test0003"}]),
@@ -3974,8 +3505,7 @@ async def test_component_ref_edit_recreate_replaces_the_block_in_place() -> None
 async def test_component_ref_edit_refusal_is_an_honest_message() -> None:
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(),
             _VIEW,
             {
@@ -3998,11 +3528,10 @@ async def test_component_ref_edit_refusal_is_an_honest_message() -> None:
         }
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -4025,13 +3554,7 @@ async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its
     recreated = {**COMPONENT, "component_id": "cmp_01test0002"}
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {
-                "outcome": "ok",
-                "frame_refs": [REF_A],
-                "component": COMPONENT,
-                "write_token": WRITE_TOKEN,
-            },
+            *_card_results(write_token=WRITE_TOKEN),
             _described(),
             _VIEW,
             {
@@ -4048,11 +3571,10 @@ async def test_a_revise_that_needs_another_frame_is_written_as_a_new_card_in_its
         strict=True,
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=ScriptedEditModel({"text": "Now France.", "patch": patch, "recreate": None}),
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -4111,8 +3633,7 @@ async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[st
     }
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": COMPONENT},
@@ -4120,11 +3641,10 @@ async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[st
         strict=True,
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=ScriptedEditModel({"text": "Done.", "patch": None, "recreate": recreate}),
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -4136,156 +3656,44 @@ async def test_an_edit_writes_the_period_as_the_model_drafted_it(period: dict[st
     }
 
 
-# --- canvas digest and canvas questions (WS-C) -----------------------------------
+# --- the canvas digest -----------------------------------------------------------
 
 
-class RecordingConverse:
-    """A converse seam that records the digest it was given and classifies
-    canvas questions the way the real model does -- by the question text."""
-
-    def __init__(self) -> None:
-        self.digests: list[dict[str, Any] | None] = []
-        self.histories: list[dict[str, Any] | None] = []
-        self.recall_results: list[dict[str, Any] | None] = []
-
-    async def __call__(
-        self,
-        *,
-        question: str,
-        canvas_digest: dict[str, Any] | None = None,
-        conversation_digest: dict[str, Any] | None = None,
-        recall_result: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self.digests.append(canvas_digest)
-        self.histories.append(conversation_digest)
-        self.recall_results.append(recall_result)
-        about = "canvas" if "canvas" in question.lower() else "data"
-        # A trivial but real decomposition -- these tests exercise digest
-        # passing and recall, not converse's own decomposition, so a bare
-        # single part is enough to keep the "data" route reaching probe.
-        search_parts = None if about == "canvas" else [{"variable": question}]
-        return {"text": f"Looking into {question}.", "search_parts": search_parts, "about": about}
-
-
-class DigestNarrate:
-    async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-        titles = [b.get("title") for b in (facts.get("canvas") or {}).get("blocks", [])]
-        return {"text": f"Canvas holds: {', '.join(filter(None, titles))}."}
+def _digest(request: Any, label: str) -> dict[str, Any] | None:
+    """The digest the agent's `request` carries under `label`, the heading
+    `orchestrator.agent` prepends it with, or `None` when it carries none."""
+    opening = f"{label}: "
+    for line in request_text(request).split("\n"):
+        if line.startswith(opening):
+            return json.loads(line.removeprefix(opening))
+    return None
 
 
 async def test_turn_two_receives_the_canvas_digest() -> None:
-    converse = RecordingConverse()
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2), _envelope()]),
-        executor,
-        generative=GenerativeNodes(
-            converse=converse, planner=ScriptedPlannerModel(), compose=ScriptedCompose()
-        ),
-        tool_surface=ScriptedSurface(),
-    )
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         await _conversation_with_component(client)
         await _stream(client, "/api/studio/turn", _turn_body("now the same for Uganda"))
 
-    assert converse.digests[0] is None  # turn 1: empty canvas, no digest
-    turn2 = converse.digests[-1]
+    requests = _model(app).requests
+    assert _digest(requests[0], "The user's canvas") is None  # turn 1: empty canvas
+    turn2 = _digest(requests[-1], "The user's canvas")
     assert turn2 is not None
-    assert [b["component_id"] for b in turn2["blocks"]] == ["cmp_01test0001"]
-    assert turn2["blocks"][0]["title"] == "Aid to Kenya"
-    assert turn2["blocks"][0]["fact_summary"]["series"][0]["label"] == "Kenya"
-
-
-async def test_turn_two_receives_the_anaphor_window() -> None:
-    """`studio.py` seeds `anaphor_window` from `ConversationState.
-    anaphor_window` the same way it seeds `canvas_digest`: turn one lands a
-    card with a resolved window, and turn two's "the same years" reaches
-    the resolver with that window already substituted."""
-    windowed_component = {
-        **COMPONENT,
-        "fact_summary": {**COMPONENT["fact_summary"], "window": {"start": "2015", "end": "2020"}},
-    }
-    converse = RecordingConverse()
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": windowed_component},
-        ]
-    )
-    app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(
-            converse=converse, planner=ScriptedPlannerModel(), compose=ScriptedCompose()
-        ),
-        tool_surface=ScriptedSurface(),
-    )
-    async with _client(app) as client:
-        await _conversation_with_component(client)
-        await _stream(client, "/api/studio/turn", _turn_body("compare it for the same years"))
-
-    assert "the same years" not in resolver.calls[-1]["question"]
-    assert "2015 to 2020" in resolver.calls[-1]["question"]
-
-
-async def test_a_canvas_question_answers_from_the_digest_without_search() -> None:
-    converse = RecordingConverse()
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope()])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(
-        resolver,
-        executor,
-        generative=GenerativeNodes(
-            converse=converse,
-            narrate=DigestNarrate(),
-            planner=ScriptedPlannerModel(),
-            compose=ScriptedCompose(),
-        ),
-        tool_surface=ScriptedSurface(),
-    )
-    async with _client(app) as client:
-        await _conversation_with_component(client)
-        resolves_before = len(resolver.calls)
-        frames = await _stream(client, "/api/studio/turn", _turn_body("what is on my canvas?"))
-
-    assert len(resolver.calls) == resolves_before  # no search on the canvas turn
-    assert _events(frames)[-1] == "done"
-    assert "Aid to Kenya" in _frame(frames, "message.complete")["text"]
+    assert turn2 == {"cards_on_canvas": 1, "cards_hidden": 0}
 
 
 # --- elicitation skip and free text (deltas 12) ----------------------------------
 
 
-def _candidates_envelope() -> dict[str, Any]:
-    return _envelope(
-        status="candidates",
-        spec_id=None,
-        candidates=[
-            {"spec_id": SPEC_A, "label": "reading A"},
-            {"spec_id": SPEC_B, "label": "reading B"},
-        ],
-    )
-
-
-async def test_skip_proceeds_on_the_top_ranked_candidate() -> None:
-    resolver = ScriptedResolver([_candidates_envelope(), _envelope(spec_id=SPEC_A)])
-    async with _client(_app(resolver, ScriptedExecutor())) as client:
+async def test_a_skipped_ask_resumes_and_hands_the_skip_back() -> None:
+    """An ask is skippable and takes free text, and a skip resumes the turn
+    with the agent told the user skipped it."""
+    app = _app(*_ask(), _text("Ask me something else."))
+    async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
         assert elicitation["skippable"] is True
         assert elicitation["allow_free_text"] is True
-        assert elicitation["progress"] == {"completed": 1, "total": 2}
 
         second = await _stream(
             client,
@@ -4294,12 +3702,12 @@ async def test_skip_proceeds_on_the_top_ranked_candidate() -> None:
         )
 
     assert _events(second)[-1] == "done"
-    assert resolver.calls[-1]["spec_id"] == SPEC_A  # the top-ranked candidate
+    assert "The user skipped the question." in request_text(_model(app).requests[-1])
 
 
-async def test_a_free_text_answer_re_resolves_with_the_refined_question() -> None:
-    resolver = ScriptedResolver([_candidates_envelope(), _envelope(spec_id=SPEC_B)])
-    async with _client(_app(resolver, ScriptedExecutor())) as client:
+async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
+    app = _app(*_ask(), _text("The OECD reading it is."))
+    async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
 
@@ -4310,39 +3718,22 @@ async def test_a_free_text_answer_re_resolves_with_the_refined_question() -> Non
         )
 
     assert _events(second)[-1] == "done"
-    refined = resolver.calls[-1]
-    assert refined["spec_id"] is None  # not mistaken for an option id
-    assert "the OECD reading please" in refined["question"]
+    assert "The user answered in their own words: the OECD reading please" in request_text(
+        _model(app).requests[-1]
+    )
 
 
 # --- auto_add and the add / set_card_meta ops (deltas 11, 13) --------------------
 
 
 async def test_auto_add_false_streams_the_component_without_composing_it() -> None:
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
-    )
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
-        frames = await _stream(
-            client, "/api/studio/turn", {**_turn_body("q with forks"), "auto_add": False}
-        )
-        plan = _frame(frames, "plan.proposed")
-        resumed = await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
-        )
+        frames = await _stream(client, "/api/studio/turn", {**_turn_body(), "auto_add": False})
 
-        assert "component.created" in _events(resumed)
-        assert "composition.updated" not in _events(resumed)
-        assert _frame(resumed, "done").get("composition") is None
+        assert "component.created" in _events(frames)
+        assert "composition.updated" not in _events(frames)
+        assert _frame(frames, "done").get("composition") is None
 
         # the client adds it later (the "Pin to Canvas" menu / Added chip);
         # with no composition yet and no composition_id named, the add
@@ -4366,30 +3757,14 @@ async def test_auto_add_false_streams_the_component_without_composing_it() -> No
 
 async def test_add_appends_a_block_rebuilt_from_the_streamed_component() -> None:
     executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {
-                "outcome": "ok",
-                "frame_refs": [REF_A],
-                "component": {**COMPONENT, "component_id": "cmp_01test0002"},
-            },
-        ]
+        [*_card_results(), *_card_results({**COMPONENT, "component_id": "cmp_01test0002"})]
     )
-    resolver = ScriptedResolver([_envelope(choice_points=2), _envelope(choice_points=2)])
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), *_card(), resolver=_search(2), executor=executor)
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
         # a second component that stays off the canvas (auto_add=false)
-        frames = await _stream(
-            client, "/api/studio/turn", {**_turn_body("q with forks"), "auto_add": False}
-        )
-        plan = _frame(frames, "plan.proposed")
-        resumed = await _stream(
-            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
-        )
-        assert _frame(resumed, "component.created")["component_id"] == "cmp_01test0002"
+        frames = await _stream(client, "/api/studio/turn", {**_turn_body(), "auto_add": False})
+        assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
 
         response = await client.post(
             "/api/studio/composition",
@@ -4405,17 +3780,11 @@ async def test_add_appends_a_block_rebuilt_from_the_streamed_component() -> None
 
 
 async def test_set_card_meta_writes_harness_owned_card_fields() -> None:
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
+    executor = ScriptedExecutor()
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
+        *_card(),
+        resolver=_search(),
+        executor=executor,
     )
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
@@ -4440,20 +3809,6 @@ async def test_set_card_meta_writes_harness_owned_card_fields() -> None:
     assert block["meta"]["y_label"] == "USD ($)"
 
 
-async def test_a_canvas_question_on_an_empty_canvas_says_so() -> None:
-    """The empty-canvas edge: no digest exists, but the question is still a
-    canvas question -- it must not fall through to a data search."""
-    converse = RecordingConverse()
-    resolver = ScriptedResolver([_envelope()])
-    app = _app(resolver, ScriptedExecutor(), generative=GenerativeNodes(converse=converse))
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("what's on my canvas?"))
-
-    assert resolver.calls == []  # never searched
-    assert _events(frames)[-1] == "done"
-    assert "nothing on your canvas" in _frame(frames, "message.complete")["text"]
-
-
 # --- regression pins --------------------------------------------------------
 
 
@@ -4469,8 +3824,7 @@ async def test_edit_frames_keep_seq_monotonic_across_the_recreate() -> None:
     }
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(),
             _VIEW,
             {"outcome": "ok", "frame_refs": [], "component": recreated},
@@ -4489,11 +3843,10 @@ async def test_edit_frames_keep_seq_monotonic_across_the_recreate() -> None:
         }
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=edit_model,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -4510,19 +3863,17 @@ async def test_a_crashing_edit_model_becomes_a_stream_fatal_error_frame() -> Non
 
     executor = ScriptedExecutor(
         [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+            *_card_results(),
             _described(),
             _VIEW,
         ],
         strict=True,
     )
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
+        *_card(),
+        resolver=_search(),
+        executor=executor,
         edit_model=ExplodingEditModel(),
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
@@ -4533,8 +3884,7 @@ async def test_a_crashing_edit_model_becomes_a_stream_fatal_error_frame() -> Non
 
 
 async def test_answer_without_a_payload_is_refused() -> None:
-    resolver = ScriptedResolver([_candidates_envelope(), _envelope(spec_id=SPEC_A)])
-    async with _client(_app(resolver, ScriptedExecutor())) as client:
+    async with _client(_app(*_ask())) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
         response = await client.post(
@@ -4554,8 +3904,7 @@ async def test_answer_without_a_payload_is_refused() -> None:
 
 
 async def test_approve_with_a_payload_is_refused() -> None:
-    executor = ScriptedExecutor()
-    async with _client(_app(ScriptedResolver([_envelope(choice_points=2)]), executor)) as client:
+    async with _client(_app(*_plan())) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
         response = await client.post(
@@ -4568,17 +3917,11 @@ async def test_approve_with_a_payload_is_refused() -> None:
 
 
 async def test_adding_an_already_composed_component_mints_no_revision() -> None:
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
+    executor = ScriptedExecutor()
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
+        *_card(),
+        resolver=_search(),
+        executor=executor,
     )
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
@@ -4594,17 +3937,11 @@ async def test_adding_an_already_composed_component_mints_no_revision() -> None:
 async def test_a_failing_operation_applies_nothing() -> None:
     """Transactional mutate: a valid pin followed by a missing remove leaves
     the manifest untouched (revision AND pinned state)."""
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
+    executor = ScriptedExecutor()
     app = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        executor,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
+        *_card(),
+        resolver=_search(),
+        executor=executor,
     )
     async with _client(app) as client:
         manifest = await _conversation_with_component(client)
@@ -4633,31 +3970,11 @@ async def test_a_failing_operation_applies_nothing() -> None:
 async def test_a_concurrent_turn_on_a_streaming_conversation_is_409() -> None:
     """The lock is taken eagerly in the route: a second request cannot slip
     past the guard while the first is still streaming."""
-    entered = asyncio.Event()
-
-    class HangingResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            entered.set()
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
-
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=HangingResolver(),  # type: ignore[arg-type]
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=_new_session_service(),
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    resolver = _HangingResolver()
+    app = _app(*_card(), resolver=resolver)
     async with _client(app) as client:
         stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.wait_for(resolver.entered.wait(), timeout=5)
         second = await client.post("/api/studio/turn", json=_turn_body("again"), headers=AUTH)
         assert second.status_code == 409
         cancel = await client.post(
@@ -4714,60 +4031,23 @@ async def test_closing_at_a_heartbeat_unwinds_cleanly() -> None:
     assert conversation.cancel_event is None
 
 
-# --- conversation history: turn records, digest, recall, plain refusals -------
-
-
-class RecallingConverse(RecordingConverse):
-    """Asks for recall on EVERY call it can -- proving the round cap is
-    structural (the node grants exactly one round, whatever the model says)."""
-
-    def __init__(self, scope: str = "conversation") -> None:
-        super().__init__()
-        self.scope = scope
-        self.calls = 0
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls += 1
-        drafted = await super().__call__(**kwargs)
-        drafted["recall"] = {"scope": self.scope, "query": "forks"}
-        return drafted
-
-
-class ScriptedRefusal:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, *, question: str, status: str, warnings: list[str]) -> dict[str, Any]:
-        self.calls.append({"question": question, "status": status, "warnings": warnings})
-        return {"text": "I couldn't answer that -- did you mean military spending, or debt?"}
+# --- conversation history: turn records and digest ----------------------------
 
 
 async def test_turn_two_receives_the_conversation_digest() -> None:
-    converse = RecordingConverse()
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2), _envelope()]),
-        executor,
-        generative=GenerativeNodes(
-            converse=converse, planner=ScriptedPlannerModel(), compose=ScriptedCompose()
-        ),
-        tool_surface=ScriptedSurface(),
-    )
+    app = _app(*_card(), resolver=_search())
     async with _client(app) as client:
         await _conversation_with_component(client)
         await _stream(client, "/api/studio/turn", _turn_body("now the same for Uganda"))
 
-    assert converse.histories[0] is None  # turn 1: no history yet
-    history = converse.histories[-1]
+    requests = _model(app).requests
+    label = "Earlier turns in this conversation"
+    assert _digest(requests[0], label) is None  # turn 1: no history yet
+    history = _digest(requests[-1], label)
     assert history is not None
     assert history["total_turns"] == 1
     (record,) = history["turns"]
-    assert record["user"] == "q with forks"
+    assert record["user"] == "kenya oda 2023"
     assert record["cards"] == [
         {
             "component_id": "cmp_01test0001",
@@ -4778,118 +4058,44 @@ async def test_turn_two_receives_the_conversation_digest() -> None:
     ]
 
 
-class GreetingConverse(RecordingConverse):
-    """Answers "hi" itself (`about: "reply"`); anything else is a data turn."""
-
-    async def __call__(self, *, question: str, **kwargs: Any) -> dict[str, Any]:
-        drafted = await super().__call__(question=question, **kwargs)
-        if question != "hi":
-            return drafted
-        return {"text": "Hello. Ask me about aid.", "search_parts": [], "about": "reply"}
-
-
-async def test_a_reply_closes_the_turn_without_search_and_is_kept_in_history() -> None:
-    converse = GreetingConverse()
-    resolver = ScriptedResolver([_envelope()])
-    app = _app(
-        resolver,
-        ScriptedExecutor([{"outcome": "ok", "frame_refs": [REF_A]}]),
-        generative=GenerativeNodes(converse=converse),
-    )
+async def test_a_plain_answer_is_kept_in_history() -> None:
+    app = _app(_text("Hello. Ask me about aid."))
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("hi"))
         await _stream(client, "/api/studio/turn", _turn_body("aid to Kenya"))
 
-    assert "activity.step" not in _events(frames)
     assert _events(frames)[-1] == "done"
     texts = [(f["event"], f["text"]) for f in frames if f["event"].startswith("message.")]
     assert texts == [
         ("message.delta", "Hello. Ask me about aid."),
         ("message.complete", "Hello. Ask me about aid."),
     ]
-    assert len(resolver.calls) == 1  # the second turn's search only
-    (record,) = converse.histories[-1]["turns"]
+    history = _digest(_model(app).requests[-1], "Earlier turns in this conversation")
+    assert history is not None
+    (record,) = history["turns"]
     assert record == {"user": "hi", "assistant": "Hello. Ask me about aid."}
 
 
 async def test_a_failed_turn_is_recorded_with_its_error() -> None:
-    class ExplodingResolver:
-        async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-            raise RuntimeError("boom")
+    class BrokenSurface(ScriptedSurface):
+        async def call_tool(self, **kwargs: Any) -> ToolCallResult:
+            raise RuntimeError("analysis mount went away")
 
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ExplodingResolver(),
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor([]),
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_plan(), tool_surface=BrokenSurface(), session_service=session_service, store=store)
     async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("q that dies"))
+        first = await _stream(client, "/api/studio/turn", _turn_body("q that dies"))
+        plan = _frame(first, "plan.proposed")
+        frames = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
         assert frames[-1]["event"] == "error"
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    conversation = store.current(principal, CONVERSATION)
+    conversation = store.current(PRINCIPAL, CONVERSATION)
     (record,) = conversation.turns
     assert record["user"] == "q that dies"
     assert record["error"] == "transient_unavailable"
-
-
-async def test_converse_recall_is_served_once_and_bounded() -> None:
-    converse = RecallingConverse()
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(
-        ScriptedResolver([_envelope(choice_points=2), _envelope()]),
-        executor,
-        generative=GenerativeNodes(
-            converse=converse, planner=ScriptedPlannerModel(), compose=ScriptedCompose()
-        ),
-        tool_surface=ScriptedSurface(),
-    )
-    async with _client(app) as client:
-        await _conversation_with_component(client)
-        converse.calls = 0
-        await _stream(client, "/api/studio/turn", _turn_body("about the kenya aid question"))
-
-    # Turn 2: initial call + exactly ONE recall round, though the scripted
-    # converse asks every time.
-    assert converse.calls == 2
-    served = converse.recall_results[-1]
-    assert served is not None and served["scope"] == "conversation"
-    assert served["total_turns"] == 1
-    assert served["turns"][0]["user"] == "q with forks"
-
-
-async def test_recall_canvas_scope_serves_full_fact_summaries() -> None:
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.components["cmp_01test0001"] = {
-        "type": "line_chart",
-        "title": "Aid to Kenya",
-        "revision": 1,
-        "fact_summary": COMPONENT["fact_summary"],
-    }
-    served = state.recall_state(scope="canvas", query="kenya")
-
-    assert served["total_cards"] == 1
-    assert served["cards"][0]["fact_summary"]["series"][0]["label"] == "Kenya"
-
-    missed = state.recall_state(scope="canvas", query="zanzibar")
-    assert missed["cards"] == []
 
 
 def test_the_conversation_digest_is_bounded() -> None:
@@ -4908,84 +4114,39 @@ def test_the_conversation_digest_is_bounded() -> None:
     assert len(json.dumps(digest["turns"])) <= 5_000
 
 
-async def test_a_deadend_close_is_plain_language_with_diagnostics_on_the_step() -> None:
-    refusal = ScriptedRefusal()
-    diagnostic = "chosen shape cosine 0.66 is weak (< 0.75)"
-    resolver = ScriptedResolver(
-        [
-            _envelope(
-                status="unsupported",
-                spec_id=None,
-                warnings=[{"code": "weak_match", "severity": "warn", "message": diagnostic}],
-            )
-        ]
-    )
-    app = _app(resolver, ScriptedExecutor([]), generative=GenerativeNodes(refusal=refusal))
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("spending in Kenya"))
-
-    message = _frame(frames, "message.complete")
-    assert message["text"] == "I couldn't answer that -- did you mean military spending, or debt?"
-    assert "cosine" not in message["text"]
-    resolve = _frame(frames, "activity.step")
-    assert diagnostic in (resolve["detail"] or "")
-    assert refusal.calls == [
-        {"question": "spending in Kenya", "status": "unsupported", "warnings": [diagnostic]}
-    ]
-    assert frames[-1]["event"] == "done"
-
-
-async def test_a_deadend_without_a_refusal_seam_stays_plain() -> None:
-    resolver = ScriptedResolver(
-        [
-            _envelope(
-                status="unsupported",
-                spec_id=None,
-                warnings=[{"code": "weak_match", "severity": "warn", "message": "cosine 0.66"}],
-            )
-        ]
-    )
-    app = _app(resolver, ScriptedExecutor([]))
-    async with _client(app) as client:
-        frames = await _stream(client, "/api/studio/turn", _turn_body("spending in Kenya"))
-
-    message = _frame(frames, "message.complete")
-    assert "cannot be expressed" in message["text"]
-    assert "cosine" not in message["text"]
-
-
-# --- codex-round fixes: recorder isolation, terminal-path records -------------
+# --- recorder isolation and terminal-path records ------------------------------
 
 
 async def test_two_streaming_conversations_keep_their_steps_apart() -> None:
     """Through the routes: both conversations sit inside their fetch at the
-    same moment, and each stream still reports only its own call."""
+    same moment, and each stream still reports only its own call. Each
+    conversation's agent fetches without a search, so the shared script
+    serves both whichever asks first."""
     both_inside = asyncio.Barrier(2)
 
-    class MeetingExecutor:
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
+    class MeetingExecutor(ScriptedExecutor):
         async def __call__(
             self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
         ) -> dict[str, Any]:
-            self.calls.append(current_conversation_id.get())
+            if tool != "get_data":
+                return await super().__call__(tool=tool, args=args)
+            conversation = current_conversation_id.get()
+            self.calls.append({"tool": tool, "conversation": conversation})
             await both_inside.wait()
-            spec = args["spec_id"]
             return {
                 "outcome": "ok",
-                "frame_refs": [{"spec_id": spec, "content_version": "cv_" + "1" * 32}],
-                "summary": f"fetched {spec}",
+                "frame_refs": [REF_A],
+                "summary": f"fetched for {conversation}",
             }
 
-    class ByQuestionResolver:
-        async def __call__(
-            self, *, question: str, spec_id: str | None = None, wide: bool = False
-        ) -> dict[str, Any]:
-            return _envelope(spec_id=SPEC_B if "uganda" in question else SPEC_A)
-
     executor = MeetingExecutor()
-    app = _app(ByQuestionResolver(), executor)  # type: ignore[arg-type]
+    app = _app(
+        fetch_call(SPEC_A),
+        fetch_call(SPEC_A),
+        _text("Kenya."),
+        _text("Uganda."),
+        executor=executor,
+    )
     other = "conv_01test0002"
     async with _client(app) as client:
         frames_a, frames_b = await asyncio.wait_for(
@@ -5000,18 +4161,21 @@ async def test_two_streaming_conversations_keep_their_steps_apart() -> None:
             timeout=10,
         )
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    assert sorted(executor.calls) == [f"{principal}/{CONVERSATION}", f"{principal}/{other}"]
+    mine, theirs = f"{PRINCIPAL}/{CONVERSATION}", f"{PRINCIPAL}/{other}"
+    fetched = [call["conversation"] for call in executor.calls if call["tool"] == "get_data"]
+    assert sorted(fetched) == [mine, theirs]
 
     def fetch_details(frames: list[dict[str, Any]]) -> list[str]:
         return [
             f["detail"]
             for f in frames
-            if f["event"] == "activity.step" and f.get("tool") == "get_data"
+            if f["event"] == "activity.step"
+            and f.get("tool") == "fetch"
+            and f["status"] == "complete"
         ]
 
-    assert fetch_details(frames_a) == [f"fetched {SPEC_A}"]
-    assert fetch_details(frames_b) == [f"fetched {SPEC_B}"]
+    assert fetch_details(frames_a) == [f"fetched for {mine}"]
+    assert fetch_details(frames_b) == [f"fetched for {theirs}"]
     assert _events(frames_a)[-1] == "done"
     assert _events(frames_b)[-1] == "done"
 
@@ -5070,20 +4234,7 @@ async def test_the_recorder_closes_a_call_that_raises_or_is_cancelled_as_a_faile
 async def test_a_rejected_plan_turn_is_recorded() -> None:
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor([]),
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_plan(), session_service=session_service, store=store)
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(frames, "plan.proposed")
@@ -5092,8 +4243,7 @@ async def test_a_rejected_plan_turn_is_recorded() -> None:
         )
         assert resumed[-1]["event"] == "done"
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    (record,) = store.current(principal, CONVERSATION).turns
+    (record,) = store.current(PRINCIPAL, CONVERSATION).turns
     assert record["user"] == "q with forks"
     assert "rejected" in record["assistant"].lower()
     assert "error" not in record
@@ -5102,26 +4252,12 @@ async def test_a_rejected_plan_turn_is_recorded() -> None:
 async def test_an_amendment_reaches_the_turn_record() -> None:
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=_plan_generative(),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(
-            [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            ]
-        ),
+    app = _app(
+        *_plan(),
+        tool_surface=ScriptedSurface(),
         session_service=session_service,
         store=store,
-        tool_surface=ScriptedSurface(),
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
         frames = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(frames, "plan.proposed")
@@ -5136,34 +4272,14 @@ async def test_an_amendment_reaches_the_turn_record() -> None:
         )
         assert final[-1]["event"] == "done"
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    (record,) = store.current(principal, CONVERSATION).turns
+    (record,) = store.current(PRINCIPAL, CONVERSATION).turns
     assert "only since 2015" in record["user"]
 
 
 async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2), _envelope()]),
-            executor=recorder,
-            generative=GenerativeNodes(planner=ScriptedPlannerModel()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(
-            [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-            ]
-        ),
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
+    app = _app(*_plan(), session_service=session_service, store=store)
     async with _client(app) as client:
         paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
         assert paused[-1]["event"] == "plan.proposed"
@@ -5172,8 +4288,7 @@ async def test_a_superseded_pause_is_recorded_as_abandoned() -> None:
         second = await _stream(client, "/api/studio/turn", _turn_body("aid to kenya, quickly"))
         assert second[-1]["event"] == "done"
 
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    records = store.current(principal, CONVERSATION).turns
+    records = store.current(PRINCIPAL, CONVERSATION).turns
     assert [record["user"] for record in records] == ["q with forks", "aid to kenya, quickly"]
     assert records[0]["error"] == "abandoned"
     assert "error" not in records[1]
@@ -5191,18 +4306,12 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
     rebuilt = {**COMPONENT, "component_id": "cmp_01test0002", "type": "bar_chart"}
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=_plan_generative(),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
+    app = _app(
+        *_card(),
+        resolver=_search(),
         executor=ScriptedExecutor(
             [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+                *_card_results(),
                 {
                     "outcome": "ok",
                     "frame_refs": [],
@@ -5215,10 +4324,7 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
         session_service=session_service,
         store=store,
         edit_model=TypeSwitchEdit(),
-        tool_surface=ScriptedSurface(),
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
         await _conversation_with_component(client)
         body = _turn_body("make it a bar chart")
@@ -5229,9 +4335,7 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
         }
         frames = await _stream(client, "/api/studio/turn", body)
         assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
-
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    records = store.current(principal, CONVERSATION).turns
+    records = store.current(PRINCIPAL, CONVERSATION).turns
     assert records[-1]["cards"] == [
         {
             "component_id": "cmp_01test0002",
@@ -5268,18 +4372,12 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
     }
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope(choice_points=2)]),
-            executor=recorder,
-            generative=_plan_generative(),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
+    app = _app(
+        *_card(),
+        resolver=_search(),
         executor=ScriptedExecutor(
             [
-                {"outcome": "ok", "frame_refs": [REF_A]},
-                {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
+                *_card_results(),
                 {
                     "outcome": "ok",
                     "frame_refs": [],
@@ -5292,10 +4390,7 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
         session_service=session_service,
         store=store,
         edit_model=TypeSwitchEdit(),
-        tool_surface=ScriptedSurface(),
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
         await _conversation_with_component(client)
         body = _turn_body("make it a bar chart")
@@ -5306,9 +4401,7 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
         }
         frames = await _stream(client, "/api/studio/turn", body)
         assert _frame(frames, "component.created")["component_id"] == "cmp_01test0002"
-
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    records = store.current(principal, CONVERSATION).turns
+    records = store.current(PRINCIPAL, CONVERSATION).turns
     assert records[-1]["cards"] == [
         {
             "component_id": "cmp_01test0002",
@@ -5320,439 +4413,46 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
     ]
 
 
-# --- "add X to the chart": the message path swaps the block, end to end -----
+# --- the cards one chart call lands, end to end -------------------------------
 
 
-async def test_add_to_the_chart_replaces_the_existing_card_with_a_two_series_one() -> None:
-    """The full scripted wiring runs with `STUDIO_SCRIPTED=true`
-    (`harness.scripted`'s `ScriptedConverse`, `ScriptedCompose`,
-    `ScriptedResolver`, and `ScriptedExecutor`, no local test fakes). A
-    direct fetch draws one card, then "add Guatemala to the chart", a
-    question `ScriptedResolver` resolves to the Kenya+Guatemala frame and
-    `ScriptedConverse` reads as naming the newest canvas block. The canvas
-    stays at one block, now the two-series card, in the first card's
-    place."""
-    session_service = _new_session_service()
-    store = StudioStore(session_service, app_name=AGENT_NAME)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(converse=ScriptedConverse(), compose=ScriptedCompose()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=MessagePathScriptedExecutor(),
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Kenya"))
-        assert _events(first)[-1] == "done"
-        first_manifest = _frame(first, "done")["composition"]
-        assert len(first_manifest["blocks"]) == 1
-
-        second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
-
-    assert _events(second)[-1] == "done"
-    second_created = _frame(second, "component.created")
-    assert {series["label"] for series in second_created["fact_summary"]["series"]} == {
-        "Guatemala",
-        "Kenya",
-    }
-    second_manifest = _frame(second, "done")["composition"]
-    # One block. The two-series card replaced the first card in its slot.
-    assert len(second_manifest["blocks"]) == 1
-    assert second_manifest["blocks"][0]["component_id"] == second_created["component_id"]
-
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    turns = store.current(principal, CONVERSATION).turns
-    assert turns[-1]["cards"][0]["action"] == "replaced"
-
-
-class _DistinctIdExecutor:
-    """Wraps `MessagePathScriptedExecutor`. The real stand-in hardcodes
-    `"cmp_scripted0002"` for every fresh `write_component` call, so two
-    turns' cards would otherwise land under the same id and a set of
-    component ids could not tell "one block survived" from "two blocks
-    happen to share a name". Each fresh write (never a revise patch, which
-    already names its own `component_id` in `args`) gets the next
-    `cmp_distinctNNNN` id instead, on both the top-level component and its
-    nested `fact_summary`."""
-
-    def __init__(self) -> None:
-        self._inner = MessagePathScriptedExecutor()
-        self._writes = 0
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        result = await self._inner(tool=tool, args=args)
-        component = result.get("component")
-        if tool == "write_component" and "component_id" not in args and isinstance(component, dict):
-            self._writes += 1
-            new_id = f"cmp_distinct{self._writes:04d}"
-            component = {
-                **component,
-                "component_id": new_id,
-                "fact_summary": {**component["fact_summary"], "component_id": new_id},
-            }
-            result = {**result, "component": component}
-        return result
-
-
-class _CardVanishesMidTurnCompose:
-    """Wraps `ScriptedCompose`. Right when compose runs, after converse
-    already validated `revises` against the turn-start canvas but before
-    the write, it removes the named target's own block -- not the whole
-    canvas -- off the conversation's composition, and PERSISTS that removal
-    (a real `/composition` call would). This stands in for a concurrent
-    `/composition` call removing just that card, since that route runs
-    without the turn lock so the canvas can change mid-turn. The checkpoint
-    `StudioRunner._checkpointed` runs before `done` and reconciles against
-    the LEDGER's own composition, not this instance's in-process copy, so
-    the removal must actually be saved for the reconcile to see it."""
-
-    def __init__(
-        self, store: StudioStore, principal: str, conversation_id: str, *, target: str
-    ) -> None:
-        self._inner = ScriptedCompose()
-        self._store = store
-        self._principal = principal
-        self._conversation_id = conversation_id
-        self._target = target
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        conversation = self._store.current(self._principal, self._conversation_id)
-        if conversation.composition is not None:
-            blocks = [
-                block
-                for block in conversation.composition.blocks
-                if block.component_id != self._target
-            ]
-            conversation.composition = conversation.composition.model_copy(
-                update={"blocks": blocks}
-            )
-            await self._store.save(self._principal, self._conversation_id, keys={_KEY_COMPOSITION})
-        return await self._inner(**kwargs)
-
-
-async def test_add_to_the_chart_appends_instead_when_the_target_vanishes_mid_turn() -> None:
-    """The target block is removed (`/composition`) between converse's
-    turn-start validation and compose's write landing. The canvas ends
-    with only the new card: the old one, the sole block, is the one that
-    vanished, and a target already gone cannot be swapped. The turn record
-    says `created`, not `replaced`, because `land_component`'s own check,
-    made synchronously right after the write returns, catches the removal
-    in time for narrate's `components_replaced` fact to say so too."""
-    session_service = _new_session_service()
-    store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _DistinctIdExecutor()
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(
-                converse=ScriptedConverse(),
-                compose=_CardVanishesMidTurnCompose(
-                    store, principal, CONVERSATION, target="cmp_distinct0001"
-                ),
-            ),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-        first_created = _frame(first, "component.created")
-        assert first_created["component_id"] == "cmp_distinct0001"
-
-        second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
-
-    assert _events(second)[-1] == "done"
-    second_created = _frame(second, "component.created")
-    assert second_created["component_id"] == "cmp_distinct0002"
-    second_manifest = _frame(second, "done")["composition"]
-    # One block: the new card only. The old one, removed mid-turn, does
-    # not survive alongside it.
-    assert len(second_manifest["blocks"]) == 1
-    assert second_manifest["blocks"][0]["component_id"] == "cmp_distinct0002"
-    assert first_created["component_id"] not in {
-        block["component_id"] for block in second_manifest["blocks"]
-    }
-
-    turns = store.current(principal, CONVERSATION).turns
-    assert turns[-1]["cards"][0]["action"] == "created"
-
-
-async def test_add_to_the_chart_replace_action_survives_removal_between_landing_and_drain() -> None:
-    """`land_component` decides and mutates atomically, right after the
-    write returns, inside `compose` -- so a removal that lands strictly
-    AFTER that call (here: at the start of `narrate`, which only runs once
-    `compose` has already finished) does not desync what narrate says
-    from what the recorder reports. Both come from the one stamped action,
-    made before the removal, not re-derived afterward: narrate's
-    `components_replaced` and the turn record's `action` say
-    `replaced`, even though the manifest the client actually receives at
-    `done` already reflects the later removal."""
-    session_service = _new_session_service()
-    store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _DistinctIdExecutor()
-    captured_facts: list[dict[str, Any]] = []
-
-    class _RemoveNewCardNarrate:
-        """Runs strictly after `compose` returns -- `land_component` has
-        already landed the replace by the time this call happens -- so
-        removing the just-landed card here simulates `/composition`
-        interleaving in the gap between the atomic landing call and the
-        translator's later drain. Persists the removal (a real
-        `/composition` call would) so the checkpoint that runs before
-        `done` -- reconciling against the LEDGER's own composition, not
-        this instance's in-process copy -- sees it too."""
-
-        async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-            del question
-            captured_facts.append(facts)
-            conversation = store.current(principal, CONVERSATION)
-            if conversation.composition is not None:
-                blocks = [
-                    block
-                    for block in conversation.composition.blocks
-                    if block.component_id != "cmp_distinct0002"
-                ]
-                conversation.composition = conversation.composition.model_copy(
-                    update={"blocks": blocks}
-                )
-                await store.save(principal, CONVERSATION, keys={_KEY_COMPOSITION})
-            return {"text": "Updated the chart."}
-
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(
-                converse=ScriptedConverse(),
-                compose=ScriptedCompose(),
-                narrate=_RemoveNewCardNarrate(),
-            ),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-        assert _frame(first, "component.created")["component_id"] == "cmp_distinct0001"
-
-        second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
-
-    assert _events(second)[-1] == "done"
-    assert captured_facts[-1]["components_replaced"] is True
-    second_manifest = _frame(second, "done")["composition"]
-    # The removal narrate performed already landed by the time the stream
-    # emits `done`: the manifest the client sees has no blocks left.
-    assert second_manifest["blocks"] == []
-
-    turns = store.current(principal, CONVERSATION).turns
-    # Agrees with narrate's fact: the recorder's own action is `replaced`,
-    # the true outcome of the one atomic call, not re-derived at drain
-    # time against a canvas the removal has since changed.
-    assert turns[-1]["cards"][0]["action"] == "replaced"
-
-
-class _TwoIntentsCompose:
-    """Wraps `ScriptedCompose`. For a "to the chart" turn only, drafts two
-    `line_chart` intents off the turn's one final-step frame instead of
-    one, both naming the same `frame_ref` -- `_admissible_intents` keeps
-    every intent naming a step's produced frame eligible, not just the
-    first, so both survive. Stands in for a model drawing two cards from
-    data it fetched once. Any other turn (the first, seeding the canvas)
-    passes through unchanged, one intent as usual."""
-
-    def __init__(self) -> None:
-        self._inner = ScriptedCompose()
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        drafted = await self._inner(**kwargs)
-        intents = drafted["intents"]
-        if not intents or "to the chart" not in str(kwargs.get("question", "")):
-            return drafted
-        first = intents[0]
-        second = {**first, "title": f"{first['title']} (second)"}
-        return {"intents": [first, second]}
-
-
-async def test_two_components_in_one_turn_the_first_replaces_the_second_appends() -> None:
-    """`revises_target` (`harness.graph`'s `compose` node) is consumed by
-    the first component that actually lands, then cleared, so a turn that
-    lands two components can only ever swap the first: `land_component`
-    (`harness.studio_state`) replaces the canvas's existing target in
-    place for the first write, then appends for the second, whatever
-    `revises` named. The manifest ends with exactly the two new cards, in
-    that order, and the old one is gone; `components_replaced` and the
-    turn's own recorded actions agree with it."""
-    session_service = _new_session_service()
-    store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _DistinctIdExecutor()
-
-    class _CapturingNarrate:
-        def __init__(self) -> None:
-            self.captured: list[dict[str, Any]] = []
-
-        async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-            del question
-            self.captured.append(facts)
-            return {"text": "Updated the chart."}
-
-    narrate = _CapturingNarrate()
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(
-                converse=ScriptedConverse(), compose=_TwoIntentsCompose(), narrate=narrate
-            ),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
-        session_service=session_service,
-        store=store,
-    )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
-    async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-        assert _frame(first, "component.created")["component_id"] == "cmp_distinct0001"
-
-        second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
-
-    assert _events(second)[-1] == "done"
-    created_ids = [
-        frame["component_id"] for frame in second if frame["event"] == "component.created"
-    ]
-    assert created_ids == ["cmp_distinct0002", "cmp_distinct0003"]
-
-    assert narrate.captured[-1]["components_replaced"] is True
-
-    second_manifest = _frame(second, "done")["composition"]
-    # Exactly the two new cards, in landing order; the pre-turn card the
-    # first one swapped out does not survive alongside them.
-    assert [block["component_id"] for block in second_manifest["blocks"]] == [
-        "cmp_distinct0002",
-        "cmp_distinct0003",
-    ]
-
-    turns = store.current(principal, CONVERSATION).turns
-    assert [card["action"] for card in turns[-1]["cards"]] == ["replaced", "created"]
-
-
-class _FirstWriteMissingFactSummaryExecutor:
-    """Wraps `_DistinctIdExecutor`. The turn's first `write_component` call
-    answers `ok` with a component that carries no `fact_summary` -- a
-    malformed-but-`ok` response -- and every other write, this turn's
-    second included, answers normally."""
-
-    def __init__(self, *, trigger: int) -> None:
-        self._inner = _DistinctIdExecutor()
-        self.writes = 0
-        self._trigger = trigger
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        if tool != "write_component":
-            return await self._inner(tool=tool, args=args)
-        self.writes += 1
-        result = await self._inner(tool=tool, args=args)
-        if self.writes != self._trigger or not isinstance(result.get("component"), dict):
-            return result
-        component = dict(result["component"])
-        del component["fact_summary"]
-        return {**result, "component": component}
-
-
-async def test_a_component_missing_fact_summary_never_lands_and_the_revise_target_survives() -> (
-    None
-):
+async def test_a_component_missing_fact_summary_never_lands() -> None:
     """An `ok` write whose component fails the `component.created` wire
-    contract -- missing `fact_summary`, here -- must not consume the
-    turn's revise target or replace the existing card. It is refused
-    the same as any other unusable write, the existing card stays
-    exactly as it was, and the target is still there for the next
-    write this same turn that actually validates."""
+    contract (here, a missing `fact_summary`) is refused like any other
+    unusable write. No frame announces it and the canvas is unchanged."""
+    missing = {key: value for key, value in COMPONENT.items() if key != "fact_summary"}
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _FirstWriteMissingFactSummaryExecutor(trigger=2)
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(converse=ScriptedConverse(), compose=_TwoIntentsCompose()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
+    app = _app(
+        *_card(),
+        resolver=_search(),
+        executor=ScriptedExecutor(_card_results(missing)),
         session_service=session_service,
         store=store,
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-        assert _frame(first, "component.created")["component_id"] == "cmp_distinct0001"
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
 
-        second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
-
-    assert _events(second)[-1] == "done"
-    created_ids = [
-        frame["component_id"] for frame in second if frame["event"] == "component.created"
-    ]
-    # Only the second write's component reaches the wire: the first,
-    # missing fact_summary, produces no component.created frame at all.
-    assert created_ids == ["cmp_distinct0003"]
-
-    second_manifest = _frame(second, "done")["composition"]
-    # One block: the second write's card, in the first (target) card's own
-    # place -- the revise target the invalid first write never consumed.
-    assert [block["component_id"] for block in second_manifest["blocks"]] == ["cmp_distinct0003"]
-
-    principal_turns = store.current(principal, CONVERSATION).turns
-    assert [card["action"] for card in principal_turns[-1]["cards"]] == ["replaced"]
+    assert _events(frames)[-1] == "done"
+    assert "component.created" not in _events(frames)
+    assert "composition" not in _frame(frames, "done")
+    assert store.current(PRINCIPAL, CONVERSATION).composition is None
 
 
-class _HangsOnTheThirdWriteExecutor:
-    """Wraps `_DistinctIdExecutor`. The third `write_component` call across
-    the conversation -- the second write of a two-intent turn -- hangs
-    forever instead of returning, standing in for a write whose response
-    never lands before the client disconnects or POST /api/studio/cancel
-    fires. The first write of that turn has already returned by then, so
-    `harness.graph`'s `compose` has already stamped its record `land=True`
-    (and, being the first usable write, consumed the revise target); the
-    hang keeps `compose`'s node from ever returning, so no ADK event
-    follows for either write."""
+class _WritesUntil(ScriptedExecutor):
+    """`ScriptedExecutor` over two `_card` turns, the second drawing two
+    charts: its first write lands `cmp_01test0002`, and the conversation's
+    third write -- the second turn's second -- runs `third_write` instead
+    of answering."""
 
-    def __init__(self) -> None:
-        self._inner = _DistinctIdExecutor()
+    def __init__(self, third_write: Callable[[], Any]) -> None:
+        super().__init__(
+            [
+                *_card_results(),
+                *_card_results({**COMPONENT, "component_id": "cmp_01test0002"}),
+            ]
+        )
+        self._third_write = third_write
         self.writes = 0
 
     async def __call__(
@@ -5761,48 +4461,47 @@ class _HangsOnTheThirdWriteExecutor:
         if tool == "write_component":
             self.writes += 1
             if self.writes == 3:
-                await asyncio.Event().wait()
-        return await self._inner(tool=tool, args=args)
+                await self._third_write()
+        return await super().__call__(tool=tool, args=args)
+
+
+async def _hang() -> None:
+    await asyncio.Event().wait()
+
+
+async def _reset() -> None:
+    raise RuntimeError("presentation-mcp connection reset")
 
 
 async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_unchanged() -> None:
-    """A cancel that lands while `compose`'s second write hangs kills the
-    turn before `compose`'s node ever yields an event -- no event means
-    `harness.studio_translate`'s `_component_frames` never runs for
-    either write, so neither the first write's already-returned component
-    nor the second lands: `harness.studio.StudioRunner._frames`'s
-    `finally` drops both undrained records with the turn. The canvas is
-    exactly what the first turn left it, not one card landed partway
-    through the second."""
+    """A cancel that lands while a chart call's second write hangs kills the
+    turn before the call returns. No event follows, so
+    `harness.studio_translate`'s `_component_frames` does not run for either
+    write, and neither the first write's already-returned component nor the
+    second lands. `harness.studio.StudioRunner._frames`'s `finally` drops
+    both undrained records with the turn. The canvas is exactly what the
+    first turn left it, with no card landed partway through the second."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _HangsOnTheThirdWriteExecutor()
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(converse=ScriptedConverse(), compose=_TwoIntentsCompose()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
+    executor = _WritesUntil(_hang)
+    app = _app(
+        *_card(),
+        *_card(charts=2),
+        resolver=_search(2),
         executor=executor,
         session_service=session_service,
         store=store,
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-        before = [b.component_id for b in store.current(principal, CONVERSATION).composition.blocks]
+        await _conversation_with_component(client)
+        before = [b.component_id for b in store.current(PRINCIPAL, CONVERSATION).composition.blocks]
 
         resume = asyncio.ensure_future(
             _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
         )
 
         async def _wait_for_the_hang() -> None:
-            while executor.writes < 3:  # first write landed, second hanging
+            while executor.writes < 3:  # first write returned, second hanging
                 await asyncio.sleep(0.01)
 
         await asyncio.wait_for(_wait_for_the_hang(), timeout=5)
@@ -5816,78 +4515,44 @@ async def test_first_write_ok_then_cancellation_before_drain_leaves_the_canvas_u
     assert cancel.status_code == 204
     assert _frame(cancelled, "error")["error"]["error"] == "cancelled"
     assert "component.created" not in _events(cancelled)
-    after = [b.component_id for b in store.current(principal, CONVERSATION).composition.blocks]
-    assert after == before
-
-
-class _RaisesOnTheThirdWriteExecutor:
-    """Wraps `_DistinctIdExecutor`. Same trigger as
-    `_HangsOnTheThirdWriteExecutor`, except the second write of the
-    two-intent turn raises instead of hanging -- stands in for a write
-    whose call itself failed after the platform may already have
-    committed it."""
-
-    def __init__(self) -> None:
-        self._inner = _DistinctIdExecutor()
-        self.writes = 0
-
-    async def __call__(
-        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
-        if tool == "write_component":
-            self.writes += 1
-            if self.writes == 3:
-                raise RuntimeError("presentation-mcp connection reset")
-        return await self._inner(tool=tool, args=args)
+    after = [b.component_id for b in store.current(PRINCIPAL, CONVERSATION).composition.blocks]
+    assert after == before == ["cmp_01test0001"]
 
 
 async def test_first_write_ok_then_second_write_raises_still_announces_what_actually_landed() -> (
     None
 ):
-    """Unlike a cancellation, ADK still surfaces the node's already-tracked
-    events before it re-raises a plain exception out of `compose`, so the
-    translator's drain (and the landing it performs) runs for the first
-    write before the second one's failure ends the stream. The first
-    write's card is announced (`component.created` plus
-    `composition.updated`) and lands for real -- narrate never runs, so no
-    text closes the turn, but the server's own composition is exactly what
-    the client was told. The second write, which never returned, produces
-    no frame and never reaches the canvas. The stream still ends with a
-    stream-fatal error."""
+    """`make_charts` answers a write that raised as a chart it could not draw
+    and draws nothing after it, so the turn goes on. The first write's card
+    is announced (`component.created` plus `composition.updated`) and lands
+    for real: the server's own composition is exactly what the client was
+    told. The second write, which never returned, produces no frame and
+    never reaches the canvas."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    executor = _RaisesOnTheThirdWriteExecutor()
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=MessagePathScriptedResolver(),
-            executor=recorder,
-            generative=GenerativeNodes(converse=ScriptedConverse(), compose=_TwoIntentsCompose()),
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=executor,
+    app = _app(
+        *_card(),
+        *_card(charts=2),
+        resolver=_search(2),
+        executor=_WritesUntil(_reset),
         session_service=session_service,
         store=store,
     )
-    app = FastAPI()
-    app.include_router(create_studio_router(studio, settings=Settings()))
     async with _client(app) as client:
-        first = await _stream(client, "/api/studio/turn", _turn_body("Life expectancy in Nigeria"))
-        assert _events(first)[-1] == "done"
-
+        await _conversation_with_component(client)
         second = await _stream(client, "/api/studio/turn", _turn_body("add Guatemala to the chart"))
 
-    assert _events(second)[-1] == "error"
+    assert _events(second)[-1] == "done"
     created = [frame for frame in second if frame["event"] == "component.created"]
     # Exactly the first write's card -- the second, which raised, never
     # produced a component to announce.
-    assert [frame["component_id"] for frame in created] == ["cmp_distinct0002"]
+    assert [frame["component_id"] for frame in created] == ["cmp_01test0002"]
     announced_manifest = _frame(second, "composition.updated")["manifest"]
-    server_blocks = store.current(principal, CONVERSATION).composition.blocks
+    server_blocks = store.current(PRINCIPAL, CONVERSATION).composition.blocks
     assert [b["component_id"] for b in announced_manifest["blocks"]] == [
         b.component_id for b in server_blocks
     ]
+    assert [b.component_id for b in server_blocks] == ["cmp_01test0001", "cmp_01test0002"]
 
 
 # --- cross-instance: two StudioRunners over one shared database service ----
@@ -5902,47 +4567,31 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
     from the ledger's `_PendingInterrupt.step_order` before resuming. A
     second `/turn` on B then continues the same conversation: the turn
     index advances past what A claimed, and the digest carries A's turn."""
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
     app_a = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
-    executor_b = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app_b = _app(
-        # B's own resolver is called exactly once: for the SECOND `/turn`
-        # below. B never resolves the first turn's question at all --
-        # `/interrupt` resumes the ADK invocation A's own `/turn` already
-        # started, in the per-turn session A created.
-        ScriptedResolver([_envelope()]),
-        executor_b,
-        generative=_plan_generative(),
-        tool_surface=ScriptedSurface(),
-        session_service=session_service,
-    )
+    # B's own model answers only after the hand-back: `/interrupt` resumes
+    # the ADK invocation A's own `/turn` already started, in the per-turn
+    # session A created, so B never sees the first turn's question.
+    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service)
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
-        assert app_b.state.studio.surface_recorder.step_order(f"{principal}/{CONVERSATION}") == []
+        assert app_b.state.studio.surface_recorder.step_order(f"{PRINCIPAL}/{CONVERSATION}") == []
 
         resumed = await _stream(
             client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
         assert _events(resumed)[-1] == "done"
-        assert app_b.state.studio.surface_recorder.step_order(f"{principal}/{CONVERSATION}") == [
+        assert app_b.state.studio.surface_recorder.step_order(f"{PRINCIPAL}/{CONVERSATION}") == [
             step["id"] for step in plan["steps"]
         ]
         # B names the plan steps' Activity lines with the plan card's labels.
-        assert app_b.state.studio.surface_recorder.step_labels(f"{principal}/{CONVERSATION}") == {
+        assert app_b.state.studio.surface_recorder.step_labels(f"{PRINCIPAL}/{CONVERSATION}") == {
             step["id"]: step["label"] for step in plan["steps"]
         }
         lines = [frame["label"] for frame in resumed if frame["event"] == "activity.step"]
@@ -5951,7 +4600,7 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
         second = await _stream(client_b, "/api/studio/turn", _turn_body("a follow-up question"))
 
     assert _events(second)[-1] == "done"
-    state = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    state = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
     digest = state.conversation_digest_state()
@@ -5970,16 +4619,12 @@ async def test_a_double_approve_across_two_instances_gives_one_success_and_one_4
     turn A has already finished."""
     session_service = sqlite_session_service(tmp_path / "shared.db")
     app_a = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
     app_b = _app(
-        ScriptedResolver([_envelope(choice_points=2)]),
-        ScriptedExecutor(),
-        generative=_plan_generative(),
+        *_plan(),
         tool_surface=ScriptedSurface(),
         session_service=session_service,
     )
@@ -6029,12 +4674,8 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
     continue to its own claim, which advances the turn index it just loaded,
     rather than answering a bare 500."""
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
+    app_a = _app(session_service=session_service)
+    app_b = _app(session_service=session_service)
 
     a_committed = asyncio.Event()
     real_create = app_b.state.studio.store.create
@@ -6056,8 +4697,7 @@ async def test_two_instances_racing_the_first_turn_on_a_brand_new_conversation_b
         second_b = await asyncio.wait_for(task_b, timeout=5)
 
     assert _events(second_b)[-1] == "done"
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-    state = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    state = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
 
@@ -6066,81 +4706,72 @@ async def test_a_composition_edit_on_one_instance_survives_a_concurrent_turns_re
     tmp_path: Path,
 ) -> None:
     """B's `/composition` pins A's first turn's card while A's SECOND turn
-    is still landing its own new one, mid-stream, before A's release. A's
+    is still writing its own new one, mid-stream, before A's release. A's
     release finds the ledger has moved (B's pin) and replays A's own
     recorded append onto B's freshly pinned manifest instead of overwriting
     it with A's own stale copy -- B's edit survives."""
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
-
-    first_manifest: dict[str, Any] = {}
-
-    class _PinFirstCardFromB:
-        """`narrate`'s scripted stand-in, wrapped: on the SECOND turn only
-        (the first turn's own narrate call must not race its own card),
-        pins the first turn's card through B before answering."""
-
-        def __init__(self, client_b: httpx2.AsyncClient) -> None:
-            self._client_b = client_b
-            self.calls = 0
-
-        async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-            del question, facts
-            self.calls += 1
-            if self.calls == 2:
-                response = await self._client_b.post(
-                    "/api/studio/composition",
-                    json={
-                        "kind": "composition.mutate",
-                        "schema_version": 1,
-                        "conversation_id": CONVERSATION,
-                        "composition_id": first_manifest["composition_id"],
-                        "expected_revision": first_manifest["revision"],
-                        "operations": [
-                            {
-                                "op": "pin",
-                                "component_id": first_manifest["blocks"][0]["component_id"],
-                            }
-                        ],
-                    },
-                    headers=AUTH,
-                )
-                assert response.status_code == 200, response.text
-            return {"text": f"Answer {self.calls}."}
+    app_b = _app(session_service=session_service)
 
     async with _client(app_b) as client_b:
-        narrate = _PinFirstCardFromB(client_b)
+        executor = _PinsTheFirstCardFromB(client_b)
         app_a = _app(
-            MessagePathScriptedResolver(),
-            _DistinctIdExecutor(),
-            generative=GenerativeNodes(
-                converse=ScriptedConverse(), compose=ScriptedCompose(), narrate=narrate
-            ),
+            *_card(),
+            *_card(),
+            resolver=_search(2),
+            executor=executor,
             session_service=session_service,
         )
         async with _client(app_a) as client_a:
-            first = await _stream(
-                client_a, "/api/studio/turn", _turn_body("Life expectancy in Kenya")
-            )
-            assert _events(first)[-1] == "done"
-            first_manifest.update(_frame(first, "done")["composition"])
-
-            second = await _stream(
-                client_a, "/api/studio/turn", _turn_body("compare Guatemala and Nigeria")
-            )
+            executor.first_manifest = await _conversation_with_component(client_a)
+            second = await _stream(client_a, "/api/studio/turn", _turn_body("now for Uganda"))
             assert _events(second)[-1] == "done"
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     blocks = reloaded.composition.blocks
-    assert len(blocks) == 2
-    first_block = next(
-        b for b in blocks if b.component_id == first_manifest["blocks"][0]["component_id"]
-    )
-    assert first_block.pinned is True
+    assert [b.component_id for b in blocks] == ["cmp_01test0001", "cmp_01test0002"]
+    assert blocks[0].pinned is True
+
+
+class _PinsTheFirstCardFromB(ScriptedExecutor):
+    """`ScriptedExecutor` over two `_card` turns, the second landing
+    `cmp_01test0002`. Its second write, the second turn's, first pins
+    the first turn's card (`first_manifest`) through `client_b`, another
+    instance, as a concurrent `/composition` call would."""
+
+    def __init__(self, client_b: httpx2.AsyncClient) -> None:
+        super().__init__(
+            [
+                *_card_results(),
+                *_card_results({**COMPONENT, "component_id": "cmp_01test0002"}),
+            ]
+        )
+        self._client_b = client_b
+        self.first_manifest: dict[str, Any] = {}
+        self.writes = 0
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        if tool == "write_component":
+            self.writes += 1
+            if self.writes == 2:
+                response = await self._client_b.post(
+                    "/api/studio/composition",
+                    json=_mutation_body(
+                        self.first_manifest,
+                        [
+                            {
+                                "op": "pin",
+                                "component_id": self.first_manifest["blocks"][0]["component_id"],
+                            }
+                        ],
+                    ),
+                    headers=AUTH,
+                )
+                assert response.status_code == 200, response.text
+        return await super().__call__(tool=tool, args=args)
 
 
 async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succeed(
@@ -6150,14 +4781,9 @@ async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succee
     per-turn session `#t{n}` still existing, is idle rather than mid-claim:
     the next `/turn` claims n+1 and succeeds, on a SECOND instance that
     never saw the first."""
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
+    app_a = _app(session_service=session_service)
+    app_b = _app(session_service=session_service)
 
     async with _client(app_a) as client_a:
         first = await _stream(client_a, "/api/studio/turn", _turn_body("first"))
@@ -6167,28 +4793,12 @@ async def test_ledger_at_turn_n_with_no_stream_running_lets_the_next_turn_succee
         second = await _stream(client_b, "/api/studio/turn", _turn_body("second"))
     assert _events(second)[-1] == "done"
 
-    state = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    state = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert state is not None
     assert state.turn_index == 2
 
 
 # --- the segment lease wired into the routes --------------------------------
-
-
-class _HangingResolver:
-    """Never resolves, so a `/turn` stream stays open indefinitely -- the
-    gated runner the cross-instance tests below hold A's stream open with,
-    instead of racing a request against A's own completion."""
-
-    def __init__(self) -> None:
-        self.entered = asyncio.Event()
-
-    async def __call__(
-        self, *, question: str, spec_id: str | None = None, wide: bool = False, parts=None
-    ) -> dict[str, Any]:
-        self.entered.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
 
 
 async def test_a_turn_from_another_instance_while_a_streams_is_409_with_retry_after(
@@ -6200,10 +4810,8 @@ async def test_a_turn_from_another_instance_while_a_streams_is_409_with_retry_af
     `retry_after_seconds`."""
     resolver = _HangingResolver()
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _app(resolver, ScriptedExecutor(), session_service=session_service)
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
+    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
+    app_b = _app(session_service=session_service)
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
@@ -6249,10 +4857,8 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     monkeypatch.setattr(store_a, "renew", stalled_renew)
     store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
     resolver = _HangingResolver()
-    app_a = _app(resolver, ScriptedExecutor(), session_service=session_service, store=store_a)
+    app_a = _app(*_card(), resolver=resolver, session_service=session_service, store=store_a)
     app_b = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
         session_service=session_service,
         store=store_b,
     )
@@ -6293,14 +4899,12 @@ async def test_a_heartbeat_that_cannot_renew_ends_the_stream_once_its_clock_pass
 
     monkeypatch.setattr(store, "renew", _renew_always_fails)
     resolver = _HangingResolver()
-    app = _app(resolver, ScriptedExecutor(), session_service=session_service, store=store)
+    app = _app(*_card(), resolver=resolver, session_service=session_service, store=store)
 
     async with _client(app) as client:
         stream_task = asyncio.ensure_future(_stream(client, "/api/studio/turn", _turn_body()))
         await asyncio.wait_for(resolver.entered.wait(), timeout=5)
-
-        principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
-        state = store.current(principal, CONVERSATION)
+        state = store.current(PRINCIPAL, CONVERSATION)
         assert state is not None and state.segment is not None
         deadline = state.segment.expires_at - 10
 
@@ -6328,10 +4932,8 @@ async def test_cancel_from_another_instance_stops_the_live_stream_within_a_heart
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
     resolver = _HangingResolver()
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_a = _app(resolver, ScriptedExecutor(), session_service=session_service)
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
+    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
+    app_b = _app(session_service=session_service)
 
     async with _client(app_a) as client_a, _client(app_b) as client_b:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
@@ -6362,16 +4964,15 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
     stale `entry.session` (fresh only because of the unrelated renewal)
     never stands in for what the ledger actually holds."""
     monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
     resolver = _HangingResolver()
-    app_a = _app(resolver, ScriptedExecutor(), session_service=session_service)
+    app_a = _app(*_card(), resolver=resolver, session_service=session_service)
 
     async with _client(app_a) as client_a:
         stream_task = asyncio.ensure_future(_stream(client_a, "/api/studio/turn", _turn_body()))
         await asyncio.wait_for(resolver.entered.wait(), timeout=5)
 
-        state_a = app_a.state.studio.store.current(principal, CONVERSATION)
+        state_a = app_a.state.studio.store.current(PRINCIPAL, CONVERSATION)
         segment_id = state_a.segment.id
         first_expires_at = state_a.segment.expires_at
 
@@ -6383,14 +4984,14 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
         assert state_a.segment.id == segment_id  # renewed, not taken over
 
         store_b = StudioStore(session_service, app_name=AGENT_NAME)
-        state_b = await store_b.load(principal, CONVERSATION)
+        state_b = await store_b.load(PRINCIPAL, CONVERSATION)
         block = CompositionBlock(
             component_id="cmp_from_b", revision=1, type=ComponentType.LINE_CHART, title="B"
         )
         state_b.composition = studio_state_module._next_manifest(
             state_b.composition, [block], actor=CompositionActor.USER
         )
-        await store_b.save(principal, CONVERSATION)
+        await store_b.save(PRINCIPAL, CONVERSATION)
 
         response = await client_a.post(
             "/api/studio/composition",
@@ -6416,7 +5017,7 @@ async def test_composition_after_a_heartbeat_renewal_still_sees_a_remote_write(
     assert pinned["component_id"] == "cmp_from_b"
     assert pinned["pinned"] is True
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded.composition.blocks[0].pinned is True
 
 
@@ -6425,16 +5026,7 @@ async def test_a_release_failure_does_not_strand_the_local_lock() -> None:
     lock even when the store's own release call raises (`StudioStore.release`
     never does in practice; this pins the guarantee independently of that
     contract) -- the exception propagates, but the lock still releases."""
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope()]),
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=_new_session_service(),
-    )
+    studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     await conversation.lock.acquire()
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -6462,16 +5054,7 @@ async def test_a_heartbeat_exception_does_not_strand_the_local_lock() -> None:
     exceptions; one from `_end_stream` or `store.now()` reaches `_unwind`
     unhandled) -- the exception propagates, but both the segment and the
     lock still release."""
-    studio = StudioRunner(
-        create_workflow=lambda recorder, surface: create_root_workflow(
-            resolver=ScriptedResolver([_envelope()]),
-            executor=recorder,
-            tool_surface=surface,
-            fetch_series_stats=scripted_fetch_series_stats,
-        ),
-        executor=ScriptedExecutor(),
-        session_service=_new_session_service(),
-    )
+    studio = _app().state.studio
     conversation = await studio.store.create("u_a", CONVERSATION)
     await conversation.lock.acquire()
     segment_id = studio.store.claim_segment("u_a", CONVERSATION)
@@ -6505,13 +5088,7 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     """When the save that runs before `plan.proposed` fails, the stream ends
     with a stream-fatal error frame and the client never receives
     `plan.proposed`."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    app = _app(
-        resolver,
-        ScriptedExecutor(),
-        generative=GenerativeNodes(planner=ScriptedPlannerModel(), compose=ScriptedCompose()),
-        tool_surface=ScriptedSurface(),
-    )
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
     studio = app.state.studio
 
     async def broken_checkpoint(*args: Any, **kwargs: Any) -> None:
@@ -6534,70 +5111,24 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
     A's second turn finishes, is merged in by the checkpoint that runs
     before `done`: A's own Done frame carries it, not just a later reload
     from the ledger, pinned on the composition manifest specifically."""
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
     session_service = sqlite_session_service(tmp_path / "shared.db")
-    app_b = _app(
-        ScriptedResolver([_envelope()]), ScriptedExecutor(), session_service=session_service
-    )
-
-    first_manifest: dict[str, Any] = {}
-
-    class _PinFirstCardFromB:
-        """`narrate`'s scripted stand-in, wrapped: on the SECOND turn only
-        (the first turn's own narrate call must not race its own card),
-        pins the first turn's card through B before answering."""
-
-        def __init__(self, client_b: httpx2.AsyncClient) -> None:
-            self._client_b = client_b
-            self.calls = 0
-
-        async def __call__(self, *, question: str, facts: dict[str, Any]) -> dict[str, Any]:
-            del question, facts
-            self.calls += 1
-            if self.calls == 2:
-                response = await self._client_b.post(
-                    "/api/studio/composition",
-                    json={
-                        "kind": "composition.mutate",
-                        "schema_version": 1,
-                        "conversation_id": CONVERSATION,
-                        "composition_id": first_manifest["composition_id"],
-                        "expected_revision": first_manifest["revision"],
-                        "operations": [
-                            {
-                                "op": "pin",
-                                "component_id": first_manifest["blocks"][0]["component_id"],
-                            }
-                        ],
-                    },
-                    headers=AUTH,
-                )
-                assert response.status_code == 200, response.text
-            return {"text": f"Answer {self.calls}."}
+    app_b = _app(session_service=session_service)
 
     async with _client(app_b) as client_b:
-        narrate = _PinFirstCardFromB(client_b)
+        executor = _PinsTheFirstCardFromB(client_b)
         app_a = _app(
-            MessagePathScriptedResolver(),
-            _DistinctIdExecutor(),
-            generative=GenerativeNodes(
-                converse=ScriptedConverse(), compose=ScriptedCompose(), narrate=narrate
-            ),
+            *_card(),
+            *_card(),
+            resolver=_search(2),
+            executor=executor,
             session_service=session_service,
         )
         async with _client(app_a) as client_a:
-            first = await _stream(
-                client_a, "/api/studio/turn", _turn_body("Life expectancy in Kenya")
-            )
-            assert _events(first)[-1] == "done"
-            first_manifest.update(_frame(first, "done")["composition"])
-
-            second = await _stream(
-                client_a, "/api/studio/turn", _turn_body("compare Guatemala and Nigeria")
-            )
+            executor.first_manifest = await _conversation_with_component(client_a)
+            second = await _stream(client_a, "/api/studio/turn", _turn_body("now for Uganda"))
             assert _events(second)[-1] == "done"
 
-    pinned_component_id = first_manifest["blocks"][0]["component_id"]
+    pinned_component_id = executor.first_manifest["blocks"][0]["component_id"]
     done_block = next(
         b
         for b in _frame(second, "done")["composition"]["blocks"]
@@ -6605,7 +5136,7 @@ async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame
     )
     assert done_block["pinned"] is True
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
     assert reloaded.composition is not None
     ledger_block = next(
@@ -6620,23 +5151,15 @@ async def test_a_card_landed_during_compositions_own_fetch_survives_live_and_the
     flight is folded into the manifest `mutate` is handed -- the pin this
     request applies to an EARLIER card and the just-landed card both reach
     the response, the live conversation, and the ledger."""
-    resolver = ScriptedResolver([_envelope(choice_points=2)])
-    executor = ScriptedExecutor(
-        [
-            {"outcome": "ok", "frame_refs": [REF_A]},
-            {"outcome": "ok", "frame_refs": [REF_A], "component": COMPONENT},
-        ]
-    )
-    app = _app(resolver, executor, generative=_plan_generative(), tool_surface=ScriptedSurface())
+    app = _app(*_card(), resolver=_search())
     session_service = app.state.studio.store._session_service
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
 
     async with _client(app) as client:
         await _conversation_with_component(client)
         store = app.state.studio.store
-        state = store.current(principal, CONVERSATION)
+        state = store.current(PRINCIPAL, CONVERSATION)
 
-        turn_lock = store.lock_for(principal, CONVERSATION)
+        turn_lock = store.lock_for(PRINCIPAL, CONVERSATION)
         await turn_lock.acquire()  # stands in for a stream still owning the turn
 
         real_get_session = session_service.get_session
@@ -6648,7 +5171,6 @@ async def test_a_card_landed_during_compositions_own_fetch_survives_live_and_the
                 action = land_component(
                     state,
                     {"component_id": "cmp_landed", "type": "line_chart", "revision": 1},
-                    revises=None,
                 )
                 assert action == "created"
             return await real_get_session(*args, **kwargs)
@@ -6675,10 +5197,10 @@ async def test_a_card_landed_during_compositions_own_fetch_survives_live_and_the
     pinned = next(b for b in updated["blocks"] if b["component_id"] == "cmp_01test0001")
     assert pinned["pinned"] is True
 
-    live = store.current(principal, CONVERSATION)
+    live = store.current(PRINCIPAL, CONVERSATION)
     assert {b.component_id for b in live.composition.blocks} == {"cmp_01test0001", "cmp_landed"}
 
-    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(principal, CONVERSATION)
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert {b.component_id for b in reloaded.composition.blocks} == {"cmp_01test0001", "cmp_landed"}
 
 
@@ -6739,107 +5261,40 @@ def _seeded_turn_body(
     return {**_turn_body(message), "seed_spec": [seed]}
 
 
-async def test_a_seeded_turn_stores_its_seed_and_plans_without_searching_or_minting(
+async def test_a_seeded_turn_stores_its_seed_and_answers_without_searching_or_minting(
     definition_store: InMemoryDefinitionStore,
 ) -> None:
-    resolver = ScriptedResolver([_envelope()])
+    search = CannedSearch()
     executor = ScriptedExecutor(strict=True)
-    app = _app(resolver, executor, served=[_seed_spec()])
+    app = _app(resolver=search, executor=executor, served=[_seed_spec()])
     async with _client(app) as client:
         frames = await _stream(
             client, "/api/studio/turn", _seeded_turn_body("top 5 donors for education aid")
         )
 
-    assert resolver.calls == []
+    assert search.calls == []
     assert executor.calls == []
     assert await definition_store.get(_SEED_SPEC, schema_version=1) is not None
-    steps = [frame for frame in frames if frame["event"] == "activity.step"]
+    steps = [frame for frame in frames if frame["event"] == "activity.step" and frame.get("tool")]
     assert (steps[0]["tool"], steps[0]["status"], steps[0]["label"]) == (
         "receive_seeds",
         "complete",
         "Receive the datasets from Search",
     )
-    assert "resolve" not in {step["step_id"] for step in steps}
-    assert _events(frames)[-1] == "plan.proposed"
-
-
-async def test_a_seeded_turn_whose_definition_store_is_unreachable_searches_the_question() -> None:
-    class _Unreachable:
-        async def put_many(self, definitions: Any) -> None:
-            raise DefinitionStoreUnavailable("backend unreachable")
-
-        async def get(self, spec_id: str, *, schema_version: int) -> None:
-            raise DefinitionStoreUnavailable("backend unreachable")
-
-        async def aclose(self) -> None:
-            pass
-
-    set_definition_store(_Unreachable())
-    try:
-        resolver = ScriptedResolver([_envelope()])
-        async with _client(_app(resolver, ScriptedExecutor(), served=[_seed_spec()])) as client:
-            frames = await _stream(
-                client, "/api/studio/turn", _seeded_turn_body("top 5 donors for education aid")
-            )
-    finally:
-        set_definition_store(None)
-
-    steps = [frame for frame in frames if frame["event"] == "activity.step"]
-    failed = [step for step in steps if step["status"] == "failed"]
-    assert [step["label"] for step in failed] == ["Receive the datasets from Search"] * 2
-    assert failed[0]["detail"] == (
-        "service_unavailable: data-mcp could not resolve seed 0: the definition store is "
-        "unreachable right now. Retry after 5.0s."
-    )
-    assert failed[1]["detail"].startswith(
-        "service_unavailable: data-mcp could not resolve the datasets"
-    )
-    assert len(resolver.calls) == 1
-    assert resolver.calls[0]["question"] == "top 5 donors for education aid"
-    assert "resolve" in {step["step_id"] for step in steps}
     assert _events(frames)[-1] == "done"
-
-
-async def test_a_no_year_seed_with_no_operation_fetches_the_year_search_showed(
-    definition_store: InMemoryDefinitionStore,
-) -> None:
-    del definition_store
-    headline = {"year": 2024, "year_named": False, "observations": 13356, "series": 13356}
-    resolver = ScriptedResolver([_envelope()])
-    executor = ScriptedExecutor()
-    async with _client(_app(resolver, executor, served=[_seed_spec(headline=headline)])) as client:
-        frames = await _stream(
-            client,
-            "/api/studio/turn",
-            _seeded_turn_body("education aid", operations=[], headline=headline),
-        )
-
-    assert "elicitation.request" not in _events(frames)
-    assert _events(frames)[-1] == "done"
-    assert resolver.calls == []
-    assert executor.calls[0] == {
-        "tool": "get_data",
-        "args": {
-            "spec_id": _SEED_SPEC,
-            "scope": {"window": {"kind": "range", "start_year": 2024, "end_year": 2024}},
-        },
-    }
 
 
 async def test_a_single_reference_seed_spec_runs_the_question_and_shows_it_was_not_used() -> None:
     """The shape `seed_spec` was reserved with is accepted, as it was: the turn
     answers the question, and a failed step says the reference seeded nothing."""
-    resolver = ScriptedResolver([_envelope()])
-    executor = ScriptedExecutor()
     body = {
         **_turn_body("life expectancy in Kenya"),
         "seed_spec": {"spec_id": _SEED_SPEC, "content_version": "cv_" + "0" * 32},
     }
-    async with _client(_app(resolver, executor)) as client:
+    async with _client(_app()) as client:
         frames = await _stream(client, "/api/studio/turn", body)
 
     assert _events(frames)[-1] == "done"
-    assert len(resolver.calls) == 1
     (failed,) = [
         frame
         for frame in frames
@@ -6849,14 +5304,12 @@ async def test_a_single_reference_seed_spec_runs_the_question_and_shows_it_was_n
     assert failed["detail"].startswith("seed_reference_unused: seed_spec holds one")
 
 
-async def test_a_seed_past_the_size_cap_fails_its_step_and_the_turn_searches_the_question(
+async def test_a_seed_past_the_size_cap_fails_its_step_and_the_turn_answers_the_question(
     definition_store: InMemoryDefinitionStore,
 ) -> None:
-    resolver = ScriptedResolver([_envelope()])
-    executor = ScriptedExecutor()
     body = _seeded_turn_body("top 5 donors for education aid")
     body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_SEED_SPEC_BYTES}
-    async with _client(_app(resolver, executor)) as client:
+    async with _client(_app()) as client:
         frames = await _stream(client, "/api/studio/turn", body)
 
     steps = [frame for frame in frames if frame["event"] == "activity.step"]
@@ -6865,7 +5318,6 @@ async def test_a_seed_past_the_size_cap_fails_its_step_and_the_turn_searches_the
     assert failed["detail"].startswith("seed_invalid: seed 0 cannot be used")
     assert "-byte cap on one seed" in failed["detail"]
     assert await definition_store.get(_SEED_SPEC, schema_version=1) is None
-    assert len(resolver.calls) == 1
     assert _events(frames)[-1] == "done"
 
 
@@ -6922,8 +5374,6 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         ],
     }
     app = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
         session_service=session_service,
         served=[_KENYA_SPEC],
     )
@@ -6952,7 +5402,7 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         if frame["event"] == "activity.step" and frame["status"] == "failed"
     ]
     assert failed["detail"] == f"seed_invalid: {refused['refused']['detail']}"
-    assert _events(frames)[-1] == "plan.proposed"
+    assert _events(frames)[-1] == "done"
 
 
 def _malformed_seed(
@@ -7003,16 +5453,15 @@ def _malformed_seed(
         "identity-shape-a-string",
     ],
 )
-async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_other_seed_plans(
+async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_other_is_kept(
     definition_store: InMemoryDefinitionStore, malformed: dict[str, Any], refused: str
 ) -> None:
     """A seed the harness cannot read is refused as it is taken; one whose
     identity Search refuses is dropped with Search's reason."""
-    resolver = ScriptedResolver([_envelope()])
-    executor = ScriptedExecutor()
+    search = CannedSearch()
     body = _seeded_turn_body("top 5 donors for education aid")
     body["seed_spec"].insert(0, malformed)
-    async with _client(_app(resolver, executor, served=[_seed_spec()])) as client:
+    async with _client(_app(resolver=search, served=[_seed_spec()])) as client:
         frames = await _stream(client, "/api/studio/turn", body)
 
     assert "error" not in _events(frames)
@@ -7023,43 +5472,34 @@ async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_o
     malformed_spec_id = malformed["spec"]["spec_id"]
     assert await definition_store.get(malformed_spec_id, schema_version=1) is None
     assert await definition_store.get(_SEED_SPEC, schema_version=1) is not None
-    assert resolver.calls == []
-    assert _events(frames)[-1] == "plan.proposed"
+    assert search.calls == []
+    assert _events(frames)[-1] == "done"
 
 
 async def test_a_request_past_the_body_cap_is_refused_before_it_is_parsed() -> None:
-    resolver = ScriptedResolver([_envelope()])
+    search = CannedSearch()
     executor = ScriptedExecutor()
     body = _seeded_turn_body("top 5 donors for education aid")
     body["seed_spec"][0]["spec"]["trace"] = {"padding": "x" * MAX_TURN_REQUEST_BYTES}
-    async with _client(_app(resolver, executor)) as client:
+    async with _client(_app(resolver=search, executor=executor)) as client:
         response = await client.post("/api/studio/turn", json=body, headers=AUTH)
 
     assert response.status_code == 413
     assert response.json()["error"] == "resource_exhausted"
     assert "6,356,992-byte cap" in response.json()["detail"]
     assert executor.calls == []
-    assert resolver.calls == []
+    assert search.calls == []
 
 
-@pytest.mark.parametrize("engine", ["graph", "orchestrator"])
-async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(engine: str) -> None:
-    """The orchestrator's planner is seeded with the earlier turns' readings,
-    warnings and the spec_ids it can pin from a stored block, and never the
-    block; the classic engine is seeded with none of it."""
+async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block() -> None:
+    """The planner is seeded with the earlier turns' readings, warnings and
+    the spec_ids it can pin from a stored block, without the block."""
     session_service = _new_session_service()
     store = StudioStore(session_service, app_name=AGENT_NAME)
-    app = _app(
-        ScriptedResolver([_envelope()]),
-        ScriptedExecutor(),
-        settings=Settings(studio_engine=engine),
-        session_service=session_service,
-        store=store,
-    )
-    principal = "u_" + hashlib.sha256(b"test-token").hexdigest()[:16]
+    app = _app(session_service=session_service, store=store)
     spec_id = "spec_" + "a" * 32
     reading = SearchReading(text="aid", status="definite", spec_id=spec_id).model_dump(mode="json")
-    conversation = await store.create(principal, CONVERSATION)
+    conversation = await store.create(PRINCIPAL, CONVERSATION)
     conversation.turn_index = 1
     conversation.turn_recorded = True
     conversation.turns = [
@@ -7070,21 +5510,21 @@ async def test_a_turn_session_is_seeded_with_earlier_readings_and_no_block(engin
             "specs": {spec_id: {"spec_id": spec_id, "note": "stored block"}},
         }
     ]
-    await store.save(principal, CONVERSATION)
+    await store.save(PRINCIPAL, CONVERSATION)
 
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body())
 
     session = await session_service.get_session(
-        app_name=AGENT_NAME, user_id=principal, session_id=f"{CONVERSATION}#t2"
+        app_name=AGENT_NAME, user_id=PRINCIPAL, session_id=f"{CONVERSATION}#t2"
     )
     assert session is not None
     assert "stored block" not in json.dumps(session.state, default=str)
-    seeded = session.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY)
-    if engine == "graph":
-        assert seeded is None
-    else:
-        assert seeded == {"readings": [reading], "warnings": {spec_id: []}, "spec_ids": [spec_id]}
+    assert session.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) == {
+        "readings": [reading],
+        "warnings": {spec_id: []},
+        "spec_ids": [spec_id],
+    }
 
 
 def test_the_turn_keeps_the_plan_records_readings_and_spec_blocks_its_events_write() -> None:

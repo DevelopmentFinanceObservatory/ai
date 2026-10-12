@@ -174,37 +174,12 @@ async def test_call_tool_tags_a_real_client_deadline_as_a_timeout() -> None:
     assert getattr(excinfo.value, "timeout_tool", None) == "search"
 
 
-async def test_a_clarify_re_entry_opens_no_client(captured_clients: list[Client]) -> None:
-    """`spec_id` set skips `search` entirely (`McpResolver.__call__`) -- this
-    is here so the next test's empty-capture assumption is documented, not
-    accidental."""
-    resolver = McpResolver(settings=Settings())
-
-    await resolver(question="unused", spec_id="spec_" + "1" * 32)
-
-    assert captured_clients == []
-
-
-async def test_missing_parts_refuses_before_the_search_call(
+async def test_empty_parts_list_refuses_before_the_search_call(
     captured_clients: list[Client],
 ) -> None:
-    """A caller that reaches the resolver with no decomposed parts (a
-    `create_root_workflow` graph with no generative seam -- see
-    `McpResolver.__call__`) must not send `search` a null/empty `parts`,
-    which its schema rejects with a raw MCP validation failure the graph
-    cannot present. The refusal must carry a usable code/message instead,
-    and it must fire before any client opens."""
-    resolver = McpResolver(settings=Settings())
-
-    with pytest.raises(ResolverError) as excinfo:
-        await resolver(question="how much debt does Kenya service")
-
-    assert captured_clients == []  # refused before any network call
-    assert excinfo.value.refusal.get("code") == "no_search_parts"
-    assert str(excinfo.value)
-
-
-async def test_empty_parts_list_refuses_the_same_way(captured_clients: list[Client]) -> None:
+    """`search` must not be sent an empty `parts`, which its schema rejects
+    with a raw MCP validation failure. The refusal carries a usable code
+    instead, and fires before any client opens."""
     resolver = McpResolver(settings=Settings())
 
     with pytest.raises(ResolverError) as excinfo:
@@ -214,37 +189,31 @@ async def test_empty_parts_list_refuses_the_same_way(captured_clients: list[Clie
     assert excinfo.value.refusal.get("code") == "no_search_parts"
 
 
-async def test_a_clarify_re_entry_carries_the_chosen_candidate_wide_forward() -> None:
-    """The `spec_id`-set shortcut cannot recompute `wide` (no `search`
-    call), so it must return whatever `wide` it was called with rather than
-    a hardcoded `False`. `graph.clarify` is the caller that supplies the
-    real value, carried forward from the candidate the user chose
-    (`harness.tool_contracts.graph_envelope`'s `candidates` branch, and
-    `_candidate_wide` in `harness.graph`); this test pins the resolver's
-    half of that contract directly, without going through `graph`'s
-    `ScriptedResolver` test double, which never exercises this shortcut and
-    so cannot catch a regression here.
+async def test_a_raw_text_search_sends_the_question_without_parts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`raw_text` sends `search` the question alone, so data-mcp reads it
+    through Search's raw-text door instead of refusing for missing parts."""
+    sent: list[dict[str, Any]] = []
 
-    The shortcut cannot recompute `parts` either: it must return the count
-    of the decomposed search parts `graph.probe` carries forward, not a
-    hardcoded `1`, or a compound question loses its compound depth floor on
-    every clarify re-entry."""
+    async def call_held(clients: Any, client: Any, tool: str, arguments: dict[str, Any], **_: Any):
+        sent.append({"tool": tool, **arguments})
+        return SimpleNamespace(is_error=True, structured_content={"code": "stop"}, meta=None)
+
+    async def get() -> object:
+        return object()
+
+    async def release(client: object) -> None:
+        return None
+
+    monkeypatch.setattr("harness.mcp_client._call_held", call_held)
     resolver = McpResolver(settings=Settings())
-    spec_id = "spec_" + "1" * 32
+    monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
 
-    narrow = await resolver(question="unused", spec_id=spec_id, wide=False)
-    wide = await resolver(question="unused", spec_id=spec_id, wide=True)
-    two_parts = await resolver(
-        question="unused",
-        spec_id=spec_id,
-        parts=[{"variable": "debt service"}, {"variable": "gdp"}],
-    )
-    no_parts = await resolver(question="unused", spec_id=spec_id)
+    with pytest.raises(ResolverError):
+        await resolver(question="ODA to Kenya from all official donors", parts=[], raw_text=True)
 
-    assert narrow["wide"] is False
-    assert wide["wide"] is True
-    assert two_parts["parts"] == 2
-    assert no_parts["parts"] == 1
+    assert sent == [{"tool": "search", "raw_query": "ODA to Kenya from all official donors"}]
 
 
 async def test_the_executor_get_data_client_carries_its_180s_deadline(
@@ -574,6 +543,36 @@ async def test_a_card_on_a_retrieval_read_with_place_types_lists_the_pair_dfo_ap
     assert result["outcome"] == "ok"
     assert result["component"]["provenance"]["inputs"] == [minted]
     assert result["component"]["payload"]["provenance"]["inputs"] == [typed]
+
+
+async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_dfo_apis_serves(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """`get_data` names a retrieval read with place types by its manifest's own pair,
+    and a card drawn on that pair finds the retrieval's lineage."""
+    minted = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
+    typed = {"spec_id": minted["spec_id"], "content_version": "cv_" + "2" * 32}
+    manifest = {
+        "definition": {"spec_id": minted["spec_id"]},
+        "content_version": minted["content_version"],
+        "trace": {},
+        "frame_ref": typed,
+    }
+    envelope = resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=minted)
+    scripted_presentation_client([_tool_result(manifest), _write_result(envelope)])
+    store = ProvenanceStore()
+    executor = McpExecutor(settings=Settings(), provenance=store)
+
+    fetched = await executor(tool="get_data", args={"spec_id": minted["spec_id"]})
+    drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
+
+    assert fetched["frame_refs"] == [minted]
+    assert drawn["outcome"] == "ok", drawn
+    assert drawn["component"]["provenance"]["inputs"] == [minted]
+    conversation = current_conversation_id.get()
+    assert store.get(conversation=conversation, **typed) == store.get(
+        conversation=conversation, **minted
+    )
 
 
 async def test_the_executor_moves_a_creates_write_token_off_the_result(
@@ -2160,7 +2159,8 @@ async def test_the_executor_retries_a_get_data_refusal_that_asks_for_a_delay(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
     # A frame minted with extra columns is held under a content_version of its own,
-    # which `get_data` states as `frame_ref` beside the manifest.
+    # which `get_data` states as `frame_ref` beside the manifest. The result names the
+    # manifest's own pair, which dfo-apis serves to describe_frame and charts.
     frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_typed"}
     manifest = {
         "definition": {"spec_id": "spec_" + "1" * 32},
@@ -2179,7 +2179,7 @@ async def test_the_executor_retries_a_get_data_refusal_that_asks_for_a_delay(
     )
 
     assert result["outcome"] == "ok"
-    assert result["frame_refs"] == [frame_ref]
+    assert result["frame_refs"] == [{"spec_id": "spec_" + "1" * 32, "content_version": "cv_1"}]
     assert client.calls == ["get_data", "get_data"]
     (delay,) = sleeps.delays
     # At least the named 2s, and at most twice it.

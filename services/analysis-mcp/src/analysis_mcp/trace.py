@@ -143,9 +143,8 @@ class Trace(BaseModel):
         pattern=_INPUT_CONTENT_VERSION_PATTERN,
         description=(
             "This result's own stored frame's frame-grammar `cv_`, derived once at write "
-            "time from the frame's own bytes plus `upstream_trace`'s lineage fields. A "
-            "later hop that resolves this result as its own input reads this field "
-            "directly."
+            "time from the frame's own bytes alone. A later hop that resolves this "
+            "result as its own input reads this field directly."
         ),
     )
     op_spec_hash: str = Field(pattern=OP_SPEC_HASH_PATTERN)

@@ -1,10 +1,10 @@
 ---
-description: Connect the DFO to Claude, ChatGPT or Gemini so your assistant can look up development finance data. Developers can also connect Claude Code, Codex or Gemini CLI.
+description: Connect the DFO to Claude, ChatGPT, or Gemini so your assistant can look up development finance data. Developers can also connect Claude Code, Codex, or Gemini CLI.
 ---
 
 # Connect your AI assistant
 
-You can connect the DFO to an AI assistant such as Claude, ChatGPT or Gemini. Once it's connected, you can ask the assistant questions about development finance. It looks up the answer in DFO data and tells you which source the numbers come from. Setup takes a few minutes and doesn't need a DFO account.
+You can connect the DFO to an AI assistant such as Claude, ChatGPT, or Gemini. Once it's connected, you can ask the assistant questions about development finance. It looks up the answer in DFO data and tells you which source the numbers come from. Setup takes a few minutes and doesn't need a DFO account.
 
 The connection uses MCP (Model Context Protocol), a standard way for AI assistants to use outside tools. You only need one thing, the DFO's server address:
 
@@ -30,7 +30,7 @@ https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=
 
 <!-- TODO: turn the template into a link once the domain is set. -->
 
-To add it by hand:
+To add it manually:
 
 1. In Claude, go to **Customize**, then **Connectors**.
 1. Choose **Add custom connector**.
@@ -72,7 +72,7 @@ Depending on the app, results appear as an interactive chart or table (Claude de
 ### If it doesn't work
 
 - **The assistant answers without using the DFO.** Check that the DFO connector is turned on for this chat. In ChatGPT, type @ and select it.
-- **The assistant says it can't reach the server.** Check the address ends in `/mcp` with no slash after it.
+- **The assistant says it can't reach the server.** Check that the address ends in `/mcp` with no slash after it.
 - **The request takes too long or fails.** Try a narrower question, such as fewer countries or a shorter time period.
 - **You see an error with a "trace id".** Send that id to the DFO team so they can look into it.
 
@@ -122,12 +122,12 @@ This server is stateless, so it can't see capabilities that clients on the 2025-
 
 Every call answers within 45 seconds.
 
-| Situation                                                                                                 | Response                                                                                                  | What to do                                                   |
-| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| A call is still running at 45 seconds                                                                     | `service_unavailable`, naming the tool and the limit                                                      | Repeat after 5 seconds                                       |
-| A large `get_data` request, such as aid from every donor to one country, takes longer upstream            | `operation_still_processing`, a few seconds before the limit, while retrieval continues in the background | Repeat with the same arguments to pick up the same retrieval |
-| A mid-size request runs for more than about 30 seconds without moving to the background path              | A refusal suggesting a narrower scope                                                                     | Narrow the request: fewer entities or a shorter window       |
-| A call that fetches, analyses or publishes a frame arrives while the server is at its in-memory row limit | `service_unavailable`, naming the rows needed and the rows free                                           | Repeat after 2 seconds                                       |
+| Situation                                                                                                  | Response                                                                                                  | What to do                                                   |
+| ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| A call is still running at 45 seconds                                                                      | `service_unavailable`, naming the tool and the limit                                                      | Repeat after 5 seconds                                       |
+| A large `get_data` request, such as aid from every donor to one country, takes longer upstream             | `operation_still_processing`, a few seconds before the limit, while retrieval continues in the background | Repeat with the same arguments to pick up the same retrieval |
+| A mid-size request runs for more than about 30 seconds without moving to the background path               | A refusal suggesting a narrower scope                                                                     | Narrow the request: fewer entities or a shorter window       |
+| A call that fetches, analyses, or publishes a frame arrives while the server is at its in-memory row limit | `service_unavailable`, naming the rows needed and the rows free                                           | Repeat after 2 seconds                                       |
 
 All supported clients allow more than 45 seconds per tool call, so no timeout override is needed:
 
@@ -270,5 +270,5 @@ Each developer tool takes the header in its own field:
 
 ## Next
 
-- [**How the MCP server answers questions**](what-you-can-ask.md)**:** follows one question from search to a cited answer and lists what the server refuses.
-- **Tools reference:** every argument and error code. <!-- TODO: link when the generated Tools reference is published. -->
+- [**How the MCP server answers questions**](what-you-can-ask.md)**:** Follows one question from search to a cited answer and lists what the server refuses.
+- **Tools reference:** Every argument and error code. <!-- TODO: link when the generated Tools reference is published. -->

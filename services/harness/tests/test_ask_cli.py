@@ -4,7 +4,7 @@ segment reader.
 `scripts/ask.py` sits outside the uv workspace (`pyproject.toml`'s
 `[tool.uv.workspace]` lists only `packages/*` and `services/*`), so it can't
 be imported as a package. It's loaded by file path instead, the same way
-`test_studio_conformance.py` loads `evals/studio/checks.py`.
+`test_studio_orchestrator_eval.py` loads `evals/studio/checks.py`.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 survives a process restart in one shared bucket, keyed by the reference
 pair a `FrameRef` names.
 
-One object per reference: `frames/v3/{spec_id}/{content_version}.parquet`,
+One object per reference: `frames/v4/{spec_id}/{content_version}.parquet`,
 uploaded with `if_generation_match=0` -- insert-only, first-writer-wins. A
 pair is content-addressed by construction (the reference pair names the
 exact frame it names), so a `PreconditionFailed` (412) means the bytes are
@@ -60,43 +60,37 @@ the identical wrong object.
 `open` runs step 1 alone and returns a `HeldFrame` whose `num_rows` is the
 recorded row count, so a caller claims the rows (`common.row_budget`)
 before any byte is downloaded. An object stored without a recorded count
-(every `frames/v1/` object, and a `frames/v2/` object written without
-one) has `num_rows` `None`, and its caller claims its own row
-ceiling instead. The `HeldFrame`'s `read(max_rows=...)` downloads the
-object, runs steps 2 to 4 with `max_rows` as the claim, and decodes it.
-`get` is `open` then `read` with this store's row ceiling as the claim. The
-key prefix names the layout, so `open` knows which decoder applies before
-it reads a byte. `_layouts` lists them in lookup order: `put` writes the
-first, and `open` reads each later one only when every name before it is a
-miss.
+has `num_rows` `None`, and its caller claims its own row ceiling instead.
+The `HeldFrame`'s `read(max_rows=...)` downloads the object, runs steps 2
+to 4 with `max_rows` as the claim, and decodes it. `get` is `open` then
+`read` with this store's row ceiling as the claim.
 
-- `frames/v3/` holds `frame_to_parquet_bytes`'s canonical Arrow layout,
-  whose `unit` struct is `{ref, request, composed}`.
-  `frame_from_verified_parquet_bytes` reads it with `pq.read_table` and
-  wraps the table with `Frame.from_table`, which checks the schema against
-  the canonical frame schema and trusts the cells.
-- `frames/v2/` holds the same layout with `unit` as the two-member struct
-  `{ref, request}`, which holds no composed unit.
-  `frame_from_verified_two_member_parquet_bytes` gives the struct its
-  `composed` member, null on every row, and wraps the table the same way,
-  so the frame has the canonical bytes its rows have in any layout.
-- `frames/v1/` holds the text layout (JSON-text `unit`, no `status`).
-  `frame_from_parquet_bytes` validates every cell through
-  `build_frame_from_arrow`.
+Every object this store keeps sits under the layout version `_LAYOUT`
+(`v4`): frames under `frames/v4/`, mint records under `mints/v4/` and anchor
+records under `anchors/v4/`. A pair can name other bytes from one layout to
+the next (under `v4` a dfo-apis pair holds that version's canonical frame,
+where it held a rendering before), and a mint or anchor record describes the
+frames of the pairs it names, so the records move with the frames.
 
-`put` writes neither `frames/v2/` nor `frames/v1/`, and an object under
-either ages out under the bucket's lifecycle rule like any other.
-
-An object that passes all four checks and still fails to decode (a v3
-schema other than the canonical one, a v2 schema that is canonical under
-neither `unit` struct, a v1 cell the grammar refuses) raises
+`frames/v4/` (`_FRAMES_PREFIX`) is the one frame prefix this store writes and
+reads. It holds `frame_to_parquet_bytes`'s canonical Arrow layout, whose
+`unit` struct is `{ref, request, composed}` with `composed` a composed
+unit's JCS text. `frame_from_verified_parquet_bytes` reads it with
+`pq.read_table` and wraps the table with `Frame.from_table`, which checks
+the schema against the canonical frame schema and trusts the cells. An
+object that passes all four checks and still has another schema raises
 `FrameIntegrityError`.
 
-A deployment reads only the prefixes it knows. One whose newest layout is
-`frames/v2/` or `frames/v1/` sees a pair stored under `frames/v3/` as a
-plain miss, never as bytes it would decode with the wrong layout. During a
-rollout that is the intended reading: a frame a `frames/v3/` writer stores
-is not held for a reader still on `frames/v2/`, and the caller re-runs the
+An object under an older prefix (`frames/v3/`, `frames/v2/`, `frames/v1/`,
+`mints/v1/`, `anchors/v1/`) is a plain miss for `open`, `get`, `get_trace`,
+`get_mint_record` and `get_anchor_record`, and `list_frames` leaves it out, as
+it would an object the lifecycle rule has deleted; the bucket's lifecycle rule
+deletes it on the schedule it deletes any object. A root whose mint record is
+held only under `mints/v1/` therefore has none, as one whose record was lost,
+and `data_mcp.mint_recovery` rebuilds it. A
+deployment reads only its own prefix, so during a rollout a pair one
+deployment stores is a miss for a deployment on another prefix, never
+bytes it would decode with the wrong layout, and the caller re-runs the
 tool that made it.
 
 `verify_content_version_on_read` (off by default, since it costs a full
@@ -127,7 +121,7 @@ from the footer's envelope. It decodes no column, so it claims no rows. The
 encoded-bytes ceiling bounds what it holds.
 
 A root frame's mint record (`common.materialisation.mint_record`) is one more
-object per reference, `mints/v1/{spec_id}/{content_version}.json`, holding
+object per reference, `mints/v4/{spec_id}/{content_version}.json`, holding
 `encode_mint_record`'s bytes. It is uploaded with `if_generation_match=0` like a
 frame, and a 412 means a record is already held, which stands. It is written
 apart from the frame's object, so a frame the bucket already holds gains one on
@@ -136,16 +130,15 @@ reference it was read under, raises `FrameIntegrityError`. The bucket's lifecycl
 rule deletes it on the schedule it deletes any object.
 
 An anchor record (`common.materialisation.anchor_record`) is one object per
-`anchor_key`, `anchors/v1/{anchor_key}.json`, holding `encode_anchor_record`'s
+`anchor_key`, `anchors/v4/{anchor_key}.json`, holding `encode_anchor_record`'s
 bytes. It is uploaded with `if_generation_match=0`, and a 412 means a record is
 already held, which stands. A stored record that does not decode, or whose
 populations, roots and rule hash to another key, raises
 `AnchorRecordIntegrityError`. The bucket's lifecycle rule deletes it on the
 schedule it deletes any object.
 
-`list_frames` lists the object names under `frames/` with each object's creation
-time and downloads nothing. A pair held under both prefixes is listed once, at the
-earlier creation time. A name that is not a frame's is skipped.
+`list_frames` lists the object names under `frames/v4/` with each object's creation
+time and downloads nothing. A name that is not a frame's is skipped.
 
 `asyncio.to_thread` crosses the synchronous `google-cloud-storage` client
 into this async protocol.
@@ -161,7 +154,7 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import pyarrow.parquet as pq
 from dfo_frame_grammar import FrameError
@@ -176,9 +169,7 @@ from common.materialisation.anchor_record import (
     encode_anchor_record,
 )
 from common.materialisation.frame_codec import (
-    frame_from_parquet_bytes,
     frame_from_verified_parquet_bytes,
-    frame_from_verified_two_member_parquet_bytes,
     frame_to_parquet_bytes,
 )
 from common.materialisation.frame_ref import FrameRef
@@ -276,30 +267,22 @@ class _StorageClient(Protocol):
     def close(self) -> None: ...
 
 
-def _layouts() -> tuple[tuple[str, Callable[[bytes], Frame]], ...]:
-    """Every key prefix this store reads, in lookup order, with the decoder its
-    layout needs. `put` writes under the first."""
-    return (
-        ("frames/v3", frame_from_verified_parquet_bytes),
-        ("frames/v2", frame_from_verified_two_member_parquet_bytes),
-        ("frames/v1", frame_from_parquet_bytes),
-    )
+# The layout version of every object this store keeps: the canonical frame layout
+# `frame_from_verified_parquet_bytes` decodes. Frames and the records that describe
+# them share it, so a move to a new frame layout moves the records too.
+_LAYOUT = "v4"
+_FRAMES_PREFIX = f"frames/{_LAYOUT}"
+_MINT_RECORD_PREFIX = f"mints/{_LAYOUT}"
+_ANCHOR_RECORD_PREFIX = f"anchors/{_LAYOUT}"
 
-
-_MINT_RECORD_PREFIX = "mints/v1"
-_ANCHOR_RECORD_PREFIX = "anchors/v1"
-
-# The prefix every frame layout sits under, and the name of a frame's object in any
-# of them. `FrameRef` decides whether the two ids are a frame's.
-_FRAMES_ROOT = "frames/"
+# The name of a frame's object. `FrameRef` decides whether the two ids are a frame's.
 _FRAME_OBJECT_NAME = re.compile(
-    "(?:" + "|".join(re.escape(prefix) for prefix, _ in _layouts()) + ")"
-    r"/(?P<spec_id>[^/]+)/(?P<content_version>[^/]+)\.parquet"
+    re.escape(_FRAMES_PREFIX) + r"/(?P<spec_id>[^/]+)/(?P<content_version>[^/]+)\.parquet"
 )
 
 
-def _frame_object_name(ref: FrameRef, *, prefix: str) -> str:
-    return f"{prefix}/{ref.spec_id}/{ref.content_version}.parquet"
+def _frame_object_name(ref: FrameRef) -> str:
+    return f"{_FRAMES_PREFIX}/{ref.spec_id}/{ref.content_version}.parquet"
 
 
 def _mint_record_object_name(ref: FrameRef) -> str:
@@ -329,7 +312,7 @@ class GcsMaterialisationStore:
         max_encoded_bytes: int = _DEFAULT_MAX_ENCODED_BYTES,
         max_uncompressed_bytes: int = _DEFAULT_MAX_UNCOMPRESSED_BYTES,
         verify_content_version_on_read: bool = False,
-        derive_content_version: Callable[[Frame, dict[str, Any]], str] | None = None,
+        derive_content_version: Callable[[Frame], str] | None = None,
     ) -> None:
         if verify_content_version_on_read and derive_content_version is None:
             raise ValueError(
@@ -381,8 +364,7 @@ class GcsMaterialisationStore:
         frame_bytes = frame_to_parquet_bytes(
             frame, metadata={_ENVELOPE_METADATA_KEY: json.dumps(envelope).encode("utf-8")}
         )
-        written_prefix, _ = _layouts()[0]
-        blob = bucket.blob(_frame_object_name(ref, prefix=written_prefix))
+        blob = bucket.blob(_frame_object_name(ref))
         blob.metadata = {
             _SHA256_METADATA_KEY: hashlib.sha256(frame_bytes).hexdigest(),
             _WRITER_METADATA_KEY: writer,
@@ -406,20 +388,17 @@ class GcsMaterialisationStore:
         return await asyncio.to_thread(self._open_one, ref)
 
     def _open_one(self, ref: FrameRef) -> HeldFrame | None:
-        bucket = self._client.bucket(self._bucket_name)
-        for prefix, decode in _layouts():
-            blob = bucket.blob(_frame_object_name(ref, prefix=prefix))
-            try:
-                # `reload()` fetches the object's resource -- size and custom
-                # metadata -- from the bucket; neither is populated on a freshly
-                # constructed `Blob`. Fetching it first is what lets step 1 run
-                # before a single byte of the object itself is downloaded.
-                blob.reload()
-            except NotFound:
-                continue
-            recorded_rows = self._admit(ref, blob)
-            return self._held(ref, blob, recorded_rows, decode)
-        return None
+        blob = self._client.bucket(self._bucket_name).blob(_frame_object_name(ref))
+        try:
+            # `reload()` fetches the object's resource -- size and custom
+            # metadata -- from the bucket; neither is populated on a freshly
+            # constructed `Blob`. Fetching it first is what lets step 1 run
+            # before a single byte of the object itself is downloaded.
+            blob.reload()
+        except NotFound:
+            return None
+        recorded_rows = self._admit(ref, blob)
+        return self._held(ref, blob, recorded_rows)
 
     def _admit(self, ref: FrameRef, blob: _Blob) -> int | None:
         """Step 1 of this module's docstring: the row count `put` recorded, or `None`
@@ -450,15 +429,9 @@ class GcsMaterialisationStore:
             )
         return recorded_rows
 
-    def _held(
-        self,
-        ref: FrameRef,
-        blob: _Blob,
-        recorded_rows: int | None,
-        decode: Callable[[bytes], Frame],
-    ) -> HeldFrame:
+    def _held(self, ref: FrameRef, blob: _Blob, recorded_rows: int | None) -> HeldFrame:
         async def read_in_thread(*, max_rows: int) -> tuple[Frame, StoredFrameTrace]:
-            return await asyncio.to_thread(self._read, ref, blob, recorded_rows, decode, max_rows)
+            return await asyncio.to_thread(self._read, ref, blob, recorded_rows, max_rows)
 
         return HeldFrame(num_rows=recorded_rows, read=read_in_thread)
 
@@ -467,7 +440,6 @@ class GcsMaterialisationStore:
         ref: FrameRef,
         blob: _Blob,
         recorded_rows: int | None,
-        decode: Callable[[bytes], Frame],
         max_rows: int,
     ) -> tuple[Frame, StoredFrameTrace]:
         """Steps 2 to 4 of this module's docstring on the downloaded object, with
@@ -477,7 +449,7 @@ class GcsMaterialisationStore:
         except NotFound as exc:
             raise FrameExpired(ref) from exc
         trace = self._verify(ref, blob, frame_bytes, recorded_rows, max_rows)
-        return self._decode(ref, frame_bytes, trace, decode), trace
+        return self._decode(ref, frame_bytes, trace), trace
 
     def _verify(
         self,
@@ -572,23 +544,21 @@ class GcsMaterialisationStore:
             )
         return decode_trace(envelope["trace"])
 
-    def _decode(
-        self,
-        ref: FrameRef,
-        frame_bytes: bytes,
-        trace: StoredFrameTrace,
-        decode: Callable[[bytes], Frame],
-    ) -> Frame:
-        """The frame `frame_bytes` holds, which `_verify` has already checked."""
+    def _decode(self, ref: FrameRef, frame_bytes: bytes, trace: StoredFrameTrace) -> Frame:
+        """The frame `frame_bytes` holds, which `_verify` has already checked. The
+        decoder trusts the rows, so with `verify_content_version_on_read` on, rows out
+        of order or held twice refuse when the recompute hashes them."""
         try:
-            frame = decode(frame_bytes)
+            frame = frame_from_verified_parquet_bytes(frame_bytes)
+            recomputed = None
+            if self._verify_content_version_on_read:
+                assert self._derive_content_version is not None  # enforced in __init__
+                recomputed = self._derive_content_version(frame)
         except FrameError as exc:
             raise FrameIntegrityError(
                 ref, reason=f"stored object does not decode to a frame: {exc}"
             ) from exc
         if self._verify_content_version_on_read:
-            assert self._derive_content_version is not None  # enforced in __init__
-            recomputed = self._derive_content_version(frame, dict(trace.upstream_trace))
             # For a root reference, `ref.content_version` IS the frame's own content
             # version, so the recompute is checked against `ref`. An `ocv_` reference
             # has no such comparison available -- see this module's own docstring.
@@ -607,27 +577,24 @@ class GcsMaterialisationStore:
         return await asyncio.to_thread(self._trace_of, ref)
 
     def _trace_of(self, ref: FrameRef) -> StoredFrameTrace | None:
-        bucket = self._client.bucket(self._bucket_name)
-        for prefix, _ in _layouts():
-            blob = bucket.blob(_frame_object_name(ref, prefix=prefix))
-            try:
-                blob.reload()
-            except NotFound:
-                continue
-            recorded_rows = self._admit(ref, blob)
-            try:
-                frame_bytes = blob.download_as_bytes()
-            except NotFound as exc:
-                raise FrameExpired(ref) from exc
-            return self._verify(ref, blob, frame_bytes, recorded_rows, self._max_frame_rows)
-        return None
+        blob = self._client.bucket(self._bucket_name).blob(_frame_object_name(ref))
+        try:
+            blob.reload()
+        except NotFound:
+            return None
+        recorded_rows = self._admit(ref, blob)
+        try:
+            frame_bytes = blob.download_as_bytes()
+        except NotFound as exc:
+            raise FrameExpired(ref) from exc
+        return self._verify(ref, blob, frame_bytes, recorded_rows, self._max_frame_rows)
 
     async def list_frames(self) -> list[FrameListing]:
         return await asyncio.to_thread(self._list_frames)
 
     def _list_frames(self) -> list[FrameListing]:
-        oldest: dict[tuple[str, str], FrameListing] = {}
-        for blob in self._client.list_blobs(self._bucket_name, prefix=_FRAMES_ROOT):
+        listings: list[FrameListing] = []
+        for blob in self._client.list_blobs(self._bucket_name, prefix=f"{_FRAMES_PREFIX}/"):
             named = _FRAME_OBJECT_NAME.fullmatch(blob.name)
             if named is None or blob.time_created is None:
                 continue
@@ -635,11 +602,9 @@ class GcsMaterialisationStore:
                 ref = FrameRef(**named.groupdict())
             except ValidationError:
                 continue
-            key = (ref.spec_id, ref.content_version)
-            if key not in oldest or blob.time_created < oldest[key].created_at:
-                oldest[key] = FrameListing(ref=ref, created_at=blob.time_created)
+            listings.append(FrameListing(ref=ref, created_at=blob.time_created))
         return sorted(
-            oldest.values(),
+            listings,
             key=lambda listing: (
                 listing.created_at,
                 listing.ref.spec_id,

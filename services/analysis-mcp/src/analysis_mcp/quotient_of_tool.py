@@ -474,13 +474,11 @@ async def quotient_of(
         detail["derived"] = derived
 
     # The numerator's upstream_trace is carried forward, as `share_of` does.
-    # Both sides' lineage is bound into `content_version` through
+    # Both sides' frames are bound into `content_version` through
     # `input_content_versions`.
     output_trace = Trace(
         upstream_trace=numerator.trace.upstream_trace,
-        frame_content_version=derive_frame_content_version(
-            frame=result.frame, upstream_trace=numerator.trace.upstream_trace
-        ),
+        frame_content_version=derive_frame_content_version(frame=result.frame),
         op_spec_hash=op_spec_hash,
         execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
         applied_policy=AppliedPolicy(

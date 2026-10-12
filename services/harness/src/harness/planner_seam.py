@@ -4,7 +4,7 @@ An adapter over `planner.agent.create_planner_agent`, built with
 translation attached by `harness.agents.create_planner_with_translator`: the
 planner runs as a dynamically-scheduled child of the graph's own node,
 through `Context.run_node`, and this module reads what it leaves in session
-state and translates it into `harness.graph.PlannerModel`'s contract.
+state and translates it into `harness.graph.seams.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
@@ -27,29 +27,27 @@ Every call renders a message shaped by whether this session has already
 been briefed: a session-scoped `_BRIEFED_STATE_KEY` boolean, written
 through `ctx.session.state`, flips true the first time this seam sends
 anything in a session. Session ids are minted fresh per `/turn`
-(`studio_state.ConversationState.session_id`), so a flag that is merely
-absent by default is automatically correct on a new turn with no reset
-logic there -- a studio session never needs the clear described next.
-`evals/agents/dfo_analyst_graph` (`just adk-web`) instead keeps one
-session across many turns, so `__call__` itself clears this flag, along
-with `planner.plan.PLAN_STATE_KEY`, on a genuine first-draft entry
-(`prior_plan`, `refusal` and `amendment` all `None`, the shape the
-graph's planner node passes only on the `choose_depth` edge): without it,
-a later turn's own first-draft entry
-would read as a continuing call on a session that already holds an
-earlier turn's plan, get only the continuing message instead of the full
-brief, and be pushed to amend that stale plan or have `starts_new_plan`
-refused as answering a different question. `_persist_durable` (see
-`__call__`) is what makes both this flag's flip and its clear survive a
+(`studio_state.ConversationState.session_id`), so the flag starts every
+turn unset. One turn can still enter the planner for a first draft more
+than once: the orchestrator's agent may call `plan` again after an earlier
+entry handed back (`harness.graph`'s `plan_done`). So `__call__` clears
+this flag, along with `planner.plan.PLAN_STATE_KEY`, on a genuine
+first-draft entry (`prior_plan`, `refusal` and `amendment` all `None`,
+the shape the graph's planner node passes only after `plan_start`):
+without it, the later first-draft entry would read as a continuing call
+on a session that already holds the earlier entry's plan, get only the
+continuing message instead of the full brief, and be pushed to amend that
+plan or have `starts_new_plan` refused as answering a different question.
+`_persist_durable` (see `__call__`) is what makes both this flag's flip and its clear survive a
 pause-and-resume across `adk_request_input`: a plain `ctx.session.state`
 write is visible in-process but never reaches a session event's
 `state_delta`, so a fresh `Runner.run_async` call after a resume would
 otherwise read a write back as it was before this call, undoing it. The
 first call of a session (or a session's first entry after such a clear)
 renders the full brief --
-envelope, canvas digest, conversation digest, the plan being changed, the
-question. Every later call in that same session -- a correction round
-inside `_propose`'s own loop, the `amend` edge (`approve_n -> planner_n`),
+the search readings, canvas digest, conversation digest, the plan being
+changed, the question. Every later call in that same session -- a correction
+round inside `_propose`'s own loop, the `amend` edge (`approve_n -> planner_n`),
 and the `replan` edge (`execute_n -> planner_n`) -- renders only what is
 new: the amendment or refusal ask, or the correction's problem nudge.
 Resending the full brief on every call would restate a history the model
@@ -60,7 +58,7 @@ only the new thing.
 edge it is the plan the model itself drafted and submitted last call,
 untouched since (`approve_n`'s own `"amend"` route never calls
 `Plan.approve`), already in its own tool-call history. On the `replan`
-edge it is `execute`'s own copy of that same plan (`graph.py:1190`),
+edge it is `execute`'s own copy of that same plan (`harness.graph.execute`),
 which by then differs from what the model drafted in exactly two fields:
 `status` and `approved_revision`. Both come from upstream of `execute`
 itself -- `approve_n`'s `"approved"` route calls `Plan.approve()`
@@ -75,13 +73,13 @@ seam sends already says in its own words; `approved_revision` is
 requirements the model itself just drafted, not a new fact about the
 world. Neither is something the refusal text does not already restate.
 
-`_plan_context` and `_render_envelope` render the brief's two largest
-sections as digests. With a realistic nine-requirement plan, compiled, and a
-`candidates` envelope at every cap, the plan section is 8,438 characters where
-its raw JSON is 22,609, and the envelope is 2,357 where its raw JSON is 3,326.
-The whole brief renders 11,437 characters, and `test_context_budget.py` holds
-it to a `SEAM_BRIEF_CEILING` of 14,300, 25% above that. These are character
-counts of the brief alone.
+`_plan_context` renders the plan being changed as a digest, and
+`_READINGS_BUDGET` holds the search readings. With a realistic
+nine-requirement plan, compiled, and readings at their whole budget, the plan
+section is 8,438 characters where its raw JSON is 22,609, and the readings
+section is 3,486. The whole brief renders 12,627 characters, and
+`test_context_budget.py` holds it to a `SEAM_BRIEF_CEILING` of 15,800, 25%
+above that. These are character counts of the brief alone.
 """
 
 from __future__ import annotations
@@ -95,7 +93,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from common.telemetry import record_span
+from common.telemetry import current_trace_id, record_span
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
@@ -119,6 +117,7 @@ from planner.plan import (
     clear_unsupported,
     current_discovery_time_left,
     cut_user_text,
+    discovery_time_left,
     load_asks,
     load_plan,
     load_plan_rounds,
@@ -127,8 +126,6 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
-    seed_of,
-    seeded_sources,
 )
 from planner.settings import (
     THINKING_SAMPLE_STATE_KEY,
@@ -136,29 +133,30 @@ from planner.settings import (
     override_thinking_on_sampled_turns,
 )
 from planner.tool_results import Outcome, ProblemCode
-from translator.discovery import stat_var_count_text
+from planner.workflow import ElectedMeasure
+from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import ReferralKind
 from translator.tool import permitted_repair
 
 from harness.agents import create_planner_with_translator
-from harness.graph import (
+from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    frame_row_ceiling,
 )
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
 from harness.turn_records import (
+    RenderedReadings,
     SearchReading,
+    measure_choice_text,
     named_spec_ids,
     newest_per_spec_id,
     render_readings,
 )
 from harness.usage import log_usage
-from harness.wire import MAX_SEEDS
 
 logger = logging.getLogger(__name__)
 
@@ -194,20 +192,8 @@ _BRIEFED_STATE_KEY = "planner:seam_briefed"
 # a planner event.
 _PLANNER_BRANCH = "dfo_planner"
 
-_ENVELOPE_CONTEXT = """\
-Context for this question. The search step has already run, so what is \
-already known about the dataset is named below. A candidate a referral \
-names for a requirement is an allowed source for that requirement -- pin \
-it from its own discovery. Never invent a spec_id or a source that \
-neither the envelope nor a referral has named.{reasons}
-
-Resolve envelope:
-{envelope}
-"""
-
-# The orchestrator engine's counterpart to `_ENVELOPE_CONTEXT`. No probe runs
-# before its planner, so the conversation's search readings stand where the
-# envelope does.
+# The opening of the planner's first message: the search readings of the
+# conversation, which name every spec_id a pin may take without a referral.
 _READINGS_CONTEXT = """\
 Context for this question. These are the readings of the searches this \
 conversation ran, earlier turns' included, oldest first: each part's \
@@ -229,70 +215,14 @@ a spec_id or a source that neither these readings nor a referral has named.
 # and a longer one sheds sentences before it folds or drops any reading
 # (`render_readings`).
 _READINGS_BUDGET = 3_000
+# The ledger a call renders without readings: a continuing call, which
+# renders no readings section, or a caller that passes none.
+_NO_READINGS = RenderedReadings("", ())
 
-# Up to this many envelope candidates are named, and the rest are only
-# counted. `graph_envelope`'s `candidates` branch caps its own list upstream,
-# but a no_data part's nearest-real suggestions come back uncapped, and a
-# list long enough to double the brief is worth a trailing count instead.
-_ENVELOPE_CANDIDATE_CAP = 6
-
-# A seeded envelope names at most `MAX_SEEDS` seeds, the Studio wire's own
-# cap, and, per seed, this many operations, the number of verbs, and counts
-# the rest.
-_ENVELOPE_OPERATION_CAP = 7
-
-# Each candidate's `label` is the resolve's own `rendered_sentence`, which
-# can run to a paragraph. Capped so six of them cannot outweigh the question
-# they were resolved for.
-_ENVELOPE_LABEL_CAP = 120
-
-# Each of the envelope's other fields renders at most this many characters: the
-# ids, counts and flags `graph_envelope` builds from a search result, a
-# candidate's `spec_id`, a warning's `severity` and `code`, and the list of
-# entity roles. A real value is a few dozen characters at most. A longer one is
-# cut.
-_ENVELOPE_FIELD_CAP = 200
-
-# Up to this many skills render, and the rest are counted, as data-mcp's search
-# digest does. `harness.tool_contracts.graph_envelope` passes every skill in
-# that digest's order, so the first five here are the digest's first five.
-_ENVELOPE_SKILL_CAP = 5
-
-# Each skill's description is cut here, the cut data-mcp's search digest makes.
-# A description is written to be matched against, and its first sentence says
-# what the skill covers.
-_ENVELOPE_SKILL_DESCRIPTION_CAP = 160
-
-# The envelope fields `_render_envelope` names. Anything else on the envelope
-# renders under its own name, after these.
-_ENVELOPE_KEYS = frozenset(
-    {
-        "status",
-        "spec_id",
-        "parts",
-        "choice_points",
-        "wide",
-        "stat_var_shape_kind",
-        "stat_var_item_count",
-        "stat_var_member_count_exact",
-        "entity_roles",
-        "stat_var_served_count",
-        "open_entity_axes",
-        "candidates",
-        "warnings",
-        "skills",
-        "seeds",
-    }
-)
-
-# At most this many envelope warnings render one by one; the rest are
-# counted. The resolve's own diagnostics ride here, and a degraded search
-# carries more of them than are worth reading individually.
-_ENVELOPE_WARNING_CAP = 5
-
-# Each rendered warning message is cut here. A warning says why an ask was
-# dropped or a default was fallen back to, which one sentence does.
-_ENVELOPE_WARNING_TEXT_CAP = 200
+# A referral candidate's `label` is the resolve's own `rendered_sentence`,
+# which can run to a paragraph. Capped where `_pinnable_candidates` shapes
+# it for a question to the user.
+_CANDIDATE_LABEL_CAP = 120
 
 # A decision's `description` and `rationale` are prose no validator compares,
 # so they are the two fields this render may shorten. Every other plan field
@@ -306,114 +236,10 @@ _PLAN_RATIONALE_CAP = 300
 # words. Capped so a nine-source plan cannot let one verbose sentence carry
 # the section.
 _PLAN_SOURCE_SENTENCE_CAP = 160
-
-# The envelope's resolve runs once, question-wide, before `propose_plan`
-# has invented any requirement (`graph.py`'s `probe -> route_status ->
-# choose_depth -> planner` order). Its `spec_id` can therefore be right for
-# at most one requirement of a `parts > 1` question, so it is left out of
-# what the planner sees rather than merely told not to use it -- a field
-# present and forbidden is the shape a model reliably tries anyway once it
-# has no other candidate to reach for.
-#
-# The one exception is a `spec_id` the user actually elected answering a
-# `clarify` round (`graph.py`'s `clarify`/`probe`, `spec_id_elected`): that
-# choice is kept and named as the source for the part it matches, in
-# `_ELECTED_SPEC_REASON` below, in place of this omission.
-_MULTI_PART_REASON = """\
-
-
-This question has {parts} parts. The envelope's spec_id ran once, \
-question-wide, before any part existed, so it can be right for at most one \
-of them and is left out of the envelope below. Pin each part from its own \
-discovery."""
-
-# The carve-out named above: the user chose this source answering which
-# reading they meant, so it is kept and named for the part it matches,
-# instead of `_MULTI_PART_REASON`'s omission.
-_ELECTED_SPEC_REASON = """\
-
-
-This question has {parts} parts. The user chose {label!r} when asked which \
-reading they meant, so its spec_id, {spec_id!r}, is kept below as the \
-source for the part it answers -- pin it as the requirement's \
-source_spec_id, citing a Decision with resolved_by=user, fixes naming \
-source_spec_id, and options listing every candidate offered. Pin every other part from its own \
-discovery."""
-
-# A turn seeded from Search (`graph.py`'s `seed` node) arrives with the
-# datasets the user chose, one per part, each with the operations the
-# question asked of it, its window, the year and rows Search showed when the
-# question named no year, and its coverage counts. The envelope's own
-# `spec_id` names only the first, so it is left out and each seed is named
-# in its own block (`_render_seeds`). The pin is the user's choice, recorded
-# as such; `propose_plan` traces it to the seed and pins the seed over the
-# requirement's period (`planner.agent._window_pins`), so the period
-# is the window the plan retrieves. `ceiling` is data-mcp's row ceiling as
-# this process configures it (`harness.graph.frame_row_ceiling`). The series
-# cap is the platform's: a chart or table component draws at most 24
-# series. An operation over a party runs over an axis its dataset leaves
-# open, which a requirement states in `across`, and a rank's `limit` keeps
-# its top or bottom rows.
-_SEEDED_REASON = """\
-
-
-This question comes from Search with its data already chosen: the user saw \
-each dataset under "Seeded datasets" below and handed it to Studio with the \
-operations listed under it. Plan from these datasets, and plan any part of \
-the question none of them covers as usual. Give each its own dataset \
-requirement, pinned to its spec_id and citing a Decision with resolved_by=user, \
-fixes naming source_spec_id, and options naming that spec_id and an unpinned \
-source. The requirement's period is the years the plan \
-retrieves, and one retrieval returns at most {ceiling:,} rows: choose \
-the fewest years the question needs. A rank over place or origin needs one \
-year, the one Search showed when the question named none; growth needs the \
-range it runs over. A dataset's "showed" line counts the rows of one year, \
-which bounds how many years fit. If a retrieval stopped at that ceiling, \
-keep the dataset pinned and narrow its period. Turn each rank, aggregate, \
-growth or share_of operation into the calculation it names. An operation \
-"across" a party runs over every member of an axis the dataset leaves open, \
-listed on its open_entity_axes line: state that party in the requirement's \
-`across` and name no member of it. State a rank's `limit` when its phrase \
-asks for a top or bottom N. An explain, forecast or report operation is what \
-the answer argues from the data, and a forecast's "to" year is the year it \
-projects to. A component shows at most 24 series."""
-
-# A `RediscoveryNeeded` replan (`graph.py`'s `_replan_refusal`) sends the
-# planner straight back here over the `execute -> planner` edge with no
-# re-probe, so the envelope this seam renders still names the exact spec_id
-# the executor just refused, and every spec_id a wave sibling's own
-# refusal named (`also_stopped`) -- the one thing this prompt must not
-# offer as pinnable again, on any `parts` count, with no carve-out: the
-# executor's refusal is a fact about the spec, while an election only says
-# which reading the user meant.
-_REFUSED_SPEC_REASON = """\
-
-
-The source {spec_id!r} this envelope would otherwise name was just \
-refused when the approved plan ran ({detail}), so it is left out of the \
-envelope below. Propose a different source -- naming this one again \
-reproduces the same refusal."""
-
-_REFUSED_SPECS_REASON = """\
-
-
-These sources this envelope would otherwise name were just refused when \
-the approved plan ran, so they are left out of the envelope below: \
-{named}. Propose different sources -- naming any of them again reproduces \
-the same refusal."""
-
-# A refusal naming a seed, or its copy over a plan's period, keeps the seed
-# pinned: the user chose the dataset in Search, and another source would
-# replace that choice. A retrieval stopped at the row ceiling names no
-# spec_id; `_SEEDED_REASON` covers it.
-_KEEP_SEED_SENTENCE = (
-    " The seeded dataset {seed!r} could not be retrieved ({detail}). The user chose it "
-    "in Search, so keep it pinned and propose it again."
-)
-_KEEP_SEEDS_SENTENCE = (
-    " These seeded datasets could not be retrieved: {named}. The user chose them in "
-    "Search, so keep each pinned and propose it again."
-)
+# A compiled source's measure and the other ways of counting it, each with
+# its spec_id (`_measure_choice_text`). An alternative past the cap is left
+# out whole, since a cut spec_id pins nothing.
+_PLAN_MEASURE_CHOICE_CAP = 240
 
 # The run-time refusal codes that mean no operation computes what the refused
 # step was asked to, each with the `unsupported` answer it stands for. A replan
@@ -448,9 +274,10 @@ _NO_SUBMIT_NUDGE = (
 )
 
 # The `refused["code"]` `_before_planner_model` stamps on a deadline refusal
-# it builds itself, never a `planner.tool_results.ProblemCode` read off a
-# `propose_plan` response. `_refusal_text` compares against this to route to
-# `_deadline_text`, and nothing outside this module ever sees it.
+# it builds itself, and `_closing_refusal` on a referral for a call the entry
+# had no time left to issue, never a `planner.tool_results.ProblemCode` read
+# off a `propose_plan` response. `_refusal_text` compares against this to
+# route to `_deadline_text`, and nothing outside this module ever sees it.
 _DEADLINE_REFUSAL_CODE = "planner_deadline_exceeded"
 
 # The seconds of an entry's deadline a discovery call leaves for the planner's
@@ -476,11 +303,19 @@ _REPEATED_REFUSAL_CODE = "translation_repeated"
 # entry is refused before it searches.
 _UNAVAILABLE_REFUSAL_CODE = "discovery_unavailable"
 
+# The `refused["code"]` `_on_planner_tool_error` stamps once one of the
+# planner's own tools raises an exception it did not anticipate. The run
+# stops there, and the entry ends on a final refusal the orchestrator answers
+# around, so the failure costs the plan and leaves the turn standing.
+_TOOL_FAILED_REFUSAL_CODE = "planner_tool_failed"
+
 # What the break `_before_planner_model` returns says, per closing refusal code.
 _CLOSING_REASONS = {
+    _DEADLINE_REFUSAL_CODE: "this turn's time budget ran out",
     _INTERNAL_REFUSAL_CODE: "translation failed internally",
     _REPEATED_REFUSAL_CODE: "the plan failed to translate the same way again",
     _UNAVAILABLE_REFUSAL_CODE: "the data service is unavailable",
+    _TOOL_FAILED_REFUSAL_CODE: "a planner tool failed inside DFO",
     ProblemCode.NOTHING_TO_PLAN: "every ask in the question is declined",
 }
 
@@ -490,6 +325,9 @@ _CLOSING_REASONS = {
 _STALLED_ACT_DEFAULT = "Change what the requirement asks for"
 _STALLED_ACTS: Mapping[str, str] = {
     ReferralKind.SOURCE_AMBIGUOUS: "Settle on one of the named candidates",
+    ReferralKind.SOURCE_NAME_AMBIGUOUS: (
+        "Ask the user to choose an offered source reference; keep its wording and exclusion"
+    ),
     ReferralKind.PINNED_SOURCE_NOT_FOUND: (
         "Settle on one of the named candidates, or unpin the source and change what "
         "the requirement asks for"
@@ -500,7 +338,6 @@ _STALLED_ACTS: Mapping[str, str] = {
     ReferralKind.REQUIREMENT_UNMEETABLE: "Tell the user what cannot be done and ask what to change",
     ReferralKind.ASK_NOT_UNDERSTOOD: "Reword the part of the ask the referral names",
     ReferralKind.DISCOVERY_BUDGET_EXHAUSTED: "Ask for less at once",
-    ReferralKind.SEED_DROPPED: "Remove that requirement",
     ReferralKind.REQUIREMENT_NEEDS_REPAIR: "Make the permitted repair ({repair}) for {constraint}",
     ReferralKind.UNSUPPORTED_ASK: "Tell the user what cannot be done and ask what to change",
     ReferralKind.NO_OPERATION_COVERS: (
@@ -622,7 +459,7 @@ _active_call: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar
 
 
 class PlannerSeam:
-    """`harness.graph.PlannerModel`, implemented by `src/planner` and the translation it runs."""
+    """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
 
     def __init__(
         self,
@@ -653,11 +490,12 @@ class PlannerSeam:
             settings=settings,
             agent_settings=agent_settings,
             surface=surface,
-            # The graph derives and narrates a turn's `resolve_envelope`,
-            # `depth` and `question` before the planner ever runs (see
-            # `planner.agent.create_planner_agent`'s own `question_fixed`
-            # doc), so this seam's planner never gets to restart a plan for a
-            # different question -- `starts_new_plan` is refused with
+            # The orchestrator states the plan's question in its brief
+            # (`harness.graph.state.ORCHESTRATOR_BRIEF_KEY`) before the planner ever
+            # runs (see `planner.agent.create_planner_agent`'s own
+            # `question_fixed` doc), so this seam's planner never gets to
+            # restart a plan for a different question -- `starts_new_plan` is
+            # refused with
             # `QUESTION_FIXED` instead, handled below the same way
             # `BUDGET_EXHAUSTED` is.
             question_fixed=True,
@@ -669,6 +507,7 @@ class PlannerSeam:
         # `ctx.run_node` call) instead of closing over it, since one
         # `PlannerSeam` serves every conversation this process runs.
         self._agent.after_tool_callback = self._after_planner_tool
+        self._agent.on_tool_error_callback = self._on_planner_tool_error
         # `drop_thought_parts` (`planner.settings`) returns a modified
         # response whenever it drops a part, and ADK's callback list stops at
         # the first truthy return, so the usage callback goes first: it
@@ -692,21 +531,17 @@ class PlannerSeam:
         *,
         ctx: Context,
         question: str,
-        envelope: dict[str, Any],
+        readings: Sequence[Mapping[str, Any]],
         prior_plan: dict[str, Any] | None = None,
         refusal: dict[str, Any] | None = None,
         amendment: str | None = None,
         canvas_digest: dict[str, Any] | None = None,
         conversation_digest: dict[str, Any] | None = None,
-        spec_id_elected: bool = False,
-        spec_id_elected_label: str | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
-        readings: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        # `readings`, set on the orchestrator engine only, is the search
-        # readings of the conversation's earlier turns and then this turn's,
-        # as `harness.orchestrator_tools` stores them. The first message
-        # renders them where the classic engine's renders the envelope.
+        # `readings` is the search readings of the conversation's earlier
+        # turns and then this turn's, as `harness.orchestrator_tools` stores
+        # them. The first message renders them.
         #
         # `propose_plan` amends from the graph's record, not whatever this
         # session's own drafting key already holds, reseeded every call --
@@ -753,8 +588,8 @@ class PlannerSeam:
             if prior_plan is None and refusal is None and amendment is None:
                 # This shape -- no `prior_plan`, no `refusal`, no
                 # `amendment` -- names a genuine first-draft entry: the
-                # graph's planner node passes exactly this on the
-                # `choose_depth` edge, never on `amend`/`replan`, which
+                # graph's planner node passes exactly this after
+                # `plan_start`, never on `amend`/`replan`, which
                 # always carry the graph's own record and their own ask
                 # (`harness.graph`'s own `planner` node). `prior_plan is
                 # None` alone is not enough to gate this on: a caller of
@@ -771,24 +606,28 @@ class PlannerSeam:
                 # throw away the very draft the ask paused, not a stale
                 # one.
                 #
-                # A studio turn never has anything to clear here -- each
-                # turn opens a brand-new ADK session, so both keys are
-                # already unset. `evals/agents/dfo_analyst_graph`
-                # (`just adk-web`) keeps one session across turns, so
-                # without this, turn 2's own first-draft entry would find
-                # turn 1's plan still on record and, with this seam's pair
-                # built with `question_fixed=True`, could only amend turn
-                # 1's plan, since `starts_new_plan` is refused. Clearing `_BRIEFED_STATE_KEY` alongside makes the
-                # very next read of it, two lines below, compute a fresh
-                # `True` for this call, so turn 2 gets the full brief
-                # rather than the continuing-call message a session that
-                # has already been briefed gets.
+                # Each turn opens a brand-new ADK session, so a turn's
+                # first entry has nothing to clear. A later `plan` call in
+                # the same turn does: without this, its first-draft entry
+                # would find the earlier entry's plan still on record and,
+                # with this seam's pair built with `question_fixed=True`,
+                # could only amend it, since `starts_new_plan` is refused.
+                # Clearing `_BRIEFED_STATE_KEY` alongside makes the very
+                # next read of it, two lines below, compute a fresh `True`
+                # for this call, so the entry gets the full brief rather
+                # than the continuing-call message a session that has
+                # already been briefed gets.
                 ctx.session.state[PLAN_STATE_KEY] = None
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
                 # A first-draft entry draws fresh rather than reusing an
                 # earlier turn's draw on the same persistent session: popped
                 # here so the write below sees it absent and draws again.
                 ctx.session.state.pop(THINKING_SAMPLE_STATE_KEY, None)
+        # A `resolve_definition` this entry's deadline cuts keeps running here
+        # for a later proposal in the same entry to be served, and is
+        # cancelled on the way out (`translator.discovery.CutCalls`).
+        cut_calls = CutCalls()
+        cut_calls_token = current_cut_calls.set(cut_calls)
         try:
             # Read once, at the top of `__call__`: `fresh` answers "has this
             # session ever been briefed," not "is this the first `_propose`
@@ -825,7 +664,6 @@ class PlannerSeam:
                 else self._planner_deadline_seconds
             )
             deadline_at = self._clock() + deadline_seconds
-            seed_of = _seed_of(cast(SessionState, ctx.session.state))
             # Every spec_id the planner's message shows it, written on every
             # entry so a correction round inside this same `__call__` reads
             # it (`PIN_SOURCES_STATE_KEY`). Only a shown one reuses its
@@ -834,13 +672,9 @@ class PlannerSeam:
             # confirmed by a fresh search. Readings render on a fresh
             # message only, so a later entry keeps the ones it rendered, less
             # any the executor has since refused.
-            ledger = None
-            if readings is None:
-                sources = _envelope_pin_sources(
-                    envelope, refusal=refusal, spec_id_elected=spec_id_elected
-                )
-            elif fresh:
-                ledger, shown = _readings_ledger(readings)
+            ledger = _NO_READINGS
+            if fresh:
+                ledger = _readings_ledger(readings)
                 # An earlier turn's spec_id pins from the block its own turn
                 # stored; this turn's search of one replaces it.
                 prior = ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}
@@ -848,7 +682,7 @@ class PlannerSeam:
                 searched = {*_named(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or ()), *blocks}
                 sources = _reading_pin_sources(
                     readings,
-                    shown,
+                    ledger.spec_ids,
                     blocks=blocks,
                     earlier=_named(prior.get("readings", ())) - searched,
                     warnings={
@@ -858,22 +692,17 @@ class PlannerSeam:
                 )
             else:
                 sources = pin_sources(cast(SessionState, ctx.session.state))
-            if readings is not None:
-                refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
-                sources = {k: v for k, v in sources.items() if k not in refused}
+            refused = {spec_id for spec_id, _ in _refused_specs(refusal)}
+            sources = {k: v for k, v in sources.items() if k not in refused}
             save_pin_sources(cast(SessionState, ctx.session.state), sources)
             message = self._message(
                 fresh=fresh,
                 question=question,
-                envelope=envelope,
                 prior_plan=prior_plan,
                 refusal=refusal,
                 amendment=amendment,
                 canvas_digest=canvas_digest,
                 conversation_digest=conversation_digest,
-                spec_id_elected=spec_id_elected,
-                spec_id_elected_label=spec_id_elected_label,
-                seed_of=seed_of,
                 ledger=ledger,
                 asks=load_asks(cast(SessionState, ctx.session.state)),
             )
@@ -897,15 +726,11 @@ class PlannerSeam:
                 message = self._message(
                     fresh=False,
                     question=question,
-                    envelope=envelope,
                     prior_plan=prior_plan,
                     refusal=refusal,
                     amendment=amendment,
                     canvas_digest=canvas_digest,
                     conversation_digest=conversation_digest,
-                    spec_id_elected=spec_id_elected,
-                    spec_id_elected_label=spec_id_elected_label,
-                    seed_of=seed_of,
                     problem=problem,
                 )
                 submitted, plan, refused = await self._propose(
@@ -946,7 +771,11 @@ class PlannerSeam:
             # is leaving, ever gets a chance to run before the flush this
             # node's own `NodeRunner` performs on the way to reporting the
             # pause (see `_persist_durable`'s own docstring).
-            self._persist_durable(ctx)
+            try:
+                self._persist_durable(ctx)
+            finally:
+                current_cut_calls.reset(cut_calls_token)
+                await cut_calls.close()
 
     @staticmethod
     def _persist_durable(ctx: Context) -> None:
@@ -977,9 +806,8 @@ class PlannerSeam:
 
         `PLAN_STATE_KEY` is the one exception to "only mirror what changed":
         `__call__`'s own first-draft clear can leave the live plan `None` on
-        a session whose *durable* `ctx.state` still holds an earlier turn's
-        plan (`evals/agents/dfo_analyst_graph`'s multi-turn session) -- a
-        real value there that has to be overwritten, not merely left
+        a session whose *durable* `ctx.state` still holds the plan of an
+        earlier `plan` call in the same turn -- a real value there that has to be overwritten, not merely left
         unmirrored, or a later durable flush would reapply that stale plan
         over the clear. `PLAN_STATE_KEY in ctx.session.state` (`__contains__`
         on the plain `dict` ADK actually hands back for `ctx.session.state`,
@@ -1125,6 +953,45 @@ class PlannerSeam:
             tool=tool,
             tool_response=tool_response,
         )
+
+    def _on_planner_tool_error(
+        self, tool: BaseTool, args: dict[str, Any], tool_context: Any, error: Exception
+    ) -> dict[str, Any] | None:
+        """The planner's `on_tool_error_callback`: an `Exception` one of its
+        own tools raised ends the entry on `_TOOL_FAILED_REFUSAL_CODE`, a
+        final refusal, instead of failing the turn.
+
+        A name that is none of the planner's tools answers `None`, so ADK's
+        own tool-not-found response, which lists the tools the model can
+        call, stands. The dict returned for a real tool becomes that call's
+        function response, and `_after_planner_tool` still runs on it. The
+        dict carries no `outcome`, so `_track_tool_call` reads it as neither a
+        terminal refusal nor a translation. The model never reads it, since
+        `_before_planner_model` stops the run before the next generation.
+        """
+        del args
+        if tool.name not in {t.name for t in self._agent.tools if isinstance(t, BaseTool)}:
+            return None
+        error_class = type(error).__name__
+        logger.error(
+            "planner tool %s raised %s session=%s invocation=%s trace_id=%s",
+            tool.name,
+            error_class,
+            tool_context.session.id,
+            tool_context.invocation_id,
+            current_trace_id(),
+            exc_info=error,
+        )
+        call = _active_call.get()
+        if call is None:
+            logger.warning("planner on_tool_error_callback fired with no active call")
+        elif call.tracker.refused is None:
+            call.tracker.ready_to_break = True
+            call.tracker.refused = {
+                "code": _TOOL_FAILED_REFUSAL_CODE,
+                "detail": {"tool": tool.name},
+            }
+        return {"error": f"{tool.name} failed inside DFO ({error_class}). Do not repeat this call."}
 
     def _after_planner_model(self, callback_context: Any, llm_response: LlmResponse) -> None:
         del callback_context
@@ -1293,9 +1160,10 @@ class PlannerSeam:
         whichever way it landed: a deadline can expire on a referral's first
         appearance, before it ever repeats, and still needs its candidates.
 
-        An internal, repeated or budget-spent failure (`_closing_refusal`)
-        ends the entry with no correction round, since the next translation
-        would stop where this one did. A referral that recurs with nothing new
+        An internal, repeated, budget-spent or never-issued failure, or a
+        transient one with no discovery time left (`_closing_refusal`), ends the entry with
+        no correction round, since the next translation would stop where this
+        one did. A referral that recurs with nothing new
         (`_stalled_referral`) ends the run for `__call__`'s correction round.
         Either way the planner's turn stops before its next generation.
         """
@@ -1327,6 +1195,7 @@ class PlannerSeam:
             _INTERNAL_REFUSAL_CODE,
             _REPEATED_REFUSAL_CODE,
             _UNAVAILABLE_REFUSAL_CODE,
+            _TOOL_FAILED_REFUSAL_CODE,
             ProblemCode.NOTHING_TO_PLAN,
         }
     )
@@ -1373,6 +1242,11 @@ class PlannerSeam:
         if refused.get("code") == _DEADLINE_REFUSAL_CODE:
             return PlannerSeam._deadline_text(refused)
         detail = refused.get("detail") or {}
+        if refused.get("code") == _TOOL_FAILED_REFUSAL_CODE:
+            return (
+                f"The planner's {detail.get('tool')} tool failed inside DFO, so no plan "
+                "was made. The fault is in the system, not the request."
+            )
         if refused.get("code") == ProblemCode.NOTHING_TO_PLAN:
             asks = "; ".join(str(decline.get("ask")) for decline in detail.get("declined") or [])
             return f"This cannot be calculated by this system, so nothing was planned: {asks}."
@@ -1473,9 +1347,18 @@ class PlannerSeam:
     @staticmethod
     def _closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
         """The refusal a referral ends the planner entry on, or `None` when a
-        correction round may still settle it: an `internal` referral, with
-        its reference; one marked `repeated`, with what it is about; or one
-        marked `budget_spent`, with the requirement it is about."""
+        correction round may still settle it.
+
+        An `internal` referral ends it with its reference. One marked
+        `budget_spent` ends it as the data service unavailable, whatever else
+        it carries. One marked `not_issued`, for a call the entry had no time left to make, ends it
+        as the deadline. Any other `transient` referral once the entry has
+        no discovery time left (`planner.plan.discovery_time_left`) ends it
+        as the data service unavailable: the call was made and did not
+        answer, and no discovery can run again in this entry. Each of these
+        carries the requirement the referral is about and its reason. One
+        marked `repeated` ends it with what it is about.
+        """
         if referral is None:
             return None
         if referral.get("outcome") == Outcome.INTERNAL.value:
@@ -1483,10 +1366,26 @@ class PlannerSeam:
                 "code": _INTERNAL_REFUSAL_CODE,
                 "detail": {"reference": str(referral.get("reference"))},
             }
-        if referral.get("budget_spent"):
+        requirement_id = referral.get("requirement_id")
+        reason = referral.get("reason")
+        if referral.get("not_issued") and not referral.get("budget_spent"):
+            return {
+                "code": _DEADLINE_REFUSAL_CODE,
+                "detail": {
+                    "requirement_ids": [requirement_id] if requirement_id else [],
+                    "reason": reason,
+                },
+            }
+        time_left = discovery_time_left()
+        out_of_time = (
+            referral.get("outcome") == Outcome.TRANSIENT.value
+            and time_left is not None
+            and time_left <= 0
+        )
+        if referral.get("budget_spent") or out_of_time:
             return {
                 "code": _UNAVAILABLE_REFUSAL_CODE,
-                "detail": {"requirement_id": referral.get("requirement_id")},
+                "detail": {"requirement_id": requirement_id, "reason": reason},
             }
         if referral.get("repeated"):
             return {
@@ -1559,43 +1458,32 @@ class PlannerSeam:
         *,
         fresh: bool,
         question: str,
-        envelope: dict[str, Any],
         prior_plan: dict[str, Any] | None,
         refusal: dict[str, Any] | None,
         amendment: str | None,
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
-        spec_id_elected: bool = False,
-        spec_id_elected_label: str | None = None,
-        seed_of: Mapping[str, str] | None = None,
         problem: str | None = None,
-        ledger: str | None = None,
+        ledger: RenderedReadings = _NO_READINGS,
         asks: Sequence[str] = (),
     ) -> str:
         """The message for one `_propose` call.
 
         `fresh=True` -- the first call this seam makes in a session --
-        renders the full brief: the envelope, the canvas and conversation
-        digests, the plan being changed, and the question. `fresh=False` --
-        a correction round inside `__call__`'s own loop, or a later
+        renders the full brief: the search readings, the canvas and
+        conversation digests, the plan being changed, and the question.
+        `fresh=False` -- a correction round inside `__call__`'s own loop, or a later
         `__call__` re-entering over the `amend`/`replan` edge -- renders
         only the new thing: the `amendment`/`refusal` ask, or the
         correction's `problem` nudge. `prior_plan` is never rendered when
         `fresh` is `False`, even though it is still accepted here and still
         seeded into `propose_plan`'s own drafting state unconditionally
         (`__call__`'s own `save_plan` call, which does not read `fresh`).
-        `spec_id_elected`/`spec_id_elected_label` only affect the envelope
-        section, so they too are inert once `fresh` is `False`.
 
-        `seed_of` maps each seeded spec_id, a seed or its copy over a plan's
-        period, to the seed (`_seed_of`); the envelope's own seeds map to
-        themselves whether or not it names them. A refusal naming one keeps
-        the seed pinned (`_keep_seeds_sentence`) where any other refused spec
-        is to be avoided.
-
-        `ledger`, the orchestrator engine's rendered search readings
-        (`_readings_ledger`), stands in place of the envelope section when
-        set. `asks`, the outputs the orchestrator engine's brief lists
+        `ledger` is the rendered search readings (`_readings_ledger`), the
+        fresh brief's opening section, and a compiled source of the plan
+        being changed states no measure choice the ledger already names
+        (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question.
 
         See the module docstring for why a continuing call needs no more
@@ -1609,16 +1497,10 @@ class PlannerSeam:
         the wire, so each renders cut to `MAX_QUESTION_CHARS`
         (`planner.plan.cut_user_text`), the size `Plan.question` holds.
 
-        The envelope and `prior_plan` render as digests, through
-        `_render_envelope` and `_plan_context`. The instruction above the
-        envelope keeps its own wording. It is what stops the model inventing
-        a `spec_id`, and a bare reference to the envelope would need a fetch
-        tool neither agent has.
+        `prior_plan` renders as a digest, through `_plan_context`. The
+        instruction above the readings keeps its own wording. It is what
+        stops the model inventing a `spec_id`.
         """
-        seed_of = {
-            **{seed["spec_id"]: seed["spec_id"] for seed in envelope.get("seeds") or []},
-            **(seed_of or {}),
-        }
         ask = ""
         if amendment:
             ask = (
@@ -1630,10 +1512,8 @@ class PlannerSeam:
                 "it translated and compiled again, then call submit_plan.\n"
             )
         elif refusal:
-            refused, kept = _split_seeded(_refused_specs(refusal), seed_of)
             avoid = (
-                _avoid_sentence(refused)
-                + _keep_seeds_sentence(kept)
+                _avoid_sentence(_refused_specs(refusal))
                 + _earned_decline_sentence(_earned_by_refusal(refusal))
                 + _share_units_repair_sentence(refusal)
                 + _facet_repair_sentence(refusal)
@@ -1649,18 +1529,10 @@ class PlannerSeam:
             return "".join([ask, nudge])
         return "".join(
             [
-                _READINGS_CONTEXT.format(readings=ledger)
-                if ledger is not None
-                else _envelope_context(
-                    envelope,
-                    refusal=refusal,
-                    spec_id_elected=spec_id_elected,
-                    spec_id_elected_label=spec_id_elected_label,
-                    seed_of=seed_of,
-                ),
+                _READINGS_CONTEXT.format(readings=ledger.text),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
-                _plan_context(prior_plan),
+                _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
                 _asks_section(asks),
                 ask,
@@ -1671,7 +1543,7 @@ class PlannerSeam:
 
 def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     """What a replan's failed run computed: the asks its finished terminal
-    steps answer (`harness.graph._computed_asks`), by number, or `None` for
+    steps answer (`harness.graph.execute._computed_asks`), by number, or `None` for
     a plan held to no asks. The new plan runs from the start, so it still
     answers every ask. The list of numbers is cut at `MAX_QUESTION_CHARS`."""
     if computed is None:
@@ -1753,13 +1625,19 @@ def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]
     """
     if not isinstance(referral, dict):
         return []
+    if referral.get("kind") == "source_name_ambiguous":
+        return [
+            {"spec_id": str(candidate["ref"]), "label": str(candidate["label"])}
+            for group in referral.get("ambiguous_sources") or []
+            for candidate in group.get("candidates") or []
+        ]
     candidates = referral.get("candidates")
     if not isinstance(candidates, list):
         return []
     return [
         {
             "spec_id": str(candidate["spec_id"]),
-            "label": _truncate(str(candidate.get("sentence") or ""), _ENVELOPE_LABEL_CAP),
+            "label": _truncate(str(candidate.get("sentence") or ""), _CANDIDATE_LABEL_CAP),
         }
         for candidate in candidates
         if isinstance(candidate, dict) and candidate.get("spec_id")
@@ -1806,18 +1684,17 @@ def _requirements_without_discovery(state: SessionState) -> list[str]:
     ]
 
 
-def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> tuple[str, tuple[str, ...]]:
+def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
     """The conversation's search readings as the planner's first message
-    renders them, each spec_id by its newest reading only, and every spec_id
+    renders them, each spec_id by its newest reading only, with the spec_ids
     that text names (`render_readings`). Over `_READINGS_BUDGET` the oldest
     readings are folded, then dropped and counted."""
     if not readings:
-        return "(no search has run in this conversation)", ()
-    rendered = render_readings(
+        return RenderedReadings("(no search has run in this conversation)", ())
+    return render_readings(
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
     )
-    return rendered.text, rendered.spec_ids
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`
@@ -1850,39 +1727,30 @@ def _reading_pin_sources(
     the turn's session never re-stores it. Any other takes this turn's block
     (`blocks`). Settled when a reading with a `_SETTLED_STATUSES` status
     holds it as its own spec_id; a spec_id only ever offered as a candidate
-    is not.
+    is not. A spec_id that only readings of another count settle
+    (`SearchReading.other_count_of`) names the source that offered it.
     """
-    settled = {
-        reading.get("spec_id") for reading in readings if reading.get("status") in _SETTLED_STATUSES
+    settled = [reading for reading in readings if reading.get("status") in _SETTLED_STATUSES]
+    elected = {reading.get("spec_id") for reading in settled if not reading.get("other_count_of")}
+    counts_of = {
+        reading.get("spec_id"): str(reading["other_count_of"])
+        for reading in settled
+        if reading.get("other_count_of")
     }
     sources: dict[str, PinSource] = {}
     for spec_id in shown:
         from_earlier = spec_id in earlier
+        reading = next((r for r in reversed(settled) if r.get("spec_id") == spec_id), {})
         sources[spec_id] = PinSource(
+            provenance_ref=reading.get("provenance_ref"),
+            provenance_account=reading.get("provenance_account"),
             block=None if from_earlier else blocks.get(spec_id),
             warnings=_warning_codes(warnings.get(spec_id)),
-            settled=spec_id in settled,
+            settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
+            other_count_of=None if spec_id in elected else counts_of.get(spec_id),
         )
     return sources
-
-
-def _envelope_pin_sources(
-    envelope: dict[str, Any], *, refusal: dict[str, Any] | None, spec_id_elected: bool
-) -> dict[str, PinSource]:
-    """The resolve envelope's own spec_id as a settled `PinSource`, when the
-    planner was shown it as a pin (`_exposed_spec_id`); empty otherwise."""
-    spec_id = _exposed_spec_id(envelope, refusal=refusal, spec_id_elected=spec_id_elected)
-    if spec_id is None:
-        return {}
-    block = envelope.get("spec_block")
-    return {
-        spec_id: PinSource(
-            block=block if isinstance(block, dict) else None,
-            warnings=_warning_codes(envelope.get("warnings")),
-            settled=True,
-        )
-    }
 
 
 def _warning_codes(warnings: object) -> tuple[str, ...]:
@@ -1893,343 +1761,12 @@ def _warning_codes(warnings: object) -> tuple[str, ...]:
     return tuple(str(code) for code in codes if code)
 
 
-def _envelope_spec_disposition(
-    envelope: dict[str, Any], *, refusal: dict[str, Any] | None, spec_id_elected: bool
-) -> tuple[bool, bool]:
-    """`(omit, elected)`: whether `_envelope_context` leaves the envelope's
-    own `spec_id` out of what the planner sees, and whether that is because
-    the user elected it answering a `clarify` round.
-
-    Shared with `_exposed_spec_id`, below, so the two can never disagree
-    about what the model was shown: `_exposed_spec_id` uses `elected` to
-    decide which pin `propose_plan` may synthesize a `Decision` for. See
-    `_envelope_context` for why each omission reason fires. A seeded
-    envelope always omits it: its seeds name every spec_id, and the model
-    records each pin as the user's (`_SEEDED_REASON`).
-    """
-    if envelope.get("seeds"):
-        return True, False
-    parts = envelope.get("parts", 1)
-    refused = bool(_refused_specs(refusal))
-    elected = spec_id_elected and not refused and envelope.get("spec_id") is not None
-    omit = refused or (isinstance(parts, int) and parts > 1 and not elected)
-    return omit, elected
-
-
-def _exposed_spec_id(
-    envelope: dict[str, Any], *, refusal: dict[str, Any] | None, spec_id_elected: bool
-) -> str | None:
-    """The envelope's own `spec_id` as `_envelope_context` rendered it to the
-    model, or `None` when it was omitted, including on the elected branch
-    where `_envelope_context` still renders it.
-
-    `PlannerSeam.__call__` records this in session state
-    (`PIN_SOURCES_STATE_KEY`) so `propose_plan` (`planner.agent`) can
-    synthesize a `resolved_by=planner_default` `Decision` for a verbatim pin
-    of it (see `_synthesize_source_decisions`) without ever manufacturing one
-    for an id the model was not shown.
-
-    The elected branch (`parts > 1`, `spec_id_elected`, not refused) shows
-    the id through `_ELECTED_SPEC_REASON`, but returns `None` here: that text
-    tells the model to record the pin itself with `resolved_by=user`, since
-    the user chose it answering a `clarify` round. A synthesized
-    `planner_default` decision would mislabel a choice the user made.
-    """
-    omit, elected = _envelope_spec_disposition(
-        envelope, refusal=refusal, spec_id_elected=spec_id_elected
-    )
-    parts = envelope.get("parts", 1)
-    if omit or (isinstance(parts, int) and parts > 1 and elected):
-        return None
-    spec_id = envelope.get("spec_id")
-    return spec_id if isinstance(spec_id, str) else None
-
-
-def _envelope_context(
-    envelope: dict[str, Any],
-    *,
-    refusal: dict[str, Any] | None = None,
-    spec_id_elected: bool = False,
-    spec_id_elected_label: str | None = None,
-    seed_of: Mapping[str, str] | None = None,
-) -> str:
-    """Render the resolve envelope for the planner's prompt.
-
-    Two independent reasons omit the envelope's own `spec_id` from what
-    the planner sees, rather than merely warning against it -- a field
-    present and forbidden is the shape a model reliably tries anyway once
-    it has no other candidate to reach for. Either can fire alone, or
-    both together (`_envelope_spec_disposition` is the one test behind both
-    this and `_exposed_spec_id`):
-
-    - `parts > 1` and not elected: `parts` is on the wire before any
-      requirement exists (`graph.py`'s `choose_depth`, read a node earlier
-      by `route_status`), so it is the test this uses rather than a
-      requirement count. The envelope's one `spec_id` is a question-wide
-      answer and can be right for at most one part of a `parts > 1`
-      question -- unless `spec_id_elected` says the user actually chose it
-      answering a `clarify` round, in which case it is kept and named for
-      the part it matches (`_ELECTED_SPEC_REASON`) instead of omitted.
-    - `refusal` names this envelope's own `spec_id`, or a wave sibling's, as
-      refused (see `_refused_specs`): a `RediscoveryNeeded` replan over the
-      `execute -> planner` edge, which does not re-probe. This omission wins
-      over an election on any `parts` count: the executor's refusal is a
-      fact about the spec, while an election only says which reading the
-      user meant.
-
-    A refused spec_id that `seed_of` maps to a seed is not treated as
-    refused here: the seed stays listed, and `PlannerSeam._message`'s ask
-    tells the planner to keep it pinned (`_keep_seeds_sentence`).
-    """
-    parts = envelope.get("parts", 1)
-    reasons = ""
-    omit, elected = _envelope_spec_disposition(
-        envelope, refusal=refusal, spec_id_elected=spec_id_elected
-    )
-    seeds = envelope.get("seeds")
-    refused, _ = _split_seeded(_refused_specs(refusal), seed_of or {})
-    if seeds:
-        reasons += _SEEDED_REASON.format(ceiling=frame_row_ceiling())
-    elif isinstance(parts, int) and parts > 1:
-        if elected:
-            reasons += _ELECTED_SPEC_REASON.format(
-                parts=parts,
-                spec_id=envelope.get("spec_id"),
-                label=spec_id_elected_label or envelope.get("spec_id"),
-            )
-        else:
-            reasons += _MULTI_PART_REASON.format(parts=parts)
-    if refused:
-        reasons += _refused_spec_reason(refused)
-    rendered = (
-        {key: value for key, value in envelope.items() if key != "spec_id"} if omit else envelope
-    )
-    text = _render_envelope(rendered)
-    if seeds:
-        text += "\n" + _render_seeds(seeds)
-    return _ENVELOPE_CONTEXT.format(envelope=text, reasons=reasons)
-
-
-# The facts of one seed's identity `_render_seeds` prints under it, as
-# `_render_envelope` prints a searched envelope's own.
-_SEED_FACT_LINES = (
-    "wide",
-    "stat_var_shape_kind",
-    "stat_var_item_count",
-    "entity_roles",
-    "stat_var_served_count",
-)
-
-
-def _render_seeds(seeds: list[dict[str, Any]]) -> str:
-    """A seeded turn's datasets, one block each: spec_id, the sentence the
-    user saw, its window, the year and rows Search showed, its coverage
-    counts, its width and the facts behind it, the entity axes it leaves open,
-    and the operations asked of it (`harness.seeds`'s `_envelope_seed`). An operation over a party reads
-    "across" that party (`_operation_text`).
-
-    Every seed stays listed, a refused one too: the user chose it, so the
-    plan keeps it pinned (`_keep_seeds_sentence`). Seeds and each seed's
-    operations are capped and counted, and every field is cut, like the
-    envelope's own.
-    """
-    lines = [f"Seeded datasets ({len(seeds)}):"]
-    for seed in seeds[:MAX_SEEDS]:
-        sentence = _truncate(str(seed.get("sentence") or ""), _ENVELOPE_LABEL_CAP)
-        lines.append(
-            f"- spec_id: {_envelope_field(seed['spec_id'])}"
-            + (f" -- {sentence}" if sentence else "")
-        )
-        lines.extend(
-            f"  {key}: {_envelope_field(seed[key])}"
-            for key in ("window", "showed", "coverage")
-            if seed.get(key)
-        )
-        lines.extend(
-            f"  {key}: {_envelope_field(_fact(seed, key))}"
-            for key in _SEED_FACT_LINES
-            if seed.get(key) is not None
-        )
-        if seed.get("open_entity_axes"):
-            axes = _open_entity_axes_text(seed["open_entity_axes"])
-            lines.append(f"  open_entity_axes: {_envelope_field(axes)}")
-        operations = seed.get("operations") or []
-        if not operations:
-            lines.append("  operations: (none)")
-        lines.extend(
-            f"  operation: {_operation_text(operation)}"
-            for operation in operations[:_ENVELOPE_OPERATION_CAP]
-        )
-        if len(operations) > _ENVELOPE_OPERATION_CAP:
-            lines.append(f"  and {len(operations) - _ENVELOPE_OPERATION_CAP} more")
-    if len(seeds) > MAX_SEEDS:
-        lines.append(f"- and {len(seeds) - MAX_SEEDS} more")
-    return "\n".join(lines)
-
-
-# The party each entity axis of a Search operation's `over` names, with the
-# column `open_entity_axes` lists it under. `category` and `year` are no
-# party: an operation over one names its axis alone.
-_OPERATION_PARTIES = {
-    "place": "observationAbout, the place",
-    "origin": "origin, the giving party",
-    "destination": "destination, the receiving party",
-}
-
-
-def _operation_text(operation: Mapping[str, Any]) -> str:
-    """One seed operation as the planner reads it.
-
-    `rank across origin, the giving party ("top 5 donors")` for an operation
-    over an entity axis, which a requirement states in `across`;
-    `growth over year ("since 2010")` for any other axis; and
-    `forecast to 2050 ("...")` for a forecast with a target year.
-    """
-    text = _envelope_field(operation["verb"])
-    over = operation.get("over")
-    if over in _OPERATION_PARTIES:
-        text += f" across {_OPERATION_PARTIES[over]}"
-    elif over:
-        text += f" over {_envelope_field(over)}"
-    if operation.get("target_year") is not None:
-        text += f" to {_envelope_field(operation['target_year'])}"
-    phrase = _truncate(str(operation.get("phrase") or ""), _ENVELOPE_LABEL_CAP)
-    return f'{text} ("{phrase}")'
-
-
-def _render_envelope(envelope: dict[str, Any]) -> str:
-    """The resolve envelope as a digest, its verdicts rendered one to a line.
-
-    Every field `graph_envelope` (`harness.tool_contracts`) puts on the
-    envelope is rendered, because each one is an input to a decision this
-    prompt asks the model to make:
-
-    - `status` and `spec_id`: what the resolve settled on, and the one
-      source the requirement may be pinned to when the question has one part.
-    - `choice_points` and `wide`: the methodological forks search settled
-      by default, and whether anything downstream can narrow the identity to
-      one series. Both are the depth policy's own inputs
-      (`harness.depth.decide_depth`), so a plan that proposes a different
-      reading from them is proposing against the reading the user's turn was
-      routed on.
-    - `parts`: how many variables the question decomposed into.
-    - The pin-predicate facts (`stat_var_shape_kind`, `stat_var_item_count`,
-      `entity_roles`, `stat_var_served_count`) ride alongside `wide` for the same
-      reason `graph_envelope` carries them, sparing a later reader of `wide`
-      another trip into the raw envelope.
-    - `open_entity_axes`, each entity axis `search` left open with its member count, so the
-      planner states the party a rank or total covers in `across`. An empty
-      list renders nothing.
-    - `candidates`, each by `spec_id` and `label`, capped and counted.
-    - `skills`, each by `id` and `description`, capped and counted: the
-      skills the resolve names for its results, which the planner loads with
-      `get_skill` when a description bears on the question.
-    - `warnings`, each by `severity`, `code` and `message`, capped and
-      counted. `severity` leads the line because `harness.graph` reads it
-      (`graph.py`'s `degraded=any(w.get("severity") == "degraded" ...)`) to
-      tell a resolve that degraded from one that merely noted something, and
-      a warning rendered without it leaves `info`, `warn` and `degraded`
-      reading the same.
-
-    An unrecognized field renders under its own name. The envelope grows
-    fields upstream of this module, and a silent omission would hand the
-    model a summary it could not tell was incomplete.
-    """
-    lines: list[str] = []
-    status = envelope.get("status")
-    if status is not None:
-        lines.append(f"- status: {_envelope_field(status)}")
-    spec_id = envelope.get("spec_id")
-    if spec_id is not None:
-        lines.append(f"- spec_id: {_envelope_field(spec_id)}")
-    lines.extend(
-        f"- {key}: {_envelope_field(envelope[key])}"
-        for key in ("parts", "choice_points", "wide")
-        if key in envelope
-    )
-    lines.extend(
-        f"- {key}: {_envelope_field(_fact(envelope, key))}"
-        for key in (
-            "stat_var_shape_kind",
-            "stat_var_item_count",
-            "entity_roles",
-            "stat_var_served_count",
-        )
-        if envelope.get(key) is not None
-    )
-    open_entity_axes = envelope.get("open_entity_axes")
-    if open_entity_axes:
-        lines.append(
-            f"- open_entity_axes: {_envelope_field(_open_entity_axes_text(open_entity_axes))}"
-        )
-
-    # `candidates`, `skills` and `warnings` are read with `is not None`, like
-    # every other field here, not with `or []`: an absent key renders nothing,
-    # while a key the envelope carries and leaves empty renders as a
-    # counted empty line. `graph_envelope` sets all three keys on every branch
-    # it returns, so today the two cases are always identical, but a producer
-    # that omitted any one would read to the model exactly like a resolve
-    # that found nothing.
-    candidates = envelope.get("candidates")
-    if isinstance(candidates, list):
-        lines.append(f"- candidates ({len(candidates)}):")
-        for candidate in candidates[:_ENVELOPE_CANDIDATE_CAP]:
-            if not isinstance(candidate, dict):
-                lines.append(f"  - {_envelope_field(candidate)}")
-                continue
-            label = _truncate(str(candidate.get("label") or ""), _ENVELOPE_LABEL_CAP)
-            pinned = f" -- {label}" if label else ""
-            wide = " (wide)" if candidate.get("wide") else ""
-            lines.append(f"  - {_envelope_field(candidate.get('spec_id'))}{wide}{pinned}")
-        if len(candidates) > _ENVELOPE_CANDIDATE_CAP:
-            lines.append(f"  - and {len(candidates) - _ENVELOPE_CANDIDATE_CAP} more")
-    elif candidates is not None:
-        lines.append(f"- candidates: {_envelope_field(candidates)}")
-
-    skills = envelope.get("skills")
-    if isinstance(skills, list):
-        lines.append(f"- skills ({len(skills)}):")
-        for skill in skills[:_ENVELOPE_SKILL_CAP]:
-            if not isinstance(skill, dict):
-                lines.append(f"  - {_envelope_field(skill)}")
-                continue
-            description = _truncate(
-                str(skill.get("description") or ""), _ENVELOPE_SKILL_DESCRIPTION_CAP
-            )
-            about = f" -- {description}" if description else ""
-            lines.append(f"  - {_envelope_field(skill.get('id'))}{about}")
-        if len(skills) > _ENVELOPE_SKILL_CAP:
-            lines.append(f"  - and {len(skills) - _ENVELOPE_SKILL_CAP} more")
-    elif skills is not None:
-        lines.append(f"- skills: {_envelope_field(skills)}")
-
-    warnings = envelope.get("warnings")
-    if isinstance(warnings, list):
-        lines.append(f"- warnings ({len(warnings)}):")
-        for warning in warnings[:_ENVELOPE_WARNING_CAP]:
-            if not isinstance(warning, dict):
-                lines.append(f"  - {_envelope_field(warning)}")
-                continue
-            code = _envelope_field(warning.get("code"))
-            severity = _envelope_field(warning.get("severity"))
-            message = _truncate(str(warning.get("message") or ""), _ENVELOPE_WARNING_TEXT_CAP)
-            lines.append(
-                f"  - [{severity}] {code}: {message}" if message else f"  - [{severity}] {code}"
-            )
-        if len(warnings) > _ENVELOPE_WARNING_CAP:
-            lines.append(f"  - and {len(warnings) - _ENVELOPE_WARNING_CAP} more")
-    elif warnings is not None:
-        lines.append(f"- warnings: {_envelope_field(warnings)}")
-
-    lines.extend(
-        f"- {key}: {_envelope_field(envelope[key])}"
-        for key in sorted(set(envelope) - _ENVELOPE_KEYS)
-    )
-    return "\n".join(lines) if lines else "(the envelope carried nothing)"
-
-
-def _plan_context(prior_plan: dict[str, Any] | None) -> str:
+def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:
     """The plan being changed, rendered field by field as a digest.
+
+    `stated` are the spec_ids of other counts the search readings above
+    already name (`RenderedReadings.other_counts`); a compiled source
+    offering only those states no measure choice of its own.
 
     The title above it comes from `_section`, matching the name `_message`'s
     docstring and the tests that read the brief use for that section. This
@@ -2314,7 +1851,7 @@ def _plan_context(prior_plan: dict[str, Any] | None) -> str:
     # recompiles them from whatever this prompt produces.
     workflow = prior_plan.get("workflow")
     if isinstance(workflow, dict):
-        lines.extend(_workflow_lines(workflow))
+        lines.extend(_workflow_lines(workflow, stated=stated))
 
     known = {
         "question",
@@ -2339,7 +1876,7 @@ def _field_line(requirement: dict[str, Any]) -> str:
     )
 
 
-def _workflow_lines(workflow: dict[str, Any]) -> list[str]:
+def _workflow_lines(workflow: dict[str, Any], *, stated: Collection[str] = ()) -> list[str]:
     """A compiled workflow's selected sources and its evidence bindings.
 
     `SelectedSource.sentence` is kept. It is the resolved reading, in the
@@ -2347,6 +1884,12 @@ def _workflow_lines(workflow: dict[str, Any]) -> list[str]:
     measure has to see what the approved source said it was. `searched_as`
     and `has_data` are dropped. Both are discovery's own bookkeeping, and the
     step and binding wiring is the mechanic above.
+
+    A source whose measure offers other ways of counting the flow names each
+    with its spec_id (`_measure_choice_text`), so an amendment asking for
+    one pins it, unless every one is in `stated`. A windowed copy carries
+    its origin's `elected_measure`, so the choice a reading of the origin
+    states is not stated again.
     """
     sources = workflow.get("sources")
     if not isinstance(sources, list) or not sources:
@@ -2359,12 +1902,31 @@ def _workflow_lines(workflow: dict[str, Any]) -> list[str]:
                 continue
             sentence = _truncate(str(source.get("sentence") or ""), _PLAN_SOURCE_SENTENCE_CAP)
             spec_id = _scalar(source.get("spec_id"))
-            named.append(f"{spec_id} -- {sentence}" if sentence else spec_id)
+            name = f"{spec_id} -- {sentence}" if sentence else spec_id
+            named.append(name + _measure_choice_text(source.get("elected_measure"), stated))
         lines = ["Compiled sources:", *(f"  {name}" for name in named)]
     bindings = workflow.get("evidence_bindings")
     if isinstance(bindings, list):
         lines.extend(_binding_line(binding) for binding in bindings)
     return lines
+
+
+def _measure_choice_text(elected: Any, stated: Collection[str]) -> str:
+    """A source's `elected_measure` and each other count with its spec_id (`measure_choice_text`).
+
+    For example "; counted as gross disbursements; other counts: net
+    disbursements [spec_…]", the choice at most `_PLAN_MEASURE_CHOICE_CAP`
+    characters. Empty when it offers none, none fits, or `stated` holds
+    every one.
+    """
+    if not isinstance(elected, dict):
+        return ""
+    measure = ElectedMeasure.model_validate(elected)
+    others = measure.other_counts()
+    if all(other.spec_id in stated for other in others):
+        return ""
+    text = measure_choice_text(measure.label, others, cap=_PLAN_MEASURE_CHOICE_CAP)
+    return f"; {text}" if text else ""
 
 
 def _binding_line(binding: Any) -> str:
@@ -2397,41 +1959,6 @@ def _scalar(value: Any) -> str:
     return json.dumps(value, default=str, separators=(",", ":"), ensure_ascii=False)
 
 
-def _open_entity_axes_text(open_entity_axes: Any) -> Any:
-    """`open_entity_axes` as `origin (55 members)`, comma-joined; anything else as it came."""
-    if not isinstance(open_entity_axes, list) or not all(
-        isinstance(axis, dict) for axis in open_entity_axes
-    ):
-        return open_entity_axes
-    parts = []
-    for axis in open_entity_axes:
-        members = axis.get("members")
-        count = (
-            "members not counted"
-            if not isinstance(members, int)
-            else f"{members} member{'' if members == 1 else 's'}"
-        )
-        parts.append(f"{_scalar(axis.get('column'))} ({count})")
-    return ", ".join(parts)
-
-
-def _fact(reading: Mapping[str, Any], key: str) -> Any:
-    """`reading[key]`, except that a `stat_var_item_count` which
-    `stat_var_member_count_exact` marks as a floor reads "at least" that many
-    StatVars, as `compact_source` counts a source's
-    (`translator.discovery.stat_var_count_text`)."""
-    value = reading[key]
-    floor = reading.get("stat_var_member_count_exact") is False
-    if key == "stat_var_item_count" and floor and isinstance(value, int):
-        return stat_var_count_text(value, floor=True)
-    return value
-
-
-def _envelope_field(value: Any) -> str:
-    """One envelope field as text, cut to `_ENVELOPE_FIELD_CAP` characters."""
-    return _truncate(_scalar(value), _ENVELOPE_FIELD_CAP)
-
-
 def _list_text(values: Any) -> str:
     """A list as a comma-joined run of scalars, JSON for anything nested."""
     if not isinstance(values, list):
@@ -2460,7 +1987,7 @@ def _stops(refusal: dict[str, Any] | None) -> list[dict[str, Any]]:
 def _share_units_refused(stop: dict[str, Any]) -> bool:
     """Whether `stop` is a `share_of` step refusing its two sides on their units.
 
-    `MethodChoiceNeeded`'s shape (`graph.py`'s `_refusal_shape`) names the
+    `MethodChoiceNeeded`'s shape (`harness.graph.execute`'s `_refusal_shape`) names the
     refusing step's tool by its name on analysis-mcp, which is the verb.
     """
     return stop.get("tool") == OperationKind.SHARE_OF and stop.get("code") in _SHARE_UNIT_CODES
@@ -2472,7 +1999,7 @@ def _earned_by_refusal(refusal: dict[str, Any] | None) -> set[UnsupportedOperati
     `_UNSUPPORTED_BY_RUN_TIME_CODE`. A `share_of` step's unit refusal earns
     none (`_share_units_refused`).
 
-    Only `MethodChoiceNeeded`'s shape (`graph.py`'s `_refusal_shape`)
+    Only `MethodChoiceNeeded`'s shape (`harness.graph.execute`'s `_refusal_shape`)
     carries a tool's `code` at its top level.
     """
     return {
@@ -2531,7 +2058,7 @@ def _earned_decline_sentence(earned: Collection[UnsupportedOperation]) -> str:
 
 def _refused_specs(refusal: dict[str, Any] | None) -> list[tuple[str, str]]:
     """Every `spec_id` a refusal names as refused, and why: the primary's own,
-    then each of its `also_stopped` siblings' (`graph.py`'s `_replan_refusal`),
+    then each of its `also_stopped` siblings' (`harness.graph.execute`'s `_replan_refusal`),
     in that order.
 
     Reads `refusal` and each `also_stopped` entry as the opaque per-kind dict
@@ -2566,17 +2093,6 @@ def _one_refused_spec(payload: object) -> list[tuple[str, str]]:
     return [(spec_id, detail)]
 
 
-def _refused_spec_reason(refused: list[tuple[str, str]]) -> str:
-    """The reason text naming every refused spec left out of the envelope."""
-    if len(refused) == 1:
-        spec_id, detail = refused[0]
-        return _REFUSED_SPEC_REASON.format(
-            spec_id=spec_id, detail=cut_user_text(detail, MAX_QUESTION_CHARS)
-        )
-    named = "; ".join(f"{spec_id!r} ({detail})" for spec_id, detail in refused)
-    return _REFUSED_SPECS_REASON.format(named=cut_user_text(named, MAX_QUESTION_CHARS))
-
-
 def _avoid_sentence(refused: list[tuple[str, str]]) -> str:
     """The sentence naming every refused spec the planner must not propose again."""
     if not refused:
@@ -2588,44 +2104,6 @@ def _avoid_sentence(refused: list[tuple[str, str]]) -> str:
     named = "; ".join(f"{spec_id!r} ({detail})" for spec_id, detail in refused)
     named = cut_user_text(named, MAX_QUESTION_CHARS)
     return f" Do not propose any of these sources again -- each was just refused: {named}."
-
-
-def _seed_of(state: SessionState) -> dict[str, str]:
-    """Each seeded spec_id this turn holds, a seed or its copy over a plan's
-    period (`planner.plan.seeded_sources`), mapped to the seed's own."""
-    return {item.source.spec_id: seed_of(item) for item in seeded_sources(state)}
-
-
-def _split_seeded(
-    refused: list[tuple[str, str]], seed_of: Mapping[str, str]
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """`refused` split into the specs to avoid and the seeds to keep pinned.
-
-    A refused seeded spec_id is replaced by its seed's (`seed_of`), once per
-    seed, with the first reason given for it.
-    """
-    avoid: list[tuple[str, str]] = []
-    keep: dict[str, str] = {}
-    for spec_id, detail in refused:
-        seed = seed_of.get(spec_id)
-        if seed is None:
-            avoid.append((spec_id, detail))
-        else:
-            keep.setdefault(seed, detail)
-    return avoid, list(keep.items())
-
-
-def _keep_seeds_sentence(kept: list[tuple[str, str]]) -> str:
-    """The sentence telling the planner to keep each refused seed pinned."""
-    if not kept:
-        return ""
-    if len(kept) == 1:
-        seed, detail = kept[0]
-        return _KEEP_SEED_SENTENCE.format(
-            seed=seed, detail=cut_user_text(detail, MAX_QUESTION_CHARS)
-        )
-    named = "; ".join(f"{seed!r} ({detail})" for seed, detail in kept)
-    return _KEEP_SEEDS_SENTENCE.format(named=cut_user_text(named, MAX_QUESTION_CHARS))
 
 
 def _section(title: str, body: dict[str, Any] | None) -> str:

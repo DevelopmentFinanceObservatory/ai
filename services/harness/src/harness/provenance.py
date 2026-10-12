@@ -9,7 +9,7 @@ the frame a component was written from to build its citation, sources,
 warnings and freshness, and withholds the card when the frame has none.
 
 A retrieval's own lineage is written by the direct-fetch path
-(`McpExecutor._get_data`, called from `harness.graph`'s `fetch` node) and by
+(`McpExecutor._get_data`, called from the orchestrator's `fetch` tool) and by
 the approved-plan path (a `get_data` step run through
 `compiler.surface.ToolSurface`, observed by `harness.studio_translate.
 _RecordingSurface`). `alias` writes a terminal frame's lineage from the
@@ -154,11 +154,9 @@ class ProvenanceInput:
         `content_version` of its own (`retrieval_frame_ref`), which the datasets door
         does not serve. A manifest that states no pair gives the frame key.
         """
-        definition = self.manifest.get("definition")
-        spec_id = definition.get("spec_id") if isinstance(definition, Mapping) else None
-        content_version = self.manifest.get("content_version")
-        if spec_id and content_version:
-            return {"spec_id": spec_id, "content_version": content_version}
+        served = served_frame_ref(self.manifest)
+        if served["spec_id"] and served["content_version"]:
+            return served
         return {"spec_id": self.spec_id, "content_version": self.content_version}
 
 
@@ -205,6 +203,31 @@ class ProvenanceStore:
             key=(spec_id, content_version),
             entry=_Entry((ProvenanceInput(spec_id, content_version, manifest),)),
         )
+
+    def put_retrieval(
+        self, *, conversation: str, manifest: dict[str, Any]
+    ) -> dict[str, str | None]:
+        """Store a successful `get_data` result's manifest as the lineage of its
+        frame, and return the pair the frame is described and drawn by
+        (`ProvenanceInput.served_ref`).
+
+        The lineage is keyed by `retrieval_frame_ref`, the pair later steps name
+        the frame by, and also by the served pair when it differs: dfo-apis serves
+        a final retrieval under that pair, and its card reads its lineage there.
+        Both keys hold the one retrieval.
+        """
+        frame = retrieval_frame_ref(manifest)
+        retrieval = ProvenanceInput(frame["spec_id"], frame["content_version"], manifest)
+        served = retrieval.served_ref
+        entry = _Entry((retrieval,))
+        for key in dict.fromkeys(
+            [
+                (frame["spec_id"], frame["content_version"]),
+                (served["spec_id"], served["content_version"]),
+            ]
+        ):
+            self._store(conversation=conversation, key=key, entry=entry)
+        return served
 
     def alias(
         self,
@@ -361,14 +384,24 @@ def retrieval_frame_ref(result: Mapping[str, Any]) -> dict[str, str | None]:
 
     The manifest's own `{spec_id, content_version}` names dfo-apis' materialisation.
     A frame minted with extra columns is held under a `content_version` of its own
-    (`data_mcp.frame_materialisation.frame_ref_for`), so both writers key a
-    retrieval's lineage by `frame_ref`, the reference every later step and
-    `ProvenanceStore.alias` name it by. A member the result does not state is `None`.
+    (`data_mcp.frame_materialisation.frame_ref_for`), so a retrieval's lineage is
+    keyed by `frame_ref`, the reference every later step and `ProvenanceStore.alias`
+    name it by, as well as by the manifest's pair (`ProvenanceStore.put_retrieval`).
+    A member the result does not state is `None`.
     """
     ref = result.get("frame_ref")
     if not isinstance(ref, Mapping):
         ref = {}
     return {"spec_id": ref.get("spec_id"), "content_version": ref.get("content_version")}
+
+
+def served_frame_ref(manifest: Mapping[str, Any]) -> dict[str, str | None]:
+    """The manifest's own `{spec_id, content_version}`: its `definition.spec_id` and
+    `content_version`, the pair dfo-apis mints and serves the frame under. A member
+    the manifest does not state is `None`."""
+    definition = manifest.get("definition")
+    spec_id = definition.get("spec_id") if isinstance(definition, Mapping) else None
+    return {"spec_id": spec_id, "content_version": manifest.get("content_version")}
 
 
 def merged_manifest(lineage: Lineage) -> dict[str, Any]:

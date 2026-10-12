@@ -48,27 +48,6 @@ _SPAN_PROVIDER.add_span_processor(SimpleSpanProcessor(_SPAN_EXPORTER))
 trace.set_tracer_provider(_SPAN_PROVIDER)
 
 
-@pytest.fixture(autouse=True)
-def _no_declared_datasets() -> Any:
-    """Read no declared datasets when a data-mcp server starts.
-
-    Every in-memory client of data-mcp, direct or through a harness mount, runs its
-    lifespan, whose schema read would otherwise reach the test's fake upstream as an
-    extra request. A patch of its own, so a test's `monkeypatch.undo()` leaves it in
-    place. `test_search_tool.py` exercises the real read. Named by its dotted path so
-    this module never imports data-mcp, whose module-level tracer, taken before the
-    provider below is set, is a proxy that binds to whichever provider is current at
-    its first span.
-    """
-
-    async def none() -> None:
-        return None
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr("data_mcp.search_tool.fetch_declared_datasets", none)
-        yield
-
-
 @pytest.fixture
 def exported_spans() -> InMemorySpanExporter:
     """The shared in-memory exporter, emptied so a test sees only its own spans."""

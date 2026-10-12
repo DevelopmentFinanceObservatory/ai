@@ -1,4 +1,4 @@
-"""The canned plan scripted mode approves, and the schemas it is compiled against.
+"""The canned plan `ScriptedPlannerModel` drafts, and the schemas it is compiled against.
 
 `scripted_plan` builds a real `planner.plan.Plan`: one `Decision`, the
 `DatasetRequirement` and `AggregateRequirement` behind it, a `Translation`,
@@ -160,9 +160,9 @@ def scripted_manifest(spec_id: str) -> dict[str, Any]:
     `executor.run._Run._check_evidence` finds no drift between what was
     approved and what came back. Carries no statistics artifact of its own
     -- `series_count` states there is one series, and `scripted_fetch_series_stats`
-    (this module's own `FetchSeriesStats`, wired in wherever scripted mode
-    builds its workflow) answers `_SCRIPTED_SERIES` for it directly, without
-    a real fetch: `STUDIO_SCRIPTED`'s whole point is no upstream call.
+    (this module's own `FetchSeriesStats`, wired in wherever a scripted
+    workflow is built) answers `_SCRIPTED_SERIES` for it directly, without
+    a real fetch, since a scripted run makes no upstream call.
     """
     return {
         "schema_version": 1,
@@ -183,8 +183,8 @@ def scripted_manifest(spec_id: str) -> dict[str, Any]:
 
 
 async def scripted_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
-    """`executor.run.FetchSeriesStats` for scripted mode: `_SCRIPTED_SERIES`, always,
-    never a real fetch. `scripted_manifest` is the only manifest this mode ever mints, so
+    """`executor.run.FetchSeriesStats` for a scripted run: `_SCRIPTED_SERIES`, always,
+    never a real fetch. `scripted_manifest` is the only manifest a scripted run mints, so
     there is nothing to key this on; a caller passing this in for any other manifest shape
     is a wiring bug, not a case this function needs to detect.
     """
@@ -205,8 +205,8 @@ def scripted_aggregate_result() -> dict[str, Any]:
     }
 
 
-def scripted_plan(question: str, *, spec_id: str | None, parts: int) -> Plan:
-    """Build the canned scripted plan a `PlannerModel` proposes in scripted mode.
+def scripted_plan(question: str, *, spec_id: str | None) -> Plan:
+    """Build the canned plan `ScriptedPlannerModel` proposes.
 
     One `Decision`, the `DatasetRequirement` and `AggregateRequirement` it
     fixes, a `Translation` retrieving that requirement and reducing it to one
@@ -218,22 +218,13 @@ def scripted_plan(question: str, *, spec_id: str | None, parts: int) -> Plan:
     Args:
         question: The plan's stated question, cut to `MAX_QUESTION_CHARS` by
             `cut_user_text` when it is longer.
-        spec_id: The source to retrieve, `harness.scripted.SCRIPTED_SPEC` or
-            `SCRIPTED_MISNAMED_SPEC`, as `ScriptedResolver` resolves the
-            question to. Falls back to `SCRIPTED_SPEC` when `None`, which
-            `ScriptedResolver` never returns for a question this is called
-            for, but the signature states it as optional to mirror the
-            resolver's own return shape.
-        parts: Unused; scripted mode always resolves to one part, so this
-            always builds a single dataset requirement. Accepted for
-            signature parity with the resolved envelope a real
-            `PlannerModel` reads.
+        spec_id: The source to retrieve. Falls back to
+            `harness.scripted.SCRIPTED_SPEC` when `None`.
 
     Returns:
         A `Plan` in `PENDING_APPROVAL`, its workflow's pins equal to what
         `harness.scripted.ScriptedSurface.list_tools()` declares.
     """
-    del parts
     resolved_spec_id = spec_id if spec_id is not None else "spec_" + "f" * 32
 
     decision = Decision(

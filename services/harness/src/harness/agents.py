@@ -81,7 +81,7 @@ def create_planner_with_translator(
             a reachable MCP server.
         question_fixed: Passed straight through to `create_planner_agent`.
             `harness.planner_seam.PlannerSeam` builds its planner with this
-            set, since the graph derives and narrates a turn's question before
+            set, since the orchestrator's brief states a turn's question before
             the planner ever runs. `evals/agents/harness_pair_v1` builds its
             own planner through `create_planner_agent` directly, not through this
             function, so the default here only has to keep this function's

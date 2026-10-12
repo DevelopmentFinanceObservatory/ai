@@ -210,16 +210,10 @@ class Settings(BaseServiceSettings):
     # Unset means any non-empty token is accepted (the token stays required
     # either way -- contract delta 5).
     studio_api_token: str | None = None
-    # Serve the studio from deterministic scripted seams: no model, no MCP,
-    # no upstream; sequential wire ids. For frontend testing only.
-    studio_scripted: bool = False
-    # Which agent answers a live studio turn: the workflow graph, or the
-    # orchestrator agent (`orchestrator.agent`) calling tools itself.
-    studio_engine: Literal["graph", "orchestrator"] = "graph"
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL
-    # Browser origins a LIVE server answers CORS preflights for, as a
+    # Browser origins the server answers CORS preflights for, as a
     # comma-separated env value (a locally served page testing against the
     # real agent on another port). Empty sends no CORS headers: the deployed
     # service is reached same-origin through the website's proxy.
@@ -228,7 +222,7 @@ class Settings(BaseServiceSettings):
     # docstring.
     studio_prefix_cache: bool = True
     # How many of one plan's wave's tool calls `executor.run._Run` may hold
-    # in flight against the MCP servers at once (`harness.graph.
+    # in flight against the MCP servers at once (`harness.graph.workflow.
     # create_root_workflow(max_concurrent_steps=...)`); a wave wider than
     # this queues at the point of call rather than opening every call at once.
     executor_max_concurrent_steps: int = Field(default=4, ge=1)

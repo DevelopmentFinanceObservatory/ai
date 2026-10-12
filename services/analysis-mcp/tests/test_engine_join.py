@@ -370,7 +370,7 @@ def test_output_over_max_output_rows_refuses_before_building_the_output(
     def build_output(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("the output frame was built")
 
-    monkeypatch.setattr("analysis_mcp.engine.join.frame_from_columns", build_output)
+    monkeypatch.setattr("analysis_mcp.engine.join.frame_keeping_role_types", build_output)
     with pytest.raises(JoinResultTooLargeError) as refused:
         run_join(oda, gni, max_output_rows=output_rows - 1)
     assert (refused.value.row_count, refused.value.ceiling) == (output_rows, output_rows - 1)

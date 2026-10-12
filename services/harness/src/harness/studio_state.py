@@ -19,7 +19,7 @@ instance's own live `ConversationState` in process, like
 the ledger-backed API every route in `harness.studio` goes through;
 `current` is the held-in-process accessor for callers that run mid-turn,
 after a route has already loaded or created the conversation on this
-instance (`make_recall`, `_RecordingExecutor.components_replaced`).
+instance (`make_recall_part`, `_RecordingExecutor._keep_write_token`).
 
 `studio:segment` is a durable lease on a conversation's active stream, the
 mechanism that keeps at most one instance streaming a conversation at a
@@ -48,7 +48,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
-from compiler.sources import source_from_spec_block
+from compiler.sources import alternative_definitions, source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from fastapi.responses import JSONResponse
@@ -61,7 +61,7 @@ from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
 from harness.conversation import current_conversation_key
-from harness.graph import ORCHESTRATOR_SPECS_KEY
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.turn_records import (
     PlanRecord,
     RecordedIdentity,
@@ -132,19 +132,52 @@ _BLOCK_SHOWS_BYTES = (
 # order the card displays them.
 _SUBSET_RULE = "display order"
 _DIGEST_WRAPPER_BYTES = 160
-CANVAS_DIGEST_MAX_BYTES = _DIGEST_WRAPPER_BYTES + _DIGEST_BLOCK_CAP * (
-    _BLOCK_FRAME_BYTES
-    + _BLOCK_ID_BYTES
-    + _TITLE_BYTE_CAP
-    + _FACT_SUMMARY_BYTE_CAP
-    + _BLOCK_SHOWS_BYTES
+# `recall(part="canvas")`'s listing (`canvas_listing_state`): per list, the
+# newest `_DIGEST_BLOCK_CAP` cards in full (with up to `_VIEW_FLAG_BYTES` of
+# pinned / on_canvas flags each) and `_LISTING_COMPACT_CAP` older ones as
+# compact entries, plus the keys and counts in `_LISTING_WRAPPER_BYTES`.
+_LISTING_COMPACT_CAP = 48
+_VIEW_FLAG_BYTES = 40
+_LISTING_WRAPPER_BYTES = 256
+# The conversation's cards not on the canvas (`hidden`): the newest
+# `_DIGEST_HIDDEN_CAP`, each its id, type and title cut to their caps inside
+# `_HIDDEN_FRAME_BYTES` of keys, plus the list's own key and cut count.
+_DIGEST_HIDDEN_CAP = 16
+_HIDDEN_FRAME_BYTES = 64
+_HIDDEN_WRAPPER_BYTES = 64
+CANVAS_DIGEST_MAX_BYTES = (
+    _DIGEST_WRAPPER_BYTES
+    + _DIGEST_BLOCK_CAP
+    * (
+        _BLOCK_FRAME_BYTES
+        + _BLOCK_ID_BYTES
+        + _TITLE_BYTE_CAP
+        + _FACT_SUMMARY_BYTE_CAP
+        + _BLOCK_SHOWS_BYTES
+    )
+    + _HIDDEN_WRAPPER_BYTES
+    + _DIGEST_HIDDEN_CAP
+    * (_HIDDEN_FRAME_BYTES + _BLOCK_ID_BYTES + _BLOCK_TYPE_BYTES + _TITLE_BYTE_CAP)
+)
+CANVAS_LISTING_MAX_BYTES = _LISTING_WRAPPER_BYTES + 2 * (
+    _DIGEST_BLOCK_CAP
+    * (
+        _BLOCK_FRAME_BYTES
+        + _VIEW_FLAG_BYTES
+        + _BLOCK_ID_BYTES
+        + _TITLE_BYTE_CAP
+        + _FACT_SUMMARY_BYTE_CAP
+        + _BLOCK_SHOWS_BYTES
+    )
+    + _LISTING_COMPACT_CAP
+    * (_HIDDEN_FRAME_BYTES + _BLOCK_ID_BYTES + _BLOCK_TYPE_BYTES + _TITLE_BYTE_CAP)
 )
 # The conversation digest's bounds: newest turns, each with its ask whole,
 # an older turn's answer cut to whole sentences, its plans each as one line
 # cut by characters, its cards by count and title bytes, and its error by
 # bytes. Over the byte cap on the serialised digest, older answers shrink
 # through `_HISTORY_ANSWER_CAPS`, then the oldest turn drops, and finally the
-# newest turn shrinks. Past any bound, converse `recall`s.
+# newest turn shrinks. Past any bound, the orchestrator `recall`s.
 _HISTORY_TURN_CAP = 10
 _HISTORY_TEXT_CAP = 280
 _HISTORY_ANSWER_CAPS = (_HISTORY_TEXT_CAP, _HISTORY_TEXT_CAP // 2, 0)
@@ -156,17 +189,12 @@ CONVERSATION_DIGEST_MAX_BYTES = 5_000
 # What a newest turn's ask and answer are cut to once the newest turn alone
 # is over the digest's cap, halved each further try.
 _HISTORY_NEWEST_TEXT_CAP = CONVERSATION_DIGEST_MAX_BYTES // 2
-_RECALL_TURN_CAP = 5
-_RECALL_CARD_CAP = 3
 type RecallPart = Literal["plan", "readings", "canvas"]
 # What `recall_part` renders of a turn's plan records, or of its readings, in
 # characters, which a turn's plans share. `_RECALL_ID_CAP` is the most component
 # ids a refusal lists.
 _RECALL_TEXT_BUDGET = 4_000
 _RECALL_ID_CAP = 20
-# The keys of a turn record kept for the planner's ledger, which
-# `recall_state` leaves out.
-_TURN_LEDGER_KEYS = frozenset({"plans", "readings", "specs", "identities"})
 # Where a sentence ends: its closing mark, when whitespace follows.
 _SENTENCE_END = re.compile(r"[.!?](?=\s)")
 
@@ -181,23 +209,7 @@ _COUNT_KEYS: dict[ComponentType, str] = {
 }
 
 
-_DETERMINISTIC_COUNTER: dict[str, int] = {}
-
-
-def deterministic_ids(enabled: bool) -> None:
-    """Scripted test mode only: wire ids become sequential so two identical
-    runs produce identical streams. Never enable in a real deployment --
-    interrupt ids must be unguessable there."""
-    _DETERMINISTIC_COUNTER.clear()
-    if enabled:
-        _DETERMINISTIC_COUNTER["next"] = 1
-
-
 def _wire_id(prefix: str) -> str:
-    if "next" in _DETERMINISTIC_COUNTER:
-        value = _DETERMINISTIC_COUNTER["next"]
-        _DETERMINISTIC_COUNTER["next"] = value + 1
-        return f"{prefix}_{value:016d}"
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
@@ -280,6 +292,17 @@ def _tool_error_response(error: ToolError, *, status_code: int) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # Conversation bookkeeping
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _CanvasView:
+    """What `ConversationState._canvas_view` decides a canvas view names."""
+
+    ordered: list[str]
+    composed: set[str]
+    pinned: set[str]
+    not_shown: int
+    hidden: list[str]
 
 
 @dataclass
@@ -457,7 +480,7 @@ class ConversationState:
     turn_components: list[dict[str, Any]] = field(default_factory=list)
     # The turn's plan records and search readings as JSON, and the spec
     # blocks its searches returned by spec_id, each the whole value the
-    # graph last wrote (`harness.graph.ORCHESTRATOR_PLAN_RECORDS_KEY`,
+    # graph last wrote (`harness.graph.state.ORCHESTRATOR_PLAN_RECORDS_KEY`,
     # `ORCHESTRATOR_SEARCHES_KEY`, `ORCHESTRATOR_SPECS_KEY`), set by
     # `harness.studio` as events stream. `turn_specs` is process-local: the
     # turn's own ADK session holds the blocks, and `StudioStore.load` reads
@@ -483,32 +506,114 @@ class ConversationState:
         field(default_factory=list, repr=False, compare=False)
     )
 
-    def canvas_digest_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
-        """The digest the models see: composed blocks in canvas order (plus
-        the focused card for a card-scoped follow-up), titles and fact
-        summaries only -- references and digests, never rows."""
-        ordered: list[str] = []
+    def _canvas_view(self, focus: str | None = None) -> _CanvasView:
+        """The cards a canvas view names: the composed blocks the cap keeps,
+        in canvas order, with the focus card kept whatever its age in place of
+        the oldest; which blocks are pinned; how many composed blocks the cap
+        left out; and the conversation's other cards, oldest first."""
+        composed: list[str] = []
+        pinned: set[str] = set()
         if self.composition is not None:
-            ordered = [block.component_id for block in self.composition.blocks]
-        # Bounded: the newest blocks win on a very large canvas, and
-        # `_digest_block` cuts each block's fields, so the digest stays within
-        # `CANVAS_DIGEST_MAX_BYTES` however long the conversation runs. The
-        # focus card is kept whatever its age, in place of the oldest.
-        ordered = ordered[-_DIGEST_BLOCK_CAP:]
+            composed = [block.component_id for block in self.composition.blocks]
+            pinned = {block.component_id for block in self.composition.blocks if block.pinned}
+        # Bounded: the last blocks in canvas order win on a very large canvas,
+        # the rest are counted, and `_digest_block` cuts each block's fields,
+        # so a view stays within `CANVAS_DIGEST_MAX_BYTES` however long the
+        # conversation runs.
+        ordered = composed[-_DIGEST_BLOCK_CAP:]
         if focus and focus in self.components and focus not in ordered:
             ordered = [*ordered, focus][-_DIGEST_BLOCK_CAP:]
-        blocks = [
-            _digest_block(cid, self.components[cid]) for cid in ordered if cid in self.components
+        return _CanvasView(
+            ordered=[cid for cid in ordered if cid in self.components],
+            composed=set(composed),
+            pinned=pinned,
+            not_shown=len(set(composed) - set(ordered)),
+            hidden=[cid for cid in self.components if cid not in set(composed)],
+        )
+
+    def _view_block(self, view: _CanvasView, component_id: str) -> dict[str, Any]:
+        """One card of a canvas view in full; a pinned one says so, and a
+        focus card off the canvas says it is not on it."""
+        return (
+            _digest_block(component_id, self.components[component_id])
+            | ({"pinned": True} if component_id in view.pinned else {})
+            | ({} if component_id in view.composed else {"on_canvas": False})
+        )
+
+    def canvas_digest_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
+        """The graph engine's digest: composed blocks in canvas order (plus
+        the focused card for a card-scoped follow-up), titles and fact
+        summaries only -- references and digests, never rows. A pinned block
+        says so; a canvas whose blocks were all removed is `{"blocks": []}`,
+        and None means the conversation has no canvas yet. `hidden` names the
+        conversation's other cards (a new turn hid them, or they were
+        removed), id, type and title only: the user can put one back."""
+        view = self._canvas_view(focus)
+        blocks = [self._view_block(view, cid) for cid in view.ordered]
+        hidden = [
+            _hidden_entry(cid, self.components[cid]) for cid in view.hidden[-_DIGEST_HIDDEN_CAP:]
         ]
-        if not blocks:
-            return None
+        if not blocks and not hidden:
+            return None if self.composition is None else {"blocks": []}
         digest: dict[str, Any] = {"blocks": blocks}
+        if view.not_shown:
+            digest["blocks_not_shown"] = view.not_shown
+        if hidden:
+            digest["hidden"] = hidden
+        if len(view.hidden) > _DIGEST_HIDDEN_CAP:
+            digest["hidden_not_shown"] = len(view.hidden) - _DIGEST_HIDDEN_CAP
         # `focus` is the client's `component_ref.component_id`, an unbounded
         # string that need not name anything, so only a stored component's id
         # is named, and cut like the block that carries it.
         if focus in self.components:
             digest["focus_component_id"] = _cut_text(str(focus), _BLOCK_ID_BYTES)
         return digest
+
+    def canvas_summary_state(self, *, focus: str | None = None) -> dict[str, Any] | None:
+        """The orchestrator's always-on canvas line: how many cards are on
+        the canvas and how many are hidden. The cards themselves are a
+        `recall(part="canvas")` away. A card-scoped follow-up's focus card
+        comes whole, with its id (#348). None when the conversation has no
+        cards yet."""
+        if self.composition is None and not self.components:
+            return None
+        view = self._canvas_view(focus)
+        summary: dict[str, Any] = {
+            "cards_on_canvas": len(view.composed),
+            "cards_hidden": len(view.hidden),
+        }
+        if focus in self.components:
+            summary["focus_component_id"] = _cut_text(str(focus), _BLOCK_ID_BYTES)
+            summary["blocks"] = [self._view_block(view, str(focus))]
+        return summary
+
+    def canvas_listing_state(self) -> dict[str, Any]:
+        """`recall(part="canvas")`'s listing: the cards on the canvas, in
+        canvas order, then the conversation's hidden cards. The newest
+        `_DIGEST_BLOCK_CAP` of each come in full (id, type, title, fact
+        summary, pinned); the next `_LISTING_COMPACT_CAP` older ones by id,
+        type and title (`<list>_older`), so each can still be recalled or
+        removed by id; the rest are counted (`<list>_not_shown`). Bounded by
+        `CANVAS_LISTING_MAX_BYTES`."""
+        view = self._canvas_view()
+        composed = (
+            [block.component_id for block in self.composition.blocks] if self.composition else []
+        )
+        listing: dict[str, Any] = {}
+        for name, ids in (
+            ("on_canvas", [cid for cid in composed if cid in self.components]),
+            ("hidden", view.hidden),
+        ):
+            full = ids[-_DIGEST_BLOCK_CAP:]
+            older = ids[:-_DIGEST_BLOCK_CAP][-_LISTING_COMPACT_CAP:]
+            listing[name] = [self._view_block(view, cid) for cid in full]
+            if older:
+                listing[f"{name}_older"] = [
+                    _hidden_entry(cid, self.components[cid]) for cid in older
+                ]
+            if rest := len(ids) - len(full) - len(older):
+                listing[f"{name}_not_shown"] = rest
+        return listing
 
     def conversation_digest_state(self) -> dict[str, Any] | None:
         """The newest turns as compact {user, assistant, plans, cards}
@@ -521,8 +626,8 @@ class ConversationState:
         Over `CONVERSATION_DIGEST_MAX_BYTES` serialised, the digest sheds in
         a fixed order until it fits: older answers to the next of
         `_HISTORY_ANSWER_CAPS`, then the oldest turn, one at a time, then the
-        newest turn's own caps, halved each try (`_history_turn`). Converse
-        can `recall` past all of these bounds."""
+        newest turn's own caps, halved each try (`_history_turn`). The
+        orchestrator can `recall` past all of these bounds."""
         if not self.turns:
             return None
         newest = self.turns[-_HISTORY_TURN_CAP:]
@@ -547,71 +652,6 @@ class ConversationState:
             window[-1] = _history_turn(newest[-1], shrink=shrink)
         return digest(window)
 
-    def anaphor_window(self, focus: str | None) -> str | None:
-        """The window a window anaphor ("the same years" and siblings,
-        `harness.graph._WINDOW_ANAPHORS`) should resolve to for this turn,
-        as `"<start> to <end>"`.
-
-        A card-scoped follow-up (`focus` names a stored component) reads
-        that card's own `time` -- the field `_digest_entry` puts on its
-        digest entry when `land_component` stores it -- so an older focus
-        card's window wins over a newer card elsewhere on the canvas.
-        Falls back to the most recently landed card's window when `focus`
-        names nothing, or names a card with no window of its own: `turns`,
-        walked newest turn first and, within a turn, newest card first,
-        the same order `land_component`/`close_turn` build it in, over the
-        FULL history -- not `conversation_digest_state`'s capped window,
-        which drops turns past `_HISTORY_TURN_CAP` and, within the newest
-        turn, cards past `_HISTORY_CARD_CAP`, and so can miss the very
-        card this should read. None when no turn recorded a card with a
-        window.
-        """
-        if focus:
-            window = _window_phrase(self.components.get(focus, {}).get("time"))
-            if window:
-                return window
-        for turn in reversed(self.turns):
-            for card in reversed(turn.get("cards") or []):
-                window = _window_phrase(card.get("window"))
-                if window:
-                    return window
-        return None
-
-    def recall_state(self, *, scope: str, query: str) -> dict[str, Any]:
-        """Serve a converse recall request, mechanically: matching turn
-        records (conversation scope) or full digest entries of matching
-        cards (canvas scope). Digests and fact summaries only, never rows."""
-        terms = [term for term in query.lower().split() if len(term) > 2]
-
-        def matches(text: str) -> bool:
-            # A query of only short words carries no usable terms; matching
-            # everything then returns the newest slice, which is the most
-            # useful honest answer to a vague recall.
-            lowered = text.lower()
-            return not terms or any(term in lowered for term in terms)
-
-        if scope == "canvas":
-            cards = [
-                {"component_id": component_id, **entry}
-                for component_id, entry in self.components.items()
-                if matches(f"{entry.get('title', '')} {json.dumps(entry.get('fact_summary'))}")
-            ]
-            return {
-                "scope": "canvas",
-                "cards": cards[-_RECALL_CARD_CAP:],
-                "total_cards": len(self.components),
-            }
-        hits = [
-            {"turn": index, **{k: v for k, v in turn.items() if k not in _TURN_LEDGER_KEYS}}
-            for index, turn in enumerate(self.turns, start=1)
-            if matches(f"{turn['user']} {turn['assistant']}")
-        ]
-        return {
-            "scope": "conversation",
-            "turns": hits[-_RECALL_TURN_CAP:],
-            "total_turns": len(self.turns),
-        }
-
     def recall_part(
         self,
         *,
@@ -622,9 +662,13 @@ class ConversationState:
         """One earlier part of this conversation, in full: the plan records
         (`plan`) or search readings (`readings`) of turn number `turn`
         (1-based; the newest turn that has any when `turn` is None), each
-        rendered to at most `_RECALL_TEXT_BUDGET` characters, or the stored
-        entry of the canvas component `component_id`. Raises `RecallRefusedError`
-        naming the legal values when the target does not exist."""
+        rendered to at most `_RECALL_TEXT_BUDGET` characters, the stored
+        entry of the canvas component `component_id`, or, with no
+        `component_id`, the canvas listing (`canvas_listing_state`). Raises
+        `RecallRefusedError` naming the legal values when the target does not
+        exist."""
+        if part == "canvas" and component_id is None:
+            return {"part": part, **self.canvas_listing_state()}
         if part == "canvas":
             entry = self.components.get(component_id or "")
             if entry is None:
@@ -632,7 +676,10 @@ class ConversationState:
                 raise RecallRefusedError(
                     f"no canvas component {component_id!r}", {"component_ids": ids}
                 )
-            return {"part": part, "component_id": component_id, **entry}
+            composed = self.composition is not None and any(
+                block.component_id == component_id for block in self.composition.blocks
+            )
+            return {"part": part, "component_id": component_id, "on_canvas": composed, **entry}
         key = "plans" if part == "plan" else "readings"
         holding = [number for number, t in enumerate(self.turns, start=1) if t.get(key)]
         if turn is None and holding:
@@ -1202,7 +1249,7 @@ class StudioStore:
     def current(self, principal: str, conversation_id: str) -> ConversationState | None:
         """This instance's live `ConversationState` for `(principal,
         conversation_id)`, if `create` or `load` has already fetched one --
-        no ledger access. The held-in-process accessor `make_recall` and
+        no ledger access. The held-in-process accessor `make_recall_part` and
         the recorder read a conversation's in-flight durable state
         through."""
         entry = self._runtime.get((principal, conversation_id))
@@ -1315,21 +1362,18 @@ class StudioStore:
         entry.state.segment = segment
         return segment.id
 
-    async def save(
-        self, principal: str, conversation_id: str, *, keys: Iterable[str] | None = None
-    ) -> None:
+    async def save(self, principal: str, conversation_id: str) -> None:
         """Append this instance's changed durable fields as one ledger
         event, through the one `Session` object this runtime entry holds.
         Only the keys whose serialised value changed since the last load
         or save on this instance are sent -- a no-op event appends
-        nothing. `keys`, when given, restricts the delta to that set even
-        when other fields also changed locally. Raises `StaleSessionError`
-        when another instance's write has advanced the ledger past what
-        this instance last saw; the caller maps that to the existing 409
-        for a `/turn` claim or `/interrupt` (`/composition` never calls
-        this: `mutate_composition` is its own fetch-rebuild-mutate-append
-        cycle, immune to whatever this instance's own `entry.session`
-        marker says). Held under `write_lock` like every other ledger
+        nothing. Raises `StaleSessionError` when another instance's write
+        has advanced the ledger past what this instance last saw; the
+        caller maps that to the existing 409 for a `/turn` claim or
+        `/interrupt` (`/composition` never calls this:
+        `mutate_composition` is its own fetch-rebuild-mutate-append cycle,
+        immune to whatever this instance's own `entry.session` marker
+        says). Held under `write_lock` like every other ledger
         append this instance makes; when this save folds the composition
         into its delta, the `_composition_ops` recorded for it are
         consumed (by prefix, since more may accumulate while this call
@@ -1340,8 +1384,6 @@ class StudioStore:
         async with entry.write_lock:
             full = _serialize_durable(entry.state)
             delta = _changed_since(full, entry.baseline)
-            if keys is not None:
-                delta = {key: value for key, value in delta.items() if key in keys}
             if not delta:
                 return
             ops_folded = len(entry.state._composition_ops) if _KEY_COMPOSITION in delta else 0
@@ -1389,8 +1431,10 @@ class StudioStore:
 
         On every path but a stale append exhausting its retries,
         `entry.state.composition` ends the call holding the rebuild, or,
-        on a landed mutation, the appended value, not this instance's
-        pre-call copy, which may already be behind the ledger. Raises
+        on a landed mutation, the appended value with any ops the live turn
+        recorded during the append replayed on top (they stay unsaved), not
+        this instance's pre-call copy, which may already be behind the
+        ledger. Raises
         `StaleSessionError` once `_COMPOSITION_MUTATE_RETRY_ATTEMPTS`
         appends in a row land stale; `entry.state.composition` is left
         holding the last rebuild, without the caller's edit. Never raises
@@ -1428,10 +1472,16 @@ class StudioStore:
                     continue
                 entry.session = session
                 entry.baseline.update(delta)
-                entry.state.composition = result
                 if ops_folded:
                     del entry.state._composition_ops[:ops_folded]
-                return result
+                # Ops the live turn recorded during the append stay unsaved
+                # and are replayed on top, so the turn's card or removal is
+                # not overwritten by this result.
+                composition = result
+                for op in entry.state._composition_ops:
+                    composition = op(composition)
+                entry.state.composition = composition
+                return composition
         assert last_error is not None
         raise last_error
 
@@ -1732,7 +1782,8 @@ class RecallRefusedError(Exception):
 
 def make_recall_part(store: StudioStore) -> Any:
     """The orchestrator's `recall` seam, bound to a store and resolved to the
-    conversation at CALL time, as `make_recall` is."""
+    conversation at CALL time through the request-scoped contextvar, because
+    the workflow is built once and shared across every conversation."""
 
     async def recall_part(
         *, part: RecallPart, turn: int | None, component_id: str | None
@@ -1746,22 +1797,18 @@ def make_recall_part(store: StudioStore) -> Any:
     return recall_part
 
 
-def make_recall(store: StudioStore) -> Any:
-    """The graph's recall seam, bound to a store. The conversation is
-    resolved at CALL time through the request-scoped contextvar -- the same
-    pattern that routes the executor's presentation client -- because the
-    workflow is constructed once and shared across every conversation."""
+def make_remove_cards(store: StudioStore) -> Any:
+    """The orchestrator's `remove_cards` seam, bound to a store and resolved
+    to the conversation at CALL time, as `make_recall_part` is."""
 
-    async def recall(*, scope: str, query: str) -> dict[str, Any]:
+    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
         key = current_conversation_key.get()
-        if key is None:
-            return {}
-        conversation = store.current(*key)
+        conversation = store.current(*key) if key is not None else None
         if conversation is None:
-            return {}
-        return conversation.recall_state(scope=scope, query=query)
+            return [], list(component_ids)
+        return remove_cards(conversation, component_ids, all_cards=all_cards)
 
-    return recall
+    return remove
 
 
 # ---------------------------------------------------------------------------
@@ -1864,7 +1911,7 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     """One block of the canvas digest: the stored entry with its id, type,
     title, fact summary and what it shows bounded. A `variable` or
     `entities` list shorter than the names the card draws carries a
-    `<key>_truncated` label. The stored entry stays whole for `recall_state`
+    `<key>_truncated` label. The stored entry stays whole for `recall_part`
     and the composition "add" op."""
     block: dict[str, Any] = {"component_id": _cut_text(component_id, _BLOCK_ID_BYTES), **entry}
     if isinstance(block.get("type"), str):
@@ -1888,15 +1935,14 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
-def _window_phrase(display: Any) -> str | None:
-    """`"<start>-<end>"` as `"<start> to <end>"`, the form
-    `harness.graph._resolve_window_anaphors` substitutes in; None when
-    `display` is not a string or carries no `-`-separated span."""
-    if isinstance(display, str) and "-" in display:
-        start, _, end = display.partition("-")
-        if start and end:
-            return f"{start} to {end}"
-    return None
+def _hidden_entry(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """A card of the conversation that is not on the canvas, as the digest
+    names it: its id, type and title, each cut to its cap."""
+    return {
+        "component_id": _cut_text(component_id, _BLOCK_ID_BYTES),
+        "type": _cut_text(str(entry.get("type")), _BLOCK_TYPE_BYTES),
+        "title": _cut_text(str(entry.get("title")), _TITLE_BYTE_CAP),
+    }
 
 
 def _history_turn(
@@ -1953,12 +1999,16 @@ def _turn_identities(
     `plans`, by spec_id.
 
     A block is read as a source (`source_from_spec_block`) for its
-    `definition.identity`. A plan source states it (`PlanSource`). An
+    `definition.identity`, and for the identity of each measure it offers
+    beside its own (`alternative_definitions`), with the block's named sets,
+    so a pin of one is read from Search's answer for it. A block of that
+    measure's own wins. A plan source states its identity (`PlanSource`). An
     identity data-mcp's `resolve_definition` would refuse
     (`caller_definition`: one that does not hash to its spec_id, or one past
     `MAX_IDENTITY_BYTES` as compact JSON) is left out, so each entry is one
     a later pin can resolve, and none takes more than that cap. The rest of
     a block is dropped."""
+    offered: dict[str, RecordedIdentity] = {}
     found: dict[str, RecordedIdentity] = {}
     for spec_id, block in specs.items():
         if not isinstance(block, dict):
@@ -1968,13 +2018,40 @@ def _turn_identities(
         except ValueError:
             continue
         if source.identity is not None:
-            found[spec_id] = RecordedIdentity(identity=source.identity, groups=source.groups)
-    found.update(
-        (source.spec_id, RecordedIdentity(identity=source.identity, groups=source.groups))
-        for plan in plans
-        for source in plan.sources
-        if source.identity is not None
-    )
+            found[spec_id] = RecordedIdentity(
+                identity=source.identity,
+                groups=source.groups,
+                resolved_sources=source.resolved_sources,
+            )
+        for alternative, identity in alternative_definitions(block).items():
+            offered.setdefault(
+                alternative,
+                RecordedIdentity(
+                    identity=identity,
+                    groups=source.groups,
+                    resolved_sources=source.resolved_sources,
+                ),
+            )
+    for plan in plans:
+        for source in plan.sources:
+            if source.identity is not None:
+                found[source.spec_id] = RecordedIdentity(
+                    identity=source.identity,
+                    groups=source.groups,
+                    resolved_sources=source.resolved_sources,
+                )
+            if source.elected_measure is not None:
+                for alternative in source.elected_measure.alternatives:
+                    if alternative.identity is not None:
+                        offered.setdefault(
+                            alternative.spec_id,
+                            RecordedIdentity(
+                                identity=alternative.identity,
+                                groups=source.groups,
+                                resolved_sources=source.resolved_sources,
+                            ),
+                        )
+    found = {**offered, **found}
     identities: dict[str, RecordedIdentity] = {}
     for spec_id, recorded in found.items():
         try:
@@ -2150,7 +2227,7 @@ def _next_manifest(
 def _block_index(composition: CompositionManifest | None, component_id: str) -> int | None:
     """The position of `component_id`'s block in `composition`, or `None`
     when there is no composition or no block there names it. The
-    membership check `_replace_block` and `land_component` share."""
+    membership check `_replace_block` makes."""
     if composition is None:
         return None
     return next(
@@ -2160,87 +2237,96 @@ def _block_index(composition: CompositionManifest | None, component_id: str) -> 
 
 
 def land_component(
-    conversation: ConversationState,
-    component: dict[str, Any],
-    *,
-    revises: str | None,
-) -> Literal["replaced", "created", "held"]:
-    """Land `component` on `conversation`'s canvas: the one place the
-    replace-or-append decision is made and carried out, together, with no
-    `await` between deciding and mutating. `harness.graph`'s `compose` node
-    calls this (through `_RecordingExecutor.land_component`,
-    `harness.studio_translate`) synchronously, right after `write_component`
-    returns, for the first component this turn's write actually lands --
-    `revises` is the target `compose` passes only that once. That
-    single call decides `narrate`'s `components_replaced` fact and performs
-    the real mutation together, so nothing downstream re-derives a second,
-    possibly different, answer from a canvas `/composition` (which runs
-    without the turn lock) could have changed in between.
+    conversation: ConversationState, component: dict[str, Any]
+) -> Literal["created", "held"]:
+    """Land `component` on `conversation`'s canvas. `harness.studio_translate`
+    calls this at drain time for a write `make_charts` stamped through
+    `_RecordingExecutor.land_component`.
 
     Always records the component's digest entry
     (`conversation.components`), so a card is findable by `recall` and the
     canvas digest whether or not it lands a block. `auto_add=False` means
-    there is no block for anything to swap or append: the component still
-    streams to the client, but nothing here composes for it, and the
-    return is `"held"`. Otherwise, `revises` naming a block still on the
-    canvas swaps it in place (`_replace_block`) and returns `"replaced"`;
-    anything else appends a new block and returns `"created"`.
+    there is no block to append: the component still streams to the
+    client, but nothing here composes for it, and the return is `"held"`.
+    Otherwise a new block is appended and the return is `"created"`.
 
-    The `turn_components` entry also carries `window` when the digest entry
-    resolved one (`_digest_shows`' `time`). `close_turn` folds it into
-    `conversation.turns`, in landing order, so `anaphor_window` can read
-    "the previous turn's resolved window" off turn order instead of canvas
-    position, correct even when this turn revises an earlier-positioned
-    block in place.
+    Either way a `turn_components` entry records it, carrying `window` when
+    the digest entry resolved one (`_digest_shows`' `time`). `close_turn`
+    folds it into `conversation.turns`, in landing order, where the
+    conversation digest reads it.
     """
     entry = _digest_entry(component)
     conversation.components[component["component_id"]] = entry
-    window = entry.get("time")
-    if not conversation.auto_add:
-        conversation.turn_components.append(
-            _turn_component_entry(
-                component_id=component["component_id"],
-                type=component["type"],
-                title=_block_title(component),
-                action="created",
-                window=window,
-            )
-        )
-        return "held"
-    replaced = bool(revises) and _replace_block(
-        conversation, old_component_id=revises, component=component
-    )
     conversation.turn_components.append(
         _turn_component_entry(
             component_id=component["component_id"],
             type=component["type"],
             title=_block_title(component),
-            action="replaced" if replaced else "created",
-            window=window,
+            action="created",
+            window=entry.get("time"),
         )
     )
-    if not replaced:
-        # Minted here, once, live (never inside `_append_block` itself) and
-        # bound into the op, so a later replay of that op against a freshly
-        # reloaded manifest that is ALSO still None (the ledger has not
-        # seen this composition either) reproduces this exact id, not a
-        # second, different one.
-        composition_id = (
-            conversation.composition.composition_id
-            if conversation.composition is not None
-            else _wire_id("cps")
-        )
-        op = functools.partial(
-            _append_block,
-            component_id=component["component_id"],
-            revision=component["revision"],
-            type=component["type"],
-            title=_block_title(component),
-            composition_id=composition_id,
-        )
-        conversation.composition = op(conversation.composition)
+    if not conversation.auto_add:
+        return "held"
+    # Minted here, once, live (never inside `_append_block` itself) and
+    # bound into the op, so a later replay of that op against a freshly
+    # reloaded manifest that is ALSO still None (the ledger has not
+    # seen this composition either) reproduces this exact id, not a
+    # second, different one.
+    composition_id = (
+        conversation.composition.composition_id
+        if conversation.composition is not None
+        else _wire_id("cps")
+    )
+    op = functools.partial(
+        _append_block,
+        component_id=component["component_id"],
+        revision=component["revision"],
+        type=component["type"],
+        title=_block_title(component),
+        composition_id=composition_id,
+    )
+    conversation.composition = op(conversation.composition)
+    conversation._composition_ops.append(op)
+    return "created"
+
+
+def remove_cards(
+    conversation: ConversationState, component_ids: list[str], *, all_cards: bool
+) -> tuple[list[str], list[str]]:
+    """Take blocks off `conversation`'s canvas: the named ones, or every
+    block when `all_cards`. Returns the ids removed, in canvas order, and the
+    named ids the conversation never held; a named card already off the
+    canvas is neither. Recorded as a replayable op, like `_append_block`, so
+    a concurrent `/composition` reconciles with it."""
+    previous = conversation.composition
+    present = [block.component_id for block in previous.blocks] if previous else []
+    named = set(component_ids)
+    removed = [cid for cid in present if all_cards or cid in named]
+    missing = [
+        cid for cid in component_ids if cid not in present and cid not in conversation.components
+    ]
+    if removed:
+        op = functools.partial(_remove_blocks, component_ids=frozenset(removed))
+        conversation.composition = op(previous)
         conversation._composition_ops.append(op)
-    return "replaced" if replaced else "created"
+    return removed, missing
+
+
+def _remove_blocks(
+    previous: CompositionManifest | None, *, component_ids: frozenset[str]
+) -> CompositionManifest | None:
+    """The next manifest without `component_ids`' blocks, or `previous`
+    unchanged when it holds none of them (a replay after `/composition`
+    removed them first)."""
+    if previous is None or not any(b.component_id in component_ids for b in previous.blocks):
+        return previous
+    blocks = [
+        block.model_copy(deep=True)
+        for block in previous.blocks
+        if block.component_id not in component_ids
+    ]
+    return _next_manifest(previous, blocks, actor=CompositionActor.MODEL)
 
 
 def _append_block(
@@ -2283,10 +2369,9 @@ def _replace_block(
     True iff a block was replaced. A card that was never composed
     (auto_add=false, or removed since) has no block to swap: the caller's
     component still streams as component.created, but must not sneak onto
-    the canvas here. Shared by the Edit Card route's recreate
-    (`harness.studio_edit`) and the message path's "add X to the chart"
-    (`land_component`, above), both of which name an existing component_id
-    whose slot the new component takes over.
+    the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
+    names the existing component_id whose slot the new component takes
+    over.
     """
     previous = conversation.composition
     index = _block_index(previous, old_component_id)

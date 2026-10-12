@@ -22,17 +22,36 @@ Sub-Saharan Africa and the Eastern Africa it contains `UNGeoRegion`. Earth (`Pla
 countries typed `Country,Place` share `Place` and no level, and World Bank aggregates sharing
 `ProvisionalNode` overlap, as "Low & middle income" contains "Low income".
 One place alone sits at one level whatever its types.
+
+A flow's parties (`financingProvider`, `financingRecipient`) carry a kind instead, in a
+`{role}_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `total` or
+`residual`. DAC tables publish group totals as parties of their own: "Africa, Total", an
+income group, the G7. A total holds other parties' figures, so a sum across a flow role leaves
+it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
+parties. dfo-apis leaves the cell empty for a party it declares no kind for, and data-mcp
+writes that cell as `UNTYPED` too, which no kind names.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
+from types import MappingProxyType
 from typing import Literal, get_args
 
-# The subject role a place-less request leaves open, and the only role data-mcp asks types for.
+# The subject role a place-less request leaves open.
 PLACE_ROLE = "observationAbout"
 
-# What a place with no type is written as in a `{role}_type` column.
+# The frame column each flow axis of a spec's identity is served in. DAC1, DAC2A, DAC2B, the CRS
+# and IDS all spell their giving and receiving sides so.
+FLOW_ROLE_COLUMNS: Mapping[str, str] = MappingProxyType(
+    {"origin": "financingProvider", "destination": "financingRecipient"}
+)
+PARTY_ROLES: frozenset[str] = frozenset(FLOW_ROLE_COLUMNS.values())
+
+# Every role a `{role}_type` column can describe, in sorted order.
+TYPED_ROLES: tuple[str, ...] = tuple(sorted({PLACE_ROLE, *PARTY_ROLES}))
+
+# What a place with no type, or a party with no kind, is written as in its enrichment column.
 UNTYPED = "untyped"
 
 # The levels a place-level filter keeps, by Data Commons type: types whose places do not contain
@@ -53,10 +72,37 @@ _COUNTRY = "Country"
 _NUTS = frozenset({"EurostatNUTS1", "EurostatNUTS2", "EurostatNUTS3"})
 _SEPARATOR = ","
 
+# The kinds dfo-apis serves in a `{role}_kind` cell. A total holds other parties' figures.
+PartyKind = Literal["party", "residual", "total"]
+PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
+TOTAL_KIND: PartyKind = "total"
+
+_ENRICHMENT_SUFFIXES = ("_type", "_kind")
+
 
 def type_column(role: str) -> str:
     """The enrichment column naming each `role` place's types: `observationAbout_type`."""
     return f"{role}_type"
+
+
+def kind_column(role: str) -> str:
+    """The enrichment column naming each `role` party's kind: `financingRecipient_kind`."""
+    return f"{role}_kind"
+
+
+def enrichment_columns(role: str) -> tuple[str, str]:
+    """The columns that can describe `role`'s places: its type and its kind column."""
+    return type_column(role), kind_column(role)
+
+
+def enrichment_role(column: str, *, roles: Collection[str]) -> str | None:
+    """The role among `roles` whose type or kind column `column` is, or None when it is
+    neither."""
+    for suffix in _ENRICHMENT_SUFFIXES:
+        role = column.removesuffix(suffix)
+        if role != column and role in roles:
+            return role
+    return None
 
 
 def levels_of(cell: str) -> frozenset[str]:

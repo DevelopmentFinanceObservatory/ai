@@ -22,6 +22,7 @@ from harness.turn_records import (
     PlanRecord,
     SearchReading,
     WindowReading,
+    loose_match_notes,
     render_readings,
 )
 from planner.plan import (
@@ -93,7 +94,7 @@ warnings:
 - window_short on imputed_multilateral_oda: the source covers 2011-2023, the requirement asks for 2010-2023
 sources:
 - spec_4b23d29a5d384574e1a40d2ffb22e952 OECD Creditor Reporting System (CRS) for official development assistance; data 2010-2023 (exact) within the years asked; family of 57 StatVars; from search
-- spec_d483f9b9d15fc52a1e1652ca32546c96 ONE Imputed Multilateral Sectors for official development assistance, imputed multilateral ODA; data 2011-2023 (exact) within the years asked; family of 133 StatVars; from seed
+- spec_d483f9b9d15fc52a1e1652ca32546c96 ONE Imputed Multilateral Sectors for official development assistance, imputed multilateral ODA; data 2011-2023 (exact) within the years asked; family of 133 StatVars; from translator
 outputs: joined_oda
 steps:
 - bilateral_oda: Fetch official development assistance for France and Guatemala (spec_4b23d29a5d384574e1a40d2ffb22e952, sum)
@@ -109,7 +110,7 @@ def _top_donors() -> tuple[Plan, PlanRecord]:
 
 def _join() -> tuple[Plan, PlanRecord]:
     plan = _plan("france_guatemala_join")
-    record = PlanRecord.from_plan(plan, searched={_BILATERAL_SPEC}, seeded={_IMPUTED_SPEC})
+    record = PlanRecord.from_plan(plan, searched={_BILATERAL_SPEC})
     return plan, record
 
 
@@ -135,7 +136,7 @@ def test_plan_record_states_period_basis_failed_step_and_family_count() -> None:
     # The fixture lists three members; the family is counted as search confirmed it.
     assert [(s.spec_id, s.members, s.origin) for s in join.sources] == [
         (_BILATERAL_SPEC, 57, "search"),
-        (_IMPUTED_SPEC, 133, "seed"),
+        (_IMPUTED_SPEC, 133, "translator"),
     ]
     assert [w.code for w in join.warnings] == ["window_short"]
 
@@ -240,7 +241,7 @@ def test_plan_record_reads_each_source_no_search_returned() -> None:
     observed_at = datetime(2026, 10, 5, tzinfo=UTC)
 
     (translated,) = top_donors.source_readings(observed_at=observed_at)
-    (seeded,) = joined.source_readings(observed_at=observed_at)
+    (imputed,) = joined.source_readings(observed_at=observed_at)
 
     assert (translated.spec_id, translated.origin) == (
         "spec_fd8b7635d17fe5f552ae2f31b6c78b89",
@@ -248,11 +249,39 @@ def test_plan_record_reads_each_source_no_search_returned() -> None:
     )
     assert translated.window == WindowReading(start=2020, end=2023, source="requested")
     assert (translated.coverage_kind, translated.observed_at) == ("exact", observed_at)
-    assert (seeded.spec_id, seeded.origin, seeded.text) == (
+    assert (imputed.spec_id, imputed.origin, imputed.text) == (
         _IMPUTED_SPEC,
-        "seed",
+        "translator",
         "official development assistance, imputed multilateral ODA",
     )
+
+
+def test_a_later_turns_reading_of_a_source_states_how_it_is_counted() -> None:
+    """A translator-found source offering net beside gross reaches a later
+    turn's ledger, through the stored record, with both counts and the net
+    spec_id. A price alternative is no other count."""
+    raw = copy.deepcopy(_FIXTURE["plans"]["guatemala_top_donors"])
+    (source,) = raw["workflow"]["sources"]
+    net = "spec_" + "e" * 32
+    source["elected_measure"] = {
+        "label": "gross disbursements",
+        "alternatives": [
+            {"spec_id": net, "label": "net disbursements", "axis": "what"},
+            {"spec_id": "spec_" + "f" * 32, "label": "constant prices", "axis": "unit"},
+        ],
+    }
+    stored = PlanRecord.from_plan(Plan.model_validate(raw)).model_dump(mode="json")
+
+    readings = PlanRecord.model_validate(stored).source_readings(
+        observed_at=datetime(2026, 10, 10, tzinfo=UTC)
+    )
+    rendered = render_readings(readings, budget=10_000)
+
+    assert (
+        f"   counted as gross disbursements; other counts: net disbursements [{net}]"
+        in rendered.text.splitlines()
+    )
+    assert rendered.other_counts == (net,)
 
 
 def test_a_search_pin_decision_is_left_out_of_the_record_and_the_card() -> None:
@@ -440,6 +469,20 @@ def test_reading_keeps_the_part_facts_as_fields() -> None:
     )
 
 
+@pytest.mark.parametrize("separate", [True, False, None])
+def test_comparison_intent_survives_reading_serialization(separate: bool | None) -> None:
+    part = {"variable": "fertility", "status": "definite", "spec_id": "spec_1"}
+    if separate is not None:
+        part["separate"] = separate
+    reading = SearchReading.from_part(part)
+    restored = SearchReading.model_validate_json(reading.model_dump_json())
+    assert restored.separate is (separate is True)
+    if separate is True:
+        assert reading.model_dump(mode="json")["separate"] is True
+    else:
+        assert "separate" not in reading.model_dump(mode="json")
+
+
 def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     part = {
         **_FIXTURE["searches"]["france_bilateral"][1]["output"]["parts"][0],
@@ -470,6 +513,17 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
         "recipient/debtor/importer; open donor/creditor/exporter (75 members)"
     )
     assert lines[-1] == "   fetch refused: frame_too_large"
+
+
+def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:
+    """A seed's reading has no question text, so its head names no quoted text."""
+    reading = SearchReading.from_part(
+        {"status": "definite", "spec_id": "spec_a", "resolved": "Aid to Kenya"}, origin="seed"
+    )
+
+    lines = render_readings([reading], budget=10_000).text.splitlines()
+
+    assert lines[1] == "1. definite spec_a (from seed)"
 
 
 @pytest.mark.parametrize("name", ["kenya_sectors", "france_bilateral"])
@@ -522,3 +576,278 @@ def test_a_no_data_reading_names_its_reason_in_place_of_its_status() -> None:
     text = render_readings([SearchReading.from_part(part)], budget=10_000).text
 
     assert text.splitlines()[1] == '1. "aid" no data: role_not_resolved'
+
+
+def test_a_qualifier_refusal_keeps_its_rejected_phrases_and_unused_broader_match() -> None:
+    reading = SearchReading.from_part(
+        {
+            "variable": "aid to Kenya for HIV",
+            "status": "no_data",
+            "reason": "qualifier_not_bound",
+            "unbound_qualifiers": ["HIV", "AIDS", "HIV"],
+            "flagged_match": "Gross ODA disbursements to Kenya for health.",
+        }
+    )
+
+    assert reading.unbound_qualifiers == ("HIV", "AIDS")
+    assert reading.flagged_match == "Gross ODA disbursements to Kenya for health."
+    rendered = render_readings([reading], budget=10_000)
+    assert "refused phrases: HIV, AIDS" in rendered.text
+    assert "broader unused match: Gross ODA disbursements to Kenya for health." in rendered.text
+    assert rendered.spec_ids == ()
+
+
+def test_a_qualifier_refusal_preserves_its_meaning_when_detail_is_shed_or_folded() -> None:
+    reading = SearchReading.from_part(
+        {
+            "variable": "aid",
+            "status": "no_data",
+            "reason": "qualifier_not_bound",
+            "unbound_qualifiers": ["HIV " * 100],
+            "flagged_match": "Health aid " * 100,
+        }
+    )
+
+    detail_shed = render_readings([reading], budget=350).text
+    folded = render_readings([reading, reading], budget=400).text
+
+    assert "refused phrases:" in detail_shed
+    assert "broader unused match:" in detail_shed
+    assert CUT_MARKER in detail_shed
+    assert "refused phrases:" in folded
+    assert "broader unused match:" in folded
+    assert len(folded.splitlines()) == 3
+
+
+_WEAK = {"code": "retrieval_score_weak", "severity": "info"}
+_CLOSEST = {"code": "closest_match", "text": "You asked for X. This shows Y."}
+_CRS = "provenance/OECDCreditorReportingSystem"
+_LOOSE_BLOCK = {
+    "resolved": {
+        "facets": {"provenance": {"ref": _CRS, "account": "provider"}},
+        "sentence_plan": [
+            {"kind": "slot", "text": "Health aid", "segment": "heading"},
+            {"kind": "text", "text": ", 2015 to 2020.", "segment": "heading"},
+            {"kind": "text", "text": " ", "segment": "byline"},
+            {"kind": "slot", "text": "US dollars", "segment": "byline"},
+            {"kind": "text", "text": " · ", "segment": "byline"},
+            {"kind": "slot", "text": "OECD CRS", "segment": "byline"},
+        ],
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("reading", "planned", "expected"),
+    [
+        pytest.param(
+            {"warnings": [_WEAK], "fetch": {"summary": "6 observations"}},
+            False,
+            [
+                'The closest series to "aid for health" is a loose match: Health aid, 2015 to '
+                "2020 (US dollars, OECD CRS), with no donor or recipient detail."
+            ],
+            id="weak-and-fetched",
+        ),
+        pytest.param(
+            {"status": "definite", "departures": [_CLOSEST], "fetch": {"summary": "6"}},
+            False,
+            [
+                'The closest series to "aid for health" is a loose match: Health aid, 2015 to '
+                "2020 (US dollars, OECD CRS), with no donor or recipient detail."
+            ],
+            id="closest-match-departure",
+        ),
+        pytest.param(
+            {"warnings": [_WEAK], "roles": ["destination"], "fetch": {"summary": "6"}},
+            False,
+            [
+                'The closest series to "aid for health" is a loose match: Health aid, 2015 to '
+                "2020 (US dollars, OECD CRS)."
+            ],
+            id="a-flow-side-is-bound",
+        ),
+        pytest.param(
+            {"warnings": [_WEAK], "open_axes": [{"column": "origin"}], "fetch": {"summary": "6"}},
+            False,
+            [
+                'The closest series to "aid for health" is a loose match: Health aid, 2015 to '
+                "2020 (US dollars, OECD CRS)."
+            ],
+            id="a-flow-side-is-open",
+        ),
+        pytest.param(
+            {"warnings": [_WEAK]},
+            True,
+            [
+                'The closest series to "aid for health" is a loose match: Health aid, 2015 to '
+                "2020 (US dollars, OECD CRS), with no donor or recipient detail."
+            ],
+            id="weak-and-planned",
+        ),
+        pytest.param({"warnings": [_WEAK]}, False, [], id="weak-and-unused"),
+        pytest.param(
+            {"status": "definite", "warnings": [_WEAK], "fetch": {"summary": "6"}},
+            True,
+            [],
+            id="weak-but-definite",
+        ),
+        pytest.param(
+            {"warnings": [_WEAK], "fetch": {"refusal_code": "empty_result"}},
+            False,
+            [],
+            id="weak-and-refused",
+        ),
+        pytest.param({"fetch": {"summary": "6 observations"}}, False, [], id="a-close-match"),
+    ],
+)
+def test_a_loose_match_the_turn_used_is_noted_with_what_it_covers_and_lacks(
+    reading: dict[str, Any], planned: bool, expected: list[str]
+) -> None:
+    stored = {
+        "text": "aid for health",
+        "status": "chosen",
+        "spec_id": "spec_h",
+        "asked_roles": ["recipient"],
+        **reading,
+    }
+    plans = [{"sources": [{"spec_id": "spec_h"}]}] if planned else []
+
+    notes = loose_match_notes([stored], specs={"spec_h": _LOOSE_BLOCK}, plans=plans)
+
+    assert notes == expected
+
+
+_USD = {"ref": "undata/UNIT_MEASURE-CR_USD", "label": "United States dollars"}
+_WDI = {"ref": "dc/base/WorldDevelopmentIndicators"}
+_EARTH = {"axis": "observationAbout", "members": [{"ref": "Earth", "label": "World"}]}
+_NO_PARTIES = ", with no donor or recipient detail"
+_WORLDWIDE = ", a worldwide total with no breakdown by country"
+
+
+@pytest.mark.parametrize(
+    ("resolved", "asked_roles", "lacks"),
+    [
+        pytest.param(
+            {"facets": {"provenance": {"ref": "undata/p/SDG"}, "unit": _USD}},
+            ["donor", "recipient"],
+            _NO_PARTIES,
+            id="parties-asked-of-a-currency-series-outside-a-flow-table",
+        ),
+        pytest.param(
+            {"facets": {"provenance": _WDI, "unit": _USD}},
+            [],
+            "",
+            id="no-party-asked-of-a-currency-series",
+        ),
+        pytest.param(
+            {"facets": {"provenance": _WDI, "unit": {"ref": "Year"}}},
+            ["recipient"],
+            "",
+            id="a-party-asked-of-a-unit-that-is-no-currency",
+        ),
+        pytest.param(
+            {"facets": {"provenance": {"ref": "undata/p/SDG"}}},
+            ["recipient"],
+            "",
+            id="a-party-asked-of-no-unit-and-no-flow-table",
+        ),
+        pytest.param(
+            {"facets": {"provenance": {"ref": "provenance/NewFlows", "account": "provider"}}},
+            ["recipient"],
+            _NO_PARTIES,
+            id="a-party-asked-of-no-unit-in-a-provider-flows-table",
+        ),
+        pytest.param({"facets": {}}, ["recipient"], "", id="a-block-that-names-no-dataset-or-unit"),
+        pytest.param(
+            {"facets": {"provenance": {"ref": "undata/p/SDG"}, "unit": _USD}, "scope": _EARTH},
+            [],
+            _WORLDWIDE,
+            id="a-worldwide-series-and-no-party-asked",
+        ),
+        pytest.param(
+            {"facets": {"provenance": {"ref": "undata/p/SDG"}, "unit": _USD}, "scope": _EARTH},
+            ["donor"],
+            ", a worldwide total with no breakdown by country and no donor or recipient detail",
+            id="a-worldwide-series-and-a-party-asked",
+        ),
+        pytest.param(
+            {"facets": {"provenance": _WDI, "unit": _USD}},
+            ["creditor"],
+            ", with no creditor or debtor detail",
+            id="a-creditor-asked",
+        ),
+        pytest.param(
+            {"facets": {"provenance": _WDI, "unit": _USD}},
+            ["importer", "exporter"],
+            ", with no exporter or importer detail",
+            id="trade-parties-asked",
+        ),
+        pytest.param(
+            {"facets": {"provenance": _WDI, "unit": _USD}},
+            ["debtor", "donor"],
+            ", with no creditor, debtor, donor, or recipient detail",
+            id="parties-of-two-flows-asked",
+        ),
+        pytest.param(
+            {
+                "facets": {"provenance": _WDI, "unit": _USD},
+                "scope": {
+                    "axis": "observationAbout",
+                    "members": [{"ref": "Earth"}, {"ref": "country/KEN"}],
+                },
+            },
+            [],
+            "",
+            id="a-scope-of-more-than-the-world",
+        ),
+    ],
+)
+def test_a_loose_match_states_what_its_series_lacks(
+    resolved: dict[str, Any], asked_roles: list[str], lacks: str
+) -> None:
+    block = {"resolved": {**_LOOSE_BLOCK["resolved"], **resolved}}
+    stored = {
+        "text": "health spending",
+        "status": "chosen",
+        "spec_id": "spec_h",
+        "warnings": [_WEAK],
+        "asked_roles": asked_roles,
+        "fetch": {"summary": "6 observations"},
+    }
+
+    assert loose_match_notes([stored], specs={"spec_h": block}, plans=[]) == [
+        'The closest series to "health spending" is a loose match: Health aid, 2015 to 2020 '
+        f"(US dollars, OECD CRS){lacks}."
+    ]
+
+
+def test_a_loose_match_with_no_block_is_described_by_its_resolved_sentence() -> None:
+    stored = {
+        "text": "aid for health",
+        "status": "chosen",
+        "spec_id": "spec_h",
+        "sentence": "Health aid, 2015 to 2020. US dollars · OECD CRS.",
+        "warnings": [_WEAK],
+        "fetch": {"summary": "6 observations"},
+    }
+
+    assert loose_match_notes([stored], specs={}, plans=[]) == [
+        'The closest series to "aid for health" is a loose match: Health aid, 2015 to 2020. '
+        "US dollars · OECD CRS."
+    ]
+
+
+def test_plan_record_keeps_translator_source_account_across_turns():
+    plan, _ = _top_donors()
+    assert plan.workflow is not None
+    source = plan.workflow.sources[0].model_copy(
+        update={"provenance_ref": "provenance/CRS", "provenance_account": "provider"}
+    )
+    plan = plan.model_copy(
+        update={"workflow": plan.workflow.model_copy(update={"sources": (source,)})}
+    )
+    record = PlanRecord.model_validate(PlanRecord.from_plan(plan).model_dump(mode="json"))
+    reading = record.source_readings(observed_at=datetime(2026, 10, 10, tzinfo=UTC))[0]
+    assert reading.provenance_ref == "provenance/CRS"
+    assert reading.provenance_account == "provider"
