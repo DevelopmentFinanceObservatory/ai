@@ -8,13 +8,14 @@ from google.adk.apps import App
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness.graph import GenerativeNodes, create_root_workflow
+from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.scripted_plan import scripted_fetch_series_stats
 from orchestrator.agent import AGENT_NAME, INSTRUCTION, create_orchestrator_agent
 
-from ..test_orchestrator_path import RefusingPlanner, ScriptLlm, _no_executor, _no_resolver
+from ..data_mcp_definitions import DataMcpDefinitions
+from ..orchestrator_fakes import RefusingPlanner, ScriptLlm, no_executor, no_resolver
 
 
 @pytest.mark.parametrize("model_name", ["gemini-test", "Gemini:gemini-test"])
@@ -134,20 +135,39 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     assert "say the data ends earlier and answer with what it holds" in text
 
 
+def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
+    text = " ".join(INSTRUCTION.split())
+    assert (
+        "Put a word for how a flow is counted into `variable` only when the user said it; "
+        "search elects the rest" in text
+    )
+    assert (
+        "the count search chose is the first option, and the other counts the result names "
+        "follow. Each of these options is the label the result gives that count, with the "
+        "spec_id the result gives it" in text
+    )
+    assert (
+        "When the user picks another count the result names, fetch that count's spec_id or "
+        "name it in the plan brief; search again only for a choice the result does not name" in text
+    )
+    assert "in the user's words, except a count, offered as the result labels it" in text
+    assert "gross or net" not in text
+
+
 async def test_every_run_of_the_agent_in_the_workflow_reads_the_clocks_utc_date():
     model = ScriptLlm(script=[types.Part.from_text(text="Done.")])
     agent = create_orchestrator_agent(
         model_name="unused",
-        tools=build_orchestrator_tools(resolver=_no_resolver, executor=_no_executor),
+        tools=build_orchestrator_tools(resolver=no_resolver, executor=no_executor),
         today=lambda: date(2026, 10, 5),
     ).model_copy(update={"model": model})
     workflow = create_root_workflow(
-        resolver=_no_resolver,
-        executor=_no_executor,
-        tool_surface=None,
-        generative=GenerativeNodes(planner=RefusingPlanner()),
-        fetch_series_stats=scripted_fetch_series_stats,
+        planner=RefusingPlanner(),
         orchestrator=agent,
+        executor=no_executor,
+        tool_surface=None,
+        definition_surface=DataMcpDefinitions(),
+        fetch_series_stats=scripted_fetch_series_stats,
     )
     runner = Runner(
         app=App(name="t", root_agent=workflow), session_service=InMemorySessionService()

@@ -28,9 +28,9 @@ from typing import Any, cast
 
 import pytest
 from compiler.compile import CompileIssueCode
-from compiler.sources import source_from_spec_block
+from compiler.sources import PROVIDER_ACCOUNT, DiscoveryStatus, source_from_spec_block
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurface
-from data_mcp.definition_store import canonicalize, spec_id_for
+from data_mcp.definition_store import InMemoryDefinitionStore, canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
@@ -46,13 +46,20 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
-from harness.planner_seam import PlannerSeam
+from harness.plan_display import shown_decisions
+from harness.planner_seam import PlannerSeam, _reading_pin_sources
 from harness.prefix_cache import PrefixCache
+from harness.studio_state import _turn_identities
 from harness.turn_records import RecordedIdentity
 from planner import agent as planner_agent
 from planner.agent import (
+    COMBINATION_OPTIONS,
+    COMBINE_OPTION,
+    _combination_unasked,
     _identity_on_record,
+    _repinned,
     _resolve_intent,
+    _source_ref_unpicked,
     build_planner_tools,
     create_planner_agent,
     planner_instruction,
@@ -74,8 +81,6 @@ from planner.plan import (
     MAX_QUESTION_CHARS,
     PLAN_ROUNDS_STATE_KEY,
     PLAN_STATE_KEY,
-    SEEDED_SOURCES_STATE_KEY,
-    SEEDS_STATE_KEY,
     WINDOWED_PINS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
@@ -92,49 +97,59 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RequirementSide,
     ResolvedBy,
-    SeededSource,
+    SumOfRequirement,
+    Unit,
     UnsupportedOperation,
     WindowedPin,
-    _parsed_sources,
     clear_unsupported,
     current_recorded_identity,
     is_dataset,
     is_search_pin,
     load_plan,
     load_plan_rounds,
-    names_dropped_seed,
     pin_sources,
     plan_revision,
     record_optional_decline,
     record_unsupported,
-    save_dropped_seeds,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
-    save_seeded_sources,
     search_pin_slot,
-    seeded_source,
-    seeded_sources,
     windowed_pins,
 )
 from planner.records import (
+    MAX_ENTITIES,
+    AmbiguousSourceReading,
+    DenominatorScope,
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
     Identifier,
+    RankAmong,
     Reduction,
     RelativePeriod,
     RollingWindow,
     Severity,
+    SourceNameCandidate,
+    StatVarReading,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
+from translator.discovery import (
+    DiscoveryLog,
+    DiscoveryRecord,
+    build_discovery_tools,
+    load_log,
+    save_log,
+)
 from translator.referral import OUTCOME_OF, Referral, ReferralKind, load_referral, save_referral
 from translator.tool import Translate, build_translate
 
 from ..context_probe import plan_record
+from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
@@ -169,7 +184,11 @@ DEFAULT_STEPS = [
 DEFAULT_SOURCES = [{"spec_id": SPEC, "sentence": "external debt service"}]
 
 # The referral kinds the user decides (`planner.agent._USER_DECIDES`).
-HANDED_BACK_KINDS = (ReferralKind.REQUIREMENT_UNMEETABLE, ReferralKind.UNSUPPORTED_ASK)
+HANDED_BACK_KINDS = (
+    ReferralKind.REQUIREMENT_UNMEETABLE,
+    ReferralKind.UNSUPPORTED_ASK,
+    ReferralKind.SOURCE_NAME_AMBIGUOUS,
+)
 
 
 class _FakeSession:
@@ -284,7 +303,7 @@ def _ask_answered_events(
 
 def _clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
     """A real ADK event for the graph's own `clarify` interrupt
-    (`harness.graph.CLARIFY_INTERRUPT`), built through ADK's own
+    (`harness.graph.state.CLARIFY_INTERRUPT`), built through ADK's own
     `create_request_input_event`: this is the shape `_offered_candidates`'s
     `payload` branch reads, distinct from `ask_user`'s flat
     `args["candidates"]` -- `RequestInput.model_dump` nests the caller's own
@@ -630,7 +649,7 @@ async def test_submit_plan_stays_blocked_for_a_rejected_or_amended_plan(
 async def test_submit_plan_refuses_a_plan_not_awaiting_approval(
     reach: Callable[[Plan], Plan], decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
-    # `graph.py` seeds a `FAILED` plan straight back into the planner after
+    # `harness.graph.execute` seeds a `FAILED` plan straight back into the planner after
     # an execution refusal, and that plan still carries a workflow at the
     # version it failed with -- exactly the shape every earlier check in
     # `_execution_blocked` lets through. Submitting it unchanged must not
@@ -1501,6 +1520,627 @@ def test_a_first_draft_is_never_refused_by_the_round_count() -> None:
         assert resolved == (None, 1)
 
 
+# The Ghana turn: net ODA to Ghana summed over its providers, added to Ghana's
+# net flows on external debt, each side pinned to a source of its own dataset.
+# Each source's identity is over every year.
+_GHANA_AID_IDENTITY: dict[str, Any] = {
+    "identity_version": "spec1",
+    "dataset": "net ODA to Ghana",
+    "requested_window": {"kind": "all"},
+}
+_GHANA_DEBT_IDENTITY: dict[str, Any] = {**_GHANA_AID_IDENTITY, "dataset": "Ghana's net debt flows"}
+SPEC_GHANA_AID = spec_id_for(canonicalize(_GHANA_AID_IDENTITY))
+SPEC_GHANA_DEBT = spec_id_for(canonicalize(_GHANA_DEBT_IDENTITY))
+CRS = "provenance/OECDCreditorReportingSystem"
+IMPUTED = "provenance/ONEImputedMultilateralSectors"
+DAC2A = "provenance/OECDDAC2A"
+IDS = "provenance/WorldBankInternationalDebtStatistics"
+# A provider's flows table Search may serve beyond today's declared ones.
+NEW_FLOWS = "provenance/NewProviderFlows"
+# The account Search serves for each table's provenance; IDS states none.
+_ACCOUNTS = dict.fromkeys((CRS, IMPUTED, DAC2A, NEW_FLOWS), PROVIDER_ACCOUNT)
+
+
+def _hold_ghana_sources(ctx: _FakeToolContext, *, datasets: tuple[str, str], held_as: str) -> None:
+    """Put the two Ghana sources, of `datasets` in turn, where `held_as` says the turn holds them.
+
+    `shown`: blocks the planner was shown (`pin_sources`). `found`: sources the
+    translator's search recorded, as a referral's candidates are.
+    """
+    held = [
+        SelectedSource(
+            spec_id=spec_id,
+            sentence=spec_id,
+            has_data=True,
+            identity=identity,
+            provenance_ref=dataset,
+            provenance_account=_ACCOUNTS.get(dataset),
+        )
+        for spec_id, identity, dataset in zip(
+            (SPEC_GHANA_AID, SPEC_GHANA_DEBT),
+            (_GHANA_AID_IDENTITY, _GHANA_DEBT_IDENTITY),
+            datasets,
+            strict=True,
+        )
+    ]
+    if held_as == "shown":
+        save_pin_sources(
+            ctx.state,
+            {
+                source.spec_id: PinSource(
+                    block={
+                        "spec_id": source.spec_id,
+                        "resolved": {
+                            "rendered_sentence": source.sentence,
+                            "facets": {
+                                "provenance": {
+                                    "ref": source.provenance_ref,
+                                    "account": source.provenance_account,
+                                }
+                            },
+                        },
+                    },
+                    settled=True,
+                )
+                for source in held
+            },
+        )
+    else:
+        log = load_log(ctx.state)
+        for requirement_id, source in zip(("aid", "debt"), held, strict=True):
+            found = DiscoveryRecord(
+                revision="earlier",
+                tool="search",
+                requirement_id=requirement_id,
+                requirement_key="earlier",
+                status=DiscoveryStatus.DEFINITE,
+                spec_ids=(source.spec_id,),
+            )
+            log = log.with_record(found, (source,))
+        save_log(ctx.state, log)
+
+
+def _sum_of_two_sources(
+    ctx: _FakeToolContext,
+    *,
+    datasets: tuple[str, str],
+    resolved_by: ResolvedBy,
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    held_as: str = "shown",
+) -> Plan:
+    """A plan summing two pinned sources, of `datasets` in turn, held in `ctx` as `held_as` says."""
+    _hold_ghana_sources(ctx, datasets=datasets, held_as=held_as)
+    ghana = [Entity(name="Ghana", role="recipient")]
+    return Plan(
+        question="Net flows to Ghana combining aid and debt",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[
+            pinning_decision(
+                SPEC_GHANA_AID, slot="aid_source", resolved_by=ResolvedBy.PLANNER_DEFAULT
+            ),
+            pinning_decision(
+                SPEC_GHANA_DEBT, slot="debt_source", resolved_by=ResolvedBy.PLANNER_DEFAULT
+            ),
+            decision(
+                slot="combine_aid_debt",
+                description="How to combine aid and debt flows.",
+                options=["add them", "show them separately"],
+                chosen="add them",
+                resolved_by=resolved_by,
+            ),
+        ],
+        evidence_requirements=[
+            requirement(
+                id="aid",
+                decision_ids=["aid_source"],
+                measure="net ODA",
+                entities=ghana,
+                across="donor",
+                source_spec_id=SPEC_GHANA_AID,
+            ),
+            AggregateRequirement(
+                id="aid_total",
+                input_id="aid",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            requirement(
+                id="debt",
+                decision_ids=["debt_source"],
+                measure="net flows on external debt",
+                entities=ghana,
+                source_spec_id=SPEC_GHANA_DEBT,
+            ),
+            SumOfRequirement(
+                id="net_flows",
+                decision_ids=["combine_aid_debt"],
+                left=RequirementSide(input_id="aid_total"),
+                right=RequirementSide(input_id="debt"),
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("datasets", "resolved_by", "refused"),
+    [
+        ((DAC2A, IDS), ResolvedBy.PLANNER_DEFAULT, True),
+        ((DAC2A, IDS), ResolvedBy.USER, False),
+        ((CRS, IMPUTED), ResolvedBy.PLANNER_DEFAULT, False),
+        ((CRS, NEW_FLOWS), ResolvedBy.PLANNER_DEFAULT, False),
+        ((IDS, IDS), ResolvedBy.PLANNER_DEFAULT, False),
+    ],
+    ids=[
+        "aid-and-debt-by-default",
+        "aid-and-debt-by-the-user",
+        "two-aid-tables",
+        "two-provider-flow-tables",
+        "one-dataset",
+    ],
+)
+def test_a_sum_of_two_datasets_needs_the_users_decision(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    datasets: tuple[str, str],
+    resolved_by: ResolvedBy,
+    refused: bool,
+) -> None:
+    # Tables Search serves with the provider account add up as their skill
+    # says, so a sum of two of them is the planner's to record; any other pair
+    # is the user's to decide. The user picked adding them in every row.
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    plan = _sum_of_two_sources(
+        ctx,
+        datasets=datasets,
+        resolved_by=resolved_by,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+
+    result = _combination_unasked(plan, ctx, previous=None)
+
+    if refused:
+        assert result is not None
+        assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
+        assert result["action"]["call"] == "adk_request_input"
+        assert result["action"]["arguments"] == {
+            "options": [dict(option) for option in COMBINATION_OPTIONS]
+        }
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("held_as", ["shown", "found"])
+@pytest.mark.parametrize(
+    ("datasets", "refused"),
+    [((CRS, IMPUTED), False), ((DAC2A, IDS), True)],
+    ids=["two-aid-tables", "aid-and-debt"],
+)
+def test_propose_plan_reads_the_dataset_of_every_pin_it_sums(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    datasets: tuple[str, str],
+    refused: bool,
+    held_as: str,
+) -> None:
+    # A source the translator found is in no store the planner was shown; the
+    # gate reads each pin's dataset all the same.
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    plan = _sum_of_two_sources(
+        ctx,
+        datasets=datasets,
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+        held_as=held_as,
+    )
+
+    result = tools["propose_plan"].func(
+        question=plan.question,
+        answer_mode=plan.answer_mode,
+        decisions=drafts(plan.decisions),
+        evidence_requirements=list(plan.evidence_requirements),
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.COMBINATION_UNASKED.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+        stored = load_plan(ctx.state)
+        assert stored is not None
+        aid = stored.requirement("aid")
+        assert isinstance(aid, DatasetRequirement)
+        assert aid.source_spec_id == SPEC_GHANA_AID
+
+
+# The datasets `_sum_of_two_sources` adds by default, as a `combination_unasked`
+# refusal's `detail` lists them.
+_AID_AND_DEBT = [DAC2A, IDS]
+
+
+def _combination_asked(
+    *answers: Any,
+    options: list[dict[str, str]] | None = None,
+    call_id: str = "ask-1",
+    about: tuple[str, list[str]] | None = ("net_flows", _AID_AND_DEBT),
+) -> list[Any]:
+    """A `combination_unasked` refusal naming the sum `about` (its requirement id and
+    datasets; `None` for no refusal), then an `adk_request_input` call offering
+    `options`, `COMBINATION_OPTIONS` by default, and one response to it per answer in
+    `answers`."""
+    offered = [dict(option) for option in COMBINATION_OPTIONS] if options is None else options
+    refusals = (
+        []
+        if about is None
+        else [
+            _response_event(
+                "propose_plan",
+                {
+                    "outcome": Outcome.REFUSED.value,
+                    "code": ProblemCode.COMBINATION_UNASKED.value,
+                    "message": "m",
+                    "detail": {"requirement_id": about[0], "datasets": about[1]},
+                },
+            )
+        ]
+    )
+    call = SimpleNamespace(
+        id=call_id,
+        name="adk_request_input",
+        args={"message": "Add them, or show them separately?", "options": offered},
+    )
+    asked = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(function_call=call, function_response=None)])
+    )
+    return [
+        *refusals,
+        asked,
+        *(_ask_response(call_id, {"result": answer}) for answer in answers),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("asks", "traced"),
+    [
+        ([], False),
+        (_ask_answered_events("add them"), False),
+        (_combination_asked({"text": "separately, please"}), False),
+        (_combination_asked({"text": "add them"}), False),
+        (_combination_asked({"spec_id": "add them"}), True),
+        (_combination_asked({"spec_id": "show them separately"}), False),
+        (_combination_asked({"spec_id": "add them"}, {"spec_id": "show them separately"}), False),
+        (
+            _combination_asked(
+                {"spec_id": "add them"},
+                options=[{"id": "add them", "label": "x"}, {"id": "no", "label": "y"}],
+            ),
+            False,
+        ),
+        (_combination_asked({"spec_id": "add them"}, about=None), False),
+        (_combination_asked({"spec_id": "add them"}, about=("other_sum", _AID_AND_DEBT)), False),
+        (_combination_asked({"spec_id": "add them"}, about=("net_flows", [DAC2A, CRS])), False),
+        (
+            [
+                *_combination_asked({"spec_id": "show them separately"}),
+                *_combination_asked({"spec_id": "add them"}, about=None, call_id="ask-2"),
+            ],
+            False,
+        ),
+    ],
+    ids=[
+        "unasked",
+        "free-text-ask-answered-with-its-choice",
+        "paraphrase-picking-the-other-option",
+        "typed-in-place-of-a-pick",
+        "picked-its-choice",
+        "picked-the-other-option",
+        "picked-then-changed-their-mind",
+        "asked-with-other-options",
+        "asked-with-no-refusal-before-it",
+        "picked-for-another-sum",
+        "picked-for-the-sum-over-other-datasets",
+        "second-ask-after-one-refusal",
+    ],
+)
+def test_a_users_decision_to_combine_two_datasets_needs_their_pick(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    asks: list[Any],
+    traced: bool,
+) -> None:
+    # A `user` decision is the model's own claim, so the one a `sum_of` cites
+    # holds only once the user has picked adding the two from the options a
+    # combination ask offers.
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(asks)
+    plan = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, IDS),
+        resolved_by=ResolvedBy.USER,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+
+    result = _combination_unasked(plan, ctx, previous=None)
+
+    if traced:
+        assert result is None
+    else:
+        assert result is not None
+        assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
+        assert result["detail"] == {"requirement_id": "net_flows", "datasets": _AID_AND_DEBT}
+
+
+def test_a_pick_to_add_two_datasets_settles_nothing_for_a_sum_over_others(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+) -> None:
+    # The user agreed to add aid and debt; the same sum over aid and another
+    # dataset nobody declared is a combination they were never asked about.
+    other = "provenance/IMFWorldEconomicOutlook"
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(_combination_asked({"spec_id": COMBINE_OPTION}))
+    plan = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, other),
+        resolved_by=ResolvedBy.USER,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+
+    result = _combination_unasked(plan, ctx, previous=None)
+
+    assert result is not None
+    assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
+    assert result["detail"] == {"requirement_id": "net_flows", "datasets": sorted([DAC2A, other])}
+
+
+def _with_debt_side(
+    plan: Plan, *, requirement_id: str, spec_id: str | None, measure: str | None = None
+) -> Plan:
+    """`plan` with its `debt` requirement renamed `requirement_id`, pinned to `spec_id`.
+
+    A `measure` replaces what the requirement asks for.
+    """
+
+    def moved(r: EvidenceRequirement) -> EvidenceRequirement:
+        if r.id == "debt":
+            update = {"id": requirement_id, "source_spec_id": spec_id}
+            if measure is not None:
+                update["measure"] = measure
+            return r.model_copy(update=update)
+        if isinstance(r, SumOfRequirement):
+            return r.model_copy(update={"right": RequirementSide(input_id=requirement_id)})
+        return r
+
+    return plan.model_copy(
+        update={"evidence_requirements": tuple(moved(r) for r in plan.evidence_requirements)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("asked", "stated", "measure", "route", "refused"),
+    [
+        (("debt", None), ("debt", None), None, "pick", False),
+        (("debt", None), ("other_debt", None), None, "pick", True),
+        (("debt", None), ("debt", None), "debt service paid", "pick", True),
+        (("debt", "spec-unread-a"), ("debt", "spec-unread-a"), None, "pick", False),
+        (("debt", "spec-unread-a"), ("debt", "spec-unread-b"), None, "pick", True),
+        (("debt", "spec-unread-a"), ("debt", "spec-unread-a"), None, "carry", False),
+        (("debt", "spec-unread-a"), ("debt", "spec-unread-b"), None, "carry", True),
+    ],
+    ids=[
+        "picked-for-this-unpinned-side",
+        "picked-for-another-unpinned-side",
+        "picked-for-this-unpinned-side-asking-for-another-measure",
+        "picked-for-this-unreadable-pin",
+        "picked-for-another-unreadable-pin",
+        "carried-over-this-unreadable-pin",
+        "carried-over-another-unreadable-pin",
+    ],
+)
+def test_a_side_no_pin_names_a_dataset_for_is_a_dataset_of_its_own(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    asked: tuple[str, str | None],
+    stated: tuple[str, str | None],
+    measure: str | None,
+    route: str,
+    refused: bool,
+) -> None:
+    # The user agreed to add aid to one side whose dataset nobody can name. A
+    # sum whose unknown side is another unpinned requirement, one asking for
+    # something else, or another pin whose dataset this turn cannot read, is a combination they were never
+    # asked about, whether the pick is in this session or the sum is carried.
+    ctx = _FakeToolContext()
+    base = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, IDS),
+        resolved_by=ResolvedBy.USER,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+    first = _with_debt_side(base, requirement_id=asked[0], spec_id=asked[1])
+    plan = _with_debt_side(base, requirement_id=stated[0], spec_id=stated[1], measure=measure)
+    previous = None
+    if route == "pick":
+        refusal = _combination_unasked(first, ctx, previous=None)
+        assert refusal is not None
+        detail = refusal["detail"]
+        ctx.session.events.extend(
+            _combination_asked(
+                {"spec_id": COMBINE_OPTION}, about=(detail["requirement_id"], detail["datasets"])
+            )
+        )
+    else:
+        previous = first
+
+    result = _combination_unasked(plan, ctx, previous=previous)
+
+    assert (result is not None) is refused
+    if result is not None:
+        assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
+
+
+_SEPARATELY = "show them separately"
+
+
+@pytest.mark.parametrize(
+    ("previous_of", "asks", "chosen", "refused"),
+    [
+        (lambda plan: plan, [], COMBINE_OPTION, False),
+        (
+            lambda plan: plan.model_copy(
+                update={
+                    "evidence_requirements": tuple(
+                        r for r in plan.evidence_requirements if r.id != "net_flows"
+                    )
+                }
+            ),
+            [],
+            COMBINE_OPTION,
+            True,
+        ),
+        (
+            lambda plan: plan.model_copy(
+                update={
+                    "evidence_requirements": tuple(
+                        r.model_copy(update={"source_spec_id": SPEC_GHANA_AID})
+                        if r.id == "debt"
+                        else r
+                        for r in plan.evidence_requirements
+                    )
+                }
+            ),
+            [],
+            COMBINE_OPTION,
+            True,
+        ),
+        (lambda plan: plan, _combination_asked({"spec_id": COMBINE_OPTION}), COMBINE_OPTION, False),
+        (lambda plan: plan, _combination_asked({"spec_id": _SEPARATELY}), COMBINE_OPTION, True),
+        (lambda plan: plan, _combination_asked({"spec_id": _SEPARATELY}), _SEPARATELY, True),
+        (lambda plan: plan, [], _SEPARATELY, True),
+        (
+            lambda plan: plan,
+            _combination_asked({"spec_id": _SEPARATELY}, about=None),
+            COMBINE_OPTION,
+            True,
+        ),
+    ],
+    ids=[
+        "carried-unchanged",
+        "added-by-this-call",
+        "carried-over-other-datasets",
+        "carried-with-its-pick-intact",
+        "carried-after-the-user-picked-showing-them-separately",
+        "patch-recording-showing-them-separately",
+        "patch-changing-its-decision",
+        "carried-after-an-unbound-ask-answered-separately",
+    ],
+)
+def test_a_sum_carried_from_an_earlier_plan_keeps_its_sum_without_a_new_pick(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    previous_of: Callable[[Plan], Plan],
+    asks: list[Any],
+    chosen: str,
+    refused: bool,
+) -> None:
+    # A later turn's session holds no pick. A sum the amended plan stated over
+    # the same datasets, citing the same decision to add them, was checked when
+    # it was recorded; one this call adds, one whose sides now read other
+    # datasets, one whose decision changed, or one the user has since asked to
+    # see separately needs removing or the pick again.
+    ctx = _FakeToolContext()
+    ctx.session.events.extend(asks)
+    recorded = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, IDS),
+        resolved_by=ResolvedBy.USER,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+    plan = recorded.model_copy(
+        update={
+            "decisions": tuple(
+                d.model_copy(update={"chosen": chosen}) if d.slot == "combine_aid_debt" else d
+                for d in recorded.decisions
+            )
+        }
+    )
+
+    result = _combination_unasked(plan, ctx, previous=previous_of(recorded))
+
+    assert (result is not None) is refused
+    if result is not None:
+        assert result["code"] == ProblemCode.COMBINATION_UNASKED.value
+
+
+def test_propose_plan_refuses_a_patch_summing_two_datasets_on_a_users_source_pick(
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+) -> None:
+    # The user elected the aid source; a patch that adds a sum citing that
+    # election has no pick on adding aid and debt, so it is refused.
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    summed = _sum_of_two_sources(
+        ctx,
+        datasets=(DAC2A, IDS),
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+    ctx.session.events = [
+        _ask_event([{"spec_id": SPEC_GHANA_AID, "label": "aid"}]),
+        _answer_event(SPEC_GHANA_AID),
+    ]
+    elected = pinning_decision(SPEC_GHANA_AID, slot="aid_source")
+    debt_source = next(d for d in summed.decisions if d.slot == "debt_source")
+    first = tools["propose_plan"].func(
+        question=summed.question,
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([elected, debt_source]),
+        evidence_requirements=[r for r in summed.evidence_requirements if r.id != "net_flows"],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    summing = summed.requirement("net_flows").model_copy(update={"decision_ids": ("aid_source",)})
+
+    result = tools["propose_plan"].func(
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[],
+        evidence_requirements=[summing],
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.COMBINATION_UNASKED.value, result
+    assert result["detail"] == {"requirement_id": "net_flows", "datasets": _AID_AND_DEBT}
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    assert recorded.version == 1
+
+
 # --- question_fixed ------------------------------------------------------------------
 
 
@@ -1826,6 +2466,21 @@ def test_propose_plan_clears_a_pending_referral(
 
 def _referral_of(kind: ReferralKind, requirement_id: str) -> Referral:
     """A valid `Referral` of `kind`, naming what that kind has to name."""
+    if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
+        return Referral(
+            kind=kind,
+            reason="r",
+            requirement_id=requirement_id,
+            ambiguous_sources=(
+                AmbiguousSourceReading(
+                    text="shared",
+                    candidates=tuple(
+                        SourceNameCandidate(ref=f"provenance/{name}", label=name, kind="provenance")
+                        for name in ("a", "b")
+                    ),
+                ),
+            ),
+        )
     if kind is ReferralKind.SOURCE_AMBIGUOUS:
         candidates = tuple(
             SelectedSource(
@@ -2335,6 +2990,30 @@ def test_propose_plan_accepts_a_dataset_requirement_that_is_the_answer(
 
     assert "code" not in result, result
     assert PLAN_STATE_KEY in ctx.state
+
+
+def test_propose_plan_accepts_a_set_larger_than_the_entity_limit_named_once(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # Africa holds more members than a requirement may list, so a question about
+    # African countries names the set once and asks for its members.
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    africa = json.loads(fixture.read_text())["spec"]["resolved"]["entities"]
+    assert len(africa) > MAX_ENTITIES
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    countries = requirement(
+        measure="government health expenditure",
+        entities=[Entity(name="Africa", members=True)],
+        unit=None,
+    )
+
+    result = _propose(tools, ctx, decision(), (countries,), answer_mode=AnswerMode.SERIES)
+
+    assert "code" not in result, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.evidence_requirements[0].entities == (Entity(name="Africa", members=True),)  # type: ignore[union-attr]
 
 
 def test_propose_plan_needs_a_derived_requirement_for_a_growth_question(
@@ -2913,6 +3592,35 @@ def test_asking_the_user_rejects_a_recommendation_naming_no_candidate() -> None:
     assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
 
 
+@pytest.mark.parametrize(
+    ("candidates", "options", "refused"),
+    [
+        ([], [dict(option) for option in COMBINATION_OPTIONS], False),
+        ([], [{"id": "add them", "label": "Add them"}, {"id": "no", "label": "No"}], True),
+        (
+            [{"spec_id": SPEC, "label": "a candidate"}],
+            [dict(option) for option in COMBINATION_OPTIONS],
+            True,
+        ),
+    ],
+    ids=["refusals-options", "other-options", "options-with-candidates"],
+)
+def test_asking_the_user_takes_only_the_options_a_refusal_carries(
+    candidates: list[dict[str, str]], options: list[dict[str, str]], refused: bool
+) -> None:
+    tools = _tools_by_name()
+
+    result = tools["adk_request_input"].func(
+        message="Add them?", candidates=candidates, options=options
+    )
+
+    if refused:
+        assert result is not None
+        assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+    else:
+        assert result is None
+
+
 def test_propose_plan_refuses_a_user_election_ask_user_never_offered(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -3122,28 +3830,35 @@ def test_a_pin_the_user_elects_over_a_stated_source_not_found_replaces_it(
     assert (pinned.source_spec_id, pinned.source) == (pin, stated_after)
 
 
-_SEED_IDENTITY: dict[str, Any] = {
+# A dataset of education aid as a search in the conversation recorded it, over
+# every year with data, and the same dataset as Search found it for "the last
+# five years": a closed range.
+_AID_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
-    "seed": "education aid",
+    "dataset": "education aid",
     "requested_window": {"kind": "all"},
 }
-_SEED_SPEC = spec_id_for(canonicalize(_SEED_IDENTITY))
+_AID_SPEC = spec_id_for(canonicalize(_AID_IDENTITY))
+_AID_2020_2024 = {
+    **_AID_IDENTITY,
+    "requested_window": {"kind": "range", "start_year": 2020, "end_year": 2024},
+}
+_AID_2020_2024_SPEC = spec_id_for(canonicalize(_AID_2020_2024))
 
 
-def _seeded(identity: dict[str, Any] = _SEED_IDENTITY) -> SeededSource:
-    """A dataset the user handed over from Search, as `harness.graph`'s `seed` node records it."""
-    return SeededSource(
-        source=SelectedSource(
-            spec_id=spec_id_for(canonicalize(identity)),
-            sentence="Education aid from every donor",
-            has_data=True,
-            identity=identity,
-        ),
-        seen_year=2024,
-    )
+@pytest.fixture
+def aid_on_record() -> Iterator[None]:
+    """Both education-aid identities on record, as `harness.studio` sets the lookup for a segment."""
+    recorded = {
+        spec_id_for(canonicalize(identity)): RecordedIdentity(identity=identity)
+        for identity in (_AID_IDENTITY, _AID_2020_2024)
+    }
+    token = current_recorded_identity.set(recorded.get)
+    yield
+    current_recorded_identity.reset(token)
 
 
-def _propose_seeded(
+def _propose_pinned(
     tools: dict[str, FunctionTool],
     ctx: object,
     decision: Decision,
@@ -3161,570 +3876,73 @@ def _propose_seeded(
     )
 
 
-def test_seeded_sources_name_each_spec_id_once() -> None:
-    """Every reader looks a seeded dataset up by spec_id, so the state holds one entry for one."""
-    state: dict[str, Any] = {}
-    other = _seeded({**_SEED_IDENTITY, "seed": "population"})
-
-    with pytest.raises(ValueError, match="more than once"):
-        save_seeded_sources(state, [_seeded(), other, _seeded()])
-
-    assert state == {}
-    save_seeded_sources(state, [_seeded(), other])
-    held = seeded_sources(state)
-    assert seeded_source(held, _SEED_SPEC) == _seeded()
-    assert seeded_source(held, other.source.spec_id) == other
-    assert seeded_source(held, "spec_" + "0" * 32) is None
-    assert seeded_source(held, None) is None
-
-
-def _over(start: int, end: int) -> SeededSource:
-    """The seed's dataset over other years: another Search result, under its own spec_id."""
-    window = {"kind": "range", "start_year": start, "end_year": end}
-    return _seeded({**_SEED_IDENTITY, "requested_window": window})
-
-
-_WINDOW_2010_2023 = {"kind": "range", "start_year": 2010, "end_year": 2023}
-
-
-def _stored_copy_state(
-    seeds: Sequence[SeededSource], window: dict[str, Any] = _WINDOW_2010_2023
-) -> dict[str, Any]:
-    """Session state holding `seeds` and one copy of `_SEED_SPEC` over `window`, as stored."""
-    stored = {
-        "seeds": [seed.model_dump(mode="json") for seed in seeds],
-        "copies": [{"windowed_from": _SEED_SPEC, "window": window}],
-    }
-    return {SEEDED_SOURCES_STATE_KEY: json.dumps(stored)}
-
-
-def test_the_state_stores_a_copy_as_its_seed_and_window(
+@pytest.mark.usefixtures("aid_on_record")
+def test_one_decision_fixing_a_recorded_pin_over_two_periods_leaves_both_pins_as_written(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
-    """A copy is its seed over another window: the state holds the seed's spec_id
-    and the window, and none of the copy's identity or name."""
+    """Two periods of a recorded pin retrieve two spec_ids, and one decision names
+    one, so both requirements keep the pin as the planner wrote it, for the
+    translator to search for each."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    seed = _seeded()
-    save_seeded_sources(ctx.state, [seed])
 
-    result = _propose_seeded(
+    result = _propose_pinned(
         tools,
         ctx,
-        pinning_decision(_SEED_SPEC),
-        [requirement(source_spec_id=_SEED_SPEC, period=Period(start=2010, end=2023))],
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    copy_id, _ = windowed_identity(_SEED_IDENTITY, _WINDOW_2010_2023)
-    assert json.loads(ctx.state[SEEDED_SOURCES_STATE_KEY]) == {
-        "seeds": [seed.model_dump(mode="json")],
-        "copies": [{"windowed_from": _SEED_SPEC, "window": _WINDOW_2010_2023}],
-    }
-    assert copy_id not in ctx.state[SEEDED_SOURCES_STATE_KEY]
-
-
-def test_a_copy_reads_back_as_its_seed_over_its_window() -> None:
-    """The copy's spec_id and identity are the seed's over the window, and its
-    name is the seed's, rebuilt where the state is read."""
-    seed = _seeded()
-
-    (held, copy) = seeded_sources(_stored_copy_state([seed]))
-
-    copy_id, copy_identity = windowed_identity(_SEED_IDENTITY, _WINDOW_2010_2023)
-    assert held == seed
-    assert copy == SeededSource(
-        source=SelectedSource(
-            spec_id=copy_id,
-            sentence=seed.source.sentence,
-            has_data=None,
-            identity=copy_identity,
-        ),
-        windowed_from=_SEED_SPEC,
-    )
-
-
-def test_a_copy_whose_seed_is_missing_is_refused() -> None:
-    """A copy is nothing without its seed, so a list holding one without the other
-    is refused where it is read and where it is written."""
-    seed, other = _seeded(), _seeded({**_SEED_IDENTITY, "seed": "population"})
-
-    with pytest.raises(ValueError, match=rf"names the seed '{_SEED_SPEC}', which the stored"):
-        seeded_sources(_stored_copy_state([other]))
-    (_, copy) = seeded_sources(_stored_copy_state([seed]))
-    state: dict[str, Any] = {}
-    with pytest.raises(ValueError, match=rf"names the seed '{_SEED_SPEC}', which the sources"):
-        save_seeded_sources(state, [other, copy])
-    with pytest.raises(ValueError, match="names the seed"):
-        save_dropped_seeds(state, [copy])
-    assert state == {}
-
-
-def test_a_seed_stored_with_member_lists_is_left_out_with_its_copy(
-    stored_with_member_list: Callable[[SelectedSource], dict[str, Any]],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A session that crosses the release holds a seed with fields
-    `SelectedSource` no longer has. It and the copy that names it are dropped,
-    and the seed stored in the current shape beside it is kept."""
-    seed, other = _seeded(), _seeded({**_SEED_IDENTITY, "seed": "population"})
-    state = _stored_copy_state([seed, other])
-    stored = json.loads(state[SEEDED_SOURCES_STATE_KEY])
-    stored["seeds"][0]["source"] = stored_with_member_list(seed.source)
-    state[SEEDED_SOURCES_STATE_KEY] = json.dumps(stored)
-    # The stored text is read once per process, so a repeat of this test
-    # would find it already read and logged.
-    _parsed_sources.cache_clear()
-
-    with caplog.at_level(logging.WARNING, logger="planner.plan"):
-        held = seeded_sources(state)
-        # A turn reads the slot many times and logs what it leaves out once.
-        assert seeded_sources(state) == held
-
-    assert held == [other]
-    (logged,) = caplog.records
-    assert logged.levelno == logging.WARNING
-    assert logged.args == (
-        SEEDED_SOURCES_STATE_KEY,
-        2,
-        1,
-        1,
-        "source.pinned, source.stat_var_truncated, source.stat_vars",
-    )
-
-
-def test_a_copy_that_is_not_its_seed_over_its_window_is_refused() -> None:
-    """The state rebuilds a copy from its seed, so a copy stating anything else
-    would read back changed, and is refused where it is written."""
-    seed = _seeded()
-    (_, copy) = seeded_sources(_stored_copy_state([seed]))
-    renamed = copy.model_copy(
-        update={"source": copy.source.model_copy(update={"sentence": "another name"})}
-    )
-
-    with pytest.raises(ValueError, match="is not its seed"):
-        save_seeded_sources({}, [seed, renamed])
-
-
-def test_one_rule_says_which_dataset_the_turn_dropped() -> None:
-    """A pin and a source are asked the same question. The dropped seed and its
-    dataset over any other years are dropped; a seed the turn still holds is
-    kept, though it is the same dataset over other years."""
-    dropped, held = _seeded(), _over(2015, 2024)
-    elsewhere = _over(2000, 2005)
-    unrelated = _seeded({**_SEED_IDENTITY, "seed": "population"})
-    state: dict[str, Any] = {}
-    save_seeded_sources(state, [held])
-    save_dropped_seeds(state, [dropped])
-
-    def asked(item: SeededSource, *, with_identity: bool) -> bool:
-        identity = item.source.identity if with_identity else None
-        return names_dropped_seed(state, spec_id=item.source.spec_id, identity=identity)
-
-    assert asked(dropped, with_identity=False) is True
-    assert asked(dropped, with_identity=True) is True
-    assert asked(held, with_identity=False) is False
-    assert asked(held, with_identity=True) is False
-    assert asked(elsewhere, with_identity=True) is True
-    assert asked(elsewhere, with_identity=False) is False
-    assert asked(unrelated, with_identity=True) is False
-
-
-def test_a_held_seed_cannot_be_pinned_over_the_window_of_its_dropped_sibling(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """The seed over 2015 to 2024 is dropped and the seed over every year is held.
-    Pinning the held one over 2015 to 2024 moves the pin to the dropped seed's own
-    spec_id, which the plan is checked for before any copy is recorded: it is
-    refused, and no copy of the held seed takes the dropped spec_id."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    held, dropped = _seeded(), _over(2015, 2024)
-    save_seeded_sources(ctx.state, [held])
-    save_dropped_seeds(ctx.state, [dropped])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC),
-        [requirement(source_spec_id=_SEED_SPEC, period=Period(start=2015, end=2024))],
-    )
-
-    assert result["code"] == ProblemCode.SEED_DROPPED.value
-    assert [item.source.spec_id for item in seeded_sources(ctx.state)] == [_SEED_SPEC]
-    assert PLAN_STATE_KEY not in ctx.state
-
-
-def test_two_seeds_over_one_dataset_pinned_over_one_period_share_the_first_seed_s_copy(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """Both pins move to the one spec_id the dataset has over that period, and the
-    copy recorded for it is the first seed's, under the first seed's name."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    first, second = _over(2000, 2005), _over(2015, 2024)
-    first = first.model_copy(
-        update={"source": first.source.model_copy(update={"sentence": "the first seed"})}
-    )
-    second = second.model_copy(
-        update={"source": second.source.model_copy(update={"sentence": "the second seed"})}
-    )
-    save_seeded_sources(ctx.state, [first, second])
-    period = Period(start=2010, end=2010)
-
-    result = tools["propose_plan"].func(
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        decisions=drafts(
-            [
-                pinning_decision(first.source.spec_id, slot="a"),
-                pinning_decision(second.source.spec_id, slot="b"),
-            ]
-        ),
-        evidence_requirements=[
-            requirement(
-                id="one", source_spec_id=first.source.spec_id, decision_ids=["a"], period=period
-            ),
-            requirement(
-                id="two", source_spec_id=second.source.spec_id, decision_ids=["b"], period=period
-            ),
-        ],
-        tool_context=ctx,
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-    (copied,) = [item for item in seeded_sources(ctx.state) if item.windowed_from]
-    assert copied.windowed_from == first.source.spec_id
-    assert copied.source.sentence == "the first seed"
-
-
-def test_propose_plan_takes_a_pin_on_a_seed_whose_sibling_over_other_years_was_dropped(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    held = _over(2015, 2024)
-    save_seeded_sources(ctx.state, [held])
-    save_dropped_seeds(ctx.state, [_seeded()])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(held.source.spec_id),
-        [requirement(source_spec_id=held.source.spec_id, period=Period(start=2015, end=2024))],
-    )
-
-    assert result["outcome"] == Outcome.OK.value, result
-
-
-@pytest.mark.parametrize("seeded", [True, False], ids=["seeded", "only-in-the-request"])
-def test_propose_plan_traces_a_user_election_to_a_seed_the_seed_node_stored(
-    seeded: bool,
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """A dataset the user handed over from Search is the user's election once
-    `harness.graph`'s `seed` node has stored it (`SEEDED_SOURCES_STATE_KEY`).
-    The request's own seeds (`SEEDS_STATE_KEY`) are not: a turn that fell
-    back to the question never stored them."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    window = {"kind": "range", "start_year": 2015, "end_year": 2024}
-    identity = {**_SEED_IDENTITY, "requested_window": window}
-    spec_id = spec_id_for(canonicalize(identity))
-    if seeded:
-        save_seeded_sources(ctx.state, [_seeded(identity)])
-    else:
-        ctx.state[SEEDS_STATE_KEY] = json.dumps([{"spec": {"spec_id": spec_id}}])
-
-    result = _propose_seeded(
-        tools, ctx, pinning_decision(spec_id), [requirement(source_spec_id=spec_id)]
-    )
-
-    if seeded:
-        assert result["outcome"] == Outcome.OK.value
-        plan = load_plan(ctx.state)
-        assert plan is not None
-        assert plan.evidence_requirements[0].source_spec_id == spec_id  # type: ignore[union-attr]
-    else:
-        assert result["code"] == ProblemCode.ELECTION_UNTRACEABLE.value
-        assert PLAN_STATE_KEY not in ctx.state
-
-
-def test_propose_plan_pins_a_seed_over_the_requirements_period(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """A seed over every year with data is pinned instead to the seed over the
-    requirement's own period, the spec_id `get_data`'s `scope.window` would
-    mint, so the plan's bare retrieval of it returns only those years."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC),
-        [requirement(source_spec_id=_SEED_SPEC, period=Period(start=2024, end=2024))],
-    )
-
-    assert result["outcome"] == Outcome.OK.value
-    windowed, identity = windowed_identity(
-        _SEED_IDENTITY, {"kind": "range", "start_year": 2024, "end_year": 2024}
-    )
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert plan.evidence_requirements[0].source_spec_id == windowed  # type: ignore[union-attr]
-    assert plan.decisions[0].fixes == DecisionFixes(source_spec_id=windowed)
-    (seed, copy) = seeded_sources(ctx.state)
-    assert seed.source.spec_id == _SEED_SPEC
-    assert copy.windowed_from == _SEED_SPEC
-    assert copy.source.spec_id == windowed
-    assert copy.source.identity == identity
-
-
-def test_the_copy_of_a_seed_over_another_period_records_nothing_search_stated_for_the_seed(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """Search states a seed's coverage, entities, axes and counts for the seed's own
-    years. The copy over the requirement's period records what resolves it, the
-    spec_id and identity Search answers under and the seed's elected StatVars, with
-    the seed's sentence as a name, and none of those facts."""
-    answered = json.loads(
-        (Path(__file__).parents[1] / "fixtures" / "resubmit_education_oda_kenya.json").read_text()
-    )["specs"]
-    seed = source_from_spec_block(answered["2015-2023"])
-    assert seed.coverage_window == Period(start=2015, end=2023)
-    assert seed.coverage_kind == "exact"
-    assert seed.has_data is True
-    assert seed.entities
-    assert seed.open_entity_axes
-    assert seed.open_axes
-    assert seed.stat_var_member_count == 89
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [SeededSource(source=seed)])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(seed.spec_id),
-        [requirement(source_spec_id=seed.spec_id, period=Period(start=2010, end=2023))],
-    )
-
-    assert result["outcome"] == Outcome.OK.value
-    (_, copy) = seeded_sources(ctx.state)
-    # The spec_id and identity Search itself answers for 2010-2023.
-    assert copy == SeededSource(
-        source=SelectedSource(
-            spec_id=answered["2010-2023"]["spec_id"],
-            sentence=seed.sentence,
-            has_data=None,
-            identity=answered["2010-2023"]["definition"]["identity"],
-        ),
-        windowed_from=seed.spec_id,
-    )
-    assert copy.source.coverage_window is None
-    assert copy.source.coverage_kind is None
-    assert copy.source.entities == ()
-    assert copy.source.open_entity_axes is None
-    assert copy.source.stat_var_member_count is None
-
-
-def test_an_amendment_naming_the_seed_again_repins_it_over_the_new_period(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """The planner reasons about the seed's own spec_id: a patch that pins it
-    again, over a narrower period, amends the windowed plan cleanly."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-    first = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC),
-        [requirement(source_spec_id=_SEED_SPEC, period=Period(start=2015, end=2024))],
-    )
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC),
-        [requirement(source_spec_id=_SEED_SPEC, period=Period(start=2022, end=2024))],
-        amends_version=int(first["version"]),  # type: ignore[call-overload]
-    )
-
-    assert result["outcome"] == Outcome.OK.value
-    windowed, _ = windowed_identity(
-        _SEED_IDENTITY, {"kind": "range", "start_year": 2022, "end_year": 2024}
-    )
-    plan = load_plan(ctx.state)
-    assert plan is not None
-    assert plan.evidence_requirements[0].source_spec_id == windowed  # type: ignore[union-attr]
-    assert [item.source.spec_id for item in seeded_sources(ctx.state)][-1] == windowed
-
-
-def test_drafts_and_amendments_across_planner_entries_hold_only_the_copy_the_plan_pins(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-    decision: DecisionFactory,
-) -> None:
-    """One seed and one requirement, its years changed by a first draft,
-    amendments and a new plan over three planner entries, more proposals than
-    one entry allows. After each, the state holds the seed and the one copy the
-    recorded plan pins; once no requirement pins the seed, the seed alone."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-    version: int | None = None
-    proposals = 0
-    for entry in range(3):
-        # What `harness.planner_seam` does on each fresh entry into the planner.
-        save_plan_rounds(ctx.state, 0)
-        for start in range(2010 + 3 * entry, 2013 + 3 * entry):
-            result = tools["propose_plan"].func(
-                question="q",
-                answer_mode=AnswerMode.SERIES,
-                decisions=drafts([pinning_decision(_SEED_SPEC)]),
-                evidence_requirements=[
-                    requirement(source_spec_id=_SEED_SPEC, period=Period(start=start, end=2024))
-                ],
-                amends_version=None if start == 2013 else version,
-                starts_new_plan=start == 2013,
-                tool_context=ctx,
-            )
-            assert result["outcome"] == Outcome.OK.value, result
-            version = int(result["version"])  # type: ignore[call-overload]
-            proposals += 1
-            windowed, _ = windowed_identity(
-                _SEED_IDENTITY, {"kind": "range", "start_year": start, "end_year": 2024}
-            )
-            assert [
-                (item.source.spec_id, item.windowed_from) for item in seeded_sources(ctx.state)
-            ] == [(_SEED_SPEC, None), (windowed, _SEED_SPEC)]
-    assert proposals > MAX_PLAN_ROUNDS
-
-    unpinned = tools["propose_plan"].func(
-        decisions=drafts([decision(slot="scope")]),
-        evidence_requirements=[requirement(id="other", decision_ids=["scope"])],
-        removed_decisions=["measure"],
-        removed_evidence_requirements=["annual_debt_service"],
-        amends_version=version,
-        tool_context=ctx,
-    )
-
-    assert unpinned["outcome"] == Outcome.OK.value, unpinned
-    assert seeded_sources(ctx.state) == [_seeded()]
-
-
-def test_one_decision_cannot_fix_a_seed_over_two_periods(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC),
+        pinning_decision(_AID_SPEC, resolved_by=ResolvedBy.PLANNER_DEFAULT),
         [
-            requirement(source_spec_id=_SEED_SPEC, period=Period(start=2024, end=2024)),
+            requirement(source_spec_id=_AID_SPEC, period=Period(start=2024, end=2024)),
             requirement(
-                id="earlier", source_spec_id=_SEED_SPEC, period=Period(start=2015, end=2015)
+                id="earlier", source_spec_id=_AID_SPEC, period=Period(start=2015, end=2015)
             ),
         ],
     )
 
-    assert result["code"] == ProblemCode.INVALID_PLAN.value
-    assert "its own decision" in str(result["message"])
-    assert PLAN_STATE_KEY not in ctx.state
-
-
-@pytest.mark.parametrize("resolved_by", [ResolvedBy.USER, ResolvedBy.PLANNER_DEFAULT])
-def test_propose_plan_refuses_a_pin_on_a_dataset_the_turn_dropped(
-    resolved_by: ResolvedBy,
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """The turn dropped the seed and told the user the plan leaves it out, so a pin on
-    it is refused whoever the decision says resolved it, and the refusal does not offer
-    `planner_default` as a way round."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_dropped_seeds(ctx.state, [_seeded()])
-
-    result = _propose_seeded(
-        tools,
-        ctx,
-        pinning_decision(_SEED_SPEC, resolved_by=resolved_by),
-        [requirement(source_spec_id=_SEED_SPEC)],
-    )
-
-    assert result["code"] == ProblemCode.SEED_DROPPED.value
-    assert result["detail"] == {"decisions": ["measure"], "requirements": ["annual_debt_service"]}
-    assert "Do not plan that dataset again in this turn" in str(result["message"])
-    assert "planner_default" not in str(result["message"])
-    assert PLAN_STATE_KEY not in ctx.state
-
-
-def test_a_patch_that_carries_a_dropped_pin_forward_is_refused(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-    decision: DecisionFactory,
-) -> None:
-    """The recorded plan pinned the seed over its period before the turn dropped it. A
-    patch that leaves that requirement in is refused, and one that removes it lands."""
-    tools = _tools_by_name()
-    ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-    other = requirement(id="other", decision_ids=["scope"])
-    first = tools["propose_plan"].func(
-        question="q",
-        answer_mode=AnswerMode.SERIES,
-        decisions=drafts([pinning_decision(_SEED_SPEC), decision(slot="scope")]),
-        evidence_requirements=[
-            requirement(source_spec_id=_SEED_SPEC, period=Period(start=2024, end=2024)),
-            other,
-        ],
-        tool_context=ctx,
-    )
-    assert first["outcome"] == Outcome.OK.value
-    recorded = ctx.state[PLAN_STATE_KEY]
-    # The turn drops the seed: it and its copy over the plan's period move from
-    # the seeded sources to the dropped ones.
-    save_dropped_seeds(ctx.state, seeded_sources(ctx.state))
-    save_seeded_sources(ctx.state, [])
-
-    carried = tools["propose_plan"].func(
-        evidence_requirements=[other.model_copy(update={"measure": "debt stock"})],
-        amends_version=int(first["version"]),
-        tool_context=ctx,
-    )
-
-    assert carried["code"] == ProblemCode.SEED_DROPPED.value
-    assert carried["detail"] == {"decisions": ["measure"], "requirements": ["annual_debt_service"]}
-    assert ctx.state[PLAN_STATE_KEY] == recorded
-
-    removed = tools["propose_plan"].func(
-        removed_decisions=["measure"],
-        removed_evidence_requirements=["annual_debt_service"],
-        amends_version=int(first["version"]),
-        tool_context=ctx,
-    )
-
-    assert removed["outcome"] == Outcome.OK.value
+    assert result["outcome"] == Outcome.OK.value, result
     plan = load_plan(ctx.state)
     assert plan is not None
-    assert [item.id for item in plan.evidence_requirements] == ["other"]
+    assert [
+        item.source_spec_id
+        for item in plan.evidence_requirements
+        if isinstance(item, DatasetRequirement)
+    ] == [_AID_SPEC, _AID_SPEC]
+    assert windowed_pins(ctx.state) == {}
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("pin", "copies"),
+    [(_AID_2020_2024_SPEC, {}), (_AID_SPEC, {_AID_2020_2024_SPEC: _AID_SPEC})],
+    ids=["recorded-over-the-period", "recorded-over-every-year"],
+)
+def test_a_recorded_pin_is_copied_over_the_requirements_period_only_when_its_window_differs(
+    pinning_decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    pin: str,
+    copies: dict[str, str],
+) -> None:
+    """A pin recorded over the requirement's own period is retrieved as it
+    stands; one recorded over other years is copied over that period."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+
+    result = _propose_pinned(
+        tools,
+        ctx,
+        pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT),
+        [requirement(source_spec_id=pin, period=Period(start=2020, end=2024))],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (pinned,) = plan.evidence_requirements
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == _AID_2020_2024_SPEC
+    assert {
+        spec_id: copy.windowed_from for spec_id, copy in windowed_pins(ctx.state).items()
+    } == copies
 
 
 # --- the envelope's own spec_id, synthesized into a Decision ---------------------------
@@ -3774,6 +3992,313 @@ def test_propose_plan_synthesizes_the_decision_a_verbatim_envelope_pin_needs(
     assert synthesized[0].resolved_by is ResolvedBy.PLANNER_DEFAULT
     assert synthesized[0].rationale == rationale
     assert synthesized[0].slot in plan.requirement(dataset.id).decision_ids
+
+
+# Search's answer to "Bilateral plus imputed multilateral aid from France to
+# Kenya": gross disbursements elected, net disbursements offered beside it.
+_FRANCE_KENYA = json.loads(
+    (
+        Path(__file__).parents[3]
+        / "data-mcp"
+        / "tests"
+        / "fixtures"
+        / "resolve_aid_france_kenya.json"
+    ).read_text()
+)["parts"][0]["spec"]
+_GROSS = _FRANCE_KENYA["spec_id"]
+_NET = _FRANCE_KENYA["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
+
+
+def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET)) -> list[Any]:
+    """The orchestrator's `ask_user` on how to count the aid, through the clarify
+    interrupt, each option offered under `offered`, and the user's pick of `picked`."""
+    return [
+        _clarify_ask_event(
+            [
+                {"spec_id": offered[0], "label": "Gross disbursements"},
+                {"spec_id": offered[1], "label": "Net disbursements"},
+            ]
+        ),
+        _clarify_answer_event(picked),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pin", "events", "chosen", "resolved_by"),
+    [
+        (_GROSS, [], "gross disbursements", ResolvedBy.PLANNER_DEFAULT),
+        (_GROSS, _measure_ask_events(_GROSS), "gross disbursements", ResolvedBy.USER),
+        (_GROSS, _measure_ask_events(_NET), "gross disbursements", ResolvedBy.PLANNER_DEFAULT),
+        (_NET, [], "net disbursements", ResolvedBy.PLANNER_DEFAULT),
+        (_NET, _measure_ask_events(_NET), "net disbursements", ResolvedBy.USER),
+        (
+            _NET,
+            _measure_ask_events("o2", offered=("o1", "o2")),
+            "net disbursements",
+            ResolvedBy.PLANNER_DEFAULT,
+        ),
+    ],
+    ids=[
+        "elected",
+        "elected-asked",
+        "elected-other-picked",
+        "sibling",
+        "sibling-asked",
+        "same-label-other-ask",
+    ],
+)
+def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    pin: str,
+    events: list[Any],
+    chosen: str,
+    resolved_by: ResolvedBy,
+) -> None:
+    """A pin of the measure search elected, or of one it offers beside it,
+    gets the measure decision, settled by the user when they picked that
+    measure's own spec_id answering the orchestrator's `ask_user`. A pick
+    under any other id, the same label included, settles nothing here."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    ctx.session.events = list(events)
+    dataset, derived = requirements
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": pin}), derived],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pin]
+    assert measure.options == ("gross disbursements", "net disbursements")
+    assert (measure.chosen, measure.resolved_by) == (chosen, resolved_by)
+    assert measure in shown_decisions(plan)
+
+
+def test_a_pick_after_the_plan_pinned_the_measure_makes_its_decision_the_users(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The plan already pins gross on the planner's say when the user picks it
+    answering a later ask: the next proposal rewrites that decision as theirs."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    pinned = [dataset.model_copy(update={"source_spec_id": _GROSS}), derived]
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=pinned,
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.session.events = _measure_ask_events(_GROSS)
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=pinned, amends_version=first["version"], tool_context=ctx
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _GROSS]
+    assert (measure.chosen, measure.resolved_by) == ("gross disbursements", ResolvedBy.USER)
+
+
+def _amendment_events(text: str) -> list[Any]:
+    """The approval card (`harness.graph.APPROVE_INTERRUPT`) and the user's amendment of it."""
+    card = create_request_input_event(RequestInput(interrupt_id="approve", payload={}))
+    answer = create_request_input_response(
+        "approve", {"result": {"approved": None, "amendment": text}}
+    )
+    return [card, Event(content=types.Content(role="user", parts=[answer]))]
+
+
+@pytest.mark.parametrize("amended", [True, False], ids=["amended", "not-amended"])
+@pytest.mark.parametrize("stated", [False, True], ids=["synthesized", "model-written"])
+def test_a_re_pin_to_another_measure_is_the_planners_even_after_an_amendment(
+    decision: DecisionFactory, requirements: RequirementPair, amended: bool, stated: bool
+) -> None:
+    """An amendment at approval names no spec_id, so a re-pin from gross to
+    net made while answering one is the planner's, as it is with no
+    amendment on record: the pin moves to net, the measure decision says
+    search elected gross, and a `resolved_by=user` decision the model writes
+    for it is refused."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    if amended:
+        ctx.session.events = _amendment_events("make it a bar chart")
+    written = decision(
+        slot="counted_as",
+        options=["gross disbursements", "net disbursements"],
+        chosen="net disbursements",
+        resolved_by=ResolvedBy.USER,
+        fixes=DecisionFixes(source_spec_id=_NET),
+    )
+    re_pinned = dataset.model_copy(
+        update={
+            "source_spec_id": _NET,
+            "decision_ids": (*dataset.decision_ids, written.slot)
+            if stated
+            else dataset.decision_ids,
+        }
+    )
+
+    second = tools["propose_plan"].func(
+        decisions=drafts([written] if stated else []),
+        evidence_requirements=[re_pinned, derived],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    if stated:
+        assert second["code"] == ProblemCode.ELECTION_UNTRACEABLE.value, second
+        return
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (pinned,) = [r for r in plan.evidence_requirements if r.id == dataset.id]
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == _NET
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == _NET]
+    assert (measure.chosen, measure.resolved_by, measure.rationale) == (
+        "net disbursements",
+        ResolvedBy.PLANNER_DEFAULT,
+        "Chosen in place of gross disbursements, the measure search elected.",
+    )
+
+
+class _ResolveOnly:
+    """A surface answering `resolve_definition` from `resolving` and recording any other call."""
+
+    def __init__(self, resolving: DataMcpDefinitions) -> None:
+        self.resolving = resolving
+        self.other_calls: list[str] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(self, *, tool: ToolId, arguments: Any, on_progress: Any = None) -> Any:
+        if tool.name != "resolve_definition":
+            self.other_calls.append(tool.name)
+            raise AssertionError(f"{tool.name} called")
+        return await self.resolving.call_tool(
+            tool=tool, arguments=arguments, on_progress=on_progress
+        )
+
+
+@pytest.mark.parametrize("from_translator", [False, True], ids=["search", "translator-session"])
+async def test_an_amendment_re_pins_an_aid_requirement_to_the_measure_offered_beside_it(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement], from_translator: bool
+) -> None:
+    """ "Use net disbursements": the patch pins the sibling spec_id the plan
+    section names, the measure decision follows it with no decision of the
+    model's, and the pin is windowed to the requirement's years as the
+    elected one was. The translator reads the copy from Search's answer for
+    its identity, recorded from the block that offered it, with no search
+    by measure words."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+    )
+    identities = _turn_identities({_GROSS: _FRANCE_KENYA}, ())
+    if from_translator:
+        dataset = dataset.model_copy(update={"unit": Unit(currency="USD", prices="current")})
+        save_log(
+            ctx.state,
+            DiscoveryLog(sources={"aid": {_GROSS: source_from_spec_block(_FRANCE_KENYA)}}),
+        )
+        identities = {}
+    token = current_recorded_identity.set(identities.get)
+    try:
+        first = tools["propose_plan"].func(
+            question="q",
+            answer_mode=AnswerMode.SERIES,
+            decisions=drafts([decision()]),
+            evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS})],
+            tool_context=ctx,
+        )
+        assert first["outcome"] == Outcome.OK.value, first
+        second = tools["propose_plan"].func(
+            evidence_requirements=[dataset.model_copy(update={"source_spec_id": _NET})],
+            amends_version=first["version"],
+            tool_context=ctx,
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (copy,) = windowed_pins(ctx.state).values()
+    assert copy.windowed_from == _NET
+    (pinned,) = plan.evidence_requirements
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == copy.spec_id
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id]
+    assert (measure.slot, measure.chosen) == (
+        search_pin_slot(copy.spec_id),
+        "net disbursements",
+    )
+
+    answered = {
+        **_FRANCE_KENYA,
+        "spec_id": copy.spec_id,
+        "definition": {"schema_version": 1, "spec_id": copy.spec_id, "identity": copy.identity},
+    }
+    surface = _ResolveOnly(DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered]))
+    discover = {t.name: t for t in build_discovery_tools(surface=cast(ToolSurface, surface))}
+    result = await discover["discover_source"].func(requirement_id="aid", tool_context=ctx)
+
+    assert result["status"] == "definite", result
+    assert surface.other_calls == []
+    assert surface.resolving.calls == [{"spec_id": copy.spec_id, "identity": copy.identity}]
+    assert [record.tool for record in load_log(ctx.state).records] == ["pin"]
+
+
+def test_a_measure_decision_moved_to_a_copy_over_another_period_keeps_its_measures(
+    decision: DecisionFactory,
+) -> None:
+    measure = decision(
+        slot=search_pin_slot(_GROSS),
+        options=("gross disbursements", "net disbursements"),
+        chosen="gross disbursements",
+        fixes=DecisionFixes(source_spec_id=_GROSS),
+    )
+
+    (moved,), _ = _repinned(
+        [measure],
+        [],
+        decision_pins={measure.slot: SPEC},
+        requirement_pins={},
+        slots={measure.slot: search_pin_slot(SPEC)},
+    )
+
+    assert (moved.slot, moved.fixes) == (search_pin_slot(SPEC), DecisionFixes(source_spec_id=SPEC))
+    assert (moved.options, moved.chosen) == (measure.options, measure.chosen)
 
 
 def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_synthesized_decision(
@@ -3966,7 +4491,6 @@ def test_propose_plan_pins_a_recorded_identity_over_the_requirements_period(
             windowed_from=_GDP_ALL["spec_id"],
         )
     }
-    assert SEEDED_SOURCES_STATE_KEY not in ctx.state
 
 
 @pytest.mark.usefixtures("gdp_on_record")
@@ -4558,7 +5082,9 @@ def test_propose_plans_declaration_states_nothing_its_keys_and_required_do_not()
 
 def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() -> None:
     # Every requirement kind carries an id and `decision_ids`, and a dozen
-    # fields name a requirement or a decision. Each refers to one definition.
+    # fields name a requirement or a decision. Each refers to one definition,
+    # except a field with a description of its own, which holds a copy of
+    # `Identifier` because Gemini reads nothing beside a `$ref`.
     declaration = _tools_by_name()["propose_plan"]._get_declaration()
     assert declaration is not None
     schema = declaration.parameters_json_schema
@@ -4575,7 +5101,12 @@ def test_propose_plans_declaration_states_identifiers_and_decision_ids_once() ->
         if "decision_ids" in model.get("properties", {})
     ]
 
-    assert patterned == [defs["Identifier"]]
+    copies = [node for node in patterned if node is not defs["Identifier"]]
+    assert all(
+        node.get("description")
+        and {key: value for key, value in node.items() if key != "description"} == identifier
+        for node in copies
+    )
     assert defs["Identifier"] == identifier
     assert defs["DecisionIds"]["items"] == {"$ref": "#/$defs/Identifier"}
     assert len(decision_ids) == 10
@@ -4589,19 +5120,50 @@ def test_an_enum_the_field_describes_carries_no_description_of_its_own() -> None
     assert declaration is not None
     schema = declaration.parameters_json_schema
     assert schema is not None
-    defs = schema["$defs"]
+    enums = (StatVarReading, RankAmong, DenominatorScope)
+    assert {enum.__name__ for enum in enums} == FIELD_DESCRIBED_ENUMS
 
-    for name in FIELD_DESCRIBED_ENUMS:
-        using = [
-            field
-            for model in defs.values()
-            for field in model.get("properties", {}).values()
-            if field.get("$ref") == f"#/$defs/{name}"
-        ]
-        assert "description" not in defs[name]
-        assert using, name
+    for enum in enums:
+        own = TypeAdapter(enum).json_schema()
+        using = [node for node in _schema_nodes(schema) if node.get("enum") == own["enum"]]
+        assert using, enum.__name__
         for field in using:
-            assert all(f"'{value}'" in field["description"] for value in defs[name]["enum"])
+            assert field["description"] != own["description"]
+            assert all(f"'{value}'" in field["description"] for value in own["enum"])
+
+
+def test_compacting_copies_a_definition_wherever_a_reference_has_keys_beside_it() -> None:
+    # Gemini reads nothing beside a `$ref`, so the field's own keys go on a
+    # copy of the definition, and a definition nothing refers to is dropped.
+    mode = {"$ref": "#/$defs/Mode", "description": "The mode.", "default": "a"}
+    schema = {
+        "$defs": {
+            "Mode": {"enum": ["a", "b"], "type": "string", "description": "A mode."},
+            "Kept": {"type": "integer"},
+        },
+        "properties": {"mode": mode, "kept": {"$ref": "#/$defs/Kept"}},
+    }
+    looped = {
+        "$defs": {
+            "Node": {"properties": {"parent": {"$ref": "#/$defs/Node", "description": "Up."}}}
+        },
+        "properties": {"root": {"$ref": "#/$defs/Node"}},
+    }
+
+    assert compact_schema(schema) == {
+        "$defs": {"Kept": {"type": "integer"}},
+        "properties": {
+            "mode": {
+                "enum": ["a", "b"],
+                "type": "string",
+                "description": "The mode.",
+                "default": "a",
+            },
+            "kept": {"$ref": "#/$defs/Kept"},
+        },
+    }
+    with pytest.raises(ValueError, match="Node"):
+        compact_schema(looped)
 
 
 def test_compacting_refuses_requirement_kinds_that_declare_decision_ids_differently() -> None:
@@ -4816,10 +5378,17 @@ def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable
     ) in instruction
     # The options an ask offers are ones discovery found, never ones the model
     # writes into the message itself, on the instruction and on the tool alike.
-    grounded = "come only from the referral's `candidates`; with none, the ask says what cannot be done and asks what to change"
+    grounded = (
+        "come only from the referral's `candidates` or a refusal's `options`; with neither, "
+        "the ask says what cannot be done and asks what to change"
+    )
     assert grounded in instruction
-    ask = _tools_by_name()["adk_request_input"].description
-    assert "The options offered come from the referral's candidates" in ask
+    declaration = _tools_by_name()["adk_request_input"]._get_declaration()
+    assert declaration is not None
+    schema = declaration.parameters_json_schema
+    assert schema is not None
+    assert {"candidates", "options"} <= schema["properties"].keys()
+    assert {"candidates", "options"}.isdisjoint(schema.get("required", []))
 
 
 def test_across_states_a_party_nobody_named() -> None:
@@ -4836,7 +5405,14 @@ def test_across_states_a_party_nobody_named() -> None:
     assert "A world figure set beside a named entity names 'World'" in across
     # The party word alone: a qualified population is not one an open axis holds.
     assert "as the party word alone, such as 'donor', 'recipient' or 'country'" in across
-    assert "names its members in `entities` instead" in across
+    assert "is named itself in `entities` instead (see `members`)" in across
+    # A set named alone is its own figure; its members are asked for by
+    # `members`, with the set named once however many members it holds.
+    members = Entity.model_fields["members"].description or ""
+    assert "'African countries' is 'Africa' with `members` set" in members
+    assert "A set is named once, never listed member by member" in members
+    assert 'such as "Africa", is one entity with its own figure' in instruction
+    assert "set once with `members` set, however many members it has" in instruction
     assert (
         "A result's open axes (`open_entity_axes`) are the columns left open: `origin` is the "
         "giving party (an entity `role` of donor, creditor or exporter), `destination` the "
@@ -5778,21 +6354,22 @@ def _rolling_issue(result: dict[str, Any]) -> tuple[str, str | None, list[str]]:
     return detail["issue"], detail.get("fault"), detail["requirement_ids"]
 
 
+@pytest.mark.usefixtures("aid_on_record")
 def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_year(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
     """ "Since 2015": the plan keeps the years it read, and the pin moves to the
-    seed over a range from 2015 with no end year, stored and read back as that."""
+    recorded dataset over a range from 2015 with no end year, stored and read back
+    as that."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
-    dataset = requirement(source_spec_id=_SEED_SPEC, period_end_open=True)
+    dataset = requirement(source_spec_id=_AID_SPEC, period_end_open=True)
 
-    result = _propose_seeded(
+    result = _propose_pinned(
         tools,
         ctx,
-        pinning_decision(_SEED_SPEC),
+        pinning_decision(_AID_SPEC, resolved_by=ResolvedBy.PLANNER_DEFAULT),
         [
             dataset.model_dump(mode="json"),
             _growth_as_written(dataset, start=2015, rolling=_ROLLS_AT_ITS_END),
@@ -5801,7 +6378,7 @@ def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_ye
 
     assert result["outcome"] == Outcome.OK.value, result
     window = {"kind": "range", "start_year": 2015}
-    opened, identity = windowed_identity(_SEED_IDENTITY, window)
+    opened, identity = windowed_identity(_AID_IDENTITY, window)
     plan = load_plan(ctx.state)
     assert plan is not None
     pinned, growth = plan.evidence_requirements
@@ -5809,11 +6386,9 @@ def test_a_period_rolling_at_its_end_is_pinned_from_its_own_start_with_no_end_ye
     assert (pinned.source_spec_id, pinned.period) == (opened, Period(start=2015, end=2024))
     assert isinstance(growth, GrowthRequirement)
     assert growth.rolling == RollingWindow(window_end=RelativePeriod(offset=0))
-    assert json.loads(ctx.state[SEEDED_SOURCES_STATE_KEY])["copies"] == [
-        {"windowed_from": _SEED_SPEC, "window": window}
-    ]
-    (_, copy) = seeded_sources(ctx.state)
-    assert (copy.source.spec_id, copy.source.identity) == (opened, identity)
+    assert windowed_pins(ctx.state) == {
+        opened: WindowedPin(spec_id=opened, identity=identity, windowed_from=_AID_SPEC)
+    }
 
 
 @pytest.mark.usefixtures("gdp_on_record")
@@ -5906,9 +6481,10 @@ def test_a_start_that_follows_the_newest_data_is_refused_without_a_whole_history
     [
         # Unpinned, the dataset is searched for, and no search states its first year.
         (True, None, _ROLLS_AT_BOTH_ENDS, "no_source_on_record"),
-        (False, _SEED_SPEC, _ROLLS_AT_ITS_END, "dataset_closed"),
+        (False, _AID_SPEC, _ROLLS_AT_ITS_END, "dataset_closed"),
     ],
 )
+@pytest.mark.usefixtures("aid_on_record")
 def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_open(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
@@ -5919,7 +6495,6 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
 ) -> None:
     tools = _tools_by_name()
     ctx = _FakeToolContext()
-    save_seeded_sources(ctx.state, [_seeded()])
     dataset = requirement(
         decision_ids=["measure"] if pin else [], source_spec_id=pin, period_end_open=end_open
     )
@@ -5927,7 +6502,9 @@ def test_a_rolling_period_is_refused_over_a_dataset_that_cannot_be_retrieved_ope
     result = tools["propose_plan"].func(
         question="q",
         answer_mode=AnswerMode.COMPUTED,
-        decisions=drafts([pinning_decision(pin)]) if pin else [],
+        decisions=(
+            drafts([pinning_decision(pin, resolved_by=ResolvedBy.PLANNER_DEFAULT)]) if pin else []
+        ),
         evidence_requirements=[
             dataset,
             _growth_as_written(dataset, start=2019, rolling=rolling),
@@ -5983,8 +6560,8 @@ def test_one_decision_cannot_fix_an_open_pin_and_another_period(
     for ctx in (alone, both):
         _show(ctx, pin)
 
-    recorded = _propose_seeded(tools, alone, chosen, [opened])
-    result = _propose_seeded(tools, both, chosen, [opened, earlier])
+    recorded = _propose_pinned(tools, alone, chosen, [opened])
+    result = _propose_pinned(tools, both, chosen, [opened, earlier])
 
     assert recorded["outcome"] == Outcome.OK.value, recorded
     assert result["code"] == ProblemCode.INVALID_PLAN.value, result
@@ -5993,16 +6570,11 @@ def test_one_decision_cannot_fix_an_open_pin_and_another_period(
 
 # --- reading a pinned dataset's first year, for a start that follows the newest data ---
 
-# The seed's dataset as Search found it for "the last five years": a closed range.
-_SEED_2020_2024 = {
-    **_SEED_IDENTITY,
-    "requested_window": {"kind": "range", "start_year": 2020, "end_year": 2024},
-}
-_SEED_EVERY_YEAR_ID, _SEED_EVERY_YEAR = windowed_identity(_SEED_2020_2024, {"kind": "all"})
+_AID_EVERY_YEAR_ID, _AID_EVERY_YEAR = windowed_identity(_AID_2020_2024, {"kind": "all"})
 
 
 class _DefinitionReads:
-    """A tool surface whose `resolve_definition` answers the seed over no window, held from 1995."""
+    """A tool surface whose `resolve_definition` answers `_AID_2020_2024` over no window, held from 1995."""
 
     def __init__(self) -> None:
         self.calls: list[Mapping[str, object]] = []
@@ -6017,8 +6589,8 @@ class _DefinitionReads:
         assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
         block = {
-            "spec_id": _SEED_EVERY_YEAR_ID,
-            "definition": {"identity": _SEED_EVERY_YEAR},
+            "spec_id": _AID_EVERY_YEAR_ID,
+            "definition": {"identity": _AID_EVERY_YEAR},
             "resolved": {"download": {"rows": 870, "window": {"start_year": 1995}}},
         }
         part = {"status": "definite", "spec": block}
@@ -6029,26 +6601,28 @@ def _tools_reading(surface: ToolSurface) -> dict[str, FunctionTool]:
     return {tool.name: tool for tool in build_planner_tools(surface=surface)}
 
 
+@pytest.mark.usefixtures("aid_on_record")
 async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
 ) -> None:
-    """The first proposal reads the seed over no window once; an amendment of
-    the turn that still rolls from its start is pinned from the year held."""
+    """The first proposal reads the recorded dataset over no window once; an
+    amendment of the turn that still rolls from its start is pinned from the year
+    held."""
     reads = _DefinitionReads()
     propose = _tools_reading(reads)["propose_plan"].func
     ctx = _FakeToolContext()
-    seed = _seeded(_SEED_2020_2024)
-    save_seeded_sources(ctx.state, [seed])
     dataset = requirement(
-        source_spec_id=seed.source.spec_id,
+        source_spec_id=_AID_2020_2024_SPEC,
         period=Period(start=2020, end=2024),
         period_end_open=True,
     )
     arguments: dict[str, Any] = {
         "question": "q",
         "answer_mode": AnswerMode.SERIES,
-        "decisions": drafts([pinning_decision(seed.source.spec_id)]),
+        "decisions": drafts(
+            [pinning_decision(_AID_2020_2024_SPEC, resolved_by=ResolvedBy.PLANNER_DEFAULT)]
+        ),
     }
 
     first = await propose(
@@ -6070,8 +6644,8 @@ async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     )
 
     assert first["outcome"] == second["outcome"] == Outcome.OK.value, (first, second)
-    assert reads.calls == [{"spec_id": _SEED_EVERY_YEAR_ID, "identity": _SEED_EVERY_YEAR}]
-    opened, _ = windowed_identity(_SEED_2020_2024, {"kind": "range", "start_year": 1995})
+    assert reads.calls == [{"spec_id": _AID_EVERY_YEAR_ID, "identity": _AID_EVERY_YEAR}]
+    opened, _ = windowed_identity(_AID_2020_2024, {"kind": "range", "start_year": 1995})
     plan = load_plan(ctx.state)
     assert plan is not None
     assert plan.evidence_requirements[0].source_spec_id == opened  # type: ignore[union-attr]
@@ -6093,10 +6667,163 @@ def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None
     block = json.loads(fixture.read_text())["spec"]
     spec_id = block["spec_id"]
 
-    _, recorded, identity = _identity_on_record(
-        spec_id, {}, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
+    recorded = _identity_on_record(
+        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
     )
 
-    assert identity == block["definition"]["identity"]
     assert recorded is not None
+    assert recorded.identity == block["definition"]["identity"]
     assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]
+
+
+def test_amendment_keeps_measure_choice_from_the_compiled_family(
+    decision: DecisionFactory, requirements: RequirementPair
+):
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    translated = _translate(ctx)
+    source = source_from_spec_block(_FRANCE_KENYA)
+    facets = {"unit": {"ref": "US_Dollar"}}
+    identity = {**source.identity, "facets": facets}
+    reminted = spec_id_for(canonicalize(identity))
+    sibling_identity = {**source.elected_measure.alternatives[0].identity, "facets": facets}
+    sibling = spec_id_for(canonicalize(sibling_identity))
+    election = source.elected_measure.model_copy(
+        update={
+            "alternatives": (
+                source.elected_measure.alternatives[0].model_copy(
+                    update={"spec_id": sibling, "identity": sibling_identity}
+                ),
+            )
+        }
+    )
+    source = source.model_copy(
+        update={"spec_id": reminted, "identity": identity, "elected_measure": election}
+    )
+    workflow = translated.workflow.model_copy(
+        update={
+            "sources": (source,),
+            "evidence_bindings": tuple(
+                b.model_copy(update={"spec_id": reminted})
+                for b in translated.workflow.evidence_bindings
+            ),
+            "steps": tuple(
+                step.model_copy(update={"args": {"spec_id": reminted}})
+                if step.tool.name == "get_data"
+                else step
+                for step in translated.workflow.steps
+            ),
+        }
+    )
+    translation = translated.translation.model_copy(
+        update={
+            "operations": tuple(
+                op.model_copy(update={"spec_id": reminted})
+                if isinstance(op, RetrieveOperation)
+                else op
+                for op in translated.translation.operations
+            )
+        }
+    )
+    compiled = translated.model_copy(update={"workflow": workflow, "translation": translation})
+    save_plan(ctx.state, Plan.model_validate(compiled.model_dump(mode="json")))
+    save_log(ctx.state, DiscoveryLog(sources={dataset.id: {reminted: source}}))
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": sibling}), derived],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    pinned = plan.requirement(dataset.id).source_spec_id
+    assert pinned != sibling
+    assert windowed_pins(ctx.state)[pinned].windowed_from == sibling
+    measure = next(d for d in plan.decisions if d.fixes and d.fixes.source_spec_id == pinned)
+    assert measure.options == ("gross disbursements", "net disbursements")
+    assert measure.chosen == "net disbursements"
+    assert measure.resolved_by == ResolvedBy.PLANNER_DEFAULT
+    assert search_pin_slot(pinned) in plan.requirement(dataset.id).decision_ids
+
+
+def test_prior_translator_provider_sources_remain_summable(decision, pinning_decision, requirement):
+
+    ctx = _FakeToolContext()
+    plan = _sum_of_two_sources(
+        ctx,
+        datasets=(CRS, DAC2A),
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        decision=decision,
+        pinning_decision=pinning_decision,
+        requirement=requirement,
+    )
+    readings = [
+        {
+            "status": "definite",
+            "spec_id": SPEC_GHANA_AID,
+            "provenance_ref": CRS,
+            "provenance_account": PROVIDER_ACCOUNT,
+        },
+        {
+            "status": "definite",
+            "spec_id": SPEC_GHANA_DEBT,
+            "provenance_ref": DAC2A,
+            "provenance_account": PROVIDER_ACCOUNT,
+        },
+    ]
+    save_pin_sources(
+        ctx.state,
+        _reading_pin_sources(
+            readings,
+            [r["spec_id"] for r in readings],
+            blocks={},
+            earlier={r["spec_id"] for r in readings},
+            warnings={},
+        ),
+    )
+    assert _combination_unasked(plan, ctx, previous=None) is None
+
+
+@pytest.mark.parametrize("target", ["annual_debt_service", "another_dataset"])
+def test_chosen_source_reference_is_bound_to_its_requirement(decision, requirements, target):
+    dataset, derived = requirements
+    plan = Plan(
+        question="question", decisions=[decision()], evidence_requirements=[dataset, derived]
+    )
+    ctx = _FakeToolContext()
+    save_referral(ctx.state, _referral_of(ReferralKind.SOURCE_NAME_AMBIGUOUS, dataset.id))
+    ctx.session.events.extend(
+        [
+            _referred_event(ReferralKind.SOURCE_NAME_AMBIGUOUS, dataset.id),
+            _ask_event([{"spec_id": "provenance/a", "label": "A"}]),
+            _answer_event("provenance/a"),
+        ]
+    )
+    modified = dataset.model_copy(
+        update={"id": target, "source": "shared", "source_ref": "provenance/a"}
+    )
+    changed = plan.model_copy(update={"evidence_requirements": (modified,)})
+    assert (_source_ref_unpicked(changed, ctx, None) is None) == (target == dataset.id)
+    changed_wording = changed.model_copy(
+        update={"evidence_requirements": (modified.model_copy(update={"source": "unrelated"}),)}
+    )
+    assert _source_ref_unpicked(changed_wording, ctx, None) is not None
+    ctx.state.pop("translator:referral")
+    assert _source_ref_unpicked(changed, ctx, None) is not None
+
+
+@pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])
+def test_source_modifiers_without_wording_are_refused(requirement, modifier):
+    with pytest.raises(ValidationError, match="require source wording"):
+        requirement(**modifier)

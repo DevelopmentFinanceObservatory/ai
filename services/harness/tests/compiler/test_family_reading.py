@@ -610,7 +610,7 @@ def test_chart_germany_s_bilateral_oda_sums_the_family_then_totals_each_year(
         sources={"oda": source},
     )
 
-    assert _step_args(result, "oda_op") == _retrieval(source, "sum")
+    assert _step_args(result, "oda_op") == _retrieval(source, "sum") | {"place_types": True}
     assert _step_args(result, "yearly_total")["group_by"] == ["time_period"]
     assert result.workflow is not None
     (selected,) = result.workflow.sources
@@ -674,7 +674,7 @@ def test_total_education_grants_from_france_sum_the_family_then_total_each_year(
         sources={"grants": source},
     )
 
-    assert _step_args(result, "grants_op") == _retrieval(source, "sum")
+    assert _step_args(result, "grants_op") == _retrieval(source, "sum") | {"place_types": True}
     assert _step_args(result, "yearly_total") == {
         "aggregation": "sum",
         "group_by": ["time_period"],
@@ -705,7 +705,7 @@ def test_a_family_confirming_one_member_asks_for_its_sum_and_feeds_a_single_meas
         sources={"grants": source},
     )
 
-    assert _step_args(result, "grants_op") == _retrieval(source, "sum")
+    assert _step_args(result, "grants_op") == _retrieval(source, "sum") | {"place_types": True}
     assert result.issues == ()
 
 
@@ -811,7 +811,7 @@ def test_a_flow_search_serves_one_member_of_feeds_a_single_measure_verb(
 
     assert not is_family(source)
     assert result.issues == ()
-    assert _step_args(result, "oda_op") == _retrieval(source)
+    assert _step_args(result, "oda_op") == _retrieval(source) | {"place_types": True}
 
 
 @pytest.mark.parametrize("confirmed", [1, None], ids=["one-confirmed", "no-count"])
@@ -1122,7 +1122,8 @@ def test_a_breakdown_by_sector_retrieves_sector_totals_and_ranks_them_by_their_c
     result = _compile_top_sectors(compile_question, source)
 
     assert _step_args(result, "oda_op") == _retrieval(source, "separate") | {
-        "breakdown": {"code_system": "crsPurpose", "level": 0}
+        "breakdown": {"code_system": "crsPurpose", "level": 0},
+        "place_types": True,
     }
     assert _step_args(result, "by_sector_op")["group_by"] == ["time_period", "stat_var_crsPurpose"]
     assert _step_args(result, "top_op")["rank_by"] == ["stat_var_crsPurpose"]

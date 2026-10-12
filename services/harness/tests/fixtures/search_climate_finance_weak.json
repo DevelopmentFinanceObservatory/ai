@@ -1,0 +1,1399 @@
+{
+  "schema_version": 1,
+  "kind": "resolution",
+  "status": "candidates",
+  "parts": [
+    {
+      "variable_text": "climate finance",
+      "warnings": [
+        {
+          "code": "retrieval_score_weak",
+          "severity": "info",
+          "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+        },
+        {
+          "code": "place_scope_defaulted",
+          "severity": "warn",
+          "message": "no place was named; the answer was resolved as a worldwide total."
+        },
+        {
+          "code": "time_window_defaulted",
+          "severity": "warn",
+          "message": "no time_text was given; the answer was resolved across every period with data."
+        }
+      ],
+      "rendered_sentence": "3 readings. Climate-specific financial support provided via bilateral, regional and other channels worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars. Total climate-specific financial support provided worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars. Climate-specific financial support provided via multilateral channels worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars.",
+      "sentence_plan": [
+        {
+          "kind": "text",
+          "text": "3 readings.",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "Climate-specific financial support provided via bilateral, regional and other channels",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "worldwide",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "SDG Global Database",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "2011 to 2022",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "US dollars",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "Total climate-specific financial support provided",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "worldwide",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "SDG Global Database",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "2011 to 2022",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "US dollars",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "Climate-specific financial support provided via multilateral channels",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "worldwide",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "SDG Global Database",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "2011 to 2022",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "US dollars",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "segment": "byline",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "restatement": {
+        "variable_text": "climate finance",
+        "operations": []
+      },
+      "operations": [],
+      "departures": [],
+      "status": "candidates",
+      "candidates": {
+        "ordering": "broadest_first",
+        "max_candidates": 6,
+        "specs": [
+          {
+            "spec_id": "spec_48ee08ad2e2b9143a0acb8bd6091e6b1",
+            "definition": {
+              "schema_version": 1,
+              "spec_id": "spec_48ee08ad2e2b9143a0acb8bd6091e6b1",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "undata/sdg/SERIES-DC_FIN_CLIMB",
+                  "measured_property": "value",
+                  "stat_type": "measuredValue"
+                },
+                "slots": [],
+                "entities": {},
+                "requested_window": {
+                  "kind": "all"
+                }
+              }
+            },
+            "resolved": {
+              "shape": {
+                "shape_id": "undata/sdg/series-dc_fin_climb_value_measuredvalue",
+                "label": "Climate-specific financial support provided via bilateral, regional and other channels",
+                "population_type": {
+                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMB",
+                  "label": "Climate-specific financial support provided via bilateral, regional and other channels"
+                },
+                "measured_property": {
+                  "dcid": "value",
+                  "label": "value"
+                },
+                "stat_type": {
+                  "dcid": "measuredValue",
+                  "label": "measuredValue"
+                },
+                "measurement_denominator_unresolved": false,
+                "slot_keys": [
+                  {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  {
+                    "axis": "source",
+                    "label": "data source"
+                  }
+                ],
+                "member_count": 1,
+                "member_digest": "b75a3ac9d0d637dc29b15e437abd586c2ed861bd4dd31ad366abb0171dabf812",
+                "refine_supported": true,
+                "data_commons": [
+                  {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                ],
+                "upstream": {
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                }
+              },
+              "slots": [
+                {
+                  "key": {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "source",
+                    "label": "data source"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                }
+              ],
+              "inapplicable_slots": [],
+              "unresolved_slots": [],
+              "stat_vars": {
+                "member_count": 1,
+                "member_count_exact": false,
+                "served_count": 1,
+                "data_date_range": {
+                  "start": "2011",
+                  "end": "2022"
+                }
+              },
+              "entities": [],
+              "coverage": {
+                "kind": "exact",
+                "has_data": true,
+                "observation_count": 12,
+                "evidence": "facet_metadata",
+                "dimensions": [
+                  {
+                    "label": "worldwide",
+                    "count": 1
+                  },
+                  {
+                    "label": "observations",
+                    "count": 12
+                  },
+                  {
+                    "label": "variables",
+                    "count": 1
+                  }
+                ]
+              },
+              "download": {
+                "rows": 12,
+                "rows_exact": true,
+                "series": 1,
+                "window": {
+                  "start_year": 2011,
+                  "end_year": 2022
+                }
+              },
+              "scope": {
+                "axis": "observationAbout",
+                "members": [
+                  {
+                    "ref": "Earth",
+                    "label": "World",
+                    "entity_type": "Place",
+                    "role": "observationAbout"
+                  }
+                ]
+              },
+              "facets": {
+                "provenance": {
+                  "basis": "fallback",
+                  "ref": "undata/p/SDG",
+                  "label": "SDG Global Database",
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                },
+                "unit": {
+                  "basis": "fallback",
+                  "ref": "undata/UNIT_MEASURE-CR_USD",
+                  "label": "United States dollars"
+                }
+              },
+              "slot_options": [],
+              "entity_options": [],
+              "facet_options": [
+                {
+                  "axis": "provenance",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/p/SDG",
+                          "label": "SDG Global Database"
+                        },
+                        "value_kind": "source"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                },
+                {
+                  "axis": "unit",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "label": "United States dollars"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                }
+              ],
+              "rendered_sentence": "Climate-specific financial support provided via bilateral, regional and other channels worldwide, 2011 to 2022. US dollars \u00b7 SDG Global Database.",
+              "sentence_plan": [
+                {
+                  "kind": "slot",
+                  "text": "Climate-specific financial support provided via bilateral, regional and other channels",
+                  "axis": "what",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": [],
+                  "distinguishes": true
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "worldwide",
+                  "axis": "where",
+                  "segment": "heading",
+                  "binding_ref": "where:",
+                  "entity_refs": [],
+                  "states": [
+                    "where:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ", ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "2011 to 2022",
+                  "axis": "when",
+                  "segment": "heading",
+                  "binding_ref": "when:",
+                  "entity_refs": [],
+                  "states": [
+                    "when:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "US dollars",
+                  "axis": "unit",
+                  "segment": "byline",
+                  "binding_ref": "unit:",
+                  "entity_refs": [],
+                  "states": [
+                    "unit:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": " \u00b7 ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "SDG Global Database",
+                  "axis": "source",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": [
+                    "source:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                }
+              ],
+              "trace": {
+                "resolved_entities": [],
+                "resolved_sources": [
+                  {
+                    "dcid": "undata/p/SDG",
+                    "label": "SDG Global Database",
+                    "source": {
+                      "ref": "undata/p/SDG",
+                      "label": "SDG Global Database"
+                    },
+                    "data_commons": {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    }
+                  }
+                ],
+                "slot_filters": [
+                  {
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  }
+                ],
+                "query_qualifiers": [],
+                "capability_version": "cap_daf889452657d56d",
+                "default_reading": {
+                  "applied": true,
+                  "removed_stat_vars": []
+                }
+              },
+              "confidence": "medium",
+              "measure_label_axes": [],
+              "measure_axis_values": []
+            }
+          },
+          {
+            "spec_id": "spec_8380f22015251b410d800a2774893073",
+            "definition": {
+              "schema_version": 1,
+              "spec_id": "spec_8380f22015251b410d800a2774893073",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "undata/sdg/SERIES-DC_FIN_CLIMT",
+                  "measured_property": "value",
+                  "stat_type": "measuredValue"
+                },
+                "slots": [],
+                "entities": {},
+                "requested_window": {
+                  "kind": "all"
+                }
+              }
+            },
+            "resolved": {
+              "shape": {
+                "shape_id": "undata/sdg/series-dc_fin_climt_value_measuredvalue",
+                "label": "Total climate-specific financial support provided",
+                "population_type": {
+                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMT",
+                  "label": "Total climate-specific financial support provided"
+                },
+                "measured_property": {
+                  "dcid": "value",
+                  "label": "value"
+                },
+                "stat_type": {
+                  "dcid": "measuredValue",
+                  "label": "measuredValue"
+                },
+                "measurement_denominator_unresolved": false,
+                "slot_keys": [
+                  {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  {
+                    "axis": "source",
+                    "label": "data source"
+                  }
+                ],
+                "member_count": 1,
+                "member_digest": "4b2a36be78ecb92fb2dc6dfd644fd1dc0044ed002c613031ca0f60f4d0701047",
+                "refine_supported": true,
+                "data_commons": [
+                  {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                ],
+                "upstream": {
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                }
+              },
+              "slots": [
+                {
+                  "key": {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "source",
+                    "label": "data source"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                }
+              ],
+              "inapplicable_slots": [],
+              "unresolved_slots": [],
+              "stat_vars": {
+                "member_count": 1,
+                "member_count_exact": false,
+                "served_count": 1,
+                "data_date_range": {
+                  "start": "2011",
+                  "end": "2022"
+                }
+              },
+              "entities": [],
+              "coverage": {
+                "kind": "exact",
+                "has_data": true,
+                "observation_count": 12,
+                "evidence": "facet_metadata",
+                "dimensions": [
+                  {
+                    "label": "worldwide",
+                    "count": 1
+                  },
+                  {
+                    "label": "observations",
+                    "count": 12
+                  },
+                  {
+                    "label": "variables",
+                    "count": 1
+                  }
+                ]
+              },
+              "download": {
+                "rows": 12,
+                "rows_exact": true,
+                "series": 1,
+                "window": {
+                  "start_year": 2011,
+                  "end_year": 2022
+                }
+              },
+              "scope": {
+                "axis": "observationAbout",
+                "members": [
+                  {
+                    "ref": "Earth",
+                    "label": "World",
+                    "entity_type": "Place",
+                    "role": "observationAbout"
+                  }
+                ]
+              },
+              "facets": {
+                "provenance": {
+                  "basis": "fallback",
+                  "ref": "undata/p/SDG",
+                  "label": "SDG Global Database",
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                },
+                "unit": {
+                  "basis": "fallback",
+                  "ref": "undata/UNIT_MEASURE-CR_USD",
+                  "label": "United States dollars"
+                }
+              },
+              "slot_options": [],
+              "entity_options": [],
+              "facet_options": [
+                {
+                  "axis": "provenance",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/p/SDG",
+                          "label": "SDG Global Database"
+                        },
+                        "value_kind": "source"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                },
+                {
+                  "axis": "unit",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "label": "United States dollars"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                }
+              ],
+              "rendered_sentence": "Total climate-specific financial support provided worldwide, 2011 to 2022. US dollars \u00b7 SDG Global Database.",
+              "sentence_plan": [
+                {
+                  "kind": "slot",
+                  "text": "Total climate-specific financial support provided",
+                  "axis": "what",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": [],
+                  "distinguishes": true
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "worldwide",
+                  "axis": "where",
+                  "segment": "heading",
+                  "binding_ref": "where:",
+                  "entity_refs": [],
+                  "states": [
+                    "where:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ", ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "2011 to 2022",
+                  "axis": "when",
+                  "segment": "heading",
+                  "binding_ref": "when:",
+                  "entity_refs": [],
+                  "states": [
+                    "when:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "US dollars",
+                  "axis": "unit",
+                  "segment": "byline",
+                  "binding_ref": "unit:",
+                  "entity_refs": [],
+                  "states": [
+                    "unit:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": " \u00b7 ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "SDG Global Database",
+                  "axis": "source",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": [
+                    "source:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                }
+              ],
+              "trace": {
+                "resolved_entities": [],
+                "resolved_sources": [
+                  {
+                    "dcid": "undata/p/SDG",
+                    "label": "SDG Global Database",
+                    "source": {
+                      "ref": "undata/p/SDG",
+                      "label": "SDG Global Database"
+                    },
+                    "data_commons": {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    }
+                  }
+                ],
+                "slot_filters": [
+                  {
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  }
+                ],
+                "query_qualifiers": [],
+                "capability_version": "cap_daf889452657d56d",
+                "default_reading": {
+                  "applied": true,
+                  "removed_stat_vars": []
+                }
+              },
+              "confidence": "medium",
+              "measure_label_axes": [],
+              "measure_axis_values": []
+            }
+          },
+          {
+            "spec_id": "spec_b72484ee7111d83921fd4dd7809af89e",
+            "definition": {
+              "schema_version": 1,
+              "spec_id": "spec_b72484ee7111d83921fd4dd7809af89e",
+              "identity": {
+                "identity_version": "spec1",
+                "shape": {
+                  "kind": "statvar_schema",
+                  "population_type": "undata/sdg/SERIES-DC_FIN_CLIMM",
+                  "measured_property": "value",
+                  "stat_type": "measuredValue"
+                },
+                "slots": [],
+                "entities": {},
+                "requested_window": {
+                  "kind": "all"
+                }
+              }
+            },
+            "resolved": {
+              "shape": {
+                "shape_id": "undata/sdg/series-dc_fin_climm_value_measuredvalue",
+                "label": "Climate-specific financial support provided via multilateral channels",
+                "population_type": {
+                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMM",
+                  "label": "Climate-specific financial support provided via multilateral channels"
+                },
+                "measured_property": {
+                  "dcid": "value",
+                  "label": "value"
+                },
+                "stat_type": {
+                  "dcid": "measuredValue",
+                  "label": "measuredValue"
+                },
+                "measurement_denominator_unresolved": false,
+                "slot_keys": [
+                  {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  {
+                    "axis": "source",
+                    "label": "data source"
+                  }
+                ],
+                "member_count": 1,
+                "member_digest": "b14a9ad928e4cc689f926a102c5efad0c0770a99ab49eae4bc91bbeda94312a6",
+                "refine_supported": true,
+                "data_commons": [
+                  {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                ],
+                "upstream": {
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                }
+              },
+              "slots": [
+                {
+                  "key": {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                },
+                {
+                  "key": {
+                    "axis": "source",
+                    "label": "data source"
+                  },
+                  "binding": {
+                    "kind": "unbound"
+                  },
+                  "summable": false
+                }
+              ],
+              "inapplicable_slots": [],
+              "unresolved_slots": [],
+              "stat_vars": {
+                "member_count": 1,
+                "member_count_exact": false,
+                "served_count": 1,
+                "data_date_range": {
+                  "start": "2011",
+                  "end": "2022"
+                }
+              },
+              "entities": [],
+              "coverage": {
+                "kind": "exact",
+                "has_data": true,
+                "observation_count": 12,
+                "evidence": "facet_metadata",
+                "dimensions": [
+                  {
+                    "label": "worldwide",
+                    "count": 1
+                  },
+                  {
+                    "label": "observations",
+                    "count": 12
+                  },
+                  {
+                    "label": "variables",
+                    "count": 1
+                  }
+                ]
+              },
+              "download": {
+                "rows": 12,
+                "rows_exact": true,
+                "series": 1,
+                "window": {
+                  "start_year": 2011,
+                  "end_year": 2022
+                }
+              },
+              "scope": {
+                "axis": "observationAbout",
+                "members": [
+                  {
+                    "ref": "Earth",
+                    "label": "World",
+                    "entity_type": "Place",
+                    "role": "observationAbout"
+                  }
+                ]
+              },
+              "facets": {
+                "provenance": {
+                  "basis": "fallback",
+                  "ref": "undata/p/SDG",
+                  "label": "SDG Global Database",
+                  "source": {
+                    "ref": "undata/p/SDG",
+                    "label": "SDG Global Database"
+                  },
+                  "data_commons": {
+                    "id": "un_system",
+                    "label": "UN System Data Commons"
+                  }
+                },
+                "unit": {
+                  "basis": "fallback",
+                  "ref": "undata/UNIT_MEASURE-CR_USD",
+                  "label": "United States dollars"
+                }
+              },
+              "slot_options": [],
+              "entity_options": [],
+              "facet_options": [
+                {
+                  "axis": "provenance",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/p/SDG",
+                          "label": "SDG Global Database"
+                        },
+                        "value_kind": "source"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                },
+                {
+                  "axis": "unit",
+                  "options": [
+                    {
+                      "value": {
+                        "ref": {
+                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "label": "United States dollars"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    }
+                  ],
+                  "truncated": false,
+                  "source": "observed"
+                }
+              ],
+              "rendered_sentence": "Climate-specific financial support provided via multilateral channels worldwide, 2011 to 2022. US dollars \u00b7 SDG Global Database.",
+              "sentence_plan": [
+                {
+                  "kind": "slot",
+                  "text": "Climate-specific financial support provided via multilateral channels",
+                  "axis": "what",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": [],
+                  "distinguishes": true
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "worldwide",
+                  "axis": "where",
+                  "segment": "heading",
+                  "binding_ref": "where:",
+                  "entity_refs": [],
+                  "states": [
+                    "where:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ", ",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "2011 to 2022",
+                  "axis": "when",
+                  "segment": "heading",
+                  "binding_ref": "when:",
+                  "entity_refs": [],
+                  "states": [
+                    "when:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "heading",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "text",
+                  "text": " ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "US dollars",
+                  "axis": "unit",
+                  "segment": "byline",
+                  "binding_ref": "unit:",
+                  "entity_refs": [],
+                  "states": [
+                    "unit:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": " \u00b7 ",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                },
+                {
+                  "kind": "slot",
+                  "text": "SDG Global Database",
+                  "axis": "source",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": [
+                    "source:"
+                  ]
+                },
+                {
+                  "kind": "text",
+                  "text": ".",
+                  "segment": "byline",
+                  "entity_refs": [],
+                  "states": []
+                }
+              ],
+              "trace": {
+                "resolved_entities": [],
+                "resolved_sources": [
+                  {
+                    "dcid": "undata/p/SDG",
+                    "label": "SDG Global Database",
+                    "source": {
+                      "ref": "undata/p/SDG",
+                      "label": "SDG Global Database"
+                    },
+                    "data_commons": {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    }
+                  }
+                ],
+                "slot_filters": [
+                  {
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  },
+                  {
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "binding_kind": "unbound",
+                    "refs": [],
+                    "provenance": "binder"
+                  }
+                ],
+                "query_qualifiers": [],
+                "capability_version": "cap_daf889452657d56d",
+                "default_reading": {
+                  "applied": true,
+                  "removed_stat_vars": []
+                }
+              },
+              "confidence": "medium",
+              "measure_label_axes": [],
+              "measure_axis_values": []
+            }
+          }
+        ],
+        "truncated": false
+      }
+    }
+  ],
+  "rendered_sentence": "3 readings. Climate-specific financial support provided via bilateral, regional and other channels worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars. Total climate-specific financial support provided worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars. Climate-specific financial support provided via multilateral channels worldwide. SDG Global Database \u00b7 2011 to 2022 \u00b7 US dollars."
+}

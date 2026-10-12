@@ -21,6 +21,7 @@ graph, outside this package.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -35,23 +36,31 @@ from compiler.surface import (
     ToolSchema,
     ToolSurfaceUnavailableError,
 )
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
     Coverage,
     DatasetRequirement,
+    DecisionFixes,
+    Entity,
     Period,
+    PinSource,
     Plan,
     PlanStatus,
-    SeededSource,
     Unit,
     UnsupportedOperation,
+    WindowedPin,
+    current_discovery_time_left,
     load_optional_declines,
     load_unsupported,
+    period_window,
     plan_revision,
-    save_dropped_seeds,
+    save_pin_sources,
+    save_windowed_pins,
 )
+from planner.records import AmbiguousSourceReading, GroupBy, SourceNameCandidate
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
 from translator.discovery import DiscoveryRecord, load_log, requirement_revision, save_log
@@ -66,6 +75,8 @@ from translator.tool import (
     issue_resolution,
     permitted_repair,
 )
+
+from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -248,26 +259,6 @@ async def test_propose_operations_compiles_and_moves_the_plan_to_pending_approva
     assert stored.workflow is not None
     assert stored.workflow.sources[0].searched_as == "external debt service paid"
     assert stored.workflow.steps[1].bindings["frame_ref"].from_step == "debt"
-
-
-async def test_propose_operations_compiles_no_source_the_turn_has_since_dropped(
-    real_schemas: list[ToolSchema],
-    draft: DraftFactory,
-    source: SourceFactory,
-    context_holding: ContextHolding,
-) -> None:
-    """The log's record predates the drop, so it carries no block of its own."""
-    context = context_holding(draft())
-    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
-    save_dropped_seeds(context.state, [SeededSource(source=source())])
-
-    result = await _core(real_schemas).propose_operations(
-        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
-    )
-
-    assert result["outcome"] != "ok", result
-    assert _stored(context).status == PlanStatus.DRAFT
-    assert _stored(context).workflow is None
 
 
 async def test_a_definite_sources_describe_definition_reaches_the_workflow(
@@ -1026,3 +1017,224 @@ def test_a_structural_issue_closes_as_an_internal_failure_before_a_repair() -> N
     action = _compile_failure_action(issues, requirement_of={})
 
     assert action.arguments == {"kind": "internal_failure", "reason": "cycle: loop"}
+
+
+# The France to Africa turn: the pin is France's aid to Africa, its recipients
+# closed to the group, and the requirement asks for every recipient.
+SPEC_AFRICA = "spec_fb3cc27e" + "0" * 24
+_AFRICA_BLOCK = _spec(
+    SPEC_AFRICA,
+    "France's gross disbursements to the 59 countries and territories in Africa",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "France", "ref": "country/FRA"},
+        {"role": "destination", "label": "Ghana", "ref": "country/GHA"},
+        {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+    ],
+    entity_groups={"destination": {"label": "Africa", "dcid": "africa"}},
+)
+
+
+_GROUP_CLOSED = {"destination": {"label": "Africa", "dcid": "africa"}}
+
+
+@pytest.mark.parametrize(
+    ("entity_groups", "group_by", "fixes_across", "named"),
+    [
+        (_GROUP_CLOSED, (GroupBy.PERIOD,), False, True),
+        ({}, (GroupBy.PERIOD,), False, False),
+        (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False, False),
+        (_GROUP_CLOSED, (GroupBy.PERIOD,), True, False),
+    ],
+    ids=["group-closed", "member-closed", "summed-per-entity", "decision-fixes-across"],
+)
+async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    decision: Callable[..., Any],
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    caplog: pytest.LogCaptureFixture,
+    entity_groups: dict[str, Any],
+    group_by: tuple[GroupBy, ...],
+    fixes_across: bool,
+    named: bool,
+) -> None:
+    """A pin closed to Africa under `across: recipient` compiles with Africa named, no search.
+
+    The rest stay a referral, searched for again with every recipient asked
+    for. A pin closed to named members alone: widening it to every recipient
+    changes the scope, which the planner decides. A total per donor: France
+    summed over its open recipients is one series, and Africa named would
+    keep one per African recipient. A cited decision that fixes `across`:
+    the rewritten plan would contradict it.
+    """
+    france = [Entity(name="France", role="donor")]
+    decisions = [pinning_decision(SPEC_AFRICA)]
+    decision_ids = ["measure"]
+    if fixes_across:
+        decisions.append(
+            decision(
+                slot="recipients",
+                description="Which recipients France's aid is read for.",
+                options=["every recipient", "named recipients"],
+                chosen="every recipient",
+                fixes=DecisionFixes(across="recipient"),
+            )
+        )
+        decision_ids.append("recipients")
+    context = context_holding(
+        draft(
+            decisions=decisions,
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    decision_ids=decision_ids,
+                    entities=france,
+                    across="recipient",
+                    source_spec_id=SPEC_AFRICA,
+                    unit=None,
+                ),
+                derived_requirement(group_by=group_by),
+            ],
+        )
+    )
+    block = _AFRICA_BLOCK | {
+        "resolved": _AFRICA_BLOCK["resolved"] | {"entity_groups": entity_groups}
+    }
+    save_pin_sources(context.state, {SPEC_AFRICA: PinSource(block=block, settled=True)})
+    surface = _CountingSurface(schemas=real_schemas)
+
+    with caplog.at_level(logging.INFO, logger="translator.discovery"):
+        answer = await build_translate(surface=surface)(context)
+
+    stored = _stored(context)
+    pinned = stored.requirement("annual_debt_service")
+    assert isinstance(pinned, DatasetRequirement)
+    assert pinned.source_spec_id == SPEC_AFRICA
+    left_as_it_was = [
+        record.getMessage()
+        for record in caplog.records
+        if "does not validate" in record.getMessage()
+    ]
+    assert bool(left_as_it_was) is fixes_across
+    if not named:
+        assert surface.calls.get("search") == 1
+        assert "named_in_place_of_across" not in answer
+        assert pinned.across == "recipient"
+        assert [*pinned.entities] == france
+        return
+    assert "search" not in surface.calls
+    assert answer["outcome"] == Outcome.OK.value, answer
+    assert answer["named_in_place_of_across"] == [
+        {
+            "requirement_id": "annual_debt_service",
+            "entity": {"name": "Africa", "role": "recipient"},
+            "across": "recipient",
+        }
+    ]
+    assert (stored.version, stored.status) == (1, PlanStatus.PENDING_APPROVAL)
+    assert pinned.across is None
+    assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient")]
+    assert stored.workflow is not None
+    assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
+
+
+@pytest.mark.parametrize(
+    ("entity_groups", "named"), [(_GROUP_CLOSED, True), ({}, False)], ids=["named", "set-aside"]
+)
+async def test_translate_resolves_a_pinned_identity_on_record_once(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    entity_groups: dict[str, Any],
+    named: bool,
+) -> None:
+    """The group rewrite and discovery both read the pin's identity on record, off one resolve."""
+    pinned = requirement(
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor")],
+        across="recipient",
+        source_spec_id=SPEC_AFRICA,
+        unit=None,
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_AFRICA)],
+            evidence_requirements=[pinned, derived_requirement()],
+        )
+    )
+    identity = {"seed": "africa", "requested_window": period_window(pinned.period)}
+    save_windowed_pins(
+        context.state,
+        [WindowedPin(spec_id=SPEC_AFRICA, identity=identity, windowed_from=SPEC_OTHER)],
+    )
+    block = _AFRICA_BLOCK | {
+        "resolved": _AFRICA_BLOCK["resolved"] | {"entity_groups": entity_groups}
+    }
+    resolved = ToolCallResult(
+        is_error=False,
+        meta={SEARCH_ENVELOPE_META_KEY: {"parts": [{"status": "definite", "spec": block}]}},
+    )
+    surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": resolved})
+
+    answer = await build_translate(surface=surface)(context)
+
+    assert surface.calls["resolve_definition"] == 1
+    assert ("named_in_place_of_across" in answer) is named
+
+
+async def test_translate_refers_a_search_never_issued_back_marked_not_issued(
+    real_schemas: list[ToolSchema], draft: DraftFactory, context_holding: ContextHolding
+) -> None:
+    """A search the planner entry had no time left to make is a referral marked `not_issued`."""
+    context = context_holding(draft())
+    surface = _CountingSurface(schemas=real_schemas)
+    token = current_discovery_time_left.set(lambda: 0.0)
+    try:
+        answer = await build_translate(surface=surface)(context)
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert "search" not in surface.calls
+    assert answer["kind"] == ReferralKind.DISCOVERY_UNAVAILABLE.value
+    assert answer["not_issued"] is True
+    assert "was not called" in answer["reason"]
+
+
+def test_return_to_planner_carries_the_source_names_search_offered(
+    real_schemas, draft, context_holding
+):
+    context = context_holding(draft())
+    ask = draft().requirement("annual_debt_service")
+    group = AmbiguousSourceReading(
+        text="shared",
+        candidates=(
+            SourceNameCandidate(ref="provenance/a", label="A", kind="provenance"),
+            SourceNameCandidate(ref="provenance/b", label="B", kind="provenance"),
+        ),
+    )
+    record = DiscoveryRecord(
+        revision=plan_revision(draft()),
+        tool="search",
+        requirement_id=ask.id,
+        requirement_key=requirement_revision(ask),
+        status=DiscoveryStatus.NO_DATA,
+        reason="source_ambiguous",
+        ambiguous_sources=(group,),
+    )
+    save_log(context.state, load_log(context.state).with_record(record, ()))
+    result = _core(real_schemas).return_to_planner(
+        kind=ReferralKind.SOURCE_NAME_AMBIGUOUS,
+        reason="Choose publisher",
+        requirement_id=ask.id,
+        tool_context=context,
+    )
+    assert result["outcome"] == "referred"
+    assert result["referral"]["ambiguous_sources"] == [group.model_dump(mode="json")]
+    assert result["referral"]["candidates"] == []

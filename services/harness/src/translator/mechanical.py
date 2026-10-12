@@ -86,7 +86,6 @@ from translator.discovery import (
     current_draft,
     dataset_keys,
     load_log,
-    settled_sources,
 )
 from translator.referral import ReferralKind
 
@@ -338,11 +337,12 @@ def _action_of(payload: Mapping[str, object]) -> Action | None:
 
 
 # `discover_source`'s own problem codes for a data-service failure rather
-# than a data answer, answered with no `action`: `_settle_discovery` turns
-# either into a transient `ReferralKind.DISCOVERY_UNAVAILABLE` referral
-# rather than the internal failure a shape it cannot resolve becomes. A
-# `SEARCH_REFUSED` that carries an `action`, Search's final answer for a seed's copy over a
-# period (`translator.discovery._seeded_source`), follows its action.
+# than a data answer. With no `action`, `_settle_discovery` turns either into
+# a transient `ReferralKind.DISCOVERY_UNAVAILABLE` referral rather than the
+# internal failure a shape it cannot resolve becomes. An answer that carries
+# an `action` follows it instead: a `SURFACE_UNAVAILABLE` for a call never
+# issued carries a `return_to_planner` action marked `not_issued`
+# (`translator.discovery._unavailable`).
 _NAMED_FAILURE_CODES = frozenset(
     {ProblemCode.SURFACE_UNAVAILABLE.value, ProblemCode.SEARCH_REFUSED.value}
 )
@@ -501,10 +501,7 @@ async def _resolve_dataset_sources(
     (`requirement_keys`/`pinned`/`log.selectable`), rather than spending a
     fresh `discover_source` call to re-learn what discovery already settled.
     A requirement stating `across` whose source was recorded without its
-    open entity axes is not settled, and is discovered again. Neither is one
-    whose recorded source is a dataset the turn has since dropped
-    (`translator.discovery.settled_sources`): its fresh search is refused as
-    `seed_dropped`, which refers the requirement back to the planner.
+    open entity axes is not settled, and is discovered again.
 
     Every requirement still unsettled starts its `discover_source` call
     together, gathered with `return_exceptions=True`, since the call itself
@@ -527,9 +524,7 @@ async def _resolve_dataset_sources(
     ]
     keys = dataset_keys(plan)
     log = load_log(tool_context.state)
-    settled = settled_sources(
-        tool_context.state,
-        log,
+    settled = log.selectable(
         requirement_keys=keys.requirement_keys,
         pinned=keys.pinned,
         across=keys.across,
@@ -565,16 +560,23 @@ async def _resolve_dataset_sources(
 
 
 def _failure_fingerprint(translation: Translation, result: Mapping[str, object]) -> str:
-    """The canonical hash of `translation` plus the sorted codes it failed to compile with."""
+    """The canonical hash of `translation` plus every issue it failed to compile with.
+
+    Each issue counts whole, its `reason` included, so a failure that moved
+    within one code (no entity named "G7", then none named "United States")
+    is a new failure, not a repeat.
+    """
     detail = result.get("detail")
     issues = detail.get("issues") if isinstance(detail, dict) else None
-    codes = sorted(
-        str(issue.get("code"))
-        for issue in (issues if isinstance(issues, list) else ())
-        if isinstance(issue, dict)
+    failed = sorted(
+        (
+            rfc8785.dumps(cast("Any", issue)).decode()
+            for issue in (issues if isinstance(issues, list) else ())
+            if isinstance(issue, dict)
+        ),
     )
-    digest = hashlib.sha256(rfc8785.dumps(translation.model_dump(mode="json"))).hexdigest()
-    return f"{digest}:{','.join(codes)}"
+    content = {"translation": translation.model_dump(mode="json"), "issues": failed}
+    return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
 def clear_compile_failures(state: Any) -> None:

@@ -24,8 +24,17 @@ from enum import StrEnum
 from typing import cast
 
 import rfc8785
-from planner.records import Period, StatVarReading, StrictModel
+from common.place_type import FLOW_ROLE_COLUMNS
+from planner.records import (
+    AmbiguousSourceReading,
+    Period,
+    ResolvedSourceMention,
+    StatVarReading,
+    StrictModel,
+)
 from planner.workflow import (
+    ElectedMeasure,
+    MeasureAlternative,
     OpenAxis,
     OpenEntityAxis,
     ReadingSetBy,
@@ -37,6 +46,10 @@ from pydantic import JsonValue
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
+
+# The `resolved.facets.provenance.account` of a table of the flows a provider
+# reports, as the OECD and ONE aid tables are.
+PROVIDER_ACCOUNT = "provider"
 
 # The `shape.kind` of an identity that describes its StatVars by schema and
 # slot bindings, where a pinned one names them.
@@ -89,6 +102,37 @@ class DiscoveryOutcome(StrictModel):
     detail: str | None = None
     reason: str | None = None
     warnings: tuple[PartWarning, ...] = ()
+    ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+
+
+def resolved_source_mentions(part: Mapping[str, object]) -> tuple[ResolvedSourceMention, ...]:
+    """The source constraints a part applied, excluding explicitly dropped wording."""
+    dropped = [
+        str(warning.get("message") or "").casefold()
+        for warning in _sequence(part.get("warnings"))
+        if warning.get("code") == "query_qualifier_dropped"
+    ]
+    mentions = (
+        ResolvedSourceMention.model_validate(mention)
+        for mention in _sequence(_mapping(part.get("restatement")).get("sources"))
+    )
+    return tuple(
+        mention
+        for mention in mentions
+        if not any((mention.text or mention.ref or "").casefold() in message for message in dropped)
+    )
+
+
+def source_constraint_matches(
+    mentions: Sequence[ResolvedSourceMention], *, text: str, ref: str | None, exclude: bool
+) -> bool:
+    """Whether Search confirmed this wording, polarity and optional chosen reference."""
+    return any(
+        " ".join((mention.text or "").casefold().split()) == " ".join(text.casefold().split())
+        and (mention.polarity == "exclude") == exclude
+        and (ref is None or mention.ref == ref)
+        for mention in mentions
+    )
 
 
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
@@ -109,17 +153,25 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     except ValueError as exc:
         raise ValueError(f"search answered with an unrecognised status {raw_status!r}") from exc
     warnings = _warnings(envelope, part)
+    mentions = resolved_source_mentions(part)
+
+    def constrained(source: SelectedSource) -> SelectedSource:
+        return source.model_copy(update={"resolved_sources": mentions})
 
     if status is DiscoveryStatus.DEFINITE:
         spec = _mapping(part.get("spec"))
         if not spec:
             raise ValueError("a definite search part names no spec")
         return DiscoveryOutcome(
-            status=status, sources=(source_from_spec_block(spec),), warnings=warnings
+            status=status, sources=(constrained(source_from_spec_block(spec)),), warnings=warnings
         )
     if status is DiscoveryStatus.CANDIDATES:
         blocks = _sequence(_mapping(part.get("candidates")).get("specs"))
-        return DiscoveryOutcome(status=status, sources=_sources(blocks), warnings=warnings)
+        return DiscoveryOutcome(
+            status=status,
+            sources=tuple(constrained(s) for s in _sources(blocks)),
+            warnings=warnings,
+        )
     if status is DiscoveryStatus.NO_DATA:
         no_data = _mapping(part.get("no_data"))
         nearest = [block for block in _sequence(no_data.get("nearest_real")) if "spec_id" in block]
@@ -130,6 +182,10 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
             detail=reason,
             reason=reason,
             warnings=warnings,
+            ambiguous_sources=tuple(
+                AmbiguousSourceReading.model_validate(group)
+                for group in _sequence(no_data.get("ambiguous_sources"))
+            ),
         )
     unsupported = _mapping(part.get("unsupported"))
     detail = " ".join(
@@ -146,8 +202,9 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     Takes the block's `spec_id`, what it `resolved` -- sentence, confidence,
     coverage, the counts of its members and how many it serves, the label,
     size and digest of the binding its `shape` states, entities and the named
-    sets whose members it binds, the entity
-    axes it leaves open, unit (or that it varies per series), provenance, the
+    sets it binds, the measure it elected and the others it offers, the entity
+    axes it leaves open, unit (or that it varies per series), provenance and
+    its account, the
     axes its family varies along -- and the identity document of its
     `definition` sidecar when the envelope carries one. A `shape` without
     `member_count` or `member_digest` leaves them `None`, and a
@@ -175,6 +232,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             confidence=_text(resolved.get("confidence")),
             has_data=_flag(coverage.get("has_data")),
             measure_label=_text(shape.get("label")),
+            elected_measure=_elected_measure(resolved),
             stat_var_member_count=_count(stat_vars.get("member_count")),
             stat_var_member_count_exact=_flag(stat_vars.get("member_count_exact")),
             served_count=_count(stat_vars.get("served_count")),
@@ -186,8 +244,13 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
             unit_per_series=True if unit.get("selection") == "per_series" else None,
+            resolved_sources=tuple(
+                ResolvedSourceMention.model_validate(mention)
+                for mention in _sequence(block.get("_resolved_sources"))
+            ),
             provenance_ref=_text(provenance.get("ref")),
             provenance_label=_text(provenance.get("label")),
+            provenance_account=_text(provenance.get("account")),
             coverage_kind=coverage_kind,
             coverage_window=(
                 _window(_mapping(coverage.get("window")))
@@ -516,7 +579,7 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
     as a `members` that is not a list, is `None`, never 0. When both state
     one column, the scope's count wins, since it lists the members it
     counts. A column a `resolved.entities` entry binds is not open. Never
-    raises: `harness.tool_contracts` reads the planner's envelope with it
+    raises: `harness.tool_contracts` reads the search envelope with it
     too, where a malformed field must not fail the digest.
     """
     bound = {_text(entity.get("role")) for entity in _sequence(resolved.get("entities"))}
@@ -543,17 +606,52 @@ def _entity(entity: Mapping[str, object]) -> ResolvedEntity:
 
 
 def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
-    """The named sets `resolved.entity_groups` states, each keyed by the role column its members fill.
+    """The named sets `resolved.entity_groups` states, each keyed by the role column it fills.
 
     A group stating no name names nothing a requirement can ask for, so it is
-    left out rather than failing the block.
+    left out rather than failing the block. `total` is the published total
+    party the role binds for the set, absent or `null` when it binds members.
     """
     found = []
     for role, raw in groups.items():
         group = _mapping(raw)
         if (label := _text(group.get("label"))) is not None:
-            found.append(ResolvedGroup(role=role, label=label, ref=_text(group.get("dcid"))))
+            found.append(
+                ResolvedGroup(
+                    role=role,
+                    label=label,
+                    ref=_text(group.get("dcid")),
+                    total=_text(group.get("total")),
+                )
+            )
     return tuple(found)
+
+
+def _elected_measure(resolved: Mapping[str, object]) -> ElectedMeasure | None:
+    """The measure `resolved.measure_label` names, with each of `resolved.alternative_measures`.
+
+    `None` when the block states no measure label. An alternative whose
+    `definition` names no spec id, or that states no label or axis, offers
+    nothing to switch to and is left out of the source's alternatives.
+    """
+    label = _text(resolved.get("measure_label"))
+    if label is None:
+        return None
+    alternatives = []
+    for raw in _sequence(resolved.get("alternative_measures")):
+        spec_id = _text(_mapping(raw.get("definition")).get("spec_id"))
+        alternative_label = _text(raw.get("label"))
+        axis = _text(raw.get("axis"))
+        if spec_id is not None and alternative_label is not None and axis is not None:
+            alternatives.append(
+                MeasureAlternative(
+                    spec_id=spec_id,
+                    label=alternative_label,
+                    axis=axis,
+                    identity=_identity(_mapping(raw.get("definition")).get("identity")),
+                )
+            )
+    return ElectedMeasure(label=label, alternatives=tuple(alternatives))
 
 
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
@@ -561,9 +659,88 @@ def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     return _groups(_mapping(_mapping(block.get("resolved")).get("entity_groups")))
 
 
+def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
+    """The identity of each measure a spec block's `resolved.alternative_measures` offers, by spec_id.
+
+    Each is the block's own identity with its measure axes swapped, over the
+    same places and years. An entry whose `definition` states no spec_id or
+    identity is left out.
+    """
+    definitions: dict[str, dict[str, JsonValue]] = {}
+    for alternative in _sequence(_mapping(block.get("resolved")).get("alternative_measures")):
+        definition = _mapping(alternative.get("definition"))
+        spec_id = _text(definition.get("spec_id"))
+        identity = _identity(definition.get("identity"))
+        if spec_id is not None and identity is not None:
+            definitions[spec_id] = identity
+    return definitions
+
+
+def total_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str | None:
+    """The sentence saying `group` is read as its published total, or `None` when it binds members.
+
+    `labels` maps a ref to its label, so the total party is named as the
+    source names it ("Africa, Total") where that differs from the set's
+    own name.
+    """
+    if group.total is None:
+        return None
+    party = labels.get(group.total, group.total)
+    named = "" if party.casefold() == group.label.casefold() else f" ({party})"
+    return (
+        f"The figures for {group.label} are the total the source publishes for the group "
+        f"as a whole{named}, not its members' figures added up."
+    )
+
+
+class MembersAnswer(StrEnum):
+    """How an answer reads a group bound as its members (`members_reading`).
+
+    `EACH` keeps the column the group sits on, so each member keeps its own
+    figure. `SUMMED` adds the members up into one figure, and `COMBINED`
+    folds them into one by some other operation, or by one the plan does
+    not show is a sum.
+    """
+
+    EACH = "each"
+    SUMMED = "summed"
+    COMBINED = "combined"
+
+
+def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> str | None:
+    """The sentence saying an answer reads `group` as its members, or `None` when it binds the total.
+
+    `answer` is how the answer reads the members, `None` when the column
+    the group sits on is not known. An answer combining a flow side's
+    members leaves out what the source allocates to the group and to no
+    single member ("Africa, regional"), which only the group's total counts.
+    """
+    if group.total is not None:
+        return None
+    if answer is None:
+        return (
+            f"The figures for {group.label} are its members' figures, not a total the source "
+            "publishes for the group."
+        )
+    if answer is MembersAnswer.EACH:
+        return f"The figures for {group.label} are its members' figures, each on its own."
+    left_out = (
+        " and leaves out amounts the data allocates to no single country"
+        if group.role in FLOW_ROLE_COLUMNS
+        else ""
+    )
+    if answer is MembersAnswer.SUMMED:
+        return f"The figure for {group.label} adds up its members' figures{left_out}."
+    return f"The figure for {group.label} is computed from its members' figures{left_out}."
+
+
 def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     """`groups` as `resolved.entity_groups` states them, keyed by role column,
-    for a resubmit to post beside the identity they stand for (`_groups`)."""
+    for a resubmit to post beside the identity they stand for (`_groups`).
+
+    `total` is not posted. Search recomputes it from what the role binds,
+    and a server that predates the field refuses it.
+    """
     return {
         group.role: {"label": group.label, **({"dcid": group.ref} if group.ref else {})}
         for group in groups

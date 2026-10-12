@@ -1,11 +1,10 @@
-"""The orchestrator engine's path through the graph, run by a real ADK runner
+"""The orchestrator's path through the workflow, run by a real ADK runner
 with a scripted model: answer, ask, plan, and what the agent reads after each."""
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,42 +14,36 @@ from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
-from google.adk.apps import App
-from google.adk.events import Event
-from google.adk.flows.llm_flows._fencing import OTHER_AGENT_CONTEXT_PREAMBLE, QUOTED_CONTENT_BEGIN
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
-from harness import graph, plan_display
-from harness.graph import (
+from harness import plan_display
+from harness.graph import execute as execute_module
+from harness.graph.plan_done import _ask_status, _partial_result, _stopped_steps
+from harness.graph.state import (
     APPROVE_INTERRUPT,
     CLARIFY_INTERRUPT,
+    ORCHESTRATOR_ASKED_KEY,
     ORCHESTRATOR_BRIEF_KEY,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     UNREADABLE_PLAN_NOTE,
-    GenerativeNodes,
-    _ask_status,
-    _partial_result,
-    _stopped_steps,
-    create_root_workflow,
+    PendingAsk,
+    ask_candidates,
+    pending_action,
 )
-from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
-from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import Settings
-from harness.studio_translate import _node_name
 from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
-from orchestrator.agent import create_orchestrator_agent
 from planner.plan import (
     ASKS_STATE_KEY,
     AskAnswer,
@@ -60,9 +53,36 @@ from planner.plan import (
     load_asks,
 )
 from planner.settings import AgentSettings
-from pydantic import Field
 
 from .context_probe import RecordingLlm
+from .orchestrator_fakes import (
+    CannedSearch,
+    FailingPlanner,
+    RefusingPlanner,
+    ScriptLlm,
+    call,
+    carries_an_interrupt,
+    chart,
+    content_text,
+    create_request_input_response,
+    definite_envelope,
+    fetch_call,
+    frame_for,
+    handed_back,
+    make_charts_call,
+    open_session,
+    orchestrator_app,
+    orchestrator_runner,
+    quotes_another_agent,
+    request_text,
+    run_turn,
+    search_call,
+    single_pause,
+    stream,
+    studio_client,
+    turn_body,
+    visited_nodes,
+)
 
 
 class AskingPlanner(ScriptedPlannerModel):
@@ -87,55 +107,6 @@ class AskingPlanner(ScriptedPlannerModel):
         return {"plan": plan.model_dump(mode="json"), "summary": {"version": plan.version}}
 
 
-class ScriptLlm(BaseLlm):
-    """Answers each model call with the next scripted part, recording requests."""
-
-    model: str = "script-llm"
-    script: list[types.Part] = Field(default_factory=list)
-    requests: list[Any] = Field(default_factory=list)
-
-    async def generate_content_async(
-        self, llm_request: Any, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse]:
-        self.requests.append(llm_request)
-        part = self.script.pop(0) if self.script else types.Part.from_text(text="done")
-        yield LlmResponse(content=types.Content(role="model", parts=[part]))
-
-
-class FailingPlanner:
-    """A planner seam that raises `PlannerSeamError`, the way `PlannerSeam` fails."""
-
-    def __init__(self, message: str = "You have not called submit_plan.") -> None:
-        self.message = message
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        raise PlannerSeamError(self.message)
-
-
-class RefusingPlanner:
-    """A planner seam that refuses to draft, as `PlannerSeam` does at its round cap."""
-
-    def __init__(self, *, final: bool = False) -> None:
-        self.questions: list[str] = []
-        self.readings: list[Any] = []
-        self.asks: list[tuple[str, ...]] = []
-        self.final = final
-
-    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
-        self.questions.append(kwargs["question"])
-        self.readings.append(kwargs.get("readings"))
-        self.asks.append(load_asks(kwargs["ctx"].state))
-        return {"refused": {"text": "the planner ran out of rounds", "final": self.final}}
-
-
-async def _no_resolver(**kwargs: Any) -> dict[str, Any]:
-    raise AssertionError("no search expected")
-
-
-async def _no_executor(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
-    raise AssertionError(f"no tool call expected, got {tool}")
-
-
 async def _describes(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
     assert tool == "describe_frame", tool
     return {"outcome": "ok", "view": {"dimensions": [{"name": "observationAbout"}]}}
@@ -145,117 +116,85 @@ async def _describes(*, tool: str, args: dict[str, Any], on_progress: Any = None
 _SCRIPTED_SPEC = "spec_" + "f" * 32
 
 
-def _call(name: str, **args: Any) -> types.Part:
-    return types.Part.from_function_call(name=name, args=args)
-
-
-def create_request_input_response(interrupt_id: str, response: dict[str, Any]) -> types.Part:
-    """The user's answer to a pause, as ADK's `adk_request_input` tool reads it."""
-    return types.Part(
-        function_response=types.FunctionResponse(
-            id=interrupt_id, name="adk_request_input", response=response
-        )
-    )
-
-
-def _texts(request: Any) -> str:
-    return "\n".join(p.text or "" for c in request.contents for p in c.parts or [])
-
-
-def _texts_of(content: types.Content) -> str:
-    return "".join(p.text or "" for p in content.parts or [])
-
-
-def _quotes_another_agent(request: Any) -> bool:
-    """Whether ADK fenced any content of `request` as another agent's."""
-    text = _texts(request)
-    return QUOTED_CONTENT_BEGIN in text or OTHER_AGENT_CONTEXT_PREAMBLE in text
-
-
-def _carries_an_interrupt(request: Any) -> bool:
-    """Whether `request` holds a pause's `adk_request_input` call, as a call or quoted."""
-    return "adk_request_input" in "\n".join(str(p) for c in request.contents for p in c.parts or [])
-
-
-def _runner(
-    *script: types.Part, planner: Any = None, tool_surface: Any = None, executor: Any = None
-) -> tuple[Runner, ScriptLlm]:
-    model = ScriptLlm(script=list(script))
-    agent = create_orchestrator_agent(
-        model_name="unused",
-        tools=build_orchestrator_tools(resolver=_no_resolver, executor=executor or _no_executor),
-    ).model_copy(update={"model": model})
-    workflow = create_root_workflow(
-        resolver=_no_resolver,
-        executor=executor or _no_executor,
-        tool_surface=tool_surface,
-        generative=GenerativeNodes(planner=planner or RefusingPlanner()),
-        fetch_series_stats=scripted_fetch_series_stats,
-        orchestrator=agent,
-    )
-    runner = Runner(
-        app=App(name="t", root_agent=workflow), session_service=InMemorySessionService()
-    )
-    return runner, model
-
-
-async def _session(runner: Runner, **state: Any) -> None:
-    await runner.session_service.create_session(
-        app_name="t", user_id="u", session_id="s", state={"surface": "studio", **state}
-    )
-
-
-async def _run(runner: Runner, message: types.Content) -> list[Event]:
-    return [
-        event async for event in runner.run_async(user_id="u", session_id="s", new_message=message)
-    ]
-
-
-def _pause(events: list[Event]) -> types.FunctionCall:
-    calls = [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    assert len(calls) == 1, [c.id for c in calls]
-    return calls[0]
-
-
-def _visited(events: list[Event]) -> list[str]:
-    return [_node_name(e) for e in events if e.node_info]
-
-
 async def test_an_answered_turn_ends_after_the_agent_without_a_pause():
-    runner, model = _runner(types.Part.from_text(text="Kenya's GDP was $101 billion in 2020."))
-    await _session(runner)
+    runner, model = orchestrator_runner(
+        types.Part.from_text(text="Kenya's GDP was $101 billion in 2020.")
+    )
+    await open_session(runner)
 
-    events = await _run(runner, types.UserContent("Kenya's GDP in 2020?"))
+    events = await run_turn(runner, types.UserContent("Kenya's GDP in 2020?"))
 
-    assert _texts(model.requests[0]).count("Kenya's GDP in 2020?") == 1
+    assert request_text(model.requests[0]).count("Kenya's GDP in 2020?") == 1
     assert not [e for e in events if e.error_code]
     assert not [c for e in events for c in e.get_function_calls() if c.name == "adk_request_input"]
-    assert "route" in _visited(events) and "ask" not in _visited(events)
+    assert "route" in visited_nodes(events) and "ask" not in visited_nodes(events)
 
 
 async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words():
-    runner, model = _runner(
-        _call("ask_user", question="Which Congo?", options=["Republic of the Congo", "DR Congo"]),
+    runner, model = orchestrator_runner(
+        call(
+            "ask_user",
+            question="Which Congo?",
+            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+        ),
         types.Part.from_text(text="Asked."),
         types.Part.from_text(text="The Republic of the Congo's GDP was $15.7 billion in 2024."),
     )
-    await _session(runner)
+    await open_session(runner)
 
-    pause = _pause(await _run(runner, types.UserContent("GDP of Congo?")))
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
     assert pause.id == CLARIFY_INTERRUPT
     assert pause.args["payload"]["candidates"] == [
         {"spec_id": "o1", "label": "Republic of the Congo"},
         {"spec_id": "o2", "label": "DR Congo"},
     ]
     answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    events = await _run(runner, types.Content(role="user", parts=[answer]))
+    events = await run_turn(runner, types.Content(role="user", parts=[answer]))
 
-    resumed = _texts(model.requests[-1])
+    resumed = request_text(model.requests[-1])
     assert "GDP of Congo?" in resumed
     assert "You asked the user: Which Congo?\nThe user chose: Republic of the Congo" in resumed
-    assert not _carries_an_interrupt(model.requests[-1])
-    assert not _quotes_another_agent(model.requests[-1])
+    assert not carries_an_interrupt(model.requests[-1])
+    assert not quotes_another_agent(model.requests[-1])
     assert not [e for e in events if e.error_code]
+
+
+async def test_a_count_option_pauses_under_its_spec_id_and_the_pick_hands_it_back():
+    gross, net = "spec_" + "a" * 32, "spec_" + "c" * 32
+    block = {
+        "spec_id": gross,
+        "resolved": {
+            "measure_label": "gross disbursements",
+            "alternative_measures": [
+                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": net}}
+            ],
+        },
+    }
+    runner, model = orchestrator_runner(
+        call(
+            "ask_user",
+            question="How should aid be counted?",
+            options=[
+                {"label": "gross disbursements", "spec_id": gross},
+                {"label": "net disbursements", "spec_id": net},
+                {"label": "Either"},
+            ],
+        ),
+        types.Part.from_text(text="Asked."),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {gross: block}})
+
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
+    assert pause.args["payload"]["candidates"] == [
+        {"spec_id": gross, "label": "gross disbursements"},
+        {"spec_id": net, "label": "net disbursements"},
+        {"spec_id": "o3", "label": "Either"},
+    ]
+    answer = create_request_input_response(pause.id, {"result": {"spec_id": net}})
+    await run_turn(runner, types.Content(role="user", parts=[answer]))
+
+    assert f"The user chose: net disbursements ({net})" in request_text(model.requests[-1])
 
 
 async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such():
@@ -263,31 +202,81 @@ async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such():
         ({"text": "the big one"}, "The user answered in their own words: the big one"),
         ({"skip": True}, "The user skipped the question. Do not answer it"),
     ]:
-        runner, model = _runner(
-            _call("ask_user", question="Which Congo?", options=["Republic of the Congo"]),
+        runner, model = orchestrator_runner(
+            call("ask_user", question="Which Congo?", options=[{"label": "Republic of the Congo"}]),
             types.Part.from_text(text="Asked."),
             types.Part.from_text(text="Done."),
         )
-        await _session(runner)
-        pause = _pause(await _run(runner, types.UserContent("GDP of Congo?")))
+        await open_session(runner)
+        pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
 
         reply = create_request_input_response(pause.id, {"result": answer})
-        await _run(runner, types.Content(role="user", parts=[reply]))
+        await run_turn(runner, types.Content(role="user", parts=[reply]))
 
-        assert expected in _texts(model.requests[-1])
+        assert expected in request_text(model.requests[-1])
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"spec_id": "o2"}, "The user chose: DR Congo"),
+        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        ({"skip": True}, "The user skipped the question. Do not answer it"),
+    ],
+)
+async def test_a_question_paused_with_bare_label_options_resumes(
+    answer: dict[str, Any], expected: str
+):
+    runner, model = orchestrator_runner(
+        call(
+            "ask_user",
+            question="Which Congo?",
+            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+        ),
+        types.Part.from_text(text="Asked."),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+    asked = _stored_state(runner)[ORCHESTRATOR_ASKED_KEY]
+    asked["options"] = ["Republic of the Congo", "DR Congo"]
+
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
+
+    assert not [e for e in events if e.error_code]
+    assert expected in request_text(model.requests[-1])
+
+
+def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
+    state = {
+        ORCHESTRATOR_PENDING_KEY: {
+            "kind": "ask",
+            "question": "Which Congo?",
+            "options": ["Republic of the Congo", "DR Congo"],
+        }
+    }
+
+    pending = pending_action(state)
+
+    assert isinstance(pending, PendingAsk)
+    assert ask_candidates(pending.model_dump()["options"]) == [
+        {"spec_id": "o1", "label": "Republic of the Congo"},
+        {"spec_id": "o2", "label": "DR Congo"},
+    ]
 
 
 async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question():
     planner = RefusingPlanner()
-    runner, model = _runner(
-        _call("plan", brief="Niger's Global Fund receipts as a share of health spending", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Niger's Global Fund receipts as a share of health spending", asks=[]),
         types.Part.from_text(text="I have handed this to the planner."),
         types.Part.from_text(text="The share could not be calculated."),
         planner=planner,
     )
     searched = {"text": "Global Fund receipts", "status": "no_data", "refusal_code": "no_match"}
     earlier = {"text": "Niger health spending", "status": "definite", "spec_id": "spec_h"}
-    await _session(
+    await open_session(
         runner,
         **{
             ORCHESTRATOR_SEARCHES_KEY: [searched],
@@ -295,12 +284,14 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
         },
     )
 
-    events = await _run(runner, types.UserContent("How much does Niger get from the Global Fund?"))
+    events = await run_turn(
+        runner, types.UserContent("How much does Niger get from the Global Fund?")
+    )
 
     assert planner.questions == ["Niger's Global Fund receipts as a share of health spending"]
     # An earlier turn's readings come first, then this turn's.
     assert planner.readings == [[earlier, searched]]
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     assert "How much does Niger get from the Global Fund?" in after_plan
     assert "The planner could not make a plan: the planner ran out of rounds" in after_plan
     assert not [e for e in events if e.error_code]
@@ -311,18 +302,18 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
 
 async def test_a_failed_plan_gives_the_plan_call_back_once():
     planner = RefusingPlanner()
-    runner, _ = _runner(
-        _call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
+    runner, _ = orchestrator_runner(
+        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
         types.Part.from_text(text="Handed."),
-        _call("plan", brief="Kenya's CRS aid as a share of GDP", asks=[]),
+        call("plan", brief="Kenya's CRS aid as a share of GDP", asks=[]),
         types.Part.from_text(text="Handed again."),
-        _call("plan", brief="Kenya's aid as a share of GDP, any source", asks=[]),
+        call("plan", brief="Kenya's aid as a share of GDP, any source", asks=[]),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    events = await _run(runner, types.UserContent("Kenya's aid as a share of GDP?"))
+    events = await run_turn(runner, types.UserContent("Kenya's aid as a share of GDP?"))
 
     assert len(planner.questions) == 2
     third = [
@@ -339,20 +330,20 @@ async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(fina
     """A final refusal (an internal or repeated failure, or a question declined
     whole) fails the same way for any brief, so the plan call is not given back
     and the hand-back does not offer one."""
-    runner, model = _runner(
-        _call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
         types.Part.from_text(text="Handed."),
         types.Part.from_text(text="Could not be calculated."),
         planner=RefusingPlanner(final=final),
     )
-    await _session(runner)
+    await open_session(runner)
 
-    await _run(runner, types.UserContent("Kenya's aid as a share of GDP?"))
+    await run_turn(runner, types.UserContent("Kenya's aid as a share of GDP?"))
 
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     calls = session.state[ORCHESTRATOR_CALLS_KEY]
     assert bool(calls.get("plan_given_back")) is not final
-    assert ("planned once more" in _texts(model.requests[-1])) is not final
+    assert ("planned once more" in request_text(model.requests[-1])) is not final
 
 
 async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
@@ -360,17 +351,17 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
     none leaves no earlier call's asks for the planner to account for."""
     planner = RefusingPlanner()
     asks = ["a chart of France's aid to Guatemala", "the total since 2010"]
-    runner, _ = _runner(
-        _call("plan", brief="France's aid to Guatemala since 2010", asks=asks),
+    runner, _ = orchestrator_runner(
+        call("plan", brief="France's aid to Guatemala since 2010", asks=asks),
         types.Part.from_text(text="Handed."),
-        _call("plan", brief="France's bilateral aid to Guatemala", asks=[]),
+        call("plan", brief="France's bilateral aid to Guatemala", asks=[]),
         types.Part.from_text(text="Handed again."),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    await _run(runner, types.UserContent("France's aid to Guatemala since 2010?"))
+    await run_turn(runner, types.UserContent("France's aid to Guatemala since 2010?"))
 
     assert planner.asks == [tuple(asks), ()]
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
@@ -378,30 +369,82 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
 
 
 async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt", asks=[]),
         types.Part.from_text(text="Handed."),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(FailingPlanner()),
     )
-    await _session(runner)
+    await open_session(runner)
 
-    events = await _run(runner, types.UserContent("Kenya's debt?"))
+    events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
-    assert "The planner could not make a plan: You have not called submit_plan." in _texts(
+    assert "The planner could not make a plan: You have not called submit_plan." in request_text(
         model.requests[-1]
     )
     assert not [e for e in events if e.error_code]
 
-    bare, _ = _runner(_call("plan", brief="Kenya's debt", asks=[]), planner=FailingPlanner())
-    await _session(bare)
+    bare, _ = orchestrator_runner(
+        call("plan", brief="Kenya's debt", asks=[]), planner=FailingPlanner()
+    )
+    await open_session(bare)
     with pytest.raises(PlannerSeamError):
-        await _run(bare, types.UserContent("Kenya's debt?"))
+        await run_turn(bare, types.UserContent("Kenya's debt?"))
+
+
+async def _breaking_resolver(**kwargs: Any) -> dict[str, Any]:
+    raise RuntimeError("upstream at http://internal.example/v2 broke")
+
+
+def _tool_answers(request: Any) -> dict[str, Any]:
+    """Each function response in `request`, by tool name."""
+    return {
+        p.function_response.name: p.function_response.response
+        for c in request.contents
+        for p in c.parts or []
+        if p.function_response
+    }
+
+
+async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_goes_on(caplog):
+    runner, model = orchestrator_runner(
+        call("search", query="Kenya's GDP?", parts=[{"variable": "GDP"}]),
+        types.Part.from_text(text="Search failed, so I cannot give Kenya's GDP."),
+        resolver=_breaking_resolver,
+    )
+    await open_session(runner)
+
+    with caplog.at_level(logging.ERROR, logger="orchestrator.tool_failures"):
+        events = await run_turn(runner, types.UserContent("Kenya's GDP?"))
+
+    answer = _tool_answers(model.requests[-1])["search"]
+    assert answer["error"].startswith("search failed inside DFO (RuntimeError).")
+    assert "internal.example" not in answer["error"]
+    assert not [e for e in events if e.error_code]
+    (record,) = [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+    assert record.args[0] == "search"
+
+
+async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(caplog):
+    runner, model = orchestrator_runner(
+        call("summon_data", topic="GDP"), types.Part.from_text(text="Sorry.")
+    )
+    await open_session(runner)
+
+    with caplog.at_level(logging.ERROR, logger="orchestrator.tool_failures"):
+        events = await run_turn(runner, types.UserContent("Kenya's GDP?"))
+
+    answer = _tool_answers(model.requests[-1])["summon_data"]
+    assert "The tools you can call are: " in answer["error"]
+    assert not [e for e in events if e.error_code]
+    assert not [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
 
 
 async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         types.Part.from_text(text="Uganda next."),
@@ -409,40 +452,40 @@ async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent
         tool_surface=ScriptedSurface(),
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     assert approval.id == APPROVE_INTERRUPT
     revision = approval.args["payload"]["revision"]
     approve = create_request_input_response(approval.id, {"result": {"approved": revision}})
-    events = await _run(runner, types.Content(role="user", parts=[approve]))
+    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
 
     request = model.requests[-1]
-    after_plan = _texts(request)
+    after_plan = request_text(request)
     assert "The approved plan ran. Chart its frames and answer." in after_plan
     body = json.loads(after_plan.split("Chart its frames and answer.\n", 1)[1].split("\n", 1)[0])
     assert body["frames"] and all(f["frame"].startswith("f") for f in body["frames"])
     assert body["step_summaries"]
     assert f"Plan {revision[:12]} (approved)" in after_plan
-    assert not _carries_an_interrupt(request)
-    assert not _quotes_another_agent(request)
-    (hand_back,) = [c for c in request.contents if "The approved plan ran" in _texts_of(c)]
+    assert not carries_an_interrupt(request)
+    assert not quotes_another_agent(request)
+    (hand_back,) = [c for c in request.contents if "The approved plan ran" in content_text(c)]
     assert hand_back.role == "user"
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert set(session.state[ORCHESTRATOR_FRAMES_KEY]) == {f["frame"] for f in body["frames"]}
     assert not [e for e in events if e.error_code]
 
-    follow_up = await _run(runner, types.UserContent("And Uganda?"))
+    follow_up = await run_turn(runner, types.UserContent("And Uganda?"))
 
     assert not [e for e in follow_up if e.error_code]
-    assert "The approved plan ran" in _texts(model.requests[-1])
-    assert not _carries_an_interrupt(model.requests[-1])
+    assert "The approved plan ran" in request_text(model.requests[-1])
+    assert not carries_an_interrupt(model.requests[-1])
 
 
 @pytest.mark.parametrize("describes", [True, False])
 async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(describes: bool):
-    runner, model = _runner(
-        _call(
+    runner, model = orchestrator_runner(
+        call(
             "plan",
             brief="Kenya's debt service since 2015, ranked against East Africa",
             asks=["Kenya's debt service each year", "a ranking of East African countries"],
@@ -453,15 +496,15 @@ async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(
         tool_surface=ScriptedSurface(),
         executor=_describes if describes else _refuses_to_describe,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     workflow = Plan.model_validate_json(session.state["plan"]).workflow
@@ -505,23 +548,23 @@ class _BreakdownRefusingSurface(ScriptedSurface):
 
 
 async def test_a_breakdown_refused_at_run_time_hands_back_a_failed_step_and_ask():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=["Kenya's debt service"]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=["Kenya's debt service"]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It could not be computed."),
         planner=AskingPlanner(),
         tool_surface=_BreakdownRefusingSurface(),
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
     assert body["failed_step"]["step_id"] == "retrieve"
     assert body["failed_step"]["code"] == "capability_unavailable"
@@ -589,23 +632,23 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
     """A capability the platform lacks fails any brief and any fetch of the
     step's data, so the plan call is not given back and the step's spec_id
     is refused to `fetch`; another refusal leaves both open."""
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="That part is unavailable."),
         planner=ScriptedPlannerModel(),
         tool_surface=RefusingGetDataSurface(code),
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     body = json.loads(next(line for line in after_plan.split("\n") if line.startswith('{"frames"')))
     assert body["failed_step"]["code"] == code
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
@@ -615,23 +658,23 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
 
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Here is what the plan computed."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_refuses_to_describe,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     assert "its result cannot be drawn" in after_plan
     body = json.loads(
         after_plan.split("Only a frame listed under frames can be charted.\n", 1)[1].split("\n", 1)[
@@ -646,28 +689,28 @@ async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not
 
 
 async def test_an_amendment_redrafts_and_the_amended_plan_runs():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     amend = create_request_input_response(
         first.id, {"result": {"approved": None, "amendment": "only 2020"}}
     )
-    second = _pause(await _run(runner, types.Content(role="user", parts=[amend])))
+    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
     assert second.args["payload"]["version"] == first.args["payload"]["version"] + 1
     approve = create_request_input_response(
         second.id, {"result": {"approved": second.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    assert "The approved plan ran." in _texts(model.requests[-1])
+    assert "The approved plan ran." in request_text(model.requests[-1])
 
 
 class _CountingSurface(ScriptedSurface):
@@ -693,7 +736,7 @@ _UNREADABLE_PLAN = json.dumps(_PLANS_WITH_MEMBER_LISTS["aggregate"]["plan"])
 
 
 def _stored_state(runner: Runner) -> dict[str, Any]:
-    """The live state of the session `_session` opened."""
+    """The live state of the session `open_session` opened."""
     service = cast(InMemorySessionService, runner.session_service)
     return service.sessions["t"]["u"]["s"].state
 
@@ -723,16 +766,16 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     it or amending it retrieves nothing: the question is planned from the
     start, the new card says why, and approving that one runs it."""
     surface = _CountingSurface()
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
     )
-    await _session(runner)
-    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    await open_session(runner)
+    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     held = _PLANS_WITH_MEMBER_LISTS[stored]
     _stored_state(runner)["plan"] = json.dumps(held["plan"])
     result = (
@@ -742,8 +785,8 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     )
 
     with caplog.at_level(logging.WARNING, logger="planner.plan"):
-        second = _pause(
-            await _run(
+        second = single_pause(
+            await run_turn(
                 runner,
                 types.Content(
                     role="user",
@@ -764,10 +807,10 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     approve = create_request_input_response(
         second.id, {"result": {"approved": second.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
     assert "get_data" in surface.calls
-    assert "The approved plan ran." in _texts(model.requests[-1])
+    assert "The approved plan ran." in request_text(model.requests[-1])
 
 
 async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists():
@@ -775,16 +818,16 @@ async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
     The next plan call drafts its own plan as it would with none on record,
     and its card says nothing of the earlier one, which no card of this
     call showed."""
-    runner, _ = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, _ = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_describes,
     )
-    await _session(runner, plan=_UNREADABLE_PLAN)
+    await open_session(runner, plan=_UNREADABLE_PLAN)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
 
     assert approval.id == APPROVE_INTERRUPT
     assert "refusal_note" not in approval.args["payload"]
@@ -816,20 +859,20 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
         lambda self: _StoredWithMemberLists.model_validate(approve_plan(self).model_dump()),
     )
     surface = _CountingSurface()
-    runner, _ = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, _ = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
     )
-    await _session(runner)
-    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    await open_session(runner)
+    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     approve = create_request_input_response(
         first.id, {"result": {"approved": first.args["payload"]["revision"]}}
     )
 
-    second = _pause(await _run(runner, types.Content(role="user", parts=[approve])))
+    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[approve])))
 
     assert second.id == APPROVE_INTERRUPT
     assert second.args["payload"]["refusal_note"] == UNREADABLE_PLAN_NOTE
@@ -842,29 +885,29 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 ):
     """`plan_done` hands back the frames the run produced as it does when no
     plan is on record: without the plan record, and with the slot cleared."""
-    run_plan = graph.execute_approved_plan
+    run_plan = execute_module.execute_approved_plan
 
     async def stored_unreadable(plan: Plan, **kwargs: Any) -> tuple[Plan, Any]:
         finished, outcome = await run_plan(plan, **kwargs)
         return _StoredWithMemberLists.model_validate(finished.model_dump()), outcome
 
-    monkeypatch.setattr(graph, "execute_approved_plan", stored_unreadable)
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    monkeypatch.setattr(execute_module, "execute_approved_plan", stored_unreadable)
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_describes,
     )
-    await _session(runner)
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    await open_session(runner)
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     revision = approval.args["payload"]["revision"]
     approve = create_request_input_response(approval.id, {"result": {"approved": revision}})
 
-    events = await _run(runner, types.Content(role="user", parts=[approve]))
+    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    handed_back = _texts(model.requests[-1])
+    handed_back = request_text(model.requests[-1])
     assert "The approved plan ran. Chart its frames and answer." in handed_back
     assert f"Plan {revision[:12]}" not in handed_back
     assert not [e for e in events if e.error_code]
@@ -875,24 +918,24 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 
 async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again():
     surface = _CountingSurface()
-    runner, _ = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, _ = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    first = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    first = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     amend = create_request_input_response(
         first.id, {"result": {"approved": None, "amendment": "only 2020"}}
     )
-    second = _pause(await _run(runner, types.Content(role="user", parts=[amend])))
+    second = single_pause(await run_turn(runner, types.Content(role="user", parts=[amend])))
     stale = create_request_input_response(
         second.id, {"result": {"approved": first.args["payload"]["revision"]}}
     )
-    third = _pause(await _run(runner, types.Content(role="user", parts=[stale])))
+    third = single_pause(await run_turn(runner, types.Content(role="user", parts=[stale])))
 
     assert third.id == APPROVE_INTERRUPT
     assert third.args["payload"]["version"] == second.args["payload"]["version"] + 1
@@ -900,20 +943,24 @@ async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_ag
 
 
 async def test_a_hand_back_is_still_in_view_after_a_later_pause():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
-        _call("ask_user", question="Which years?", options=["Since 2015", "Since 2020"]),
+        call(
+            "ask_user",
+            question="Which years?",
+            options=[{"label": "Since 2015"}, {"label": "Since 2020"}],
+        ),
         types.Part.from_text(text="Asked."),
         types.Part.from_text(text="Kenya's debt service since 2015 could not be calculated."),
     )
-    await _session(runner)
+    await open_session(runner)
 
-    pause = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    pause = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    await _run(runner, types.Content(role="user", parts=[answer]))
+    await run_turn(runner, types.Content(role="user", parts=[answer]))
 
-    resumed = _texts(model.requests[-1])
+    resumed = request_text(model.requests[-1])
     assert "Kenya's debt service?" in resumed
     assert "The planner could not make a plan" in resumed
     assert "The user chose: Since 2015" in resumed
@@ -927,24 +974,24 @@ async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_
     )
     planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")
     seam._agent.model = planner_llm
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt, first brief", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt, first brief", asks=[]),
         types.Part.from_text(text="Handed."),
-        _call("plan", brief="Kenya's debt, second brief", asks=[]),
+        call("plan", brief="Kenya's debt, second brief", asks=[]),
         types.Part.from_text(text="Handed again."),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(seam),
     )
-    await _session(runner)
+    await open_session(runner)
 
-    events = await _run(runner, types.UserContent("Kenya's debt?"))
+    events = await run_turn(runner, types.UserContent("Kenya's debt?"))
 
     hand_back = "The planner could not make a plan"
-    second_run = [r for r in planner_llm.captured if "second brief" in _texts(r)]
+    second_run = [r for r in planner_llm.captured if "second brief" in request_text(r)]
     assert second_run
-    assert not [r for r in second_run if hand_back in _texts(r)]
-    assert hand_back in _texts(model.requests[-1])
-    assert not _quotes_another_agent(model.requests[-1])
+    assert not [r for r in second_run if hand_back in request_text(r)]
+    assert hand_back in request_text(model.requests[-1])
+    assert not quotes_another_agent(model.requests[-1])
     # The hand-back's branch stays on the hand-back: the graph's own events
     # reach the same agents after each hand-back as before the first.
     graph_events = [e for e in events if e.author == "dfo_analyst_graph"]
@@ -987,8 +1034,8 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
     """A source an earlier turn's search returned is recorded as searched, so
     its block in that turn's record stays the one a later turn pins from."""
     monkeypatch.setattr(plan_display, "step_rows", _rows_led_by_a_wide_step(plan_display.step_rows))
-    runner, model = _runner(
-        _call("plan", brief="Kenya's debt service since 2015", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's debt service since 2015", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
@@ -996,14 +1043,14 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
         executor=_describes,
     )
     prior = {"readings": [], "spec_ids": prior_spec_ids, "warnings": {}}
-    await _session(runner, **{ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
+    await open_session(runner, **{ORCHESTRATOR_PRIOR_LEDGER_KEY: prior})
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's debt service?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's debt service?")))
     revision = approval.args["payload"]["revision"]
     approve = create_request_input_response(approval.id, {"result": {"approved": revision}})
-    events = await _run(runner, types.Content(role="user", parts=[approve]))
+    events = await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     assert f"Plan {revision[:12]} (approved)" in after_plan
     assert f"({_SCRIPTED_SPEC}, sum)" in after_plan
     assert "Wide_StatVar_" not in after_plan
@@ -1048,23 +1095,23 @@ class _NoisySurface(ScriptedSurface):
 
 
 async def test_step_summaries_reach_the_agent_without_frame_references_or_operation_notes():
-    runner, model = _runner(
-        _call("plan", brief="Kenya's life expectancy", asks=[]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's life expectancy", asks=[]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=_NoisySurface(),
         executor=_describes,
     )
-    await _session(runner)
+    await open_session(runner)
 
-    approval = _pause(await _run(runner, types.UserContent("Kenya's life expectancy?")))
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's life expectancy?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    after_plan = _texts(model.requests[-1])
+    after_plan = request_text(model.requests[-1])
     body = json.loads(after_plan.split("Chart its frames and answer.\n", 1)[1].split("\n", 1)[0])
     assert (
         "Retrieved life expectancy for Kenya.\n\nSource: World Bank.\n\nCoverage 1960-2023."
@@ -1156,34 +1203,29 @@ async def _approved_two_asks(
 ) -> tuple[ScriptLlm, TwoAsksPlanner]:
     """Run the two-asks brief, approving every plan the planner drafts."""
     planner = planner or TwoAsksPlanner()
-    runner, model = _runner(
-        _call("plan", brief="Kenya's life expectancy and its mean", asks=_TWO_ASKS),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's life expectancy and its mean", asks=_TWO_ASKS),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Answered."),
         planner=planner,
         tool_surface=surface,
         executor=_describes,
     )
-    await _session(runner)
-    events = await _run(runner, types.UserContent("Kenya's life expectancy?"))
+    await open_session(runner)
+    events = await run_turn(runner, types.UserContent("Kenya's life expectancy?"))
     while any(c.name == "adk_request_input" for e in events for c in e.get_function_calls()):
-        approval = _pause(events)
+        approval = single_pause(events)
         approve = create_request_input_response(
             approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
         )
-        events = await _run(runner, types.Content(role="user", parts=[approve]))
+        events = await run_turn(runner, types.Content(role="user", parts=[approve]))
     return model, planner
-
-
-def _hand_back(model: ScriptLlm) -> tuple[str, dict[str, Any]]:
-    text = _texts(model.requests[-1])
-    return text, json.loads(next(line for line in text.split("\n") if line.startswith('{"frames"')))
 
 
 async def test_a_terminal_step_another_step_reads_comes_back_on_an_accepted_plan():
     model, _ = await _approved_two_asks(ScriptedSurface())
 
-    _, body = _hand_back(model)
+    _, body = handed_back(model)
     series, mean = (frame["frame"] for frame in body["frames"])
     assert body["asks"] == [
         {
@@ -1200,7 +1242,7 @@ async def test_a_failed_plan_hands_back_the_terminal_frames_it_finished(
 ):
     model, _ = await _approved_two_asks(_AggregateRefusingSurface(), TwoAsksPlanner(declined))
 
-    text, body = _hand_back(model)
+    text, body = handed_back(model)
     (series,) = (frame["frame"] for frame in body["frames"])
     failed = {"status": "failed", "failed_at": "totals", "code": "growth_gap_year"}
     not_computed, charted = _first_ask(declined)
@@ -1218,22 +1260,22 @@ async def test_a_failed_plan_hands_back_the_terminal_frames_it_finished(
 
 async def test_a_failed_plan_hands_back_no_step_that_is_only_read():
     """The retrieval finished, but only the refused aggregate answers an ask."""
-    runner, model = _runner(
-        _call("plan", brief="Kenya's life expectancy", asks=["Kenya's mean life expectancy"]),
+    runner, model = orchestrator_runner(
+        call("plan", brief="Kenya's life expectancy", asks=["Kenya's mean life expectancy"]),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It could not be computed."),
         planner=AskingPlanner(),
         tool_surface=_AggregateRefusingSurface(),
         executor=_describes,
     )
-    await _session(runner)
-    approval = _pause(await _run(runner, types.UserContent("Kenya's life expectancy?")))
+    await open_session(runner)
+    approval = single_pause(await run_turn(runner, types.UserContent("Kenya's life expectancy?")))
     approve = create_request_input_response(
         approval.id, {"result": {"approved": approval.args["payload"]["revision"]}}
     )
-    await _run(runner, types.Content(role="user", parts=[approve]))
+    await run_turn(runner, types.Content(role="user", parts=[approve]))
 
-    _, body = _hand_back(model)
+    _, body = handed_back(model)
     assert body["frames"] == []
     assert body["failed_step"]["step_id"] == "totals"
 
@@ -1286,7 +1328,7 @@ async def test_a_planner_refusal_after_a_stopped_run_hands_back_the_asks_it_comp
         _EmptyAggregateSurface(), _RefusingReplanner(declined)
     )
 
-    text, body = _hand_back(model)
+    text, body = handed_back(model)
     (series,) = (frame["frame"] for frame in body["frames"])
     not_computed, charted = _first_ask(declined)
     assert planner.refusals[-1] is not None
@@ -1310,7 +1352,7 @@ async def test_a_replanned_run_that_stops_earlier_keeps_the_asks_the_first_run_c
         _RetrievalRefusingOnReplanSurface(), TwoAsksPlanner(declined)
     )
 
-    text, body = _hand_back(model)
+    text, body = handed_back(model)
     (series,) = (frame["frame"] for frame in body["frames"])
     failed = {"status": "failed", "failed_at": "retrieve", "code": "growth_gap_year"}
     not_computed, charted = _first_ask(declined)
@@ -1342,3 +1384,46 @@ def test_a_partial_result_offers_to_chart_only_frames_that_hold_series(
     assert (
         'holds no series or cannot be drawn, as each step\'s status says: "the mean".' in text
     ) is not charted
+
+
+async def test_a_plain_text_turn_streams_the_agents_answer_over_the_studio_routes():
+    app, model = orchestrator_app(types.Part.from_text(text="Kenya's GDP was $101 billion."))
+
+    async with studio_client(app) as client:
+        frames = await stream(client, "/api/studio/turn", turn_body("Kenya's GDP in 2020?"))
+
+    assert [f["event"] for f in frames][-4:] == [
+        "message.delta",
+        "message.complete",
+        "suggestions",
+        "done",
+    ]
+    assert frames[-3]["text"] == "Kenya's GDP was $101 billion."
+    assert len(model.requests) == 1
+    assert "Kenya's GDP in 2020?" in request_text(model.requests[0])
+
+
+async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes():
+    search = CannedSearch(definite_envelope())
+    app, model = orchestrator_app(
+        search_call("life expectancy in Kenya", "life expectancy"),
+        fetch_call(),
+        make_charts_call(chart(frame_for())),
+        types.Part.from_text(text="Life expectancy in Kenya rose to 62 years."),
+        resolver=search,
+    )
+
+    async with studio_client(app) as client:
+        frames = await stream(client, "/api/studio/turn", turn_body("Life expectancy in Kenya?"))
+
+    assert [c["question"] for c in search.calls] == ["life expectancy in Kenya"]
+    tools = [f.get("tool") for f in frames if f["event"] == "activity.step"]
+    assert {"search", "fetch", "make_charts", "write_component"} <= set(tools)
+    created = [f for f in frames if f["event"] == "component.created"]
+    assert [f["component_id"] for f in created] == ["cmp_scripted0002"]
+    assert frames[-1]["event"] == "done"
+    complete = next(f for f in frames if f["event"] == "message.complete")
+    assert complete["text"] == "Life expectancy in Kenya rose to 62 years."
+    drawn = model.requests[-1].contents[-1].parts[0].function_response
+    assert drawn.name == "make_charts"
+    assert "facts" in drawn.response["charts"][0]

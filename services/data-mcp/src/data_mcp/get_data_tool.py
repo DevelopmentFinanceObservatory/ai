@@ -30,6 +30,7 @@ import httpx2
 import pyarrow as pa
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
+from common.place_type import PLACE_ROLE, type_column
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
@@ -54,8 +55,9 @@ from data_mcp.definition_store import (
 from data_mcp.errors import UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
-    PLACE_TYPE_COLUMNS,
     materialise_and_register,
+    place_type_columns_for,
+    replayed_mint_options,
 )
 from data_mcp.get_data_digest import (
     BreakdownLevel,
@@ -66,6 +68,7 @@ from data_mcp.get_data_digest import (
     statistics_needs_fetch,
 )
 from data_mcp.manifest import (
+    ArtifactEntry,
     DefinitionModel,
     Manifest,
     SeriesStatisticsModel,
@@ -188,6 +191,9 @@ _deadline_clock: Clock = time.monotonic
 _mint_ledger = MintLedger()
 
 logger = logging.getLogger(__name__)
+
+# The type column of a place-subject frame.
+_PLACE_TYPE_COLUMN = type_column(PLACE_ROLE)
 
 
 class GetDataScope(BaseModel):
@@ -654,12 +660,22 @@ async def _persist_reminted_definition(
     return True
 
 
+def _artifact_title(artifact: ArtifactEntry) -> str:
+    """A link title that names the artifact's content once, from its `rendering`."""
+    rendering = artifact.rendering
+    if statistics := rendering.get("statistics"):
+        return f"{statistics} statistics artifact"
+    if file_format := rendering.get("format"):
+        return f"{file_format} artifact"
+    return "artifact"
+
+
 def _artifact_resource_links(manifest: Manifest) -> list[ResourceLink]:
     """One `ResourceLink` per artifact on `manifest`, from its own `resource_uri`.
 
-    A model reads the link to pull a freshly signed download URL at fetch
-    time. A URL embedded in this tool's result would go stale, so neither
-    the result nor the manifest in structured content carries one. One link
+    A model reads the link to pull the artifact's download URL when it needs
+    one, so neither the result nor the manifest in structured content carries
+    one. One link
     per artifact on the narrowed manifest (`_narrowed_to_rendering`): the
     requested rendering and its statistics.
     """
@@ -675,10 +691,10 @@ def _artifact_resource_links(manifest: Manifest) -> list[ResourceLink]:
                 uri=artifact.resource_uri,
                 # Stable and unique within one manifest, unlike `title`.
                 name=artifact.artifact_digest,
-                title=f"{artifact.rendering.get('format', 'artifact')} artifact",
+                title=_artifact_title(artifact),
                 description=(
-                    f"Read for a freshly signed download URL ({artifact.bytes} bytes). "
-                    "The URL is minted at read time and expires in minutes; do not cache it."
+                    f"Read for the download URL ({artifact.bytes} bytes). "
+                    "The URL does not expire; a GET on it redirects to the bytes."
                 ),
                 # The media type of the JSON document this link resolves to,
                 # not the artifact's own `media_type`.
@@ -698,7 +714,7 @@ async def _fetch_statistics_for_digest(
     Only fetches when `statistics_needs_fetch(manifest.series_count)` -- a
     count of `0`, past the digest's own cap, or `None` (an old record)
     renders from `manifest.series_count` alone and never touches the
-    network. A signed-URL fetch or Parquet-decode failure degrades to
+    network. An artifact fetch or Parquet-decode failure degrades to
     `(None, True)`, logged here rather than raised: the mint itself already
     succeeded, and the frame reference `render_get_data_digest` renders
     stays real and usable either way.
@@ -852,12 +868,13 @@ async def _finish_mint_response(
     written to the store here, and what happens when the write itself fails.
 
     Once the manifest itself validates, it is narrowed to the requested rendering
-    (`_narrowed_to_rendering`), and `materialise_and_register` fetches the bytes of
-    the artifact whose rendering equals `options`, parses them into a `Frame`, and
-    registers it in the shared materialisation store under the frame reference this
-    digest hands the model (`frame_materialisation.frame_ref_for`). A frame minted with
-    `options.columns` has a `content_version` of its own, and the manifest keeps dfo-apis' pair, which its
-    artifacts are read under. A failed fetch or an unconfirmed store write degrades this
+    (`_narrowed_to_rendering`), and `materialise_and_register` registers the frame in
+    the shared materialisation store under the frame reference this digest hands the
+    model (`frame_materialisation.frame_ref_for`): for a default mint the version's
+    canonical frame, read off the snapshot route, and otherwise the artifact whose
+    rendering equals `options`. A frame minted with `options.columns` or
+    `options.groupby` has a `content_version` of its own, and the manifest keeps
+    dfo-apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed store write degrades this
     call's own digest rather than refusing it (see `render_get_data_digest`'s
     `degraded_frame`); a genuinely unusable artifact or manifest still refuses.
 
@@ -983,10 +1000,13 @@ def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) ->
 
     A manifest lists every rendering dfo-apis stores under its pair, so other callers'
     groupby sums and column selections sit beside the requested one, in no set order.
-    The frame fetch, the resource links, and the harness's freshness date
-    (`harness.provenance.data_artifact`) all read the narrowed list. A manifest without
-    the requested rendering keeps only its statistics, and `materialise_and_register`
-    refuses it unless the store already holds the frame.
+    The resource links and the harness's freshness date
+    (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
+    fetch of a mint with columns or a groupby. A manifest without the requested
+    rendering keeps only its statistics, and `materialise_and_register` refuses such a
+    mint unless the store already holds the frame. A default mint's frame is the
+    version's canonical frame, which the snapshot route lists and no mint response
+    does.
     """
     statistics = find_statistics_artifact(manifest)
     artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
@@ -1113,9 +1133,13 @@ async def _attempt_mint(
     With one contributor the two frames are the same bytes under one `content_version`.
     A `breakdown` adds its own `Breakdown.groupby` instead, which sums the StatVars
     within each code at the breakdown's level.
-    `place_types` sets `options.columns` to `PLACE_TYPE_COLUMNS`, which adds
-    `observationAbout_type` to the default columns, and gives the frame a
-    `content_version` of its own (`frame_materialisation.frame_ref_for`).
+    `place_types` sets `options.columns` to the columns
+    `frame_materialisation.place_type_columns_for` picks for `identity`, which adds them to
+    the default columns, and gives the frame a `content_version` of its own
+    (`frame_materialisation.frame_ref_for`). A `column_unknown` refusal of the place type
+    column from a table without one is sent once more with no columns
+    (`_without_unserved_place_type`). A refusal of a flow table's `kind` is relayed: a
+    flow frame without kinds would let a sum count party totals beside their parties.
     """
     mint_input: dict[str, Any] = {
         "kind": "spec_id",
@@ -1138,7 +1162,7 @@ async def _attempt_mint(
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
     if place_types:
-        options["columns"] = list(PLACE_TYPE_COLUMNS)
+        options["columns"] = list(place_type_columns_for(identity))
     request_body = {
         "schema_version": _SCHEMA_VERSION,
         "input": mint_input,
@@ -1168,9 +1192,16 @@ async def _attempt_mint(
         )
 
     try:
-        posted = await _post_mint(
-            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
-        )
+        try:
+            posted = await _post_mint(
+                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+            )
+        except UpstreamError as exc:
+            if not _without_unserved_place_type(options, exc, spec_id=spec_id):
+                raise
+            posted = await _post_mint(
+                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+            )
     except UpstreamError as exc:
         if identity is None and exc.code == "spec_not_found":
             # The sidecar-free registry-fallback request above just missed
@@ -1208,16 +1239,50 @@ async def _attempt_mint(
     )
 
 
+def _without_unserved_place_type(
+    options: dict[str, Any], refused: UpstreamError, *, spec_id: str
+) -> bool:
+    """Drop `options.columns` when it asks for the place type column alone and a
+    `column_unknown` refusal lists that column as unserved, and say whether it did. A
+    refusal of any other code or request, or one whose list is truncated, changes
+    nothing.
+    """
+    alternatives = refused.extensions.get("alternatives")
+    if (
+        refused.code != "column_unknown"
+        or options.get("columns") != [_PLACE_TYPE_COLUMN]
+        or refused.extensions.get("truncated")
+        or not isinstance(alternatives, list)
+    ):
+        return False
+    served = {
+        alternative["ref"]
+        for alternative in alternatives
+        if isinstance(alternative, dict) and isinstance(alternative.get("ref"), str)
+    }
+    if _PLACE_TYPE_COLUMN in served:
+        return False
+    logger.info(
+        "get_data: %s serves no %s; minting again with the default columns",
+        spec_id,
+        _PLACE_TYPE_COLUMN,
+    )
+    del options["columns"]
+    return True
+
+
 @dataclass(frozen=True, kw_only=True)
 class RootMint:
     """A root frame `mint_recorded_root` confirmed in the materialisation store.
 
     `frame` is the pair the store holds it under, `dataset` the pair dfo-apis names
-    the materialisation by, and `stat_var_count` the distinct StatVars its rows hold.
+    the materialisation by, `options` the mint options sent, and `stat_var_count` the
+    distinct StatVars its rows hold.
     """
 
     frame: FrameRef
     dataset: FrameRef
+    options: dict[str, Any]
     stat_var_count: int
 
 
@@ -1226,12 +1291,16 @@ async def mint_recorded_root(
 ) -> RootMint | QueuedOperation | ToolResult:
     """Mint the dataset `record` names again, with the `options` and `scope` it
     records, and register the current frame of that rendering in the store.
+    Recorded `options` are first mapped to what `get_data` sends
+    (`frame_materialisation.replayed_mint_options`): a flow root recorded with its
+    parties' types or with no columns is minted with their kinds, and comes back
+    under a new pair.
 
     This is `get_data`'s mint without its model-facing parts. No entity name is
     resolved, since a recorded scope already holds dcids, and no digest, statistics
     or resource link is built. The request is `get_data`'s own: `record.dataset
     .spec_id` with `record.scope`, the stored definition beside it when the
-    definition store holds one, and `record.options` as they stand. It goes through
+    definition store holds one, and those `options`. It goes through
     `_post_mint`, so the current `CallBudget` sizes the POST and the mint ledger
     admits it, and `materialise_and_register` registers the frame and writes the
     mint record of its current pair.
@@ -1261,8 +1330,9 @@ async def mint_recorded_root(
     posted = await _post_recorded_mint(client, record, settings=settings, deadline=deadline)
     if isinstance(posted, ToolResult):
         return posted
+    response, options = posted
     payload = await _manifest_payload_without_waiting(
-        posted, client=client, settings=settings, deadline=deadline
+        response, client=client, settings=settings, deadline=deadline
     )
     if isinstance(payload, QueuedOperation | ToolResult):
         return payload
@@ -1277,10 +1347,10 @@ async def mint_recorded_root(
         )
 
     outcome = await materialise_and_register(
-        manifest=_narrowed_to_rendering(manifest, options=record.options),
+        manifest=_narrowed_to_rendering(manifest, options=options),
         settings=settings,
         writer=current_writer(),
-        options=record.options,
+        options=options,
         scope=record.scope,
         deadline=deadline,
     )
@@ -1303,19 +1373,27 @@ async def mint_recorded_root(
         dataset=FrameRef(
             spec_id=manifest.definition.spec_id, content_version=manifest.content_version
         ),
+        options=dict(options),
         stat_var_count=outcome.stat_var_count,
     )
 
 
 async def _post_recorded_mint(
-    client: UpstreamClient, record: MintRecord, *, settings: Settings, deadline: CallDeadline
-) -> httpx2.Response | ToolResult:
+    client: UpstreamClient,
+    record: MintRecord,
+    *,
+    settings: Settings,
+    deadline: CallDeadline,
+) -> tuple[httpx2.Response, Mapping[str, Any]] | ToolResult:
     """POST the mint `record` names, as `_attempt_mint` posts `get_data`'s, with the
-    stored definition beside the `spec_id` when the definition store holds one."""
+    stored definition beside the `spec_id` when the definition store holds one, and
+    return the response with the options it sent: the recorded ones mapped for that
+    definition's identity (`replayed_mint_options`)."""
     spec_id = record.dataset.spec_id
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
         return identity
+    options = replayed_mint_options(record.options, identity=identity)
     mint_input: dict[str, Any] = {"kind": "spec_id", "spec_id": spec_id, "scope": record.scope}
     if identity is not None:
         mint_input["definition"] = {
@@ -1326,7 +1404,7 @@ async def _post_recorded_mint(
     request_body = {
         "schema_version": _SCHEMA_VERSION,
         "input": mint_input,
-        "options": record.options,
+        "options": options,
     }
     try:
         posted = await _post_mint(
@@ -1336,7 +1414,7 @@ async def _post_recorded_mint(
         if identity is None and exc.code == "spec_not_found":
             return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
         return to_tool_result(from_upstream_error(exc))
-    return to_tool_result(posted) if isinstance(posted, ToolRefusal) else posted
+    return to_tool_result(posted) if isinstance(posted, ToolRefusal) else (posted, options)
 
 
 async def _manifest_payload_without_waiting(
@@ -1441,9 +1519,13 @@ async def get_data(
         bool,
         Field(
             description=(
-                "Add each place's Data Commons types as an observationAbout_type column, "
-                'comma-joined ("Country", "AdministrativeArea1,State", "Place" for Earth), and '
-                '"untyped" for a place with none. Set it for a spec that names no place: its '
+                "Add the Data Commons types of each place the frame names as an "
+                'observationAbout_type column. Values are comma-joined ("Country", '
+                '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
+                "with none. On a flow frame it adds each party's kind instead, as "
+                "financingProvider_kind and financingRecipient_kind: party, residual, or total "
+                'for a group total such as "Africa, Total", which sums and ranks leave out, and '
+                '"untyped" for a party with none. Set it for a spec that names no place: its '
                 "frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
@@ -1507,9 +1589,10 @@ async def get_data(
 
     A spec that names no place covers every place with data, at every
     level: the world, regions, World Bank groups, countries and their
-    subdivisions. `place_types=true` adds each place's types as
-    `observationAbout_type`, so a `filter` can keep one level before a rank
-    or a total sets a place beside the places inside it.
+    subdivisions. `place_types=true` adds the `observationAbout_type` column,
+    so a `filter` can keep one level before a rank or a total sets a place
+    beside the places inside it. On a flow frame it adds each party's kind
+    (`financingProvider_kind`, `financingRecipient_kind`) instead.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got
@@ -1525,8 +1608,8 @@ async def get_data(
             Omit entirely to retrieve the stored definition unchanged.
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
-        place_types: Whether to add each place's types as
-            `observationAbout_type`, for a spec that names no place.
+        place_types: Whether to add the places' types (`observationAbout_type`), or
+            each party's kind on a flow frame, for a spec that names no place.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 

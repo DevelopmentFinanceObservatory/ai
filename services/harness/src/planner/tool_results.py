@@ -82,7 +82,7 @@ class ProblemCode(StrEnum):
     ASK_NOT_UNDERSTOOD = "ask_not_understood"
     ELECTION_UNTRACEABLE = "election_untraceable"
     SOURCE_NOT_OFFERED = "source_not_offered"
-    SEED_DROPPED = "seed_dropped"
+    COMBINATION_UNASKED = "combination_unasked"
     OPERATION_UNSUPPORTED = "operation_unsupported"
     DECLINE_MISSING = "decline_missing"
     DECLINE_UNEARNED = "decline_unearned"

@@ -232,7 +232,7 @@ def render_get_data_digest(
             ignored otherwise, since a count of `0`, past the cap, or `None`
             renders from `manifest.series_count` alone.
         statistics_fetch_failed: The caller tried the fetch
-            `statistics_needs_fetch` called for and it raised -- a signed-URL
+            `statistics_needs_fetch` called for and it raised -- an artifact
             fetch or a Parquet decode failure. Renders a count-only line with
             a note rather than raising: the mint itself succeeded and the
             frame reference above is real, so a sidecar-artifact hiccup

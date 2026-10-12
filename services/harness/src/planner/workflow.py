@@ -24,6 +24,7 @@ from planner.records import (
     EvidenceIssue,
     Identifier,
     Period,
+    ResolvedSourceMention,
     SpecId,
     StatVarReading,
     StrictModel,
@@ -68,18 +69,27 @@ class ResolvedEntity(StrictModel):
 
 
 class ResolvedGroup(StrictModel):
-    """A named set whose members a source binds on one role column.
+    """A named set a source binds on one role column, read whole or as its members.
 
-    `search` binds the members of a set asked for as one ("African
-    countries") and names the set beside them, keyed by the role column its
-    members fill (`resolved.entity_groups`). `label` is the set's name, which
-    a requirement's `Entity.name` asking for its members is matched against,
-    and `ref` its own graph node, `None` when the graph holds none.
+    `search` names the set it bound, keyed by the role column it fills
+    (`resolved.entity_groups`). `label` is the set's name, and `ref` its own
+    graph node, `None` when the graph holds none (a resolver group such as
+    "G7"). `total` is the party the dataset publishes as the set's own total
+    (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
+    when the role binds the set's members, one entity each. A requirement's
+    `Entity` naming the label, case-folded, on the set's side of the flow is
+    met by the source under either reading (`compiler.evidence.resolve_group`),
+    except that one asking for the members is not met by the total.
     """
 
     role: str = Field(min_length=1)
     label: str = Field(min_length=1)
     ref: str | None = None
+    # Left out of every dump while unset, so a source saved without it keeps
+    # its serialised form.
+    total: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda total: total is None
+    )
 
 
 class OpenAxis(StrictModel):
@@ -120,6 +130,47 @@ class OpenEntityAxis(StrictModel):
     member_count: int | None = Field(default=None, ge=0)
 
 
+class MeasureAlternative(StrictModel):
+    """One other measure `search` offers for a source, from `resolved.alternative_measures`.
+
+    `spec_id` is the alternative's own definition, minted from the source's
+    identity with its measure axes swapped. `label` names the measure without
+    its price basis ("net disbursements") on axis `what`, or names the prices
+    ("constant prices") on axis `unit`. `axis` is a plain string, since
+    the vocabulary belongs to dfo-apis and an unknown axis must not fail
+    validation. `identity` preserves the sibling definition for approval
+    amendments and later turns, so choosing it resolves the recorded
+    dataset without a fresh search.
+    """
+
+    spec_id: SpecId
+    label: str = Field(min_length=1)
+    axis: str = Field(min_length=1)
+    identity: Annotated[dict[str, JsonValue] | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda identity: identity is None
+    )
+
+
+class ElectedMeasure(StrictModel):
+    """The measure `search` elected for a source, and the others it could answer with.
+
+    `label` is `resolved.measure_label`, the measure partition the source's
+    served rows exhibit, named the way each `what` alternative is. Empty
+    `alternatives` means `search` labelled no other partition.
+    """
+
+    label: str = Field(min_length=1)
+    alternatives: tuple[MeasureAlternative, ...] = ()
+
+    def other_counts(self) -> tuple[MeasureAlternative, ...]:
+        """Each alternative that counts the flow another way (axis `what`).
+
+        A price alternative (axis `unit`) is the same count in other prices,
+        so it is not one.
+        """
+        return tuple(alternative for alternative in self.alternatives if alternative.axis == "what")
+
+
 class SelectedSource(StrictModel):
     """The dataset definition discovery selected for one retrieval.
 
@@ -144,9 +195,19 @@ class SelectedSource(StrictModel):
     `measure_label` is `resolved.shape.label`, the name `search` gives what
     the definition measures; `None` when the envelope states none.
 
+    `elected_measure` is the measure partition `search` elected among those
+    the definition's family holds, with the others it offers in its place
+    (`ElectedMeasure`); `None` when the envelope states no
+    `resolved.measure_label`, as for a source with no measure family.
+
     `unit_per_series` is `True` when `resolved.facets.unit` selects a unit
     per series (`selection: per_series`), so each series states its own unit
     and the source names no one `unit_ref`; `None` otherwise.
+
+    `provenance_account` is `resolved.facets.provenance.account`:
+    `"provider"` (`compiler.sources.PROVIDER_ACCOUNT`) for a table of the
+    flows a provider reports, as the OECD and ONE aid tables are; `None`
+    when the envelope states none.
 
     `stat_var_member_count` is `resolved.stat_vars.member_count`, the members
     of the definition's binding that `search` confirmed at the resolve's
@@ -196,8 +257,16 @@ class SelectedSource(StrictModel):
     `translator.discovery.DiscoveryLog.selectable` does not offer such a
     source to a requirement that states `across`.
 
-    `groups` are the named sets whose members the source binds, one per role
-    column at most (`ResolvedGroup`); empty when the block names none.
+    `groups` are the named sets the source binds, one per role column at
+    most, each read as its published total or as its members
+    (`ResolvedGroup`); empty when the block names none.
+
+    `entity_refs` maps a requirement's entity name, case-folded, that
+    matches no label of `entities` to the graph ref it resolves to
+    (`translator.discovery.resolve_entity_refs`), so "United States" finds
+    the entity labelled "United States of America" by ref
+    (`compiler.evidence.named_members`). Empty until that resolve runs, and
+    for a source whose names all match by label.
 
     `definition` is the source's own definition, read from data-mcp's
     `describe` rather than `search`; for a StatVar it is the graph's
@@ -216,6 +285,11 @@ class SelectedSource(StrictModel):
     confidence: str | None = None
     has_data: bool | None
     measure_label: Annotated[str | None, HASHED_WHEN_SET] = None
+    # Left out of every dump while unset, so a source saved without it keeps
+    # its serialised form.
+    elected_measure: Annotated[ElectedMeasure | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda measure: measure is None
+    )
     stat_var_member_count: int | None = None
     stat_var_member_count_exact: Annotated[bool | None, HASHED_WHEN_SET] = None
     served_count: Annotated[int | None, HASHED_WHEN_SET] = None
@@ -223,12 +297,19 @@ class SelectedSource(StrictModel):
     shape_member_digest: str | None = None
     entities: tuple[ResolvedEntity, ...] = ()
     groups: Annotated[tuple[ResolvedGroup, ...], HASHED_WHEN_SET] = ()
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    entity_refs: Annotated[dict[str, str], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda refs: not refs
+    )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
     unit_ref: str | None = None
     unit_label: str | None = None
     unit_per_series: Annotated[bool | None, HASHED_WHEN_SET] = None
     provenance_ref: str | None = None
     provenance_label: str | None = None
+    provenance_account: Annotated[str | None, HASHED_WHEN_SET] = None
+    resolved_sources: Annotated[tuple[ResolvedSourceMention, ...], HASHED_WHEN_SET] = ()
     coverage_kind: str | None = None
     coverage_window: Period | None = None
     identity: dict[str, JsonValue] | None = None

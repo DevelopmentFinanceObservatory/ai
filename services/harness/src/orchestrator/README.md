@@ -3,8 +3,8 @@
 The Orchestrator Agent answers a studio turn by calling tools itself. It
 decides what a question needs -- search and fetch data, draw charts, ask the
 user, load a skill, or hand a question that needs construction or synthesis
-to the planner. `harness.graph.create_root_workflow` wires it in when given one
-(`STUDIO_ENGINE=orchestrator`).
+to the planner. `harness.graph.workflow.create_root_workflow` runs it as the
+workflow's `orchestrate` node.
 
 `orchestrator` ships inside `harness` as a sibling top-level module
 (`services/harness/src/orchestrator/`), on harness's dependencies, tests, and
@@ -32,5 +32,4 @@ and chart facts, never rows. Each request opens with the canvas digest and
 the conversation digest from session state (`prepend_digests`), so the
 instruction stays the same on every call and its prefix is served from the
 shared cache (`harness.prefix_cache`). Within a turn it sees its own calls
-and every hand-back (see "The orchestrator engine" in
-`services/harness/README.md`).
+and every hand-back (see "The workflow" in `services/harness/README.md`).

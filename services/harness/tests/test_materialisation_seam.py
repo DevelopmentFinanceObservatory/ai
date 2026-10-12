@@ -15,18 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import httpx2
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
+from common.materialisation import frame_to_parquet_bytes
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.client import UpstreamClient
 from data_mcp.settings import Settings as DataMcpSettings
+from dfo_frame_grammar import Frame, frame_sha256, mint_content_version
 from fastapi import FastAPI
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
@@ -35,7 +34,24 @@ from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Setti
 from mcp.shared._httpx_utils import McpHttpClientFactory
 
 _SPEC_ID = "spec_" + "5" * 32
-_CONTENT_VERSION = "cv_" + "6" * 32
+
+
+def _frame() -> Frame:
+    return Frame.build(
+        role_keys=["reporter"],
+        rows=[
+            {
+                "stat_var": "dcid:Test",
+                "reporter": "country/KEN",
+                "time_period": "2020",
+                "value": 1.5,
+            }
+        ],
+    )
+
+
+# The version's token, minted from its canonical frame as dfo-apis mints it.
+_CONTENT_VERSION = mint_content_version(frame_sha256=frame_sha256(_frame()))
 
 
 @pytest.fixture(autouse=True)
@@ -147,27 +163,16 @@ def _mint_response() -> dict[str, Any]:
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
     }
 
 
 def _parquet_bytes() -> bytes:
-    """One valid row, already in the shape `Frame.build` accepts directly -- no
-    coercion needed (mirrors `data-mcp`'s own `test_frame_materialisation.py`)."""
-    table = pa.table(
-        {
-            "stat_var": pa.array(["dcid:Test"], type=pa.string()),
-            "reporter": pa.array(["country/KEN"], type=pa.string()),
-            "time_period": pa.array(["2020"], type=pa.string()),
-            "value": pa.array([1.5], type=pa.float64()),
-        }
-    )
-    buf = io.BytesIO()
-    pq.write_table(table, buf)
-    return buf.getvalue()
+    """One row in the canonical layout: the version's canonical frame, which the
+    default mint registers, and its frame file."""
+    return frame_to_parquet_bytes(_frame())
 
 
 def _artifact_digest() -> str:
@@ -202,6 +207,14 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/datasets":
             return httpx2.Response(200, json=_mint_response())
+        if request.url.path == f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}":
+            # The snapshot lists the version's canonical frame beside the frame file.
+            snapshot = _mint_response()
+            snapshot["artifacts"].append(
+                snapshot["artifacts"][0]
+                | {"rendering": {"format": "frame"}, "url": "/links/canonical"}
+            )
+            return httpx2.Response(200, json=snapshot)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(

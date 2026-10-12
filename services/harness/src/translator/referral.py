@@ -19,7 +19,10 @@ that already failed with the same issues earlier in the session
 failed. `budget_spent` marks a `discovery_unavailable` referral made once
 a discovery budget is spent and the most recent call that spent it timed
 out (`translator.discovery._budget_referral`). Translating the same revision
-again cannot search, so retrying cannot succeed.
+again cannot search, so retrying cannot succeed. `not_issued` marks a
+`discovery_unavailable` referral for a call the planner entry had no time
+left to issue (`translator.discovery.NoTimeLeftError`): the service was never
+asked, so the entry ran out of time rather than the service failing.
 
 Four kinds carry `candidates`, for different reasons. `SOURCE_AMBIGUOUS`
 always carries two or more: discovery found a real choice. The planner
@@ -50,6 +53,14 @@ other requirement of the same plan revision whose pin discovery did not find,
 each with the sources found in its place, so one planner round repairs every
 pin a change such as a moved period left stale.
 
+A source found in place of a pin whose own source discovery read and set
+aside, because it held the requirement's `across` side closed, is offered
+only when it keeps that source's scope (`dropped_scope`). One that drops it,
+leaving open a role the pinned source closed to a named group or named
+members, is listed under `withheld` with the scope it drops, and never under
+`candidates`, so `offered` does not name it and the planner cannot pin it.
+"France to Africa", re-searched as "France to every recipient", is the case.
+
 `save_referral`, `load_referral` and `clear_referral` keep the last referral in
 session state, under `REFERRAL_STATE_KEY`, so the planner can read why the
 translator handed the plan back without it riding along on the plan itself.
@@ -62,8 +73,9 @@ from collections.abc import Mapping
 from enum import StrEnum
 
 from compiler.compile import CompileIssueCode
+from planner.parties import flow_side, party_role
 from planner.plan import SessionState
-from planner.records import Identifier, StrictModel, warn_left_out
+from planner.records import AmbiguousSourceReading, Identifier, StrictModel, warn_left_out
 from planner.tool_results import Outcome
 from planner.workflow import SelectedSource
 from pydantic import Field, ValidationError, model_validator
@@ -79,6 +91,7 @@ class ReferralKind(StrEnum):
     """Why the translator stopped."""
 
     SOURCE_AMBIGUOUS = "source_ambiguous"
+    SOURCE_NAME_AMBIGUOUS = "source_name_ambiguous"
     NO_DATA = "no_data"
     UNSUPPORTED_ASK = "unsupported_ask"
     REQUIREMENT_UNMEETABLE = "requirement_unmeetable"
@@ -92,10 +105,6 @@ class ReferralKind(StrEnum):
     # requirement's own content, so it is never `requirement_unmeetable`:
     # nothing about the requirement needs to change for a retry to work.
     DISCOVERY_UNAVAILABLE = "discovery_unavailable"
-    # A `search` that answered a requirement with a dataset the turn dropped
-    # (`planner.plan.dropped_seeds`): the user is told the plan leaves it out,
-    # so the planner removes the requirement.
-    SEED_DROPPED = "seed_dropped"
     # A compile issue the planner repairs in the requirement it names, carrying
     # the issue's code as `constraint` and the permitted change as `repair`.
     REQUIREMENT_NEEDS_REPAIR = "requirement_needs_repair"
@@ -110,12 +119,12 @@ class ReferralKind(StrEnum):
 # What each kind asks of the planner, in the planner's own `Outcome` vocabulary.
 OUTCOME_OF: Mapping[ReferralKind, Outcome] = {
     ReferralKind.SOURCE_AMBIGUOUS: Outcome.CHOICE_REQUIRED,
+    ReferralKind.SOURCE_NAME_AMBIGUOUS: Outcome.CHOICE_REQUIRED,
     ReferralKind.PINNED_SOURCE_NOT_FOUND: Outcome.CHOICE_REQUIRED,
     ReferralKind.NO_DATA: Outcome.INVALID_INPUT,
     ReferralKind.REQUIREMENT_UNMEETABLE: Outcome.INVALID_INPUT,
     ReferralKind.ASK_NOT_UNDERSTOOD: Outcome.INVALID_INPUT,
     ReferralKind.DISCOVERY_BUDGET_EXHAUSTED: Outcome.INVALID_INPUT,
-    ReferralKind.SEED_DROPPED: Outcome.INVALID_INPUT,
     ReferralKind.REQUIREMENT_NEEDS_REPAIR: Outcome.INVALID_INPUT,
     ReferralKind.UNSUPPORTED_ASK: Outcome.UNSUPPORTED,
     ReferralKind.NO_OPERATION_COVERS: Outcome.UNSUPPORTED,
@@ -128,13 +137,13 @@ OUTCOME_OF: Mapping[ReferralKind, Outcome] = {
 ABOUT_A_REQUIREMENT = frozenset(
     {
         ReferralKind.SOURCE_AMBIGUOUS,
+        ReferralKind.SOURCE_NAME_AMBIGUOUS,
         ReferralKind.NO_DATA,
         ReferralKind.UNSUPPORTED_ASK,
         ReferralKind.REQUIREMENT_UNMEETABLE,
         ReferralKind.PINNED_SOURCE_NOT_FOUND,
         ReferralKind.ASK_NOT_UNDERSTOOD,
         ReferralKind.DISCOVERY_UNAVAILABLE,
-        ReferralKind.SEED_DROPPED,
         ReferralKind.NO_OPERATION_COVERS,
         ReferralKind.REQUIREMENT_NEEDS_REPAIR,
     }
@@ -157,11 +166,119 @@ MAY_CARRY_CANDIDATES = frozenset(
 )
 
 
+class WithheldSource(StrictModel):
+    """A source found in place of a pin that drops the scope the pinned source held.
+
+    `dropped` names each role column whose scope it drops, one sentence a
+    column (`dropped_scope`).
+    """
+
+    source: SelectedSource
+    dropped: tuple[str, ...] = Field(min_length=1)
+
+
+def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...]:
+    """The scope `held`, a pinned dataset's source, holds on each role column that `found` drops.
+
+    A column `held` closes, by binding entities on it or naming a group on
+    it, is dropped when `found` leaves it open, when `found` binds on it
+    fewer than every entity `held` binds there, or when `held` names its
+    members only as a group and `found` names no group of that label there.
+    A column `held` leaves open is never dropped: a source that closes it
+    narrows the population to what the requirement names. Empty when `found`
+    keeps the scope on every column.
+    """
+    found_open = {axis.column: axis.member_count for axis in found.open_entity_axes or ()}
+    held_open = {axis.column for axis in held.open_entity_axes or ()}
+    closed = {entity.role for entity in held.entities} | {group.role for group in held.groups}
+    dropped: list[str] = []
+    for column in sorted(closed - held_open):
+        refs = {entity.ref for entity in held.entities if entity.role == column}
+        group = next((group for group in held.groups if group.role == column), None)
+        if group is not None:
+            scope = group.label
+        elif len(refs) == 1:
+            scope = next(entity.label for entity in held.entities if entity.role == column)
+        else:
+            scope = f"{len(refs)} named members"
+        if column in found_open:
+            count = found_open[column]
+            over = "every member" if count is None else f"{count} members"
+            dropped.append(
+                f"{column!r}: the pinned source holds it to {scope}; this one leaves it "
+                f"open over {over}"
+            )
+            continue
+        kept = refs & {entity.ref for entity in found.entities if entity.role == column}
+        if kept != refs:
+            dropped.append(
+                f"{column!r}: the pinned source holds it to {scope}; this one binds "
+                f"{len(kept)} of those {len(refs)} members"
+            )
+        elif not refs and not any(
+            other.role == column and other.label.casefold() == scope.casefold()
+            for other in found.groups
+        ):
+            dropped.append(
+                f"{column!r}: the pinned source holds it to {scope}; this one names no "
+                f"{scope} there"
+            )
+    return tuple(dropped)
+
+
+def closing_group(held: SelectedSource, across: str) -> str | None:
+    """The label of the one group `held` holds the side of a flow `across` names to, or `None`.
+
+    `None` when `across` names no side of a flow, or `held` names no group,
+    or several, on that side.
+    """
+    side = flow_side(across)
+    if side is None:
+        return None
+    labels = {group.label for group in held.groups if flow_side(group.role) == side}
+    return next(iter(labels)) if len(labels) == 1 else None
+
+
+def scope_repair(held: SelectedSource, across: str) -> str | None:
+    """The change to a requirement that restates the scope `held` keeps on the side `across` opens, or `None`.
+
+    `held` is a pinned dataset's source set aside because it holds that side
+    closed. When it holds the side to one group, or to one entity, the
+    requirement can name that member under the side's `PARTY_ROLES` word and
+    drop `across`, which brings the pinned source's scope back. Several
+    named members, or an `across` naming no single role, give `None`.
+    """
+    role = party_role(across)
+    side = flow_side(across)
+    if role is None or side is None:
+        return None
+    groups = {group.label for group in held.groups if flow_side(group.role) == side}
+    entities = {entity.label for entity in held.entities if flow_side(entity.role) == side}
+    labels = groups or entities
+    if len(labels) != 1:
+        return None
+    (label,) = labels
+    return f"name {label!r} as {role} in `entities` and drop `across`"
+
+
 class StalePin(StrictModel):
-    """A requirement whose pin discovery did not find, and the sources found in its place."""
+    """A requirement whose pin discovery did not find, and the sources found in its place.
+
+    `withheld` are the sources found that drop the scope its pinned source
+    held (`WithheldSource`), which it may not pin, and `repair` the change
+    to the requirement that keeps that scope (`scope_repair`), when one does.
+    """
 
     requirement_id: Identifier
     candidates: tuple[SelectedSource, ...] = ()
+    withheld: tuple[WithheldSource, ...] = ()
+    repair: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _repairs_a_withheld_scope(self) -> StalePin:
+        if self.repair is not None and not self.withheld:
+            raise ValueError("a stale pin states a repair only for a scope it withholds")
+        return self
 
 
 class Referral(StrictModel):
@@ -172,13 +289,16 @@ class Referral(StrictModel):
     requirement_id: Identifier | None = None
     candidates: tuple[SelectedSource, ...] = ()
     no_data_reason: str | None = None
+    ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
     constraint: CompileIssueCode | None = None
     repair: str | None = Field(default=None, min_length=1)
     reference: str | None = Field(default=None, min_length=1)
     repeated: bool = False
     budget_spent: bool = False
+    not_issued: bool = False
     source_mismatch: bool = False
     stale_pins: tuple[StalePin, ...] = ()
+    withheld: tuple[WithheldSource, ...] = ()
 
     @property
     def outcome(self) -> Outcome:
@@ -189,6 +309,7 @@ class Referral(StrictModel):
         """The sources each requirement this referral is about may pin, by requirement id.
 
         Its own `requirement_id` with `candidates`, then each of `stale_pins`.
+        A source under `withheld` is never offered.
         """
         offers = {pin.requirement_id: pin.candidates for pin in self.stale_pins}
         if self.requirement_id is not None:
@@ -212,8 +333,12 @@ class Referral(StrictModel):
                 raise ValueError(
                     f"a {self.kind.value} referral names the constraint and the permitted repair"
                 )
-        elif self.constraint is not None or self.repair is not None:
-            raise ValueError(f"a {self.kind.value} referral names no constraint or repair")
+        elif self.constraint is not None:
+            raise ValueError(f"a {self.kind.value} referral names no constraint")
+        elif self.repair is not None and not self.withheld:
+            raise ValueError(
+                f"a {self.kind.value} referral names a repair only for a scope it withholds"
+            )
         if (self.kind is ReferralKind.INTERNAL_FAILURE) != (self.reference is not None):
             raise ValueError(
                 f"a {self.kind.value} referral "
@@ -223,6 +348,15 @@ class Referral(StrictModel):
                     else "carries no diagnostic reference"
                 )
             )
+        if self.kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
+            if not self.ambiguous_sources or any(
+                len(group.candidates) < 2 for group in self.ambiguous_sources
+            ):
+                raise ValueError(
+                    "a source_name_ambiguous referral carries the offered source references"
+                )
+        elif self.ambiguous_sources:
+            raise ValueError("only a source_name_ambiguous referral carries ambiguous_sources")
         if self.kind is ReferralKind.SOURCE_AMBIGUOUS and len(self.candidates) < 2:
             raise ValueError("a source_ambiguous referral carries the candidate sources")
         if self.kind not in MAY_CARRY_CANDIDATES and self.candidates:
@@ -242,8 +376,12 @@ class Referral(StrictModel):
             raise ValueError(f"a {self.kind.value} referral carries no reason code")
         if self.stale_pins and self.kind is not ReferralKind.PINNED_SOURCE_NOT_FOUND:
             raise ValueError(f"a {self.kind.value} referral carries no stale pins")
+        if self.withheld and self.kind is not ReferralKind.PINNED_SOURCE_NOT_FOUND:
+            raise ValueError(f"a {self.kind.value} referral withholds no sources")
         if self.budget_spent and self.kind is not ReferralKind.DISCOVERY_UNAVAILABLE:
             raise ValueError(f"a {self.kind.value} referral is never marked budget_spent")
+        if self.not_issued and self.kind is not ReferralKind.DISCOVERY_UNAVAILABLE:
+            raise ValueError(f"a {self.kind.value} referral is never marked not_issued")
         return self
 
 

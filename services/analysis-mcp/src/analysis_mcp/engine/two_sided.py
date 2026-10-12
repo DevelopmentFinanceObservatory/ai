@@ -28,12 +28,14 @@ from analysis_mcp.engine.common import (
     ExclusionReason,
     Exclusions,
     FacetSelection,
+    combine_exclusions,
     narrow_and_resolve,
     record_counted_exclusion,
     require_one_place_level,
     require_single_stat_var,
     role_columns,
     validate_entity_columns,
+    without_party_totals,
 )
 
 type Side = Literal["numerator", "denominator"]
@@ -120,15 +122,22 @@ def sum_side(
     frame has no grain for, and (`PlaceLevelsMixedError`) if `frame`'s
     places share no level, whether this side sums across them or keys by them,
     as the harness's `planner.shapes` refuses either side of a share over such a frame.
+    A flow party that totals other parties is left out of the side, whether
+    the side sums across its role or keys by it, unless `entity` binds that
+    role (`without_party_totals`).
     """
     stat_var = require_single_stat_var(frame)
     validate_entity_columns(frame, (*entity, *by))
     require_one_place_level(frame, role_columns(frame))
+    frame, party_exclusions = without_party_totals(
+        frame, (column for column in role_columns(frame) if column not in entity), side=side
+    )
     # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from
     # this side's sum, consistent with the policy `aggregate` applies.
     table, resolved, exclusions = narrow_and_resolve(
         frame, entity=entity, pinned_unit=pinned_unit, exclude_unitless=True, side=side
     )
+    exclusions = combine_exclusions(party_exclusions, exclusions)
 
     # Groups come in order of their first row, so keys land in this dict in
     # order of their first row and each key's periods in order of theirs:

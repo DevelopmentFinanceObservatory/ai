@@ -485,15 +485,10 @@ def live_shaped_trace(name: str, frame: Frame) -> MaterialisationTrace:
     manifest's own `trace` field rather than `_fixture_trace`'s already-closed
     shape: each `facets` entry carries bookkeeping members
     (`default_policy`, `default_policy_version`, `dispatch_facet_id`,
-    `selection_reason`) beyond the `{axis, ref, basis}` shape
-    `dfo_frame_grammar.content_version.mint_content_version` accepts, and its
-    `basis` is `"deployment_fallback"`, outside that mint's `bound`/
-    `declared_default` vocabulary. A second entry carries `ref: None`, an
-    axis with no facet selected, which that mint refuses outright. For
-    exercising `frame_ref_resolution.derive_frame_content_version`'s
-    sanitisation (`_sanitised_facets`) against the wire shape it actually
-    receives from a live materialisation, rather than `_fixture_trace`'s
-    already-mintable one.
+    `selection_reason`) beyond `{axis, ref, basis}`, its `basis` is
+    `"deployment_fallback"`, and a second entry carries `ref: None`, an
+    axis with no facet selected. For checking that the toolkit stores and
+    carries the wire shape a live materialisation actually produces.
     """
     ref = _fixture_ref(name)
     facets: tuple[Mapping[str, object], ...] = (

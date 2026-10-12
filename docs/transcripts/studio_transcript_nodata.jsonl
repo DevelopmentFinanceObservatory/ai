@@ -1,6 +1,0 @@
-{"event": "message.delta", "seq": 0, "text": "Looking into average annual rainfall for Middle Earth."}
-{"event": "activity.step", "seq": 1, "step_id": "resolve", "label": "Resolve the question against the data graph", "status": "complete", "detail": "resolved: no_data", "tool": "search"}
-{"event": "message.delta", "seq": 2, "text": "I couldn't find any data on the average annual rainfall in Middle Earth. Please try rephrasing your question or searching for a different location."}
-{"event": "message.complete", "seq": 3, "text": "I couldn't find any data on the average annual rainfall in Middle Earth. Please try rephrasing your question or searching for a different location."}
-{"event": "suggestions", "seq": 4, "items": []}
-{"event": "done", "seq": 5, "trace_id": "tr_5feab852228e4089"}

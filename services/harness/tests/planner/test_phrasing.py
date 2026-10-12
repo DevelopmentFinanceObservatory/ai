@@ -68,6 +68,14 @@ def test_entities_phrase_joins_names_in_order_deduplicated() -> None:
     assert phrasing.entities_phrase([Entity(name="Kenya")]) == "Kenya"
 
 
+def test_entities_phrase_tells_a_sets_members_from_the_set() -> None:
+    assert phrasing.entities_phrase([Entity(name="Africa")]) == "Africa"
+    assert (
+        phrasing.entities_phrase([Entity(name="Africa", members=True), Entity(name="France")])
+        == "each member of Africa and France"
+    )
+
+
 def test_entities_phrase_states_the_party_across_covers_last() -> None:
     assert phrasing.entities_phrase([], across="donor") == "every donor"
     assert (

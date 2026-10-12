@@ -97,6 +97,7 @@ from planner.workflow import (
     OpenEntityAxis,
     ReadingSetBy,
     ResolvedEntity,
+    ResolvedGroup,
     SelectedSource,
 )
 from pydantic import TypeAdapter
@@ -214,7 +215,8 @@ def test_a_retrieval_then_an_aggregate_compiles_to_two_bound_steps(
     assert workflow is not None
     retrieve, totals = workflow.steps
     assert (retrieve.tool.server, retrieve.tool.name) == ("data-mcp", "get_data")
-    assert retrieve.args == {"spec_id": SPEC_KENYA}
+    # A total across a flow source's parties asks for their types.
+    assert retrieve.args == {"spec_id": SPEC_KENYA, "place_types": True}
     assert retrieve.bindings == {}
     assert (totals.tool.server, totals.tool.name) == ("analysis-mcp", "aggregate")
     # The compiler wrote the frame grammar's period column; the proposal said "period".
@@ -902,6 +904,121 @@ def test_a_population_rank_over_the_same_wide_source_is_not_reported(
 
     assert Code.SOURCE_WIDER_THAN_REQUIREMENT not in _codes(result)
     assert result.ok, result.issues
+
+
+_G7_DONORS = (
+    ResolvedEntity(role="origin", ref="country/USA", label="United States of America"),
+    ResolvedEntity(role="origin", ref="country/FRA", label="France"),
+)
+_AFRICAN_RECIPIENTS = (
+    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
+)
+
+
+def _g7_to_africa(source: SourceFactory) -> SelectedSource:
+    """A source binding the G7's donors and Africa's recipients, each set named beside them."""
+    return source(
+        entities=(*_G7_DONORS, *_AFRICAN_RECIPIENTS),
+        groups=(
+            ResolvedGroup(role="origin", label="G7"),
+            ResolvedGroup(role="destination", label="Africa", ref="africa"),
+        ),
+    )
+
+
+def _g7_to_africa_requirement(requirement: RequirementFactory) -> DatasetRequirement:
+    return requirement(
+        entities=[Entity(name="G7", role="donor"), Entity(name="Africa", role="recipient")]
+    )
+
+
+def test_a_period_sum_over_groups_named_on_both_roles_is_not_wider_than_the_requirement(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # "G7" and "Africa" each name a set whose members the source binds, so
+    # every member is named and none is surplus to the period sum.
+    plan = _draft([decision()], [_g7_to_africa_requirement(requirement), derived_requirement()])
+
+    result = build(
+        plan,
+        _translation(_retrieve(), _aggregate()),
+        discovered={"annual_debt_service": _g7_to_africa(source)},
+    )
+
+    assert result.ok, result.issues
+
+
+def test_a_filter_naming_a_group_keeps_its_members(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    kept = FilterRequirement(
+        id="kept",
+        decision_ids=["measure"],
+        input_id="annual_debt_service",
+        predicates=(EntityIn(names=("Africa",)),),
+    )
+    plan = _draft([decision()], [_g7_to_africa_requirement(requirement), kept])
+    filter_op = FilterOperation(
+        id="kept",
+        requirement_id="kept",
+        input="debt",
+        predicates=(EntityIn(names=("Africa",)),),
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), filter_op, terminal=["kept"]),
+        discovered={"annual_debt_service": _g7_to_africa(source)},
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[1].args["predicates"] == [
+        {
+            "kind": "category_match",
+            "column": "destination",
+            "values": ["country/KEN", "country/GHA"],
+        }
+    ]
+
+
+def test_a_side_naming_a_group_of_several_members_is_refused(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # A side's entity argument picks one series; Africa's members are two.
+    comparison = ComparisonRequirement(
+        id="gap",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="annual_debt_service", entity="Africa"),
+        right=RequirementSide(input_id="annual_debt_service", entity="G7"),
+    )
+    plan = _draft([decision()], [_g7_to_africa_requirement(requirement), comparison])
+    gap = CompareOperation(
+        id="gap",
+        requirement_id="gap",
+        left=Side(input="debt", entity="Africa"),
+        right=Side(input="debt", entity="G7"),
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), gap, terminal=["gap"]),
+        discovered={"annual_debt_service": _g7_to_africa(source)},
+    )
+
+    assert _codes(result) == [Code.ENTITY_AMBIGUOUS], result.issues
+    assert result.workflow is None
 
 
 def test_a_share_of_step_binds_both_frames_when_the_sides_differ(
@@ -4366,6 +4483,7 @@ def test_top_donors_to_kenya_ranks_by_the_open_origin_axis(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
+        "place_types": True,
     }
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.RULE
     assert retrieve.expected_role_keys == _frame_role_columns(["destination", "origin"])
@@ -4578,10 +4696,52 @@ def test_a_rank_over_a_donor_family_the_plan_reads_summed_asks_for_the_sum(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
+        "place_types": True,
     }
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.PLAN
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}
     assert rank.expected_role_keys == _frame_role_columns(["origin"])
+
+
+@pytest.mark.parametrize("ranked", [True, False], ids=["growth-then-rank", "growth-alone"])
+def test_a_growth_across_donors_asks_for_party_types_when_a_rank_reads_it(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    role_open_block: dict[str, Any],
+    ranked: bool,
+) -> None:
+    # "Whose education aid to Kenya grew the most?": the growth keeps each donor
+    # with its types, so the rank over it can leave out the donors that total
+    # others only when the retrieval asks for their types.
+    kenya_from_every_donor = source_from_spec_block(role_open_block)
+    reading = decision(slot="reading", fixes=DecisionFixes(stat_vars=StatVarReading.SUM))
+    aid = _kenya_from_every_donor().model_copy(
+        update={"stat_vars": StatVarReading.SUM, "decision_ids": ("measure", "reading")}
+    )
+    window = {"window_start": 2015, "window_end": 2023}
+    growth_req = GrowthRequirement(id="growth", decision_ids=["measure"], input_id="aid", **window)
+    growth = GrowthOperation(id="growth", requirement_id="growth", input="fetch", **window)
+    rank_req, rank = _rank_over("growth", axis="donor", reads="growth")
+    requirements: list[EvidenceRequirement] = [aid, growth_req]
+    decisions = [decision(), reading]
+    operations: list[Operation] = [
+        RetrieveOperation(id="fetch", requirement_id="aid", spec_id=kenya_from_every_donor.spec_id),
+        growth,
+    ]
+    if ranked:
+        requirements.append(rank_req)
+        decisions.append(_population_decision(decision))
+        operations.append(rank)
+
+    result = build(
+        _draft(decisions, requirements),
+        _translation(*operations, terminal=[operations[-1].id]),
+        discovered={"aid": kenya_from_every_donor},
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[0].args.get("place_types", False) is ranked
 
 
 def test_grouping_by_entity_over_an_open_axis_naming_no_entity_is_refused(

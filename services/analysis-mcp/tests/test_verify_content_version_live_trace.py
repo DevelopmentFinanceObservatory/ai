@@ -1,19 +1,14 @@
 """`GcsMaterialisationStore.get` with `verify_content_version_on_read=True`,
 driven by the real registered deriver (`analysis_mcp.frame_ref_resolution
 .derive_frame_content_version`, read back through `common.materialisation
-.get_content_version_deriver` exactly as `build_store` sources it) against a
-live-shaped `upstream_trace` -- not a synthetic lambda.
+.get_content_version_deriver` exactly as `build_store` sources it) over a
+frame registered under a live-shaped `upstream_trace` -- not a synthetic
+lambda.
 
 `packages/common/tests/test_gcs_store.py`'s own `verify_content_version_on_read`
-coverage (`test_verify_content_version_on_read_passes_on_a_match` and its
-sibling) injects a lambda that ignores its input entirely, so it never
-exercises the sanitising step a real deployment relies on.
-`test_input_content_version_live_trace.py` feeds a live-shaped
-`upstream_trace` -- bookkeeping members beyond `mint_content_version`'s
-closed `{axis, ref, basis}` shape, a `basis` of `"deployment_fallback"`, and
-a null-ref facet -- but calls `derive_frame_content_version` directly, never
-through a store. Nothing joins the two: this module does, with a real
-`put`/`get` round trip.
+coverage injects a lambda that ignores its input entirely, so it never
+exercises the deriver a real deployment relies on. This module does, with a
+real `put`/`get` round trip.
 
 The fake `_StorageClient`/`_Bucket`/`_Blob` here duplicate
 `packages/common/tests/test_gcs_store.py`'s own fakes, since a service's
@@ -93,22 +88,19 @@ class _FakeStorageClient:
         pass
 
 
-async def test_get_verifies_a_live_shaped_trace_through_the_real_sanitising_deriver() -> None:
+async def test_get_verifies_a_live_shaped_trace_through_the_real_deriver() -> None:
     """Importing `analysis_mcp.frame_ref_resolution` (above) already
     registered the real deriver at module import time; `get_content_version_deriver`
     reads back that same callable, exactly as `common.materialisation.factory
     .build_store` sources the check it wires into a durable store.
 
-    `ref.content_version` is minted the same way `derive_frame_content_version`
-    mints it -- through `_sanitised_facets` -- rather than an arbitrary
-    stand-in, since `GcsMaterialisationStore.get` checks a root reference's
-    recomputed content_version against `ref` itself.
+    `ref.content_version` is minted by `derive_frame_content_version`
+    rather than an arbitrary stand-in, since `GcsMaterialisationStore.get`
+    checks a root reference's recomputed content_version against `ref` itself.
     """
     frame = plain_single_unit_frame()
     live_trace = live_shaped_trace("live_plain_single_unit", frame)
-    content_version = derive_frame_content_version(
-        frame=frame, upstream_trace=live_trace.upstream_trace
-    )
+    content_version = derive_frame_content_version(frame=frame)
     ref = FrameRef(spec_id=live_trace.spec_id, content_version=content_version)
     trace = replace(live_trace, content_version=content_version)
     deriver = get_content_version_deriver()

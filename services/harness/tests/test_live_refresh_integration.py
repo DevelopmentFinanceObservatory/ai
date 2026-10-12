@@ -148,7 +148,7 @@ class Harness:
         return frame
 
     def move_dataset(self) -> None:
-        self.upstream.move(SECOND_VALUES, to=SECOND)
+        self.upstream.move(SECOND_VALUES)
         self.apis.heads[SPEC] = SECOND
 
     def growth_of(self, frame: tuple[str, str]) -> dict[str, float]:

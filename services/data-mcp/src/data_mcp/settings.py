@@ -39,7 +39,7 @@ class Settings(FrameServiceSettings):
     analysis-mcp and presentation-mcp: this service bounds a fetched artifact's parse
     with it, from Parquet metadata alone, before any row is materialised, and the
     store read of a pair already held. `artifact_fetch_budget_s` caps the whole post-mint fetch step in
-    `frame_materialisation.py` (every signed-URL re-sign and every GET against it); the
+    `frame_materialisation.py` (the link lookup and every GET against the link); the
     call deadline below can cut it shorter.
 
     `frame_store_bucket` names the same GCS bucket `analysis_mcp.settings.Settings`'s

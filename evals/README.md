@@ -7,22 +7,16 @@ CI**. CI's gates live in each service's own `tests/` directory and use no model.
 Everything for one eval set sits in `evals/agents/<suite>/`: the agent, the cases
 (`<suite>.evalset.json`), and the metrics (`test_config.json`).
 
-The exception is `evals/studio/` (harness-studio-v1), which evals the studio's
-HTTP surface: `adk eval` drives agents directly and cannot reach SSE routes,
+The exception is `evals/studio/` (harness-studio-orchestrator-v1), which evals
+the studio's HTTP surface: `adk eval` drives agents directly and cannot reach SSE routes,
 so this suite ships its own runner. Same two-lane split: its deterministic contract
 layer runs in CI, its judged layer never does. See `evals/studio/README.md`.
-
-`evals/agents/dfo_analyst_graph/` holds no eval set. It is the whole system as
-one `adk web` app -- the same graph, MCP toolsets and context-cache setting
-(implicit by default) `harness.server.create_app` serves -- so a real turn's events can be read in
-the web UI. `just adk-web` runs it.
 
 ## Run it
 
 ```
 just eval-planner      # 1a. score harness-planner-v2
 just eval-pair         # 1b. score harness-pair-v1
-just eval-planner-skills  # 1c. score harness-planner-skills-v1
 just eval-web          # 2.  read the results at http://127.0.0.1:8000
 ```
 
@@ -30,50 +24,15 @@ Score in the CLI, read in the web UI, in that order. You need a model credential
 in the repo-root `.env`, either `GOOGLE_API_KEY` or the Vertex AI triple from
 `deploy/README.md`.
 
-For a live turn rather than an eval run, start `just dev` in one terminal and
-`just adk-web` in another; `just adk-web` also needs `MCP_API_TOKEN` in `.env`,
-because the MCP mounts it calls resolved that token in the harness process.
-The mounts forward every search, describe and presentation call to the dfo-apis
-platform at `DFO_APIS_URL`. `.env.example` defaults it to
-`http://localhost:8083`, so without a platform running there `just dev` logs a
+For a live turn rather than an eval run, start `just studio-live` in one
+terminal and send a question with `just ask "<question>"` from another.
+The mounts forward every search, describe and presentation call to the
+dfo-apis platform at `DFO_APIS_URL`. `just studio-live` sets it to the dev
+platform. `just dev` reads it from `.env`, where `.env.example` defaults it
+to `http://localhost:8083`, so without a platform running there `just dev` logs a
 404 on `/api/presentation/release` at startup and every data call fails; point
 it at a reachable platform (the dev deployment, or a local one) before starting
 `just dev`.
-
-### harness-planner-skills-v1
-
-`harness-planner-skills-v1` asks whether the planner loads the skill a
-question needs before it drafts, and leaves alone the skills it does not.
-Its agent is the planner as the harness graph builds it, with a tool surface
-and `question_fixed=True`, except that the translator is left out, so a case
-ends at `propose_plan`. It carries `get_skill` and `get_skill_file`, and the
-surface behind them is `skill_surface.SkillSurface`: six skills with the
-dfo-skills catalogue's own ids and descriptions and short fixed bodies,
-answered with no server behind them.
-
-Each case's user message is the brief `harness.planner_seam` renders for a
-resolve envelope whose `skills` names three or four of those skills, then
-the question. A turn names the skills it requires as `get_skill` entries in
-`tool_uses`; each case's `forbidden` skills, named skills with no bearing on
-its question, sit in `cases.py`, since an ADK turn has no field for them. The
-`skills_loaded_before_plan` metric (`harness_planner_skills_v1/skill_metric.py`)
-reads the recorded calls and passes the turn when `propose_plan` was called
-and, before the first `propose_plan`, every required skill was loaded and no
-forbidden one was. A named skill in neither set may be loaded or skipped.
-`workflow_outcome` checks a plan was accepted. No judge model scores this
-set.
-
-The JSON is built from `harness_planner_skills_v1/cases.py`. Edit a case
-there, then rewrite the set:
-
-```
-PYTHONPATH=evals/agents uv run python -m harness_planner_skills_v1.cases
-```
-
-`test_the_skills_eval_set_is_the_one_its_cases_build` in
-`services/harness/tests/test_eval_sets.py` fails while the two disagree, and
-`services/harness/tests/test_eval_skill_loads.py` pins the metric and the
-surface with no model.
 
 ## Why the CLI scores
 
@@ -380,7 +339,7 @@ and the eval set proves the model reaches for them. That is why
 | A case's score moves between identical runs                     | Judge sampling. `num_samples` makes the score an average over independent judgments                                                                                                                                                                                 |
 | A rubric you wrote is missing from the results                  | It was dropped for lacking `"type": "TOOL_USE_QUALITY"`. The case still scored, against the rubrics that remained                                                                                                                                                   |
 | `ModuleNotFoundError: planner` or `translator`                  | Run `just sync`. The agent folders import those packages from the shared `.venv`                                                                                                                                                                                    |
-| `ImportError: Could not import custom metric function from ...` | `evals/agents` is not on `sys.path` when `_get_metric_function` resolves `harness_translator_v1.outcome_metric.workflow_outcome`. Check the set's own `__init__.py` inserts it (`harness_pair_v1`, `harness_planner_v2` and `harness_planner_skills_v1` all do)     |
+| `ImportError: Could not import custom metric function from ...` | `evals/agents` is not on `sys.path` when `_get_metric_function` resolves `harness_translator_v1.outcome_metric.workflow_outcome`. Check the set's own `__init__.py` inserts it (`harness_pair_v1` and `harness_planner_v2` both do)                                 |
 | `workflow_outcome` scores a turn `None` (not evaluated)         | That turn's expected invocation carries no `intermediate_data.tool_responses` entry naming a tool the metric scores. `test_a_set_configuring_workflow_outcome_states_an_expectation_on_every_turn` in `test_eval_sets.py` should have caught this before a paid run |
 
 ## Naming

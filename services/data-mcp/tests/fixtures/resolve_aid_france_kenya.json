@@ -1,0 +1,636 @@
+{
+  "comment": "A real `/api/search/resolve` response from the deployed dev dfo-apis (engine build 8f2bf06a), for the parsed-door query \"aid from France to Kenya\", {\"variable_text\": \"aid\", \"entities\": [{\"text\": \"France\", \"role_text\": \"donor\"}, {\"text\": \"Kenya\", \"role_text\": \"recipient\"}]}: it resolved `definite` to spec_85bd3b844a3a080e524ee49dfd344bba with `resolved.measure_label` \"gross disbursements\" and one `alternative_measures` entry, \"net disbursements\" on axis \"what\", whose definition hashes to spec_c67524ce5da3bfd4d94994a76c560b28. Trimmed to what the tests read: the top-level `sentence_plan` and `resolved.trace`, `resolved.slot_options`, `resolved.sentence_plan` and `resolved.unit_conversion` are dropped.",
+  "schema_version": 1,
+  "query_echo": {
+    "entry_path": "parsed",
+    "raw_query": "aid from France to Kenya",
+    "extract_skipped": true
+  },
+  "diagnostics": {
+    "engine_build": "8f2bf06a7ae9a68b98ef73bd21a6404085c5bf9d",
+    "trace_id": "0c5b11ab99414012b15f9518194d8fca",
+    "warnings": [],
+    "timing_ms": {
+      "total": 1974
+    },
+    "llm_usage": {
+      "input_tokens": 2492,
+      "output_tokens": 137,
+      "cached_tokens": 0
+    },
+    "timed_out": false
+  },
+  "kind": "resolution",
+  "parts": [
+    {
+      "variable_text": "aid",
+      "warnings": [
+        {
+          "code": "slot_defaulted",
+          "severity": "warn",
+          "message": "No aid type was named, so the answer covers official development assistance."
+        },
+        {
+          "code": "time_window_defaulted",
+          "severity": "warn",
+          "message": "no time_text was given; the answer was resolved across every period with data."
+        }
+      ],
+      "timing_ms": {
+        "total": 1910,
+        "by_step": {
+          "recall": 1,
+          "shape": 800,
+          "bind": 998,
+          "materialise": 92,
+          "answer": 12,
+          "options": 7
+        }
+      },
+      "restatement": {
+        "variable_text": "aid",
+        "entities": [
+          {
+            "text": "France",
+            "role_text": "donor"
+          },
+          {
+            "text": "Kenya",
+            "role_text": "recipient"
+          }
+        ],
+        "operations": []
+      },
+      "operations": [],
+      "departures": [],
+      "status": "definite",
+      "spec": {
+        "spec_id": "spec_85bd3b844a3a080e524ee49dfd344bba",
+        "definition": {
+          "schema_version": 1,
+          "spec_id": "spec_85bd3b844a3a080e524ee49dfd344bba",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "FinancialFlow",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "dac2aAidType",
+                "binding": {
+                  "state": "value",
+                  "ref": "DAC2aAidType206"
+                }
+              },
+              {
+                "property": "dacTypeOfFinance",
+                "binding": {
+                  "state": "unbound"
+                }
+              },
+              {
+                "property": "financialFlowType",
+                "binding": {
+                  "state": "value",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "property": "nettingBasis",
+                "binding": {
+                  "state": "value",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "entities": {
+              "destination": [
+                "country/KEN"
+              ],
+              "origin": [
+                "country/FRA"
+              ]
+            },
+            "requested_window": {
+              "kind": "all"
+            }
+          }
+        },
+        "resolved": {
+          "shape": {
+            "shape_id": "financialflow_amount_measuredvalue_nominal_family_f096b1ba",
+            "label": "gross disbursements (official development assistance)",
+            "population_type": {
+              "dcid": "FinancialFlow",
+              "label": "financial flow"
+            },
+            "measured_property": {
+              "dcid": "amount",
+              "label": "amount"
+            },
+            "stat_type": {
+              "dcid": "measuredValue",
+              "label": "measuredValue"
+            },
+            "measurement_qualifier": {
+              "dcid": "Nominal",
+              "label": "Nominal"
+            },
+            "measurement_denominator_unresolved": false,
+            "slot_keys": [
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "dac2aAidType",
+                  "label": "DAC 2a aid type"
+                },
+                "label": "aid type"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "financialFlowType",
+                  "label": "financial flow type"
+                },
+                "label": "financial flow type"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "nettingBasis",
+                  "label": "netting basis"
+                },
+                "label": "netting basis"
+              },
+              {
+                "axis": "how",
+                "property": {
+                  "dcid": "dacTypeOfFinance",
+                  "label": "DAC type of finance"
+                },
+                "label": "dac type of finance"
+              },
+              {
+                "axis": "where",
+                "label": "place"
+              },
+              {
+                "axis": "when",
+                "label": "time window"
+              },
+              {
+                "axis": "source",
+                "label": "data source"
+              }
+            ],
+            "member_count": 1,
+            "member_digest": "1a36e1a7292b1bfff95a5415de0be74cac7bb033217ed50e79faa8ce51a224c0",
+            "refine_supported": true,
+            "data_commons": [
+              {
+                "id": "dfo",
+                "label": "Development Finance Observatory"
+              }
+            ]
+          },
+          "slots": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "dac2aAidType",
+                  "label": "DAC 2a aid type"
+                },
+                "label": "aid type"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "DAC2aAidType206",
+                    "label": "official development assistance"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "financialFlowType",
+                  "label": "financial flow type"
+                },
+                "label": "financial flow type"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "Disbursement",
+                    "label": "disbursement"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "nettingBasis",
+                  "label": "netting basis"
+                },
+                "label": "netting basis"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "Gross",
+                    "label": "gross"
+                  },
+                  "value_kind": "enum_value"
+                }
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "dcid": "dacTypeOfFinance",
+                  "label": "DAC type of finance"
+                },
+                "label": "dac type of finance"
+              },
+              "binding": {
+                "kind": "unbound"
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding": {
+                "kind": "value",
+                "value": {
+                  "ref": {
+                    "dcid": "country/KEN",
+                    "label": "Kenya"
+                  },
+                  "value_kind": "entity"
+                }
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding": {
+                "kind": "unbound"
+              },
+              "summable": false
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding": {
+                "kind": "unbound"
+              },
+              "summable": false
+            }
+          ],
+          "inapplicable_slots": [
+            "dacTypeOfFinance",
+            "financialObligationType"
+          ],
+          "unresolved_slots": [],
+          "stat_vars": {
+            "member_count": 1,
+            "member_count_exact": true,
+            "served_count": 1,
+            "data_date_range": {
+              "start": "1978",
+              "end": "2024"
+            }
+          },
+          "entities": [
+            {
+              "ref": "country/KEN",
+              "label": "Kenya",
+              "entity_type": "Country",
+              "role": "destination"
+            },
+            {
+              "ref": "country/FRA",
+              "label": "France",
+              "entity_type": "Country",
+              "role": "origin"
+            }
+          ],
+          "coverage": {
+            "kind": "exact",
+            "has_data": true,
+            "observation_count": 47,
+            "evidence": "facet_metadata",
+            "dimensions": [
+              {
+                "label": "sources",
+                "count": 1
+              },
+              {
+                "label": "observations",
+                "count": 47
+              },
+              {
+                "label": "variables",
+                "count": 1
+              }
+            ]
+          },
+          "headline": {
+            "year": 2024,
+            "year_named": false,
+            "observations": 1,
+            "series": 1,
+            "role_counts": {
+              "financingProvider": 1,
+              "financingRecipient": 1
+            },
+            "recent_years": [
+              {
+                "year": 2024,
+                "observations": 1,
+                "series": 1,
+                "role_counts": {
+                  "financingProvider": 1,
+                  "financingRecipient": 1
+                }
+              },
+              {
+                "year": 2023,
+                "observations": 1,
+                "series": 1,
+                "role_counts": {
+                  "financingProvider": 1,
+                  "financingRecipient": 1
+                }
+              },
+              {
+                "year": 2022,
+                "observations": 1,
+                "series": 1,
+                "role_counts": {
+                  "financingProvider": 1,
+                  "financingRecipient": 1
+                }
+              }
+            ]
+          },
+          "download": {
+            "rows": 47,
+            "rows_exact": true,
+            "series": 1,
+            "window": {
+              "start_year": 1978,
+              "end_year": 2024
+            },
+            "licence": {
+              "label": "OECD Terms and Conditions"
+            }
+          },
+          "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+          "facets": {
+            "provenance": {
+              "basis": "fallback",
+              "ref": "provenance/OECDDAC2A",
+              "label": "OECD DAC2A",
+              "source": {
+                "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd",
+                "label": "Organisation for Economic Co-operation and Development (OECD)"
+              },
+              "data_commons": {
+                "id": "dfo",
+                "label": "Development Finance Observatory"
+              }
+            },
+            "unit": {
+              "basis": "fallback",
+              "ref": "CurrencyUSD",
+              "label": "US Dollar",
+              "currency": "USD"
+            }
+          },
+          "entity_options": [],
+          "facet_options": [
+            {
+              "axis": "provenance",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "provenance/OECDDAC2A",
+                      "label": "OECD DAC2A"
+                    },
+                    "value_kind": "source"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            },
+            {
+              "axis": "unit",
+              "options": [
+                {
+                  "value": {
+                    "ref": {
+                      "dcid": "CurrencyUSD",
+                      "label": "US Dollar"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                }
+              ],
+              "truncated": false,
+              "source": "observed"
+            }
+          ],
+          "rendered_sentence": "France's gross disbursements to Kenya for official development assistance, 1978 to 2024. Current US dollars \u00b7 OECD DAC2a.",
+          "confidence": "medium",
+          "available_at_place": true,
+          "skills": [
+            "oda-dac2a"
+          ],
+          "alternative_measures": [
+            {
+              "definition": {
+                "schema_version": 1,
+                "spec_id": "spec_c67524ce5da3bfd4d94994a76c560b28",
+                "identity": {
+                  "identity_version": "spec1",
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "population_type": "FinancialFlow",
+                    "measured_property": "amount",
+                    "stat_type": "measuredValue",
+                    "measurement_qualifier": "Nominal"
+                  },
+                  "slots": [
+                    {
+                      "property": "dac2aAidType",
+                      "binding": {
+                        "state": "value",
+                        "ref": "DAC2aAidType206"
+                      }
+                    },
+                    {
+                      "property": "dacTypeOfFinance",
+                      "binding": {
+                        "state": "unbound"
+                      }
+                    },
+                    {
+                      "property": "financialFlowType",
+                      "binding": {
+                        "state": "value",
+                        "ref": "Disbursement"
+                      }
+                    },
+                    {
+                      "property": "nettingBasis",
+                      "binding": {
+                        "state": "value",
+                        "ref": "Net"
+                      }
+                    }
+                  ],
+                  "entities": {
+                    "destination": [
+                      "country/KEN"
+                    ],
+                    "origin": [
+                      "country/FRA"
+                    ]
+                  },
+                  "requested_window": {
+                    "kind": "all"
+                  }
+                }
+              },
+              "label": "net disbursements",
+              "axis": "what",
+              "measure_axis_values": [
+                {
+                  "axis": "populationType",
+                  "value": {
+                    "dcid": "FinancialFlow",
+                    "label": "financial flow"
+                  }
+                },
+                {
+                  "axis": "measuredProperty",
+                  "value": {
+                    "dcid": "amount",
+                    "label": "amount"
+                  }
+                },
+                {
+                  "axis": "measurementQualifier",
+                  "value": {
+                    "dcid": "Nominal",
+                    "label": "nominal"
+                  }
+                },
+                {
+                  "axis": "financialFlowType",
+                  "value": {
+                    "dcid": "Disbursement",
+                    "label": "disbursement"
+                  }
+                },
+                {
+                  "axis": "nettingBasis",
+                  "value": {
+                    "dcid": "Net",
+                    "label": "net"
+                  }
+                }
+              ],
+              "served_rows": 47,
+              "served_rows_exact": true
+            }
+          ],
+          "measure_label": "gross disbursements",
+          "measure_label_axes": [
+            "populationType",
+            "measuredProperty",
+            "measurementQualifier",
+            "financialFlowType",
+            "nettingBasis"
+          ],
+          "measure_axis_values": [
+            {
+              "axis": "populationType",
+              "value": {
+                "dcid": "FinancialFlow",
+                "label": "financial flow"
+              }
+            },
+            {
+              "axis": "measuredProperty",
+              "value": {
+                "dcid": "amount",
+                "label": "amount"
+              }
+            },
+            {
+              "axis": "measurementQualifier",
+              "value": {
+                "dcid": "Nominal",
+                "label": "nominal"
+              }
+            },
+            {
+              "axis": "financialFlowType",
+              "value": {
+                "dcid": "Disbursement",
+                "label": "disbursement"
+              }
+            },
+            {
+              "axis": "nettingBasis",
+              "value": {
+                "dcid": "Gross",
+                "label": "gross"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "rendered_sentence": "France's gross disbursements to Kenya for official development assistance, 1978 to 2024. Current US dollars \u00b7 OECD DAC2a.",
+  "skills": {
+    "oda-dac2a": {
+      "id": "oda-dac2a",
+      "name": "oda-dac2a",
+      "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
+      "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc"
+    }
+  },
+  "status": "definite"
+}

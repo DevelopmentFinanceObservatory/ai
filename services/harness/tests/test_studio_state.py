@@ -46,7 +46,7 @@ from google.adk.errors import StaleSessionError
 from google.adk.sessions import DatabaseSessionService, InMemorySessionService
 from harness import studio_state
 from harness.approval import ApprovalDecision, ApprovalRecord
-from harness.graph import ORCHESTRATOR_SPECS_KEY
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
@@ -59,6 +59,7 @@ from harness.studio_state import (
     _next_manifest,
     _PendingInterrupt,
     land_component,
+    remove_cards,
 )
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
@@ -149,7 +150,7 @@ def test_abandoned_turn_closes_its_span_before_the_next_one_opens(monkeypatch):
     assert state.turns[-1] == {"user": "", "assistant": "", "error": "abandoned"}
 
 
-# --- land_component: the one place the canvas decision is made and done ----
+# --- land_component: the one place a card lands on the canvas -------------
 
 
 def _component(component_id: str, *, revision: int = 1, kind: str = "line_chart") -> dict[str, Any]:
@@ -160,42 +161,10 @@ def _component(component_id: str, *, revision: int = 1, kind: str = "line_chart"
     return {"component_id": component_id, "revision": revision, "type": kind}
 
 
-def test_land_component_replaces_the_named_block_in_place() -> None:
-    """`revises` naming the canvas's only block: the new component takes
-    that block's slot, the manifest still holds one block, the
-    turn_components entry says `replaced`, and the return value does too."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    block = studio_state.CompositionBlock(
-        component_id="cmp_nigeria", revision=1, type="line_chart", title="Nigeria", pinned=False
-    )
-    state.composition = studio_state._next_manifest(
-        None, [block], actor=studio_state.CompositionActor.MODEL
-    )
-
-    action = studio_state.land_component(state, _component("cmp_two"), revises="cmp_nigeria")
-
-    assert action == "replaced"
-    assert [b.component_id for b in state.composition.blocks] == ["cmp_two"]
-    assert state.turn_components[-1]["action"] == "replaced"
-    assert "cmp_two" in state.components
-
-
-def test_land_component_appends_when_revises_names_nothing_on_canvas() -> None:
-    """A `revises` target already gone (or never composed) cannot be
-    swapped, so the write appends instead."""
+def test_land_component_appends_a_block() -> None:
     state = ConversationState(conversation_id=CONVERSATION)
 
-    action = studio_state.land_component(state, _component("cmp_two"), revises="cmp_gone")
-
-    assert action == "created"
-    assert [b.component_id for b in state.composition.blocks] == ["cmp_two"]
-    assert state.turn_components[-1]["action"] == "created"
-
-
-def test_land_component_appends_when_revises_is_none() -> None:
-    state = ConversationState(conversation_id=CONVERSATION)
-
-    action = studio_state.land_component(state, _component("cmp_two"), revises=None)
+    action = studio_state.land_component(state, _component("cmp_two"))
 
     assert action == "created"
     assert [b.component_id for b in state.composition.blocks] == ["cmp_two"]
@@ -209,7 +178,7 @@ def test_land_component_first_card_op_replays_onto_none_identically() -> None:
     than minting a second, different id."""
     state = ConversationState(conversation_id=CONVERSATION)
 
-    action = studio_state.land_component(state, _component("cmp_one"), revises=None)
+    action = studio_state.land_component(state, _component("cmp_one"))
 
     assert action == "created"
     live = state.composition
@@ -222,14 +191,13 @@ def test_land_component_first_card_op_replays_onto_none_identically() -> None:
 
 
 def test_land_component_held_when_auto_add_is_off() -> None:
-    """`auto_add=False` means there is no block for anything to swap or
-    append: the digest entry still gets written (the card is still
+    """`auto_add=False` means there is no block to append: the digest entry still gets written (the card is still
     findable by `recall`), but the composition itself is untouched and the
     return is `"held"`."""
     state = ConversationState(conversation_id=CONVERSATION)
     state.auto_add = False
 
-    action = studio_state.land_component(state, _component("cmp_two"), revises="cmp_nigeria")
+    action = studio_state.land_component(state, _component("cmp_two"))
 
     assert action == "held"
     assert state.composition is None
@@ -635,6 +603,270 @@ def test_the_canvas_digest_stays_under_its_maximum_however_large_the_inputs():
     assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
 
 
+def test_a_canvas_emptied_by_removals_is_stated_empty_in_the_digest():
+    """A canvas whose cards were all removed reads as empty, not as no canvas,
+    so the model is not left with the earlier turns' cards as its only view."""
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    state.composition = _next_manifest(state.composition, [], actor=CompositionActor.USER)
+
+    digest = state.canvas_digest_state()
+    assert digest is not None
+    assert digest["blocks"] == []
+    assert [card["component_id"] for card in digest["hidden"]] == ["cmp_01"]
+    assert ConversationState(conversation_id=CONVERSATION).canvas_digest_state() is None
+
+
+def test_the_digest_marks_a_pinned_block():
+    state = _canvas({"cmp_01": _entry("Aid", None), "cmp_02": _entry("Debt", None)})
+    assert state.composition is not None
+    state.composition.blocks[1].pinned = True
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    assert "pinned" not in digest["blocks"][0]
+    assert digest["blocks"][1]["pinned"] is True
+
+
+def test_the_digest_counts_the_blocks_its_cap_leaves_out():
+    cap = studio_state._DIGEST_BLOCK_CAP
+    state = _canvas({f"cmp_{index:02d}": _entry("Aid", None) for index in range(cap + 3)})
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    assert len(digest["blocks"]) == cap
+    assert digest["blocks_not_shown"] == 3
+    one = _canvas({"cmp_01": _entry("Aid", None)}).canvas_digest_state()
+    assert one is not None
+    assert "blocks_not_shown" not in one
+
+
+def test_the_digest_with_every_block_pinned_and_some_cut_stays_under_its_maximum():
+    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
+    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
+    shows = _shows(
+        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
+        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
+    )
+    entries = {
+        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
+        for index in range(studio_state._DIGEST_BLOCK_CAP + 2)
+    }
+    state = _canvas(entries)
+    assert state.composition is not None
+    for block in state.composition.blocks:
+        block.pinned = True
+
+    digest = state.canvas_digest_state(focus=next(reversed(entries)))
+
+    assert digest is not None
+    assert digest["blocks_not_shown"] == 2
+    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+
+
+def test_the_digest_lists_this_conversations_cards_that_are_not_on_the_canvas():
+    """A card a new turn hid, or one removed, is named under `hidden`: id,
+    type and title only, so the model can talk about it but not read it as
+    on the canvas."""
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary())})
+    state.components["cmp_old"] = _entry("Debt", _fact_summary())
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    assert [b["component_id"] for b in digest["blocks"]] == ["cmp_01"]
+    assert digest["hidden"] == [{"component_id": "cmp_old", "type": "line_chart", "title": "Debt"}]
+
+
+def test_a_canvas_with_only_hidden_cards_is_empty_and_names_them():
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    remove_cards(state, [], all_cards=True)
+
+    digest = state.canvas_digest_state()
+
+    assert digest == {
+        "blocks": [],
+        "hidden": [{"component_id": "cmp_01", "type": "line_chart", "title": "Aid"}],
+    }
+
+
+def test_the_hidden_list_keeps_the_newest_and_counts_the_rest():
+    cap = studio_state._DIGEST_HIDDEN_CAP
+    state = _canvas({"cmp_on": _entry("On", None)})
+    for index in range(cap + 4):
+        state.components[f"cmp_{index:02d}"] = _entry(f"Card {index}", None)
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    assert len(digest["hidden"]) == cap
+    assert digest["hidden"][-1]["component_id"] == f"cmp_{cap + 3:02d}"
+    assert digest["hidden_not_shown"] == 4
+
+
+def test_a_focus_card_off_the_canvas_is_a_block_that_says_it_is_hidden():
+    """#348 keeps the focus card in `blocks` whatever its state; a hidden one
+    stays hidden, so the model does not read it as on the user's canvas."""
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    state.components["cmp_off"] = _entry("Off the canvas", None)
+
+    digest = state.canvas_digest_state(focus="cmp_off")
+
+    assert digest is not None
+    assert digest["blocks"][-1]["component_id"] == "cmp_off"
+    assert digest["blocks"][-1]["on_canvas"] is False
+    assert "on_canvas" not in digest["blocks"][0]
+    assert [card["component_id"] for card in digest["hidden"]] == ["cmp_off"]
+
+
+def test_the_digest_with_hidden_cards_at_their_caps_stays_under_its_maximum():
+    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
+    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
+    shows = _shows(
+        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
+        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
+    )
+    entries = {
+        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
+        for index in range(studio_state._DIGEST_BLOCK_CAP + 2)
+    }
+    state = _canvas(entries)
+    assert state.composition is not None
+    for block in state.composition.blocks:
+        block.pinned = True
+    for index in range(studio_state._DIGEST_HIDDEN_CAP + 2):
+        hidden = _entry("h" * BIG, None)
+        hidden["type"] = "x" * BIG
+        state.components["cmp_h" + "i" * BIG + str(index)] = hidden
+
+    digest = state.canvas_digest_state(focus=next(reversed(entries)))
+
+    assert digest is not None
+    assert digest["hidden_not_shown"] == 2
+    assert _serialised(digest) <= CANVAS_DIGEST_MAX_BYTES
+
+
+def test_the_orchestrators_canvas_summary_counts_the_cards_and_names_none():
+    """The always-on summary is two counts; the listing is a recall away."""
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
+    state.components["cmp_old"] = _entry("Old", None)
+
+    assert state.canvas_summary_state() == {"cards_on_canvas": 2, "cards_hidden": 1}
+    assert ConversationState(conversation_id=CONVERSATION).canvas_summary_state() is None
+
+
+def test_the_canvas_summary_keeps_a_focus_card_in_full():
+    """#348: a card's "Ask follow up" names the card and carries it whole."""
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
+
+    summary = state.canvas_summary_state(focus="cmp_01")
+
+    assert summary is not None
+    assert summary["focus_component_id"] == "cmp_01"
+    assert [block["component_id"] for block in summary["blocks"]] == ["cmp_01"]
+    assert summary["blocks"][0]["fact_summary"] is not None
+
+
+def test_recall_without_a_component_lists_the_canvas_and_the_hidden_cards():
+    state = _canvas({"cmp_01": _entry("Aid", _fact_summary()), "cmp_02": _entry("Debt", None)})
+    assert state.composition is not None
+    state.composition.blocks[0].pinned = True
+    state.components["cmp_old"] = _entry("Old", _fact_summary())
+
+    listing = state.recall_part(part="canvas")
+
+    assert listing["part"] == "canvas"
+    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01", "cmp_02"]
+    assert listing["on_canvas"][0]["pinned"] is True
+    assert [card["component_id"] for card in listing["hidden"]] == ["cmp_old"]
+    assert listing["hidden"][0]["fact_summary"] is not None
+
+
+def test_the_listing_names_cards_past_its_cap_compactly_so_each_can_be_found():
+    """Past the newest 16 a card is still named (id, type, title), so the
+    model can recall or remove it by id; past that compact cap they are
+    counted."""
+    full, compact = studio_state._DIGEST_BLOCK_CAP, studio_state._LISTING_COMPACT_CAP
+    state = _canvas({f"cmp_{n:03d}": _entry(f"Card {n}", None) for n in range(full + compact + 2)})
+
+    listing = state.canvas_listing_state()
+
+    assert len(listing["on_canvas"]) == full
+    assert len(listing["on_canvas_older"]) == compact
+    assert set(listing["on_canvas_older"][0]) == {"component_id", "type", "title"}
+    assert listing["on_canvas_older"][-1]["component_id"] == f"cmp_{compact + 1:03d}"
+    assert listing["on_canvas_not_shown"] == 2
+
+
+def test_the_listing_at_every_cap_stays_under_its_maximum():
+    title = "t" * (studio_state._TITLE_BYTE_CAP - 2)
+    summary = "s" * (studio_state._FACT_SUMMARY_BYTE_CAP - 2)
+    shows = _shows(
+        "n" * (studio_state._DIGEST_NAME_BYTE_CAP - 2),
+        "y" * (studio_state._DIGEST_TIME_BYTE_CAP - 2),
+    )
+    many = studio_state._DIGEST_BLOCK_CAP + studio_state._LISTING_COMPACT_CAP + 3
+    entries = {
+        f"cmp_{index:058d}": _entry(title, summary, revision=9_999_999_999, shows=shows)
+        for index in range(many)
+    }
+    state = _canvas(entries)
+    assert state.composition is not None
+    for block in state.composition.blocks:
+        block.pinned = True
+    for index in range(many):
+        state.components[f"cmp_h{index:057d}"] = _entry(
+            title, summary, revision=9_999_999_999, shows=shows
+        )
+
+    listing = state.canvas_listing_state()
+
+    assert listing["hidden_not_shown"] == 3
+    assert _serialised({"part": "canvas", **listing}) <= studio_state.CANVAS_LISTING_MAX_BYTES
+
+
+def test_recall_says_whether_a_component_is_still_on_the_canvas():
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    state.components["cmp_off"] = _entry("Removed", None)
+
+    assert state.recall_part(part="canvas", component_id="cmp_01")["on_canvas"] is True
+    assert state.recall_part(part="canvas", component_id="cmp_off")["on_canvas"] is False
+
+
+def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
+    state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2, 3)})
+    before = state.composition
+
+    removed, missing = remove_cards(state, ["cmp_02", "cmp_99"], all_cards=False)
+
+    assert (removed, missing) == (["cmp_02"], ["cmp_99"])
+    assert state.composition is not None and before is not None
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_01", "cmp_03"]
+    assert state.composition.revision == before.revision + 1
+    assert state.composition.actor == CompositionActor.MODEL
+    # Recorded as a replayable op, so a concurrent `/composition` reconciles.
+    assert state._composition_ops[-1](before) == state.composition
+
+
+def test_a_card_already_off_the_canvas_is_not_reported_missing():
+    state = _canvas({"cmp_01": _entry("Aid", None)})
+    state.components["cmp_hidden"] = _entry("Hidden", None)
+
+    assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [])
+
+
+def test_removing_every_card_leaves_an_empty_canvas_the_digest_states():
+    state = _canvas({f"cmp_0{n}": _entry("Aid", None) for n in (1, 2)})
+
+    removed, missing = remove_cards(state, [], all_cards=True)
+
+    assert (removed, missing) == (["cmp_01", "cmp_02"], [])
+    digest = state.canvas_digest_state()
+    assert digest is not None and digest["blocks"] == []
+    assert remove_cards(state, [], all_cards=True) == ([], [])
+
+
 def test_a_focus_that_names_no_stored_component_stays_out_of_the_digest():
     """`focus` is the client's `component_ref.component_id`, an unbounded string."""
     state = _canvas({"cmp_01": _entry("Aid", _fact_summary())})
@@ -727,9 +959,14 @@ def test_recall_serves_the_uncut_canvas_entries():
     title, summary = "t" * BIG, {"series": ["x" * BIG]}
     state = _canvas({"cmp_01": _entry(title, summary)})
 
-    served = state.recall_state(scope="canvas", query="ttt")
+    served = state.recall_part(part="canvas", component_id="cmp_01")
 
-    assert served["cards"] == [{"component_id": "cmp_01", **_entry(title, summary)}]
+    assert served == {
+        "part": "canvas",
+        "component_id": "cmp_01",
+        "on_canvas": True,
+        **_entry(title, summary),
+    }
     assert state.components["cmp_01"] == _entry(title, summary)  # the digest cuts a copy
 
 
@@ -1080,29 +1317,6 @@ def test_a_ledger_turn_stored_before_search_stopped_listing_members_still_loads(
     )
 
 
-def test_recall_leaves_out_a_turns_plans_readings_blocks_and_identities():
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [
-        {
-            "user": "q",
-            "assistant": "a",
-            "plans": [_PLAN_JSON],
-            "readings": [],
-            "specs": {},
-            "identities": {
-                _GDP_ALL_YEARS["spec_id"]: {
-                    "identity": _GDP_ALL_YEARS["identity"],
-                    "stat_vars": [_GDP_STAT_VAR],
-                }
-            },
-        }
-    ]
-
-    assert state.recall_state(scope="conversation", query="")["turns"] == [
-        {"turn": 1, "user": "q", "assistant": "a"}
-    ]
-
-
 def _recallable() -> ConversationState:
     state = ConversationState(conversation_id=CONVERSATION)
     state.turns = [
@@ -1135,6 +1349,7 @@ def test_recall_part_returns_a_turns_readings_and_a_canvas_entry():
     assert canvas == {
         "part": "canvas",
         "component_id": "cmp_01",
+        "on_canvas": False,
         **_entry("Aid", {"series": ["x"]}),
     }
 
@@ -1146,7 +1361,6 @@ def test_recall_part_returns_a_turns_readings_and_a_canvas_entry():
         ({"part": "plan", "turn": 9}, {"turns": [1, 3]}),
         ({"part": "readings", "turn": 3}, {"turns": [1]}),
         ({"part": "canvas", "component_id": "cmp_99"}, {"component_ids": ["cmp_01"]}),
-        ({"part": "canvas"}, {"component_ids": ["cmp_01"]}),
     ],
 )
 def test_recall_part_refuses_a_missing_target_naming_the_legal_values(target, legal):
@@ -1267,127 +1481,6 @@ def test_the_conversation_digest_holds_its_cap_for_any_size_of_a_single_id():
 
     assert digest is not None
     assert _serialised(digest) <= CONVERSATION_DIGEST_MAX_BYTES
-
-
-# --- anaphor_window: what "the same years" and a card-scoped follow-up's ---
-# --- own window resolve to -------------------------------------------------
-
-
-def _card(component_id: str, *, window: str | None = None) -> dict[str, Any]:
-    """One `turns[n]["cards"]` entry, `_turn_component_entry`'s own shape."""
-    card: dict[str, Any] = {
-        "component_id": component_id,
-        "type": "line_chart",
-        "title": component_id,
-        "action": "created",
-    }
-    if window:
-        card["window"] = window
-    return card
-
-
-def test_anaphor_window_reads_the_newest_card_past_the_history_card_cap() -> None:
-    """`_history_turn` keeps only a turn's FIRST `_HISTORY_CARD_CAP` cards
-    for the conversation digest, dropping anything past it; `anaphor_window`
-    reads the uncapped `turns` list instead, so the newest card's window --
-    landed after the cap -- is still found."""
-    capped = [_card(f"cmp_{index}") for index in range(studio_state._HISTORY_CARD_CAP)]
-    newest = _card("cmp_newest", window="2021-2023")
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [_turn(0, cards=[*capped, newest])]
-
-    assert state.anaphor_window(None) == "2021 to 2023"
-
-
-def test_anaphor_window_finds_a_window_in_a_turn_dropped_from_the_digest() -> None:
-    """`conversation_digest_state` keeps only the newest `_HISTORY_TURN_CAP`
-    turns; `anaphor_window` reads the full `turns` list, so a window landed
-    further back than that cap is still found when no later turn landed
-    one of its own."""
-    oldest = _turn(0, cards=[_card("cmp_old", window="2015-2020")])
-    later = [
-        _turn(index, cards=[_card(f"cmp_{index}")])
-        for index in range(1, 1 + studio_state._HISTORY_TURN_CAP)
-    ]
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [oldest, *later]
-
-    assert state.anaphor_window(None) == "2015 to 2020"
-
-
-def test_anaphor_window_prefers_the_focus_cards_own_window_over_the_newest() -> None:
-    """A card-scoped follow-up names its focus card in `canvas_digest`'s
-    `focus_component_id`; that card's own window wins even when a newer
-    card elsewhere on the canvas carries a different one."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.components["cmp_a"] = _entry("A", None, shows=_shows("gdp", "2015-2020"))
-    state.turns = [
-        _turn(0, cards=[_card("cmp_a", window="2015-2020")]),
-        _turn(1, cards=[_card("cmp_b", window="2021-2023")]),
-    ]
-
-    assert state.anaphor_window("cmp_a") == "2015 to 2020"
-
-
-def test_anaphor_window_falls_back_to_the_newest_when_the_focus_card_has_no_window() -> None:
-    """A focus card that names no window of its own (a note, a table with
-    no resolved span) falls back to the most recently landed card's,
-    the same as a question with no focus at all."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.components["cmp_a"] = _entry("A", None)
-    state.turns = [
-        _turn(0, cards=[_card("cmp_a")]),
-        _turn(1, cards=[_card("cmp_b", window="2021-2023")]),
-    ]
-
-    assert state.anaphor_window("cmp_a") == "2021 to 2023"
-
-
-def test_anaphor_window_prefers_the_newer_of_two_turns_each_carrying_a_window() -> None:
-    """Two turns each land a card with its own window: the newer turn's
-    window wins, proving the fallback walks `reversed(self.turns)` -- newest
-    turn first -- and not forward turn order, where the older turn's window
-    would be found first instead."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [
-        _turn(0, cards=[_card("cmp_a", window="2015-2020")]),
-        _turn(1, cards=[_card("cmp_b", window="2021-2023")]),
-    ]
-
-    assert state.anaphor_window(None) == "2021 to 2023"
-
-
-def test_anaphor_window_prefers_the_last_of_several_windowed_cards_in_one_turn() -> None:
-    """One turn lands several cards, each with its own window: the last
-    landed card's window wins, proving the fallback walks a turn's own
-    cards newest-first, not the order `land_component` appended them in."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [
-        _turn(
-            0,
-            cards=[
-                _card("cmp_a", window="2015-2020"),
-                _card("cmp_b", window="2021-2023"),
-            ],
-        )
-    ]
-
-    assert state.anaphor_window(None) == "2021 to 2023"
-
-
-def test_anaphor_window_reads_a_revised_cards_new_window_not_its_original() -> None:
-    """The same component id landed again in a later turn -- a revision, not
-    a new card -- carries its own new `turn_components` entry
-    (`land_component` appends on every call, `create` or `replace` alike):
-    the later turn's entry is what the fallback finds, not the original
-    turn's now-stale window."""
-    state = ConversationState(conversation_id=CONVERSATION)
-    state.turns = [
-        _turn(0, cards=[_card("cmp_a", window="2015-2020")]),
-        _turn(1, cards=[_card("cmp_a", window="2021-2023")]),
-    ]
-
-    assert state.anaphor_window(None) == "2021 to 2023"
 
 
 # --- awaiting_answer / drop_resuming: a pending interrupt marked resuming ---
@@ -1660,6 +1753,20 @@ async def test_save_appends_only_the_keys_that_changed(session_service) -> None:
     assert len(calls) == 2
 
 
+async def test_a_save_that_folds_the_composition_consumes_its_ops(session_service) -> None:
+    """The ops a save folds into its delta are spent, so a later checkpoint
+    does not replay them onto the manifest a second time."""
+    store = StudioStore(session_service, app_name="app")
+    state = await store.create("principal", CONVERSATION)
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
+
+    await store.save("principal", CONVERSATION)
+
+    assert state._composition_ops == []
+    reloaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one"]
+
+
 async def test_a_non_json_value_raises_rather_than_being_silently_coerced(session_service) -> None:
     store = StudioStore(session_service, app_name="app")
     state = await store.create("principal", CONVERSATION)
@@ -1865,9 +1972,7 @@ async def test_checkpoint_keeps_a_composition_op_recorded_while_its_own_fetch_is
             )
             await store_b.save("principal", CONVERSATION)
             action = land_component(
-                state_a,
-                {"component_id": "cmp_added", "type": "line_chart", "revision": 1},
-                revises=None,
+                state_a, {"component_id": "cmp_added", "type": "line_chart", "revision": 1}
             )
             assert action == "created"
         return await real_get_session(*args, **kwargs)
@@ -1894,9 +1999,7 @@ async def test_checkpoint_consumes_composition_ops_by_prefix_not_the_whole_list(
     segment_id = store.claim_segment("principal", CONVERSATION)
     await store.save("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    action = land_component(
-        state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1}, revises=None
-    )
+    action = land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
     assert action == "created"
     assert len(state._composition_ops) == 1
 
@@ -1905,9 +2008,7 @@ async def test_checkpoint_consumes_composition_ops_by_prefix_not_the_whole_list(
     async def append_event_then_land(session: Any, event: Any) -> Any:
         # A second op lands after `checkpoint` already captured `n` for
         # this attempt's fold, but before the append itself commits.
-        land_component(
-            state, {"component_id": "cmp_two", "type": "line_chart", "revision": 1}, revises=None
-        )
+        land_component(state, {"component_id": "cmp_two", "type": "line_chart", "revision": 1})
         return await real_append_event(session, event)
 
     service.append_event = append_event_then_land
@@ -2015,6 +2116,20 @@ async def test_checkpoint_raises_segment_lost_after_a_takeover_and_writes_nothin
     assert reloaded.turn_final_text == ""
 
 
+async def test_checkpoint_raises_segment_lost_when_the_ledger_is_gone(session_service) -> None:
+    store = StudioStore(session_service, app_name="app")
+    await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await session_service.delete_session(
+        app_name="app.ledger", user_id="principal", session_id=CONVERSATION
+    )
+
+    store.current("principal", CONVERSATION).turn_final_text = "an answer with no ledger"
+    with pytest.raises(SegmentLost):
+        await store.checkpoint("principal", CONVERSATION, segment_id)
+
+
 # --- mutate_composition: /composition's fetch-rebuild-mutate-append cycle ---
 
 
@@ -2034,9 +2149,7 @@ async def test_mutate_composition_appends_the_returned_manifest_and_consumes_its
     store = StudioStore(service, app_name="app")
     await store.create("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    land_component(
-        state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1}, revises=None
-    )
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
     assert len(state._composition_ops) == 1
 
     def mutate(manifest: CompositionManifest | None) -> CompositionManifest:
@@ -2065,9 +2178,7 @@ async def test_mutate_composition_rebuilds_the_fetched_manifest_with_unsaved_ops
     store = StudioStore(service, app_name="app")
     await store.create("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    land_component(
-        state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1}, revises=None
-    )
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
 
     seen: list[CompositionManifest | None] = []
 
@@ -2081,6 +2192,45 @@ async def test_mutate_composition_rebuilds_the_fetched_manifest_with_unsaved_ops
     assert [b.component_id for b in seen[0].blocks] == ["cmp_one"]
 
 
+async def test_a_turn_op_landing_while_composition_appends_is_kept(tmp_path) -> None:
+    """A card the turn lands (or a removal it makes) while `/composition`
+    awaits its append must survive the mutation's result, in memory and once
+    the turn saves; it used to be overwritten and its op consumed unsaved."""
+    service = _database_service(tmp_path)
+    store = StudioStore(service, app_name="app")
+    await store.create("principal", CONVERSATION)
+    state = store.current("principal", CONVERSATION)
+    assert state is not None
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
+    await store.save("principal", CONVERSATION)
+    real_append_event = service.append_event
+
+    async def append_while_the_turn_lands(*args: Any, **kwargs: Any) -> Any:
+        land_component(state, {"component_id": "cmp_two", "type": "table", "revision": 1})
+        return await real_append_event(*args, **kwargs)
+
+    service.append_event = append_while_the_turn_lands
+
+    def pin(manifest: CompositionManifest | None) -> CompositionManifest:
+        assert manifest is not None
+        pinned = manifest.blocks[0].model_copy(update={"pinned": True})
+        return _next_manifest(manifest, [pinned], actor=CompositionActor.USER)
+
+    result = await store.mutate_composition("principal", CONVERSATION, pin)
+    service.append_event = real_append_event
+
+    assert result == state.composition
+    assert [b.component_id for b in result.blocks] == ["cmp_one", "cmp_two"]
+
+    assert state.composition is not None
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_one", "cmp_two"]
+    assert state.composition.blocks[0].pinned is True
+    await store.save("principal", CONVERSATION)
+    reloaded = await StudioStore(service, app_name="app").load("principal", CONVERSATION)
+    assert reloaded is not None and reloaded.composition is not None
+    assert [b.component_id for b in reloaded.composition.blocks] == ["cmp_one", "cmp_two"]
+
+
 async def test_mutate_composition_no_op_returns_the_same_manifest_without_appending(
     tmp_path,
 ) -> None:
@@ -2088,9 +2238,7 @@ async def test_mutate_composition_no_op_returns_the_same_manifest_without_append
     store = StudioStore(service, app_name="app")
     await store.create("principal", CONVERSATION)
     state = store.current("principal", CONVERSATION)
-    land_component(
-        state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1}, revises=None
-    )
+    land_component(state, {"component_id": "cmp_one", "type": "line_chart", "revision": 1})
 
     real_append_event = service.append_event
     calls = 0
@@ -2403,3 +2551,46 @@ def test_a_plan_retrieving_a_sets_places_records_the_set_into_the_next_turn():
     assert [(g.role, g.label, g.ref) for g in recorded.groups] == [
         ("observationAbout", "Africa", "africa")
     ]
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["verified", "hash-mismatch"])
+def test_translator_only_plan_preserves_verified_sibling_definitions(corrupt: bool):
+    block = json.loads(
+        (
+            Path(__file__).parents[2] / "data-mcp/tests/fixtures/resolve_aid_france_kenya.json"
+        ).read_text()
+    )["parts"][0]["spec"]
+    if corrupt:
+        block["resolved"]["alternative_measures"][0]["definition"]["identity"] = {}
+    sibling = block["resolved"]["alternative_measures"][0]["definition"]
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_plans = [_plan_json_retrieving(source_from_spec_block(block))]
+
+    assert state.recorded_identity(block["spec_id"]) is not None
+    assert (state.recorded_identity(sibling["spec_id"]) is not None) is not corrupt
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+    assert (state.recorded_identity(sibling["spec_id"]) is not None) is not corrupt
+    if not corrupt:
+        assert state.recorded_identity(sibling["spec_id"]).identity == sibling["identity"]
+
+
+@pytest.mark.parametrize("origin", ["search", "translator"])
+def test_source_constraints_survive_a_saved_alternative_definition(origin):
+    block = json.loads(
+        (
+            Path(__file__).parents[2] / "data-mcp/tests/fixtures/resolve_aid_france_kenya.json"
+        ).read_text()
+    )["parts"][0]["spec"]
+    block["_resolved_sources"] = [{"text": "DAC", "ref": None, "polarity": "include"}]
+    source = source_from_spec_block(block)
+    sibling = block["resolved"]["alternative_measures"][0]["definition"]["spec_id"]
+    state = ConversationState(conversation_id=CONVERSATION)
+    if origin == "search":
+        state.turn_specs = {source.spec_id: block}
+    else:
+        state.turn_plans = [_plan_json_retrieving(source)]
+    assert state.recorded_identity(sibling).resolved_sources == source.resolved_sources
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+    assert state.recorded_identity(sibling).resolved_sources == source.resolved_sources

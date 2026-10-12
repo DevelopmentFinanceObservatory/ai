@@ -10,8 +10,8 @@ past: one that was worked out from the latest data.
 
 `RollingCards.admit` applies both rules to one `write_component` call.
 `harness.mcp_client.McpExecutor` runs it on every write, which is the one call
-every card passes through: the orchestrator's `make_charts`, the graph's
-`compose`, and the Edit Card route.
+every card passes through: the orchestrator's `make_charts` and the Edit Card
+route.
 
 A create (an intent with a `frame_ref` and no `component_id`):
 

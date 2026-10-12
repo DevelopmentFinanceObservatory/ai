@@ -63,9 +63,10 @@ _SENEGAL_TOTAL = 98100.5 + 120400.25 + 153000.0342
 
 
 def _artifact(unit_text: str) -> bytes:
-    """A `get_data` Parquet artifact in dfo-apis's layout: canonical column order,
-    every grain column a string, `unit` the text `unit_text` on every row, and an
-    all-null `status` column."""
+    """A `get_data(place_types=true)` Parquet artifact in dfo-apis's layout: canonical
+    column order, every grain column a string, `unit` the text `unit_text` on every
+    row, an all-null `status` column, and each party's kind, which a sum across the
+    recipients reads."""
     keys = sorted(_VALUES)
     rows = len(keys)
     table = pa.table(
@@ -79,6 +80,8 @@ def _artifact(unit_text: str) -> bytes:
             "measurementMethod": pa.nulls(rows, type=pa.string()),
             "provenance": pa.array(["dcid:dc/base/OECD_CRS"] * rows),
             "status": pa.nulls(rows, type=pa.string()),
+            "financingProvider_kind": pa.array(["party"] * rows),
+            "financingRecipient_kind": pa.array(["party"] * rows),
         }
     )
     buf = io.BytesIO()

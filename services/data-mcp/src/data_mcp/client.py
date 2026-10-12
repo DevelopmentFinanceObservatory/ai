@@ -214,6 +214,10 @@ class UpstreamClient:
         """Release the underlying connection pool."""
         await self._client.aclose()
 
+    def absolute_url(self, link: str) -> str:
+        """`link`, a root-relative path, on the dfo-apis origin this client calls."""
+        return str(self._client.base_url.join(link))
+
     async def request(
         self,
         method: str,

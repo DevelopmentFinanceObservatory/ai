@@ -277,6 +277,11 @@
     "anchor",
     "offset"
   ],
+  "planner.records.ResolvedSourceMention": [
+    "text",
+    "ref",
+    "polarity"
+  ],
   "planner.records.RollingWindow": [
     "window_start",
     "window_end"
@@ -290,10 +295,19 @@
     "from_step",
     "output"
   ],
+  "planner.workflow.ElectedMeasure": [
+    "label",
+    "alternatives"
+  ],
   "planner.workflow.EvidenceBinding": [
     "requirement_id",
     "step_id",
     "spec_id"
+  ],
+  "planner.workflow.MeasureAlternative": [
+    "spec_id",
+    "label",
+    "axis"
   ],
   "planner.workflow.OpenAxis": [
     "property",

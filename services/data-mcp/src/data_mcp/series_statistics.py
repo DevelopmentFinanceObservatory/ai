@@ -5,10 +5,10 @@ per-series figures.
 `artifacts` list, by its `rendering` shape alone -- the same way
 `frame_materialisation._select_parquet_artifact` already picks the frame
 artifact off the same list. `fetch_series_statistics` then reads it: a
-signed-URL round trip through `data_mcp.artifact_resource.read_artifact`
-(the same re-sign hop `frame_materialisation` uses), a streamed GET that
-refuses once the downloaded body exceeds `artifact.bytes` (the advertised
-size) rather than buffering an oversized body in full, a check of the fetched
+link lookup through `data_mcp.artifact_resource.read_artifact` (the same hop
+`frame_materialisation` uses), a streamed GET on that link that follows its
+redirect to the object store and refuses once the downloaded body exceeds
+`artifact.bytes` (the advertised size) rather than buffering an oversized body in full, a check of the fetched
 bytes against `artifact.artifact_digest` (the same check
 `frame_materialisation._verify_parse_and_register` runs before it trusts a
 frame's bytes), and a read that checks the file's own `dfo.schema` metadata
@@ -109,7 +109,7 @@ SERIES_STATISTICS_ARROW_SCHEMA = pa.schema(
 # `SeriesStatisticsModel.facet`'s own type, checked once per distinct facet.
 _FACET = TypeAdapter(SeriesStatisticsModel.model_fields["facet"].annotation)
 
-# This hop's own timeout for the raw signed-URL GET. Unlike
+# This hop's own timeout for the artifact GET. Unlike
 # `frame_materialisation`'s fetch, this one carries no retry loop of its
 # own: a caller here (the digest, or the harness's evidence check) already
 # degrades cleanly on any failure, so a single attempt is enough -- see each
@@ -197,7 +197,7 @@ async def fetch_series_statistics_table(
         transport: Only ever set by a test, exactly like
             `frame_materialisation.materialise_and_register`'s own `transport`
             -- `None` (the default) means a real network GET.
-        deadline: When set, the signing call and the GET together must finish
+        deadline: When set, the link lookup and the GET together must finish
             before it; `None` bounds each by its own timeout alone.
 
     Returns:
@@ -205,18 +205,18 @@ async def fetch_series_statistics_table(
         order -- empty when `artifact` carries zero rows.
 
     Raises:
-        fastmcp.exceptions.ResourceError: `read_artifact` could not sign or
-            reach the snapshot route.
+        fastmcp.exceptions.ResourceError: `read_artifact` could not read the
+            artifact's link off the snapshot route.
         SeriesStatisticsSchemaError: the downloaded body exceeds `artifact
             .bytes` (the advertised size), the fetched bytes do not hash to
             `artifact.artifact_digest`, the fetched file's `dfo.schema`
             metadata is not `series-statistics/1`, its Parquet-metadata row
             count does not match `expected_rows`, or a column does not fit
             `SERIES_STATISTICS_ARROW_SCHEMA` or a facet `SeriesStatisticsModel`.
-        httpx2.HTTPStatusError: the signed-URL GET answered with an error
-            status.
-        httpx2.TransportError: the signed-URL GET itself failed.
-        TimeoutError: `deadline` passed before the signing call and the GET
+        httpx2.HTTPStatusError: the link answered with an error status, such
+            as 410 `artifact_expired`, or its redirect target did.
+        httpx2.TransportError: the GET itself failed.
+        TimeoutError: `deadline` passed before the link lookup and the GET
             finished.
     """
     # Imported here, not at module level: `data_mcp.artifact_resource` imports
@@ -229,11 +229,13 @@ async def fetch_series_statistics_table(
     from data_mcp.artifact_resource import read_artifact  # noqa: PLC0415
 
     async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
-        signed = await read_artifact(subject_id, content_version, artifact.artifact_digest)
+        link = await read_artifact(subject_id, content_version, artifact.artifact_digest)
         async with httpx2.AsyncClient(
-            transport=transport, timeout=httpx2.Timeout(_FETCH_TIMEOUT_S)
+            transport=transport,
+            timeout=httpx2.Timeout(_FETCH_TIMEOUT_S),
+            follow_redirects=True,
         ) as client:
-            fetched = await _get_bounded(client, signed["url"], max_bytes=artifact.bytes)
+            fetched = await _get_bounded(client, link["url"], max_bytes=artifact.bytes)
     computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
     if computed_digest != artifact.artifact_digest:
         raise SeriesStatisticsSchemaError(
@@ -246,8 +248,8 @@ async def fetch_series_statistics_table(
 async def _get_bounded(client: httpx2.AsyncClient, url: str, *, max_bytes: int) -> bytes:
     """Stream `url`'s body, refusing before it is buffered in full once it exceeds `max_bytes`.
 
-    `artifact.bytes` is dfo-apis' own advertised size for the artifact this URL
-    was signed for; a body that outgrows it is refused chunk by chunk, so an
+    `artifact.bytes` is dfo-apis' own advertised size for the artifact this link
+    names; a body that outgrows it is refused chunk by chunk, so an
     artifact whose advertised size understates what dfo-apis actually stored
     never gets fully read into memory here. `Accept-Encoding: identity` keeps
     the response uncompressed, so a chunk `aiter_bytes` yields is never larger

@@ -84,12 +84,7 @@ async def _seed_handle(
     execution_identity = current_execution_identity()
     if engine_version is not None:
         execution_identity = dataclasses.replace(execution_identity, engine_version=engine_version)
-    input_cv = mint_content_version(
-        frame_sha256=frame_sha256(frame),
-        graph_revision="rev_test",
-        source_revisions=[],
-        facets=[],
-    )
+    input_cv = mint_content_version(frame_sha256=frame_sha256(frame))
     trace = Trace(
         upstream_trace={"graph_revision": "rev_test"},
         frame_content_version=input_cv,

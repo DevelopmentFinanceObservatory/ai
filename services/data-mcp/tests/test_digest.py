@@ -468,6 +468,44 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     assert "group" not in digest
 
 
+@pytest.mark.parametrize(
+    ("measure_label", "alternatives", "line"),
+    [
+        # Counts first, then prices, whatever the wire order.
+        (
+            "gross disbursements",
+            [
+                {"definition": {"spec_id": "spec_c"}, "label": "constant prices", "axis": "unit"},
+                {"definition": {"spec_id": "spec_n"}, "label": "net disbursements", "axis": "what"},
+                {"definition": {"spec_id": "spec_k"}, "label": "commitments", "axis": "what"},
+            ],
+            "Counted as gross disbursements; other counts: net disbursements [spec_n], "
+            "commitments [spec_k]; other prices: constant prices [spec_c].",
+        ),
+        # A served partition whose siblings are all unlabelled publishes [].
+        ("gross disbursements", [], None),
+        # An entry with no spec_id names nothing get_data could take.
+        ("gross disbursements", [{"definition": {}, "label": "net", "axis": "what"}], None),
+        # No measure family: both fields are null.
+        (None, None, None),
+    ],
+    ids=["counts-and-prices", "no-sibling", "no-spec-id", "no-family"],
+)
+def test_a_definite_spec_names_its_elected_measure_and_each_sibling(
+    measure_label: str | None, alternatives: list[dict[str, Any]] | None, line: str | None
+) -> None:
+    spec = _spec()
+    spec["resolved"]["measure_label"] = measure_label
+    spec["resolved"]["alternative_measures"] = alternatives
+
+    digest = render_digest(_envelope("definite", spec=spec))
+
+    if line is None:
+        assert "Counted as" not in digest
+    else:
+        assert line in digest.splitlines()
+
+
 def test_a_spec_with_no_elected_stat_vars_renders_no_measure_line() -> None:
     assert "StatVar" not in render_digest(_envelope("definite", spec=_spec()))
 
@@ -773,10 +811,58 @@ def test_no_data_qualifier_not_bound_preserves_each_disposition_in_query_order()
 
     assert "spec_flagged" in digest
     assert "does not satisfy every requested qualifier" in digest
+    assert 'It shows: "malaria grants from France to Togo, 2015 to 2024"' in digest
     assert "quality gate" not in digest
     assert '"malaria" names a category the search could not apply.' in digest
     assert '"untied" is not a distinction this data records.' in digest
     assert digest.index('"malaria"') < digest.index('"untied"')
+
+
+@pytest.mark.parametrize(
+    ("texts", "named"),
+    [
+        ([], "every phrase of this ask"),
+        (["global"], '"global"'),
+        (["HIV", "AIDS", "HIV"], '"HIV" and "AIDS"'),
+        (["HIV", "AIDS", "malaria"], '"HIV", "AIDS", and "malaria"'),
+    ],
+)
+def test_no_data_qualifier_not_bound_with_a_flagged_match_is_headed_as_a_refusal(
+    texts: list[str], named: str
+) -> None:
+    """The data exists without the phrase, so the part says search would not
+    apply it."""
+    envelope = _envelope(
+        "no_data",
+        no_data={
+            "reason": "qualifier_not_bound",
+            "category": "absent",
+            "flagged_match": _spec(spec_id="spec_flagged"),
+            "gate": None,
+            "unbound_qualifiers": [{"text": text, "disposition": "unbound"} for text in texts],
+        },
+    )
+
+    digest = render_digest(envelope)
+
+    assert "no data is available" not in digest
+    assert (
+        f"Search found matching data but could not apply {named} to it, so this part has "
+        "no answer (reason: qualifier_not_bound)."
+    ) in digest
+
+
+def test_no_data_qualifier_not_bound_without_a_flagged_match_keeps_the_no_data_heading() -> None:
+    envelope = _envelope(
+        "no_data",
+        no_data={
+            "reason": "qualifier_not_bound",
+            "category": "absent",
+            "unbound_qualifiers": [{"text": "global", "disposition": "unbound"}],
+        },
+    )
+
+    assert "Resolved, but no data is available" in render_digest(envelope)
 
 
 def test_no_data_qualifier_not_bound_without_unbound_qualifiers_omits_the_line() -> None:
@@ -1196,3 +1282,162 @@ def test_a_resolution_answer_renders_its_parts_as_before_and_states_its_kind() -
     assert render_digest(envelope) == render_digest(
         {k: v for k, v in envelope.items() if k != "kind"}
     )
+
+
+# Digest rendering, sources the ask named
+
+_IDS = "provenance/WorldBankInternationalDebtStatistics"
+_CRS = "provenance/OECDCreditorReportingSystem"
+_TIME_HINT = {
+    "code": "time_window_defaulted",
+    "severity": "warn",
+    "message": "no time_text was given; the answer was resolved across every period with data.",
+}
+
+
+def _restatement(*sources: dict[str, Any]) -> dict[str, Any]:
+    return {"variable_text": "debt service", "entities": [], "sources": list(sources)}
+
+
+def test_a_named_source_reads_as_asked_for_with_the_label_the_spec_gives() -> None:
+    spec = _spec(
+        facets={"provenance": {"ref": _IDS, "label": "World Bank IDS", "basis": "fallback"}}
+    )
+    source = {"text": "IDS", "ref": _IDS, "polarity": "include"}
+
+    digest = render_digest(_envelope("definite", spec=spec, restatement=_restatement(source)))
+
+    assert f'Sources: asked for "IDS", read as World Bank IDS ({_IDS}).' in digest
+
+
+def test_an_excluded_source_reads_as_excluded_with_its_ref_when_the_spec_has_no_label() -> None:
+    spec = _spec(facets={"provenance": {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2A"}})
+    source = {"text": "CRS", "ref": _CRS, "polarity": "exclude"}
+
+    digest = render_digest(_envelope("definite", spec=spec, restatement=_restatement(source)))
+
+    assert f'Sources: excluded "CRS", read as {_CRS}.' in digest
+    assert "asked for" not in digest
+
+
+def test_a_source_label_comes_from_the_facet_options_too() -> None:
+    options = [
+        {"axis": "provenance", "options": [_facet_option(_CRS, "OECD Creditor Reporting System")]}
+    ]
+    source = {"text": "CRS", "ref": _CRS, "polarity": "exclude"}
+
+    digest = render_digest(
+        _envelope("definite", spec=_spec(facet_options=options), restatement=_restatement(source))
+    )
+
+    assert f'excluded "CRS", read as OECD Creditor Reporting System ({_CRS})' in digest
+
+
+def test_several_sources_share_one_line() -> None:
+    sources = [
+        {"text": "IDS", "ref": _IDS, "polarity": "include"},
+        {"text": "CRS", "ref": _CRS, "polarity": "exclude"},
+    ]
+
+    digest = render_digest(_envelope("definite", spec=_spec(), restatement=_restatement(*sources)))
+
+    (line,) = [line for line in digest.splitlines() if line.startswith("Sources:")]
+    assert line == f'Sources: asked for "IDS", read as {_IDS} · excluded "CRS", read as {_CRS}.'
+
+
+def test_a_part_that_named_no_source_gets_no_sources_line() -> None:
+    digest = render_digest(_envelope("definite", spec=_spec(), restatement=_restatement()))
+
+    assert "Sources:" not in digest
+
+
+# Digest rendering, source refusals
+
+_UNRESOLVED_SOURCE = {
+    "reason": "source_not_resolved",
+    "category": "unresolved",
+    "message": 'Could not match "XYZ statistics" to a data source. Try a publisher or '
+    "dataset name, or leave the source out.",
+    "source_terms": ["XYZ statistics"],
+    "ambiguous_sources": [],
+}
+
+
+def _refused(no_data: dict[str, Any], **part_fields: Any) -> dict[str, Any]:
+    """An envelope whose one `no_data` part carries `part_fields` (its own warnings, restatement)."""
+    return _envelope("no_data", parts=[_part("no_data", no_data=no_data, **part_fields)])
+
+
+def test_a_source_not_resolved_refusal_drops_the_defaulted_time_window_hint() -> None:
+    digest = render_digest(
+        _refused(
+            _UNRESOLVED_SOURCE,
+            warnings=[_TIME_HINT],
+            restatement=_restatement({"text": "XYZ statistics", "polarity": "include"}),
+        )
+    )
+
+    assert "time_text" not in digest
+    assert 'Could not match "XYZ statistics" to a data source.' in digest
+    assert 'Sources: asked for "XYZ statistics".' in digest
+
+
+def test_an_entity_not_resolved_refusal_drops_the_defaulted_time_window_hint_too() -> None:
+    digest = render_digest(
+        _refused({"reason": "entity_not_resolved", "category": "unresolved"}, warnings=[_TIME_HINT])
+    )
+
+    assert "time_text" not in digest
+
+
+def test_a_refusal_keeps_the_warnings_about_the_callers_input() -> None:
+    warning = {"code": "time_text_not_parsed", "message": "time_text 'sometime' was not parsed."}
+
+    digest = render_digest(_refused(_UNRESOLVED_SOURCE, warnings=[_TIME_HINT, warning]))
+
+    assert warning["message"] in digest
+
+
+def test_data_that_resolved_keeps_the_defaulted_time_window_hint() -> None:
+    digest = render_digest(
+        _envelope("definite", parts=[_part("definite", spec=_spec(), warnings=[_TIME_HINT])])
+    )
+
+    assert _TIME_HINT["message"] in digest
+
+
+def test_a_source_ambiguous_refusal_lists_each_candidate_with_its_ref_and_kind() -> None:
+    candidates = [
+        {"ref": "dc/s/A", "label": "Source A", "kind": "source"},
+        {"ref": "dc/d/B", "label": "Dataset B", "kind": "dataset"},
+        {"ref": "provenance/C", "label": "Table C", "kind": "provenance"},
+    ]
+    no_data = {
+        "reason": "source_ambiguous",
+        "category": "unresolved",
+        "message": '"ambiguous" matches more than one source. Name one of them.',
+        "source_terms": ["ambiguous"],
+        "ambiguous_sources": [{"text": "ambiguous", "candidates": candidates}],
+    }
+
+    digest = render_digest(_refused(no_data, warnings=[_TIME_HINT]))
+
+    assert (
+        '"ambiguous" could mean: Source A (dc/s/A, source); Dataset B (dc/d/B, dataset); '
+        "Table C (provenance/C, provenance)."
+    ) in digest
+    assert "time_text" not in digest
+
+
+def test_ambiguous_source_candidates_are_capped_with_a_count_of_the_rest() -> None:
+    candidates = [{"ref": f"dc/s/{n}", "label": f"Source {n}", "kind": "source"} for n in range(8)]
+    no_data = {
+        "reason": "source_ambiguous",
+        "category": "unresolved",
+        "ambiguous_sources": [{"text": "s", "candidates": candidates}],
+    }
+
+    digest = render_digest(_envelope("no_data", no_data=no_data))
+
+    assert "Source 5 (dc/s/5, source), and 2 more." in digest
+    assert "Source 6" not in digest

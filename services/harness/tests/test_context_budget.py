@@ -4,7 +4,7 @@ This file measures what the planner is handed and holds
 each part of it to a ceiling. The bounds themselves live in production code:
 `planner.plan` limits the plan and cuts user text (`MAX_PLAN_RECORD_CHARS`,
 `cut_user_text`), `harness.studio_state` limits the two digests, and
-`harness.planner_seam` caps the envelope and cuts the question, the amendment
+`harness.planner_seam` holds the search readings to a budget and cuts the question, the amendment
 and a refusal. This file's ceilings are derived from those limits or measured
 from a recorded scenario, and each control test shows its ceiling can fail.
 
@@ -78,63 +78,40 @@ from __future__ import annotations
 import copy
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from compiler.surface import FixtureSurface, ToolCallResult
-from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.skills_client import PAGE_CHARS, continuation_line, page_of, with_closing_line
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
 from harness import planner_seam, studio_state
-from harness.graph import frame_row_ceiling
 from harness.planner_seam import (
-    _ENVELOPE_CANDIDATE_CAP,
-    _ENVELOPE_CONTEXT,
-    _ENVELOPE_FIELD_CAP,
-    _ENVELOPE_KEYS,
-    _ENVELOPE_LABEL_CAP,
-    _ENVELOPE_OPERATION_CAP,
-    _ENVELOPE_SKILL_CAP,
-    _ENVELOPE_SKILL_DESCRIPTION_CAP,
-    _ENVELOPE_WARNING_CAP,
-    _ENVELOPE_WARNING_TEXT_CAP,
+    _PLAN_MEASURE_CHOICE_CAP,
     _PLAN_SOURCE_SENTENCE_CAP,
-    _SEEDED_REASON,
+    _READINGS_BUDGET,
+    _READINGS_CONTEXT,
     PlannerSeam,
     PlannerSeamError,
-    _envelope_context,
     _plan_context,
+    _readings_ledger,
     _section,
 )
 from harness.prefix_cache import prefix_key
-from harness.seeds import seeded_envelope
 from harness.settings import Settings
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
     CONVERSATION_DIGEST_MAX_BYTES,
     ConversationState,
 )
+from harness.turn_records import CandidateReading, SearchReading, WarningReading
 from harness.wire import (
-    MAX_OPERATION_PHRASE_CHARS,
-    MAX_SEED_COUNT,
-    MAX_SEED_LIST_ITEMS,
-    MAX_SEED_OPERATIONS,
-    MAX_SEED_RECORD_CHARS,
-    MAX_SEED_ROLES,
-    MAX_SEED_SENTENCE_CHARS,
-    MAX_SEED_SOURCE_CHARS,
-    MAX_SEED_TEXT_CHARS,
-    MAX_SEEDS,
-    MAX_TARGET_YEAR,
     ComponentType,
     CompositionActor,
     CompositionBlock,
 )
-from planner.agent import build_planner_tools
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -150,11 +127,9 @@ from planner.plan import (
     MAX_PLAN_DECISIONS,
     MAX_PLAN_RECORD_CHARS,
     MAX_PLAN_REQUIREMENTS,
-    MAX_PLAN_ROUNDS,
     MAX_PREDICATES,
     MAX_QUESTION_CHARS,
     MAX_SOURCE_CHARS,
-    SEEDED_SOURCES_STATE_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Decision,
@@ -163,24 +138,12 @@ from planner.plan import (
     Plan,
     ResolvedBy,
     Unit,
-    save_plan_rounds,
-    save_seeded_sources,
-    seeded_sources,
 )
 from planner.records import GroupBy, Reduction
 from planner.settings import AgentSettings
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
-from translator.discovery import compact_source
 
-from .bounded_seeds import (
-    bounded_seed,
-    fullest_described_seed,
-    fullest_recorded_seed,
-    most_recorded_entities,
-    read_seed,
-    recorded_seed,
-)
 from .context_probe import (
     BOUNDING_PATTERNS,
     RELAY_MARKER,
@@ -198,7 +161,6 @@ from .context_probe import (
 from .context_probe import (
     record_chars as _record_chars,
 )
-from .decision_drafts import drafts
 from .test_planner_seam import _NO_DATA_SEARCH_RESPONSE, _gdp_plan, _SeamHarness
 
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
@@ -213,25 +175,26 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 14,219 with the skill tools and
+# `planner.agent.planner_instruction`. Measured 15,628 with the skill tools and
 # translation attached. The margin is 4.1% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 14_800
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 16_270
 
-# Every planner tool declaration together: 35,165 (`propose_plan` 30,487 and
-# 4,678 across the smaller ones). The margin is 10%.
+# Every planner tool declaration together: 37,873 (`propose_plan` 32,634 and
+# 5,239 across the smaller ones). The margin is 2.7%.
 PLANNER_DECLARATIONS_TOTAL_CEILING = 38_880
 
 # `propose_plan`'s own declaration: the `DecisionDraft` and `EvidenceRequirement`
 # schemas with their `$defs` tree, and the patch, decline, answer and intent
-# arguments. Measured 30,487. It sits in the static prefix every planner call
+# arguments. Measured 32,634, with every field that refers to a definition holding a
+# copy of it under the field's own description. It sits in the static prefix every planner call
 # repeats, which Gemini's implicit cache can serve. Its field descriptions are what
 # the planner writes a plan from. The margin is 2%.
-PROPOSE_PLAN_DECLARATION_CEILING = 31_070
+PROPOSE_PLAN_DECLARATION_CEILING = 33_300
 
-# The smaller planner declarations at once: `adk_request_input` 1,845,
-# `get_skill_file` 1,084, `submit_plan` 840, `get_skill` 651 and `reject_plan`
+# The smaller planner declarations at once: `adk_request_input` 2,397,
+# `get_skill_file` 1,084, `submit_plan` 840, `get_skill` 660 and `reject_plan`
 # 258.
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_690
 
@@ -252,24 +215,23 @@ PLANNER_CONTENTS_CEILING = 1_680
 SKILL_PAGE_CEILING = 40_800
 
 # The seam's own brief, bucketed as `text(seam-brief)` on its opening words
-# (`harness.planner_seam._ENVELOPE_CONTEXT`): the resolve envelope, the two
+# (`harness.planner_seam._READINGS_CONTEXT`): the search readings, the two
 # digests, the plan being changed and the question. A session sends it on its
 # first planner call and only the ask thereafter, so this bounds what that one
 # call is billed in full before a cache can serve it.
-# `harness.planner_seam._render_envelope` and `_plan_context` render the
-# envelope and the prior plan as line-rendered digests, which is what this
-# bounds.
+# `harness.planner_seam._plan_context` renders the prior plan as a
+# line-rendered digest, and `_READINGS_BUDGET` holds the readings.
 #
-# A two-requirement plan with an empty envelope is the wrong end of the range
-# to size this from: the seam's own docstring probe records the realistic upper
-# end at nine requirements, and the section that dominates it is the prior plan, re-sent on
+# A two-requirement plan is the wrong end of the range to size this from: the
+# seam's own docstring probe records the realistic upper end at nine
+# requirements, and the section that dominates it is the prior plan, re-sent on
 # every fresh render. `test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling`
-# measures that upper end, with a `candidates` envelope at every cap
-# `harness.planner_seam` sets: 9,941 chars for a draft plan and 11,437 for a
-# compiled one (the plan section alone is 8,723 -> 6,942 raw-to-digest for the
-# draft, 22,609 -> 8,438 for the compiled one). The ceiling is 25% above the
-# compiled case, as this file's own convention says.
-SEAM_BRIEF_CEILING = 14_300
+# measures that upper end, with readings at their whole budget: 11,131 chars for
+# a draft plan and 12,627 for a compiled one (the plan section alone is
+# 8,723 -> 6,942 raw-to-digest for the draft, 22,609 -> 8,438 for the compiled
+# one, and the readings section 3,486). The ceiling is 25% above the compiled
+# case, as this file's own convention says.
+SEAM_BRIEF_CEILING = 15_800
 
 # The seam's brief in the realistic scenario, which carries the brief a
 # deployed planner call recorded (`_RECORDED_BRIEF_PATH`): three search
@@ -280,9 +242,9 @@ RECORDED_BRIEF_CEILING = 9_400
 
 # The measured scenario ----------------------------------------------------------
 
-# The third recorded scenario: the same round, with the seam's brief carrying a
-# maximal resolve envelope and the canvas and conversation digests at their
-# maxima. The other two run with an empty envelope and no digests.
+# The second recorded scenario: the same round, with the seam's brief carrying
+# search readings far past their budget and the canvas and conversation digests
+# at their maxima.
 BOUNDED_CONTEXT = "bounded-context"
 
 
@@ -356,7 +318,6 @@ def _recorded_brief() -> dict[str, Any]:
     return {
         "context": {
             "question": recorded["question"],
-            "envelope": {},
             "readings": recorded["readings"],
             "canvas_digest": recorded["canvas_digest"],
             "conversation_digest": recorded["conversation_digest"],
@@ -376,8 +337,8 @@ async def _recorded_round(
 ) -> dict[str, tuple[list[dict[str, Any]], list[Any]]]:
     """One plan-then-translate round, with every request the planner's model was handed.
 
-    `context` is what the seam's brief carries besides the plan: the resolve
-    `envelope` or the search `readings`, the `canvas_digest` and
+    `context` is what the seam's brief carries besides the plan: the search
+    `readings`, the `canvas_digest` and
     `conversation_digest`, and the `question` when it is not the draft's own.
     `state` is what the session holds before the round, such as the asks.
 
@@ -431,8 +392,8 @@ async def measured(
     Both loads come from one run: a test that reads a record and a test that
     reads a raw request are looking at the same capture, so the stability
     assertions and the size assertions can never describe different rounds.
-    The second scenario, `BOUNDED_CONTEXT`, hands the seam a maximal resolve
-    envelope and both digests at their maxima.
+    The second scenario, `BOUNDED_CONTEXT`, hands the seam readings far past
+    their budget and both digests at their maxima.
 
     The baseline rewrite is env-gated the way `test_digest_budget.py`'s own is
     and wrapped by the `context-baseline` `just` recipe. It happens here, in the
@@ -775,7 +736,7 @@ def _request(
     `(author, chars)`: the framing `_fencing._present_other_agent_message`
     emits, so the relay bucket is exercised against the real shape, not
     one this test invented. `seam`, when given, prepends a seam-brief part of
-    that many chars, `harness.planner_seam._ENVELOPE_CONTEXT`'s own opening
+    that many chars, `harness.planner_seam._READINGS_CONTEXT`'s own opening
     words, which is what `context_probe` buckets on, so the seam ceiling is
     exercised against a part that really is one. `skill`, when given, appends
     a `get_skill` answer of that many chars.
@@ -916,51 +877,16 @@ def _nine_requirement_plan() -> Any:
     )
 
 
-def _capped_envelope() -> dict[str, Any]:
-    """A `candidates` envelope at every cap `harness.planner_seam` sets.
-
-    The candidates branch carries more than the `definite` branch does: six
-    candidates each with a label, plus the pin-predicate facts on each, so it
-    is the envelope shape the ceiling has to hold on.
-    """
-    return {
-        "status": "candidates",
-        "spec_id": None,
-        "choice_points": 6,
-        "parts": 2,
-        "wide": True,
-        "stat_var_shape_kind": "statvar_schema",
-        "stat_var_item_count": 0,
-        "entity_roles": ["observationAbout"],
-        "stat_var_served_count": None,
-        "candidates": [
-            {
-                "spec_id": f"spec_{index:032x}",
-                "label": (
-                    "Population of Guatemala, annual, from the World Bank's World "
-                    "Development Indicators, measured as the total resident population"
-                ),
-                "wide": index % 2 == 0,
-            }
-            for index in range(1, 7)
-        ],
-        "warnings": [
-            {"code": f"warn_{i}", "severity": "warn", "message": "m" * 250} for i in range(6)
-        ],
-    }
-
-
 def _seam_brief(
     *,
     fresh: bool,
-    envelope: dict[str, Any],
     prior_plan: dict[str, Any] | None,
+    readings: Sequence[Mapping[str, Any]] = (),
     canvas_digest: dict[str, Any] | None = None,
     conversation_digest: dict[str, Any] | None = None,
     question: str = "compare population and gdp for guatemala since the year 2000",
     refusal: dict[str, Any] | None = None,
     amendment: str | None = None,
-    seed_of: dict[str, str] | None = None,
 ) -> str:
     """One `_message` render, the way `PlannerSeam.__call__` asks for it."""
     seam = PlannerSeam(
@@ -970,13 +896,12 @@ def _seam_brief(
     return seam._message(
         fresh=fresh,
         question=question,
-        envelope=envelope,
         prior_plan=prior_plan,
         refusal=refusal,
         amendment=amendment,
         canvas_digest=canvas_digest,
         conversation_digest=conversation_digest,
-        seed_of=seed_of,
+        ledger=_readings_ledger(readings),
     )
 
 
@@ -985,19 +910,19 @@ def test_the_seam_brief_holds_a_nine_requirement_plan_under_its_ceiling() -> Non
 
     Both a draft plan and a compiled one, since a compiled plan carries the
     `translation` and `workflow` the digest renders a summary of. Each is
-    rendered against a `candidates` envelope at every cap, which is the larger
-    envelope shape, and held to `SEAM_BRIEF_CEILING` on its own.
+    rendered against readings far past their budget, so the readings section
+    is at its largest, and held to `SEAM_BRIEF_CEILING` on its own.
 
     This is the test the ceiling is sized from. The recorded scenario's own
-    brief is two requirements and an empty envelope, so a ceiling taken from it
+    brief is two requirements and three readings, so a ceiling taken from it
     would pass a change that let the brief grow with the plan it carries.
     """
     draft = _nine_requirement_plan()
     dumped = draft.model_dump(mode="json")
-    envelope = _capped_envelope()
+    readings = _maximal_readings()
 
     for label, plan in (("draft", dumped), ("compiled", _compiled(draft))):
-        render = _seam_brief(fresh=True, envelope=envelope, prior_plan=plan)
+        render = _seam_brief(fresh=True, readings=readings, prior_plan=plan)
         assert len(render) <= SEAM_BRIEF_CEILING, (
             f"a nine-requirement {label} plan renders a {len(render)}-char seam brief, "
             f"past the {SEAM_BRIEF_CEILING} ceiling this test derives from that same case"
@@ -1100,15 +1025,16 @@ def test_the_seam_brief_ceiling_fails_when_the_plan_section_grows() -> None:
 # schema allows and nobody writes. This tier measures the largest legal input to
 # each part of the planner's brief and holds it to a ceiling derived from the
 # limits that make it legal: `planner.plan.MAX_PLAN_RECORD_CHARS` for the plan,
-# `planner_seam`'s caps for the envelope, `studio_state`'s maxima for the two
+# `planner_seam`'s budget for the readings, `studio_state`'s maxima for the two
 # digests. The ceilings are computed in this file from those constants, so a
 # limit that moves changes its ceiling with it.
 #
 # The tier covers the model-authored fields at their bound plus the renderer's
 # own caps. What the compiler and data-mcp put on a plan is bounded in the
 # render: a workflow's source `sentence` is cut at `_PLAN_SOURCE_SENTENCE_CAP`,
-# and its other rendered strings are ids that the `Identifier` and `SpecId`
-# patterns bound. The live question, the amendment text and a refusal are
+# its measure and other counts at `_PLAN_MEASURE_CHOICE_CAP`, and its other
+# rendered strings are ids that the `Identifier` and `SpecId` patterns
+# bound. The live question, the amendment text and a refusal are
 # unbounded on the wire, so `PlannerSeam._message` cuts each at
 # `MAX_QUESTION_CHARS` (`cut_user_text`) and the tier feeds each one far past it.
 
@@ -1129,7 +1055,8 @@ def _plan_framing_chars() -> int:
     `rationale` below their JSON size.
 
     The workflow is bounded by one source and one evidence binding per
-    requirement, the source's `sentence` cut at `_PLAN_SOURCE_SENTENCE_CAP`.
+    requirement, the source's `sentence` cut at `_PLAN_SOURCE_SENTENCE_CAP`
+    and its measure and other counts at `_PLAN_MEASURE_CHOICE_CAP`.
     """
     opening = (
         len("\nThe plan being changed:\nQuestion: ")
@@ -1161,7 +1088,13 @@ def _plan_framing_chars() -> int:
     workflow = (
         len("\nCompiled sources:")
         + MAX_PLAN_REQUIREMENTS
-        * (len("\n  ") + _SPEC_ID_CHARS + len(" -- ") + _PLAN_SOURCE_SENTENCE_CAP)
+        * (
+            len("\n  ")
+            + _SPEC_ID_CHARS
+            + len(" -- ")
+            + _PLAN_SOURCE_SENTENCE_CAP
+            + _PLAN_MEASURE_CHOICE_CAP
+        )
         + MAX_PLAN_REQUIREMENTS
         * (
             len("\n- evidence: ")
@@ -1177,23 +1110,34 @@ def _plan_framing_chars() -> int:
 
 
 # The plan section at its largest: the model-authored record at its size limit
-# (16,000) and the framing (12,708, of which the compiled workflow is 9,522), so
-# 28,708.
+# (16,000) and the framing (18,468, of which the compiled workflow is 15,282), so
+# 34,468.
 LEGAL_MAXIMUM_PLAN_SECTION_CEILING = MAX_PLAN_RECORD_CHARS + _plan_framing_chars()
 
 
 def _with_workflow(record: dict[str, Any]) -> dict[str, Any]:
     """`record` with a compiled workflow added: one source and one binding per requirement.
 
-    Each source sentence is three times the render's cap, so the render's own
-    cut is what sets that part of the size.
+    Each source sentence is three times the render's cap, and each source
+    offers more other counts than its measure line fits, so the render's own
+    cuts are what set those parts of the size.
     """
     ids = [requirement["id"] for requirement in record["evidence_requirements"]]
     return {
         **record,
         "workflow": {
             "sources": [
-                {"spec_id": _spec(index), "sentence": "S" * (_PLAN_SOURCE_SENTENCE_CAP * 3)}
+                {
+                    "spec_id": _spec(index),
+                    "sentence": "S" * (_PLAN_SOURCE_SENTENCE_CAP * 3),
+                    "elected_measure": {
+                        "label": "gross disbursements",
+                        "alternatives": [
+                            {"spec_id": _spec(other), "label": "net disbursements", "axis": "what"}
+                            for other in range(_PLAN_MEASURE_CHOICE_CAP // _SPEC_ID_CHARS + 1)
+                        ],
+                    },
+                }
                 for index in range(len(ids))
             ],
             "evidence_bindings": [
@@ -1279,440 +1223,63 @@ def test_the_plan_ceiling_fails_when_one_field_outgrows_the_limit() -> None:
     assert len(_plan_context(plan)) > LEGAL_MAXIMUM_PLAN_SECTION_CEILING
 
 
-def _maximal_envelope() -> dict[str, Any]:
-    """An envelope with every field the renderer names far past its cap.
+def _maximal_readings() -> list[dict[str, Any]]:
+    """Fifty readings, each far past what `_READINGS_BUDGET` holds.
 
-    Fifty candidates against a cap of `_ENVELOPE_CANDIDATE_CAP`, each label
-    100,000 characters against `_ENVELOPE_LABEL_CAP`, fifty skills against
-    `_ENVELOPE_SKILL_CAP`, each description 100,000 characters against
-    `_ENVELOPE_SKILL_DESCRIPTION_CAP`, and fifty warnings against
-    `_ENVELOPE_WARNING_CAP`, each message 100,000 characters against
-    `_ENVELOPE_WARNING_TEXT_CAP`. Every other field, a `spec_id`, a skill's
-    `id`, a warning's `code` and `severity`, the pin-predicate facts, eight
-    entity roles and eight open axes, is 100,000 characters against
-    `_ENVELOPE_FIELD_CAP`. `parts` is a string here,
-    so the render does not add the multi-part reason paragraph, which is fixed
-    text. Fifty seeds against `MAX_SEEDS`, each with its own width facts, eight
-    open axes and fifty operations against `_ENVELOPE_OPERATION_CAP`, and every
-    field 100,000 characters, make the envelope a seeded one, which adds
-    `_SEEDED_REASON`, also fixed text.
+    Each is a `definite` part with a 100,000-character sentence, ten candidates
+    with 100,000-character labels and a warning, so `render_readings` sheds
+    sentences and labels, folds every reading and then drops the oldest until
+    the text fits.
     """
     long = "x" * _BIG
-    return {
-        "status": long,
-        "spec_id": long,
-        "choice_points": long,
-        "parts": long,
-        "wide": long,
-        "stat_var_shape_kind": long,
-        "stat_var_item_count": long,
-        "stat_var_member_count_exact": True,
-        "entity_roles": [long] * 8,
-        "stat_var_served_count": long,
-        "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
-        "candidates": [{"spec_id": long, "label": long, "wide": True} for _ in range(50)],
-        "skills": [{"id": long, "description": long} for _ in range(50)],
-        "warnings": [{"code": long, "severity": long, "message": long} for _ in range(50)],
-        "seeds": [
-            {
-                "spec_id": f"{index}{long}",
-                "sentence": long,
-                "window": long,
-                "showed": long,
-                "coverage": long,
-                "wide": long,
-                "stat_var_shape_kind": long,
-                "stat_var_item_count": long,
-                "stat_var_member_count_exact": True,
-                "entity_roles": [long] * 8,
-                "stat_var_served_count": long,
-                "open_entity_axes": [{"column": long, "members": _BIG}] * 8,
-                "operations": [
-                    {"verb": long, "phrase": long, "over": long, "target_year": long}
-                    for _ in range(50)
-                ],
-            }
-            for index in range(50)
-        ],
-    }
-
-
-def _envelope_ceiling() -> int:
-    """What `_envelope_context` renders for an envelope with these keys, at most.
-
-    The frame, then one line for each of the ten scalar fields at
-    `_ENVELOPE_FIELD_CAP`, then the three capped lists: `_ENVELOPE_CANDIDATE_CAP`
-    candidate lines of a `spec_id` at the field cap, `(wide)` and a label of
-    `_ENVELOPE_LABEL_CAP`, `_ENVELOPE_SKILL_CAP` skill lines of an `id` at the
-    field cap and a description of `_ENVELOPE_SKILL_DESCRIPTION_CAP`, and
-    `_ENVELOPE_WARNING_CAP` warning lines of a `severity` and a `code` at the
-    field cap and a message of `_ENVELOPE_WARNING_TEXT_CAP`. Each list ends
-    with an "and N more" line. The seeded block follows
-    (`_seeded_section_ceiling`). The
-    keys the renderer does not name are outside it (see
-    `test_the_maximal_envelope_names_every_key_the_renderer_does`), and so is the
-    reason paragraph a searched resolve that is not one part adds.
-    """
-    frame = len(_ENVELOPE_CONTEXT.format(envelope="", reasons=""))
-    scalar_lines = 10 * (len("\n- stat_var_shape_kind: ") + _ENVELOPE_FIELD_CAP)
-    candidates = len("\n- candidates (999):") + _ENVELOPE_CANDIDATE_CAP * (
-        len("\n  - ") + _ENVELOPE_FIELD_CAP + len(" (wide)") + len(" -- ") + _ENVELOPE_LABEL_CAP
-    )
-    more = len("\n  - and 999 more")
-    skills = len("\n- skills (999):") + _ENVELOPE_SKILL_CAP * (
-        len("\n  - ") + _ENVELOPE_FIELD_CAP + len(" -- ") + _ENVELOPE_SKILL_DESCRIPTION_CAP
-    )
-    warnings = len("\n- warnings (999):") + _ENVELOPE_WARNING_CAP * (
-        len("\n  - [")
-        + _ENVELOPE_FIELD_CAP
-        + len("] ")
-        + _ENVELOPE_FIELD_CAP
-        + len(": ")
-        + _ENVELOPE_WARNING_TEXT_CAP
-    )
-    return (
-        frame
-        + scalar_lines
-        + candidates
-        + more
-        + skills
-        + more
-        + warnings
-        + more
-        + _seeded_section_ceiling()
-    )
-
-
-def _seeded_section_ceiling() -> int:
-    """What a seeded envelope adds to its render, at most: `_SEEDED_REASON` and
-    the seeds block (`harness.planner_seam._render_seeds`) at every cap. An
-    operation line is longest over an axis that names no party, with a target
-    year."""
-    operation = (
-        len("\n  operation: ")
-        + _ENVELOPE_FIELD_CAP
-        + len(" over ")
-        + _ENVELOPE_FIELD_CAP
-        + len(" to ")
-        + _ENVELOPE_FIELD_CAP
-        + len(' ("')
-        + _ENVELOPE_LABEL_CAP
-        + len('")')
-    )
-    seed = (
-        len("\n- spec_id: ")
-        + _ENVELOPE_FIELD_CAP
-        + len(" -- ")
-        + _ENVELOPE_LABEL_CAP
-        + len("\n  window: ")
-        + _ENVELOPE_FIELD_CAP
-        + len("\n  showed: ")
-        + _ENVELOPE_FIELD_CAP
-        + len("\n  coverage: ")
-        + _ENVELOPE_FIELD_CAP
-        + 5 * (len("\n  stat_var_shape_kind: ") + _ENVELOPE_FIELD_CAP)
-        + len("\n  open_entity_axes: ")
-        + _ENVELOPE_FIELD_CAP
-        + _ENVELOPE_OPERATION_CAP * operation
-        + len("\n  and 999 more")
-    )
-    more = len("\n- and 999 more")
-    reason = _SEEDED_REASON.format(ceiling=frame_row_ceiling())
-    return len(reason) + len("\nSeeded datasets (999):") + MAX_SEEDS * seed + more
-
-
-MAXIMAL_ENVELOPE_CEILING = _envelope_ceiling()
-
-
-def test_the_maximal_envelope_names_every_key_the_renderer_does() -> None:
-    """The envelope ceiling is derived for the keys `_render_envelope` names.
-
-    A key the renderer starts to name has to enter the derivation, and a key it
-    drops leaves a line in the ceiling that nothing renders. Either way the
-    fixture and the renderer's key set disagree, and this fails.
-    """
-    assert set(_maximal_envelope()) == set(_ENVELOPE_KEYS)
-
-
-def test_the_resolve_envelope_at_far_past_its_caps_renders_under_the_ceiling() -> None:
-    """The envelope's caps bound its section however much the resolve returned."""
-    envelope = _maximal_envelope()
-
-    section = _envelope_context(
-        envelope, refusal=None, spec_id_elected=False, spec_id_elected_label=None
-    )
-
-    assert len(section) <= MAXIMAL_ENVELOPE_CEILING, (
-        f"a resolve envelope of 50 candidates, 50 skills and 50 warnings renders {len(section):,} chars, "
-        f"past the {MAXIMAL_ENVELOPE_CEILING:,} its caps derive"
-    )
-    assert len(section) > MAXIMAL_ENVELOPE_CEILING * 0.9, (
-        f"the maximal envelope renders {len(section):,} chars, under 90% of the derived "
-        f"{MAXIMAL_ENVELOPE_CEILING:,}: the envelope or the derivation is off"
-    )
-    assert "and 44 more" in section
-    assert section.count("and 45 more") == 2
-
-
-@pytest.mark.parametrize(
-    "cap",
-    [
-        "_ENVELOPE_LABEL_CAP",
-        "_ENVELOPE_FIELD_CAP",
-        "_ENVELOPE_SKILL_DESCRIPTION_CAP",
-        "_ENVELOPE_WARNING_TEXT_CAP",
-    ],
-)
-def test_the_envelope_ceiling_fails_when_a_cap_is_removed(
-    cap: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The control for the envelope ceiling: with one cap gone, it is exceeded."""
-    monkeypatch.setattr(planner_seam, cap, 10**9)
-
-    section = _envelope_context(
-        _maximal_envelope(), refusal=None, spec_id_elected=False, spec_id_elected_label=None
-    )
-
-    assert len(section) > MAXIMAL_ENVELOPE_CEILING
-
-
-# -- what a seed puts outside the brief ------------------------------------------------
-#
-# A seed's text also reaches the model in tool results and stays in session
-# state. Each is measured here with seeds at their bounds
-# (`harness.wire`'s `MAX_SEED_*`), against a ceiling derived from those bounds.
-
-
-# The description a model reads of one seed is `compact_source` of its source.
-# It is held to `MAX_SEED_SOURCE_CHARS` where the seed is read, and discovery
-# stamps the requirement's measure on it as `searched_as`, at most
-# `MAX_MEASURE_CHARS`. What a whole translation result and the `planner:plan`
-# state hold for a plan that retrieves `MAX_SEEDS` such seeds through
-# `MAX_PLAN_REQUIREMENTS` requirements is measured on `run_translate` itself,
-# in `tests/translator/test_mechanical.py`.
-SEEDED_SOURCE_DESCRIPTION_CEILING = MAX_SEED_SOURCE_CHARS + len('""') + MAX_MEASURE_CHARS
-
-
-def test_a_seed_s_description_stays_under_its_ceiling() -> None:
-    seed, _ = fullest_described_seed(0)
-
-    described = compact_source(
-        read_seed(0, seed).source.source.model_copy(update={"searched_as": "m" * MAX_MEASURE_CHARS})
-    )
-
-    one = len(json.dumps(described))
-    assert one <= SEEDED_SOURCE_DESCRIPTION_CEILING
-    assert one > SEEDED_SOURCE_DESCRIPTION_CEILING * 0.99, (
-        f"the fullest seed describes itself in {one:,} chars, under 99% of the cap: "
-        "the seed is not at its bound"
-    )
-
-
-def test_a_seed_described_past_the_ceiling_is_refused_not_cut() -> None:
-    """The control: one more entity than fits refuses the seed, with the size."""
-    seed, entities = fullest_described_seed(0)
-    over = bounded_seed(0, entities=entities + 1)
-
-    read_seed(0, seed)
-    with pytest.raises(ValueError, match="characters to describe, past the cap of 65,536"):
-        read_seed(0, over)
-
-
-# The session-state keys that hold a seed's text, each for `MAX_SEEDS` seeds.
-#
-# `planner:seeded_sources` holds one record per seed, each held to
-# `MAX_SEED_RECORD_CHARS` where the seed is read. `propose_plan` holds a copy
-# of a seed for each dataset requirement of the plan it records that pins it
-# over another period, at most `MAX_PLAN_REQUIREMENTS` more, and lets go of a
-# copy only a plan it replaced pinned, so no count of drafts or amendments
-# adds to that. A drop moves records to `planner:dropped_seeds` without adding
-# any. A copy is stored as the seed it copies and its window, never its
-# identity (`planner.plan._store_sources`).
-_STORED_COPY_CHARS = (
-    len(
-        json.dumps(
-            {
-                "windowed_from": "",
-                "window": {"kind": "range", "start_year": 9999, "end_year": 9999},
-            }
-        )
-    )
-    + _SPEC_ID_CHARS
-    + len(", ")
-)
-SEEDED_SOURCES_STATE_CEILING = (
-    MAX_SEEDS * (MAX_SEED_RECORD_CHARS + len(", "))
-    + MAX_PLAN_REQUIREMENTS * _STORED_COPY_CHARS
-    + len('{"seeds": [], "copies": []}')
-)
-
-
-def test_a_seed_whose_record_is_past_the_ceiling_is_refused_not_cut() -> None:
-    """The control for the state ceiling: one more entity than fits refuses the seed."""
-    entities = most_recorded_entities(0)
-
-    read_seed(0, recorded_seed(0, entities=entities))
-    with pytest.raises(ValueError, match=r"its record takes .* past the cap of 131,072"):
-        read_seed(0, recorded_seed(0, entities=entities + 1))
-
-
-class _ToolContext:
-    """What `propose_plan` reads of an ADK `ToolContext`: its state, and its session's events."""
-
-    def __init__(self) -> None:
-        self.state: dict[str, Any] = {}
-        self.session = SimpleNamespace(events=[])
-
-
-# The most dataset requirements, each with its own decision pinning a seed, a
-# plan of the shortest fields fits under `MAX_PLAN_RECORD_CHARS`: 20 take
-# 16,349 characters. So no plan pins `MAX_PLAN_REQUIREMENTS` copies at once,
-# and the ceiling above holds them with room.
-_MOST_PINNED_REQUIREMENTS = 19
-
-
-def test_the_seeded_sources_state_stays_under_its_ceiling_across_drafts_and_amendments(
-    pinning_decision: Callable[..., Decision],
-    requirement: Callable[..., DatasetRequirement],
-) -> None:
-    """`MAX_SEEDS` seeds at their record bound, and a plan of
-    `_MOST_PINNED_REQUIREMENTS` requirements, each pinning a seed over a year
-    of its own, drafted and then amended over new years across two planner
-    entries. Every proposal copies each seed it pins over new years; the
-    state holds the seeds and the copies the recorded plan pins, the same
-    size after every proposal and under the ceiling."""
-    reads = [read_seed(number, fullest_recorded_seed(number)) for number in range(MAX_SEEDS)]
-    one = len(json.dumps(reads[0].source.model_dump(mode="json")))
-    assert one <= MAX_SEED_RECORD_CHARS
-    assert one > MAX_SEED_RECORD_CHARS * 0.99
-    propose = next(tool for tool in build_planner_tools() if tool.name == "propose_plan")
-    ctx = _ToolContext()
-    save_seeded_sources(ctx.state, [read.source for read in reads])
-    version: int | None = None
-    held: list[int] = []
-    for entry in range(2):
-        # What `harness.planner_seam` does on each fresh entry into the planner.
-        save_plan_rounds(ctx.state, 0)
-        for draft in range(MAX_PLAN_ROUNDS):
-            first_year = 1900 + (entry * MAX_PLAN_ROUNDS + draft) * _MOST_PINNED_REQUIREMENTS
-            pins = [
-                (index, reads[index % MAX_SEEDS].source.source.spec_id)
-                for index in range(_MOST_PINNED_REQUIREMENTS)
-            ]
-            result = propose.func(
-                question="q",
-                answer_mode="series",
-                decisions=drafts(
-                    pinning_decision(
-                        spec_id,
-                        slot=f"d{index}",
-                        description="d",
-                        options=["a", "b"],
-                        chosen="a",
-                        rationale="r",
-                    )
-                    for index, spec_id in pins
-                ),
-                evidence_requirements=[
-                    requirement(
-                        id=f"r{index}",
-                        decision_ids=[f"d{index}"],
-                        source_spec_id=spec_id,
-                        period=Period(start=first_year + index, end=first_year + index),
-                        measure="m",
-                        entities=[Entity(name="K")],
-                        unit=None,
-                    )
-                    for index, spec_id in pins
-                ],
-                amends_version=version,
-                tool_context=ctx,
-            )
-            assert result["outcome"] == "ok", result
-            version = int(result["version"])
-            assert len(seeded_sources(ctx.state)) == MAX_SEEDS + _MOST_PINNED_REQUIREMENTS
-            held.append(len(ctx.state[SEEDED_SOURCES_STATE_KEY]))
-
-    assert len(held) > MAX_PLAN_ROUNDS
-    assert set(held) == {held[0]}
-    assert held[0] <= SEEDED_SOURCES_STATE_CEILING
-
-
-def _envelope_seed_ceiling() -> int:
-    """What one seed adds to `resolve_envelope`, at most (`harness.seeds._envelope_seed`).
-
-    The frame is the entry of a seed with nothing in it. To that: the
-    sentence at its cap; the window, two years of `MAX_SEED_COUNT`'s digits;
-    the year and rows Search showed, the rows with thousands separators; the
-    coverage text, `MAX_SEED_LIST_ITEMS` counted labels; the shape kind; the
-    identity's roles, `MAX_SEED_ROLES` strings; the open entity axes, one per
-    role fact and one for the scope; and `MAX_SEED_OPERATIONS` operations.
-    """
-    digits = len(str(MAX_SEED_COUNT))
-    grouped = len(f"{MAX_SEED_COUNT:,}")
-    empty = read_seed(0, _EMPTY_SEED).planned
-    frame = len(json.dumps(empty)) - len(json.dumps(empty["window"])) + len('""')
-    axis = len(json.dumps({"column": "", "members": 0})) - 1 + MAX_SEED_TEXT_CHARS + digits
-    operation = (
-        len(json.dumps({"verb": "forecast", "phrase": "", "over": "destination", "target_year": 0}))
-        - 1
-        + MAX_OPERATION_PHRASE_CHARS
-        + len(str(MAX_TARGET_YEAR))
-    )
-    return (
-        frame
-        + MAX_SEED_SENTENCE_CHARS
-        + len(" to ")
-        + 2 * digits
-        + len('""')
-        + digits
-        + len(", ")
-        + grouped
-        + len(" rows")
-        + len('""')
-        + MAX_SEED_LIST_ITEMS * (grouped + len(" ") + MAX_SEED_TEXT_CHARS + len(", "))
-        + len('""')
-        + MAX_SEED_TEXT_CHARS
-        + MAX_SEED_ROLES * (len('"", ') + MAX_SEED_TEXT_CHARS)
-        + (MAX_SEED_LIST_ITEMS + 1) * (axis + len(", "))
-        + MAX_SEED_OPERATIONS * (operation + len(", "))
-    )
-
-
-_EMPTY_SEED = {
-    "spec": {
-        "spec_id": spec_id_for(canonicalize({"identity_version": "spec1"})),
-        "definition": {
-            "schema_version": 1,
-            "spec_id": spec_id_for(canonicalize({"identity_version": "spec1"})),
-            "identity": {"identity_version": "spec1"},
-        },
-        "resolved": {},
-    },
-    "operations": [],
-}
-
-RESOLVE_ENVELOPE_SEED_CEILING = _envelope_seed_ceiling()
-
-
-def test_the_seeded_resolve_envelope_and_the_elected_label_stay_under_their_ceilings() -> None:
-    """`resolve_envelope` rides every state write of the turn and every node's output."""
-    reads = [
-        read_seed(number, bounded_seed(number, open_members=True)) for number in range(MAX_SEEDS)
+    return [
+        SearchReading(
+            text=f"aid to country {index}",
+            status="definite",
+            spec_id=_spec(index),
+            sentence=long,
+            candidates=tuple(
+                CandidateReading(spec_id=_spec(1_000 + 10 * index + rank), label=long)
+                for rank in range(10)
+            ),
+            warnings=(WarningReading(code="role_scope_defaulted"),),
+        ).model_dump(mode="json")
+        for index in range(50)
     ]
 
-    envelope = seeded_envelope([read.planned for read in reads])
 
-    one = len(json.dumps(reads[0].planned))
-    assert one <= RESOLVE_ENVELOPE_SEED_CEILING
-    assert one > RESOLVE_ENVELOPE_SEED_CEILING * 0.95, (
-        f"one seed's envelope entry is {one:,} chars, under 95% of the derived "
-        f"{RESOLVE_ENVELOPE_SEED_CEILING:,}: the seed or the derivation is off"
+# The readings section of the brief, at most: `_READINGS_CONTEXT`'s own wording
+# around a ledger `render_readings` holds to `_READINGS_BUDGET`.
+READINGS_SECTION_CEILING = len(_READINGS_CONTEXT.format(readings="")) + _READINGS_BUDGET
+
+
+def _readings_section(readings: Sequence[Mapping[str, Any]]) -> str:
+    """The readings section `PlannerSeam._message` opens a fresh brief with."""
+    return _READINGS_CONTEXT.format(readings=_readings_ledger(readings).text)
+
+
+def test_readings_far_past_the_budget_render_under_the_ceiling() -> None:
+    """The budget bounds the readings section however many readings the conversation holds."""
+    section = _readings_section(_maximal_readings())
+
+    assert len(section) <= READINGS_SECTION_CEILING, (
+        f"fifty oversized readings render {len(section):,} chars, past the "
+        f"{READINGS_SECTION_CEILING:,} the budget derives"
     )
-    frame = len(json.dumps(seeded_envelope([read_seed(0, _EMPTY_SEED).planned])))
-    assert len(json.dumps(envelope)) <= frame + MAX_SEEDS * (RESOLVE_ENVELOPE_SEED_CEILING + 2)
-    # `spec_id_elected_label` is the first seed's sentence.
-    assert len(reads[0].planned["sentence"]) == MAX_SEED_SENTENCE_CHARS
+    assert len(section) > READINGS_SECTION_CEILING * 0.9, (
+        f"the maximal readings render {len(section):,} chars, under 90% of the derived "
+        f"{READINGS_SECTION_CEILING:,}: the readings or the derivation is off"
+    )
+    assert "earlier readings not shown" in section
+
+
+def test_the_readings_ceiling_fails_when_the_budget_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control for the readings ceiling: with the budget gone, it is exceeded."""
+    monkeypatch.setattr(planner_seam, "_READINGS_BUDGET", 10**9)
+
+    assert len(_readings_section(_maximal_readings())) > READINGS_SECTION_CEILING
 
 
 # The two digests, built by `harness.studio_state`'s own functions.
@@ -1870,8 +1437,7 @@ def _maximal_refusal() -> dict[str, Any]:
     """An executor refusal far past the cut: one 100,000-character message and a
     hundred wave siblings that each carry the same.
 
-    Every stop names a refused spec, half of them seeds (`_MAXIMAL_SEED_OF`),
-    and is also a step refusing its sides on their units under a
+    Every stop names a refused spec, and is also a step refusing its sides on their units under a
     100,000-character step id: a `share_of` on the odd stops, which gets the
     repair, and a `compare` on the even ones, which earns a decline. The run
     computed 100,000 asks first. So the ask carries every sentence
@@ -1892,10 +1458,6 @@ def _maximal_refusal() -> dict[str, Any]:
         "also_stopped": [refused(index) for index in range(2, 102)],
         "computed_asks": list(range(_BIG)),
     }
-
-
-# The refused specs of `_maximal_refusal` that are seeds, each its own seed.
-_MAXIMAL_SEED_OF = {_spec(index): _spec(index) for index in range(52, 102)}
 
 
 def _share_units_stop(step_id: str) -> dict[str, Any]:
@@ -1931,7 +1493,7 @@ def _earned_decline_ceiling() -> int:
 def _ask_kwargs(ask: str) -> dict[str, Any]:
     """`_seam_brief`'s arguments for the amendment ask or the refusal ask."""
     if ask == "refusal":
-        return {"refusal": _maximal_refusal(), "seed_of": _MAXIMAL_SEED_OF}
+        return {"refusal": _maximal_refusal()}
     return {"amendment": _BRIEF_AMENDMENT}
 
 
@@ -1945,27 +1507,20 @@ def _maximal_brief_parts(ask: str) -> dict[str, str]:
     the one the fresh brief ends with, and a fresh brief carries one or the
     other.
     """
-    refusal = _maximal_refusal() if ask == "refusal" else None
     cut_question = _BRIEF_QUESTION[: MAX_QUESTION_CHARS - len(CUT_MARKER)] + CUT_MARKER
     return {
-        "envelope": _envelope_context(
-            _maximal_envelope(),
-            refusal=refusal,
-            spec_id_elected=False,
-            spec_id_elected_label=None,
-            seed_of=_MAXIMAL_SEED_OF if refusal else None,
-        ),
+        "readings": _readings_section(_maximal_readings()),
         "canvas digest": _section(_CANVAS_TITLE, _largest_canvas_digest()),
         "conversation digest": _section(_CONVERSATION_TITLE, _conversation_digest()),
         "plan": _plan_context(_legal_maximum_plan_record()),
         "question": f"\nQuestion: {cut_question}\n",
-        "ask": _seam_brief(fresh=False, envelope={}, prior_plan=None, **_ask_kwargs(ask)),
+        "ask": _seam_brief(fresh=False, prior_plan=None, **_ask_kwargs(ask)),
     }
 
 
 def _continuing_chars(**kwargs: Any) -> int:
     """Characters of the continuing message for `kwargs`, an ask and nothing else."""
-    return len(_seam_brief(fresh=False, envelope={}, prior_plan=None, **kwargs))
+    return len(_seam_brief(fresh=False, prior_plan=None, **kwargs))
 
 
 def _refused_sentence_ceiling(sentence: Callable[[list[tuple[str, str]]], str]) -> int:
@@ -1987,13 +1542,10 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
 
     The question and the amendment are cut at `MAX_QUESTION_CHARS`. A refusal
     is cut there as JSON, then again in each sentence the ask adds to it: the
-    asks the failed run computed, the specs to avoid, the seeds to keep
-    pinned, and the `share_of` steps to repair. The declines it earned are a
-    closed set. On a fresh render the envelope's paragraph naming the specs it
-    left out is cut too. The wording around each cut is measured from the
-    renderer.
+    asks the failed run computed, the specs to avoid, and the `share_of` steps
+    to repair. The declines it earned are a closed set. The wording around each
+    cut is measured from the renderer.
     """
-    envelope = MAXIMAL_ENVELOPE_CEILING
     if ask == "refusal":
         framing = _continuing_chars(refusal={"kind": "x"}) - len(json.dumps({"kind": "x"}))
         ask_ceiling = (
@@ -2001,15 +1553,13 @@ def _maximal_brief_ceilings(ask: str) -> dict[str, int]:
             + MAX_QUESTION_CHARS
             + _failed_run_ceiling()
             + _refused_sentence_ceiling(planner_seam._avoid_sentence)
-            + _refused_sentence_ceiling(planner_seam._keep_seeds_sentence)
             + _earned_decline_ceiling()
             + _share_units_repair_ceiling()
         )
-        envelope += _refused_sentence_ceiling(planner_seam._refused_spec_reason)
     else:
         ask_ceiling = _continuing_chars(amendment="x") - 1 + MAX_QUESTION_CHARS
     return {
-        "envelope": envelope,
+        "readings": READINGS_SECTION_CEILING,
         "canvas digest": CANVAS_SECTION_CEILING,
         "conversation digest": CONVERSATION_SECTION_CEILING,
         "plan": LEGAL_MAXIMUM_PLAN_SECTION_CEILING,
@@ -2026,7 +1576,7 @@ LEGAL_MAXIMUM_BRIEF_CEILING = max(sum(_maximal_brief_ceilings(ask).values()) for
 def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str) -> None:
     """Every section of the fresh brief at its maximum at once, held to the sum.
 
-    The maximal envelope, the two digests through their own functions, the
+    Readings far past their budget, the two digests through their own functions, the
     largest legal plan, a question and the amendment or refusal ask, rendered by
     `PlannerSeam._message`. The message names each part with its size and
     ceiling, so a failure says which one moved.
@@ -2035,7 +1585,7 @@ def test_the_largest_legal_brief_is_within_the_sum_of_its_parts_maxima(ask: str)
     ceilings = _maximal_brief_ceilings(ask)
     brief = _seam_brief(
         fresh=True,
-        envelope=_maximal_envelope(),
+        readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest=_largest_canvas_digest(),
         conversation_digest=_conversation_digest(),
@@ -2065,7 +1615,7 @@ def test_the_brief_ceiling_fails_when_a_part_is_inflated() -> None:
     """The control for the composed ceiling: one inflated part puts the brief over it."""
     brief = _seam_brief(
         fresh=True,
-        envelope=_maximal_envelope(),
+        readings=_maximal_readings(),
         prior_plan=_legal_maximum_plan_record(),
         canvas_digest={"blocks": [{"title": "x" * LEGAL_MAXIMUM_BRIEF_CEILING}]},
         conversation_digest=_conversation_digest(),
@@ -2083,8 +1633,8 @@ def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
     monkeypatch.setattr(planner_seam, "cut_user_text", lambda text, cap: text)
     ceilings = _maximal_brief_ceilings(ask)
 
-    question = _seam_brief(fresh=True, envelope={}, prior_plan=None, question=_BRIEF_QUESTION)
-    asked = _seam_brief(fresh=False, envelope={}, prior_plan=None, **_ask_kwargs(ask))
+    question = _seam_brief(fresh=True, prior_plan=None, question=_BRIEF_QUESTION)
+    asked = _seam_brief(fresh=False, prior_plan=None, **_ask_kwargs(ask))
 
     assert len(question) > ceilings["question"]
     assert len(asked) > ceilings["ask"]
@@ -2092,31 +1642,27 @@ def test_the_question_and_ask_ceilings_fail_when_the_seam_stops_cutting(
 
 # The bounded production context, through the seam and ADK --------------------------
 #
-# The two recorded scenarios above run with an empty envelope and no digests. A
-# session's first planner call carries all three in the brief, and each is
-# bounded at its source, so this scenario records that call with every one at
-# its maximum, as the request ADK assembles it.
+# The realistic round above runs with three readings and small digests. A
+# session's first planner call can carry far more of all three in the brief, and
+# each is bounded at its source, so this scenario records that call with every
+# one at its maximum, as the request ADK assembles it.
 
 
 def _bounded_context() -> dict[str, Any]:
     """What `PlannerSeam.__call__` is handed besides the plan and the question."""
     return {
-        "envelope": _maximal_envelope(),
+        "readings": _maximal_readings(),
         "canvas_digest": _largest_canvas_digest(),
         "conversation_digest": _conversation_digest(),
     }
 
 
 # The seam's brief in the `BOUNDED_CONTEXT` scenario: `SEAM_BRIEF_CEILING`, which
-# already covers a capped searched envelope, a nine-requirement plan and the
+# already covers readings at their budget, a nine-requirement plan and the
 # question, plus the two digests at their maxima (`CANVAS_SECTION_CEILING` and
-# `CONVERSATION_SECTION_CEILING`), plus what a seeded envelope adds at its caps
-# (`_seeded_section_ceiling`).
+# `CONVERSATION_SECTION_CEILING`).
 BOUNDED_CONTEXT_BRIEF_CEILING = (
-    SEAM_BRIEF_CEILING
-    + CANVAS_SECTION_CEILING
-    + CONVERSATION_SECTION_CEILING
-    + _seeded_section_ceiling()
+    SEAM_BRIEF_CEILING + CANVAS_SECTION_CEILING + CONVERSATION_SECTION_CEILING
 )
 
 # The planner's whole `contents` in that scenario: the realistic history's
@@ -2148,7 +1694,7 @@ def test_the_bounded_production_context_stays_under_its_derived_ceilings(
     assert brief <= BOUNDED_CONTEXT_BRIEF_CEILING, (
         f"the bounded-context seam brief is {brief:,} chars, past {BOUNDED_CONTEXT_BRIEF_CEILING:,} "
         f"(SEAM_BRIEF_CEILING {SEAM_BRIEF_CEILING:,} + canvas {CANVAS_SECTION_CEILING:,} + "
-        f"conversation {CONVERSATION_SECTION_CEILING:,} + seeds {_seeded_section_ceiling():,})"
+        f"conversation {CONVERSATION_SECTION_CEILING:,})"
     )
     assert contents <= BOUNDED_CONTEXT_CONTENTS_CEILING, (
         f"the planner's contents in the bounded-context scenario are {contents:,} chars, "

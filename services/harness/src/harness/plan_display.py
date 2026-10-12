@@ -144,11 +144,16 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     """The decisions of `plan` the card and the plan record list.
 
     Leaves out the decision `propose_plan` writes for a pin of a source a
-    search settled on (`planner.plan.is_search_pin`): its slot and choice
-    are the source's spec_id, and the plan names that source in words
-    where it lists its sources.
+    search settled on (`planner.plan.is_search_pin`) when its choice names
+    the source's spec_id, since the plan names that source in words where
+    it lists its sources. One that chooses how the flow is counted, by the
+    measures' labels, is listed.
     """
-    return tuple(decision for decision in plan.decisions if not is_search_pin(decision))
+    return tuple(
+        decision
+        for decision in plan.decisions
+        if not (is_search_pin(decision) and _SPEC_ID.search(decision.chosen))
+    )
 
 
 # A spec_id as `planner.records.SpecId` states it, anywhere in a text.

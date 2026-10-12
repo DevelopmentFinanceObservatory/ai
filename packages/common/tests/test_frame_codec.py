@@ -1,7 +1,6 @@
-"""Round-trip tests for `frame_to_parquet_bytes` and two of its decoders: a
-`Frame`'s own canonical bytes survive a trip through Parquet unchanged, the
-verified decoder wraps only the canonical schema, and the validating decoder
-refuses what `Frame.build` refuses.
+"""Round-trip tests for `frame_to_parquet_bytes` and its decoder: a `Frame`'s
+own canonical bytes survive a trip through Parquet unchanged, and the decoder
+wraps only the canonical schema.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from common.materialisation.frame_codec import (
-    frame_from_parquet_bytes,
     frame_from_verified_parquet_bytes,
     frame_to_parquet_bytes,
 )
@@ -67,7 +65,7 @@ def _mixed_unit_frame() -> Frame:
 def test_frame_round_trips_through_parquet_bytes_with_mixed_units() -> None:
     frame = _mixed_unit_frame()
 
-    round_tripped = frame_from_parquet_bytes(frame_to_parquet_bytes(frame))
+    round_tripped = frame_from_verified_parquet_bytes(frame_to_parquet_bytes(frame))
 
     assert canonical_frame_bytes(round_tripped) == canonical_frame_bytes(frame)
 
@@ -87,7 +85,7 @@ def test_frame_round_trips_at_fifty_thousand_rows() -> None:
         ],
     )
 
-    round_tripped = frame_from_parquet_bytes(frame_to_parquet_bytes(frame))
+    round_tripped = frame_from_verified_parquet_bytes(frame_to_parquet_bytes(frame))
 
     assert canonical_frame_bytes(round_tripped) == canonical_frame_bytes(frame)
 
@@ -115,36 +113,3 @@ def test_verified_decoder_refuses_the_earlier_layout() -> None:
         frame_from_verified_parquet_bytes(_parquet(earlier))
 
     assert caught.value.category == "schema_violation"
-
-
-def test_validating_decoder_refuses_a_duplicate_grain_the_verified_decoder_trusts() -> None:
-    table = _mixed_unit_frame().table
-    doubled = _parquet(pa.concat_tables([table.slice(0, 1), table.slice(0, 1)]))
-
-    with pytest.raises(FrameError) as caught:
-        frame_from_parquet_bytes(doubled)
-
-    assert caught.value.category == "duplicate_row_key"
-    assert frame_from_verified_parquet_bytes(doubled).num_rows == 2
-
-
-@pytest.mark.parametrize(
-    "unit",
-    [
-        pytest.param({"currency": "USD", "prices": "current", "extra": 1}, id="unknown-member"),
-        pytest.param({"currency": "USD", "prices": "constant", "base_year": "2015"}, id="str-year"),
-        pytest.param(5, id="number"),
-        pytest.param("", id="empty-ref"),
-        pytest.param({"numerator": "dcid:USDollar"}, id="composed-without-a-denominator"),
-    ],
-)
-def test_earlier_layout_unit_refuses_as_frame_build_does(unit: object) -> None:
-    row = {"stat_var": "dcid:OdaDisbursedAmount", "time_period": "2020", "value": 1.0}
-    earlier = pa.table({**{key: [cell] for key, cell in row.items()}, "unit": [json.dumps(unit)]})
-    with pytest.raises(FrameError) as expected:
-        Frame.build(role_keys=[], rows=[{**row, "unit": unit}])
-
-    with pytest.raises(FrameError) as caught:
-        frame_from_parquet_bytes(_parquet(earlier))
-
-    assert caught.value.category == expected.value.category

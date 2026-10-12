@@ -838,5 +838,214 @@
       "status": "pending_approval",
       "approved_revision": null
     }
+  },
+  "grouped": {
+    "revision": "721b558d54680f9abedb9d3780d4ab6b7827c97747e7f1fdc42ff71f5ee3cce5",
+    "requirement_revisions": {
+      "life_expectancy": "4ff871a11edf6fac9963e2c6ad07b5c1d1ef309164062147685de6d857c9b81f"
+    },
+    "plan": {
+      "question": "comprehensive life expectancy",
+      "answer_mode": "series",
+      "decisions": [
+        {
+          "slot": "measure",
+          "description": "Which measure answers the scripted question.",
+          "options": [
+            "life expectancy at birth",
+            "healthy life expectancy"
+          ],
+          "chosen": "life expectancy at birth",
+          "resolved_by": "planner_default",
+          "rationale": "Life expectancy at birth is the measure scripted mode always answers with.",
+          "fixes": {
+            "period": null,
+            "unit": null,
+            "entities": null,
+            "measure": null,
+            "source_spec_id": null,
+            "stat_vars": null,
+            "reduction": "mean",
+            "group_by": null,
+            "window_start": null,
+            "window_end": null,
+            "direction": null,
+            "predicates": null,
+            "among": null,
+            "axis": null,
+            "denominator_scope": null,
+            "change": null,
+            "per_period": null
+          }
+        }
+      ],
+      "evidence_requirements": [
+        {
+          "kind": "dataset",
+          "id": "life_expectancy",
+          "decision_ids": [
+            "measure"
+          ],
+          "measure": "life expectancy at birth",
+          "entities": [
+            {
+              "name": "Kenya",
+              "role": null
+            }
+          ],
+          "period": {
+            "start": 1960,
+            "end": 2023
+          },
+          "frequency": "annual",
+          "unit": null,
+          "source": null,
+          "source_spec_id": null,
+          "coverage": {
+            "on_missing": "report_gaps"
+          },
+          "stat_vars": null
+        },
+        {
+          "kind": "aggregate",
+          "id": "life_expectancy_by_period",
+          "decision_ids": [
+            "measure"
+          ],
+          "input_id": "life_expectancy",
+          "reduction": "mean",
+          "group_by": [
+            "period"
+          ]
+        }
+      ],
+      "translation": {
+        "operations": [
+          {
+            "kind": "retrieve",
+            "id": "retrieve",
+            "requirement_id": "life_expectancy",
+            "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+          },
+          {
+            "kind": "aggregate",
+            "id": "totals",
+            "requirement_id": "life_expectancy_by_period",
+            "input": "retrieve",
+            "reduction": "mean",
+            "group_by": [
+              "period"
+            ]
+          }
+        ],
+        "terminal": [
+          "totals"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "retrieve",
+            "operation_id": "retrieve",
+            "tool": {
+              "server": "data-mcp",
+              "name": "get_data"
+            },
+            "args": {
+              "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+            },
+            "bindings": {},
+            "implementation_version": null,
+            "input_schema_hash": "e3983a32ec5a3a1a35c761b4c68b3486f0c4a88382be00a9df82886266eee191",
+            "output_schema_hash": null,
+            "expected_role_keys": [
+              "country"
+            ]
+          },
+          {
+            "id": "totals",
+            "operation_id": "totals",
+            "tool": {
+              "server": "analysis-mcp",
+              "name": "aggregate"
+            },
+            "args": {
+              "aggregation": "mean",
+              "group_by": [
+                "time_period"
+              ]
+            },
+            "bindings": {
+              "frame_ref": {
+                "from_step": "retrieve",
+                "output": "frame_ref"
+              }
+            },
+            "implementation_version": null,
+            "input_schema_hash": "a39e878dc1be854e22e319e8e91663c9ca1d82036a04657465ee18dd3c733412",
+            "output_schema_hash": null,
+            "expected_role_keys": []
+          }
+        ],
+        "sources": [
+          {
+            "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+            "sentence": "life expectancy at birth in Kenya, 1960 to 2023",
+            "searched_as": null,
+            "confidence": "high",
+            "has_data": true,
+            "stat_var_member_count": null,
+            "shape_member_count": null,
+            "shape_member_digest": null,
+            "entities": [
+              {
+                "role": "country",
+                "ref": "country/KEN",
+                "label": "Kenya"
+              }
+            ],
+            "unit_ref": null,
+            "unit_label": null,
+            "provenance_ref": null,
+            "provenance_label": null,
+            "coverage_kind": null,
+            "coverage_window": {
+              "start": 1960,
+              "end": 2023
+            },
+            "identity": {
+              "stat_var": "LifeExpectancy_Person"
+            },
+            "definition": null,
+            "open_axes": [],
+            "stat_var_reading": null,
+            "stat_var_reading_set_by": null,
+            "served_count": 1,
+            "groups": [
+              {
+                "role": "country",
+                "label": "East Africa",
+                "ref": "eastAfrica"
+              }
+            ]
+          }
+        ],
+        "evidence_bindings": [
+          {
+            "requirement_id": "life_expectancy",
+            "step_id": "retrieve",
+            "spec_id": "spec_ffffffffffffffffffffffffffffffff"
+          }
+        ],
+        "terminal_steps": [
+          "totals"
+        ],
+        "warnings": []
+      },
+      "version": 1,
+      "previous_version": null,
+      "status": "pending_approval",
+      "approved_revision": null
+    }
   }
 }

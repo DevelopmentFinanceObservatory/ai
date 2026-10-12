@@ -59,12 +59,13 @@ from dfo_frame_grammar.grammar import (
     UnitCell,
 )
 
-from analysis_mcp.engine.columnar import frame_from_columns, keys_unique, repeated
+from analysis_mcp.engine.columnar import keys_unique, repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     available_entity_columns,
     combine_exclusions,
+    frame_keeping_role_types,
     narrow_and_resolve,
     record_exclusion,
     require_single_stat_var,
@@ -411,7 +412,7 @@ def run_join(
     right_facet_refs = {selection.axis: selection.ref for selection in right_facets}
     # Long format: every matched key's left row, then its right row, as two
     # blocks the output frame's canonical sort interleaves.
-    output_frame = frame_from_columns(
+    output_frame = frame_keeping_role_types(
         {
             STAT_VAR_COLUMN: pa.concat_arrays(
                 [repeated(left_stat_var, count), repeated(right_stat_var, count)]
@@ -435,6 +436,7 @@ def run_join(
             },
         },
         role_keys=key_columns,
+        source=left_frame,
     )
 
     warnings: list[str] = []

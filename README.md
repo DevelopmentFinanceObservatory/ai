@@ -31,6 +31,7 @@ dfo-ai/
   services/
     harness/
       src/harness/            # Agentic loop on Google ADK and FastAPI with SSE event streaming
+      src/orchestrator/       # The agent that answers a studio turn by calling its tools
       src/planner/            # Methodological planning engine gated behind user approval
       src/compiler/           # Builds and checks the workflow an approved plan runs
       src/translator/         # Finds each requirement's data and proposes the operations the compiler builds
@@ -45,17 +46,18 @@ dfo-ai/
 
 Each service follows a src layout, `services/<name>/src/<pkg>/`, with tests
 under `services/<name>/tests/`. Package names are `harness`, `data_mcp`,
-`analysis_mcp`, `presentation_mcp`, and `common`. `planner`, `compiler`,
-`translator` and `executor` live inside `services/harness/src/` as further
-top-level modules so they share harness dependencies, tests, and CI pipelines
-during development. Their tests live under `services/harness/tests/planner/`,
+`analysis_mcp`, `presentation_mcp`, and `common`. `orchestrator`, `planner`,
+`compiler`, `translator` and `executor` live inside `services/harness/src/` as
+further top-level modules so they share harness dependencies, tests, and CI
+pipelines during development. Their tests live under
+`services/harness/tests/orchestrator/`, `services/harness/tests/planner/`,
 `services/harness/tests/compiler/`, `services/harness/tests/translator/` and
 `services/harness/tests/executor/`.
 
 Detailed package documentation lives in each component directory:
 
 - [`packages/common`](packages/common/README.md) covers shared configuration, telemetry, and materialisation storage.
-- [`services/harness`](services/harness/README.md) covers the studio surface, the workflow graph, sub-app mounting, and SSE transport. Frontend developers start at [`docs/frontend-interface.md`](docs/frontend-interface.md); the contract's design history is [`docs/studio-contract-v1.md`](docs/studio-contract-v1.md).
+- [`services/harness`](services/harness/README.md) covers the studio surface, the agent's workflow, sub-app mounting, and SSE transport. Frontend developers start at [`docs/frontend-interface.md`](docs/frontend-interface.md); the contract's design history is [`docs/studio-contract-v1.md`](docs/studio-contract-v1.md).
 - [`services/data-mcp`](services/data-mcp/README.md) covers search discovery, dataset retrieval, and parquet minting.
 - [`services/analysis-mcp`](services/analysis-mcp/README.md) covers analytical operations, op-spec hashing, and lineage.
 - [`services/presentation-mcp`](services/presentation-mcp/README.md) covers canvas component generation and UI contracts.

@@ -53,7 +53,7 @@ from common.materialisation import (
     composed_stat_vars_of,
     get_store,
 )
-from common.place_type import type_column
+from common.place_type import enrichment_role
 from common.recipe import RecipeError, build_recipe
 from common.row_budget import RowClaim, row_budget
 from dfo_frame_grammar import (
@@ -203,10 +203,11 @@ def publish_body(
     (see `_wire_row_slices` for the row mappings). Rows are encoded one
     slice at a time, so the whole row list never exists as Python objects.
 
-    A place-type column (`common.place_type`) beside its place column is left
-    out. dfo-apis labels each series and table row by joining every role's
-    value, so the column would label a continent "Africa / Continent". It is a
-    function of its place column, so the published rows stay distinct.
+    A place-type or party-kind column (`common.place_type.enrichment_role`)
+    beside its place column is left out. dfo-apis labels each series and table
+    row by joining every role's value, so the column would label a continent
+    "Africa / Continent". It is a function of its place column, so the
+    published rows stay distinct.
 
     `composed_stat_vars` is the body's last member, each entry written as
     `{stat_var, relation, first, second}`. The member is left out when the
@@ -217,8 +218,7 @@ def publish_body(
     """
     encode = _ENCODER.encode
     roles = [name for name in frame.columns if name not in _RESERVED_COLUMNS]
-    type_columns = {type_column(role) for role in roles}
-    place_types = [role for role in roles if role in type_columns]
+    place_types = [role for role in roles if enrichment_role(role, roles=roles) is not None]
     role_keys = [role for role in roles if role not in place_types]
     body = io.BytesIO()
     body.write(

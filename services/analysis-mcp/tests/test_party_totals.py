@@ -1,0 +1,403 @@
+"""Party totals: `aggregate`, `rank`, `share_of` and `quotient_of` leave out the flow parties
+that total other parties, and record them as `party_total` exclusions.
+
+The frames carry `financingRecipient_kind` as `get_data(place_types=true)` registers it for a
+flow table: the kind dfo-apis serves for each party, `party`, `residual` or `total`, and
+`untyped` where it serves none.
+"""
+
+from __future__ import annotations
+
+import secrets
+
+import pytest
+from analysis_mcp.aggregate_tool import aggregate
+from analysis_mcp.engine.aggregate import run_aggregate
+from analysis_mcp.engine.common import PlaceLevelsMixedError
+from analysis_mcp.engine.growth import run_growth
+from analysis_mcp.engine.join import run_join
+from analysis_mcp.engine.quotient_of import run_quotient_of
+from analysis_mcp.engine.rank import run_rank
+from analysis_mcp.engine.share_of import run_share_of
+from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.identity import op_spec_hash_for
+from analysis_mcp.op_spec import AggregateOpSpec
+from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
+from dfo_frame_grammar import Frame
+
+_ODA = "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal"
+_RECIPIENT = "financingRecipient"
+_KINDS = f"{_RECIPIENT}_kind"
+_TYPES = f"{_RECIPIENT}_type"
+
+# France's 2022 ODA to a few of DAC2A's recipients, in USD millions: two countries, a
+# residual and an organisation, and three totals holding them again.
+_RECIPIENTS = {
+    "country/MAR": ("party", 600.0),
+    "country/IND": ("party", 400.0),
+    "DACAfricaUnallocated": ("residual", 100.0),
+    "EuropeanCommission": ("party", 2600.0),
+    "DACAfrica": ("total", 5400.0),
+    "WorldBankLowerMiddleIncome": ("total", 4700.0),
+    "HeavilyIndebtedPoorCountries": ("total", 2800.0),
+}
+_TOTALS = ("DACAfrica", "HeavilyIndebtedPoorCountries", "WorldBankLowerMiddleIncome")
+
+
+def _frame(
+    recipients: dict[str, tuple[str, float]] = _RECIPIENTS,
+    *,
+    years: tuple[str, ...] = ("2022",),
+    stat_var: str = _ODA,
+    kinds: bool = True,
+    types: bool = False,
+) -> Frame:
+    return Frame.build(
+        role_keys=[
+            "financingProvider",
+            _RECIPIENT,
+            *([_KINDS] if kinds else []),
+            *([_TYPES] if types else []),
+        ],
+        rows=[
+            {
+                "stat_var": stat_var,
+                "financingProvider": "country/FRA",
+                _RECIPIENT: recipient,
+                **({_KINDS: kind} if kinds else {}),
+                **({_TYPES: "untyped"} if types else {}),
+                "time_period": year,
+                "value": value * (1 + offset),
+                "unit": "USD",
+            }
+            for offset, year in enumerate(years)
+            for recipient, (kind, value) in recipients.items()
+        ],
+    )
+
+
+def _sum(frame: Frame):
+    return run_aggregate(frame, group_by=("time_period",), aggregation="sum")
+
+
+@pytest.mark.parametrize(
+    "group_by",
+    [("time_period",), (_KINDS, "time_period")],
+    ids=["across-recipients", "by-recipient-kind"],
+)
+def test_a_sum_across_recipients_leaves_out_the_totals_and_names_them(
+    group_by: tuple[str, ...],
+) -> None:
+    # Grouped by kind, the `total` group would add Africa to the income groups that
+    # overlap it (5400 + 4700 + 2800); a shared kind does not make totals additive.
+    result = run_aggregate(_frame(), group_by=group_by, aggregation="sum")
+
+    assert sum(summary.value for summary in result.group_summaries) == 3700.0
+    (excluded,) = result.exclusions.records
+    assert excluded.reason == "party_total"
+    assert excluded.row_count == 3
+    assert excluded.entities == {_RECIPIENT: _TOTALS}
+
+
+@pytest.mark.parametrize(
+    "recipients",
+    [
+        {"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)},
+        {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)},
+    ],
+    ids=["no-kind", "every-one-a-total"],
+)
+def test_a_sum_across_parties_of_no_kind_or_all_totals_is_refused(
+    recipients: dict[str, tuple[str, float]],
+) -> None:
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        _sum(_frame(recipients))
+
+    assert raised.value.column == _KINDS
+
+
+@pytest.mark.parametrize("verb", ["sum", "rank", "sum-by-recipient-type"])
+def test_a_sum_or_rank_across_parties_with_no_kind_column_is_refused(verb: str) -> None:
+    # A flow frame minted without kinds cannot tell totals from parties, so a sum fails
+    # closed rather than counting "Africa, Total" beside the countries it holds, and a
+    # rank rather than ranking it above them.
+    # A frame minted before kinds carries `financingRecipient_type`, and grouping by it
+    # would sum the totals sharing a type cell on top of each other.
+    run = {
+        "sum": lambda: _sum(_frame(kinds=False)),
+        "rank": lambda: _rank(_frame(kinds=False)),
+        "sum-by-recipient-type": lambda: run_aggregate(
+            _frame(kinds=False, types=True), group_by=(_TYPES, "time_period"), aggregation="sum"
+        ),
+    }[verb]
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        run()
+
+    assert (raised.value.column, raised.value.types) == (_KINDS, ())
+
+
+def test_a_sum_over_recipients_grouped_first_still_leaves_out_the_totals() -> None:
+    # Summing per recipient first keeps the recipient's kind, so the later sum across
+    # recipients finds the totals the direct sum leaves out: 3700, not 16600.
+    by_recipient = run_aggregate(
+        _frame(), group_by=(_RECIPIENT, "time_period"), aggregation="sum"
+    ).frame
+
+    result = _sum(by_recipient)
+
+    assert _KINDS in by_recipient.columns
+    (summary,) = result.group_summaries
+    assert summary.value == _sum(_frame()).group_summaries[0].value == 3700.0
+    (excluded,) = result.exclusions.records
+    assert excluded.reason == "party_total"
+    assert excluded.entities[_RECIPIENT] == _TOTALS
+
+
+def test_a_rank_of_recipient_growth_leaves_out_the_totals() -> None:
+    growth = run_growth(
+        _frame(years=("2021", "2022")),
+        window_start="2021",
+        window_end="2022",
+        entity_by=(_RECIPIENT,),
+        change="absolute",
+    ).frame
+
+    result = _rank(growth)
+
+    ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
+    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND", "DACAfricaUnallocated"]
+    assert [record.reason for record in result.exclusions.records] == ["party_total"]
+
+
+_KEYED_BY_RECIPIENT = {
+    "aggregate": lambda: run_aggregate(
+        _frame(), group_by=(_RECIPIENT, "time_period"), aggregation="sum"
+    ),
+    "growth": lambda: run_growth(
+        _frame(years=("2021", "2022")),
+        window_start="2021",
+        window_end="2022",
+        entity_by=(_RECIPIENT,),
+    ),
+    "rank": lambda: _rank(_frame(), rank_by=(_RECIPIENT, "financingProvider")),
+    "join": lambda: run_join(
+        _frame(), _frame(stat_var="dcid:Other"), join_keys=(_RECIPIENT, "financingProvider")
+    ),
+    "share_of": lambda: run_share_of(
+        _frame(),
+        _frame(),
+        stat_var="dcid:share",
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=(_RECIPIENT,),
+    ),
+    "quotient_of": lambda: run_quotient_of(
+        _frame(),
+        _frame(),
+        stat_var="dcid:ratio",
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=(_RECIPIENT,),
+        denominator_by={_RECIPIENT: _RECIPIENT},
+    ),
+}
+
+
+@pytest.mark.parametrize("verb", list(_KEYED_BY_RECIPIENT))
+def test_a_verb_keyed_by_recipient_keeps_each_recipients_kind(verb: str) -> None:
+    output = _KEYED_BY_RECIPIENT[verb]().frame
+
+    assert _KINDS in output.columns
+    kinds = dict(
+        zip(
+            output.table.column(_RECIPIENT).to_pylist(),
+            output.table.column(_KINDS).to_pylist(),
+            strict=True,
+        )
+    )
+    assert kinds["DACAfricaUnallocated"] == "residual"
+    assert kinds["EuropeanCommission"] == "party"
+
+
+@pytest.mark.parametrize(
+    "recipients",
+    [{"DACAfrica": ("total", 5400.0)}, {"geoId/06": ("untyped", 1.0)}],
+    ids=["one-total", "one-of-no-kind"],
+)
+def test_one_party_alone_sums_whatever_its_kind(
+    recipients: dict[str, tuple[str, float]],
+) -> None:
+    result = _sum(_frame(recipients))
+
+    assert result.exclusions.records == ()
+
+
+def test_a_rank_of_recipients_leaves_out_the_totals() -> None:
+    result = run_rank(
+        _frame(),
+        rank_by=(_RECIPIENT,),
+        aggregation=None,
+        window_start=None,
+        window_end=None,
+        ascending=False,
+    )
+
+    ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
+    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND", "DACAfricaUnallocated"]
+    assert [record.reason for record in result.exclusions.records] == ["party_total"]
+
+
+def _rank(frame: Frame, rank_by: tuple[str, ...] = (_RECIPIENT,)):
+    return run_rank(
+        frame,
+        rank_by=rank_by,
+        aggregation="sum",
+        window_start=None,
+        window_end=None,
+        ascending=False,
+    )
+
+
+def test_a_rank_of_recipients_that_are_all_totals_ranks_them() -> None:
+    # "Which regions receive the most French aid?" ranks DACGroup rows side by side.
+    regions = {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}
+
+    result = _rank(_frame(regions))
+
+    ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
+    assert ranked == ["DACAfrica", "DACAsia"]
+    assert result.exclusions.records == ()
+
+
+def test_a_rank_pooling_recipients_that_are_all_totals_is_refused() -> None:
+    # Ranking providers sums each provider's recipients, and a sum of totals counts twice.
+    regions = {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}
+
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        _rank(_frame(regions), rank_by=("financingProvider",))
+
+    assert raised.value.column == _KINDS
+
+
+def test_a_share_of_a_named_total_divides_by_the_parties_alone() -> None:
+    # Africa's share of everything France gave: the numerator binds the DACAfrica row,
+    # and the denominator sums the parties with the totals left out.
+    result = run_share_of(
+        _frame(),
+        _frame(),
+        stat_var="dcid:share",
+        numerator_entity={_RECIPIENT: "DACAfrica"},
+        denominator_entity={},
+    )
+
+    (share,) = result.period_shares
+    assert share.denominator_value == 3700.0
+    totals = [record for record in result.exclusions.records if record.reason == "party_total"]
+    assert [(record.side, record.row_count) for record in totals] == [("denominator", 3)]
+    assert result.warnings[-1].startswith("share_exceeds_whole: 1 share(s) above 100%")
+
+
+def test_a_share_within_its_whole_carries_no_warning() -> None:
+    result = run_share_of(
+        _frame(),
+        _frame(),
+        stat_var="dcid:share",
+        numerator_entity={_RECIPIENT: "country/MAR"},
+        denominator_entity={},
+    )
+
+    assert not any(warning.startswith("share_exceeds_whole") for warning in result.warnings)
+
+
+@pytest.fixture
+def store():
+    held = InMemoryMaterialisationStore()
+    set_store(held)
+    yield held
+    set_store(None)
+
+
+def _trace() -> Trace:
+    op_spec = AggregateOpSpec(
+        frame_ref=FrameRef(spec_id="spec_" + "a" * 32, content_version="cv_" + "b" * 32),
+        group_by=(),
+        aggregation="sum",
+    )
+    return Trace(
+        upstream_trace={
+            "graph_revision": "rev_test",
+            "source_revisions": [{"source": "test", "revision": "1"}],
+            "facets": [],
+            "conversion": None,
+        },
+        frame_content_version="cv_" + "d" * 32,
+        op_spec_hash=op_spec_hash_for(op_spec),
+        execution_record=ExecutionRecord(content="{}"),
+        applied_policy=AppliedPolicy(),
+        content_version="ocv_" + "c" * 32,
+        input_content_versions=["cv_" + "b" * 32],
+        execution_identity=current_execution_identity(),
+    )
+
+
+async def test_the_aggregate_tool_reports_the_totals_it_left_out(store) -> None:
+    digest = secrets.token_hex(16)
+    ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
+    await store.put(ref, frame=_frame(), trace=_trace(), writer="test")
+
+    result = await aggregate(
+        frame_ref={"spec_id": ref.spec_id, "content_version": ref.content_version},
+        aggregation="sum",
+        group_by=("time_period",),
+    )
+
+    assert result.is_error is False, result.structured_content
+    (excluded,) = result.structured_content["exclusions"]
+    assert excluded["reason"] == "party_total"
+    assert excluded["entities"] == {_RECIPIENT: list(_TOTALS)}
+    assert "party_total (totals of other parties" in result.content[0].text
+
+
+_FILTER_RETRY = f"category_match on {_RECIPIENT!r}"
+
+
+@pytest.mark.parametrize(
+    ("frame", "kinds", "retry"),
+    [
+        (
+            lambda: _frame({"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)}),
+            ["party", "untyped"],
+            _FILTER_RETRY,
+        ),
+        (
+            lambda: _frame({"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}),
+            ["total"],
+            _FILTER_RETRY,
+        ),
+        # A filter adds no kind column, so only a retrieval with kinds is offered.
+        (lambda: _frame(kinds=False), [], "place_types=true"),
+    ],
+    ids=["no-kind", "every-one-a-total", "no-kind-column"],
+)
+async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_column(
+    store, frame, kinds: list[str], retry: str
+) -> None:
+    digest = secrets.token_hex(16)
+    ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
+    await store.put(ref, frame=frame(), trace=_trace(), writer="test")
+
+    result = await aggregate(
+        frame_ref={"spec_id": ref.spec_id, "content_version": ref.content_version},
+        aggregation="sum",
+        group_by=("time_period",),
+    )
+
+    assert result.is_error is True
+    refusal = result.structured_content
+    assert refusal["code"] == "place_levels_mixed"
+    assert refusal["fix"] == {"column": _KINDS, "types": kinds}
+    # The retry names the party column, not a place_level filter on the kind column, or
+    # the retrieval that adds the kind column; never a filter that keeps several parties.
+    assert retry in result.content[0].text
+    assert (_FILTER_RETRY in result.content[0].text) == (retry == _FILTER_RETRY)

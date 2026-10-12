@@ -9,7 +9,6 @@ import hashlib
 import io
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
@@ -37,7 +36,7 @@ _SPEC_ID = "spec_" + "1" * 32
 _MEMBER_SPEC_ID = "spec_" + "4" * 32
 _CONTENT_VERSION = "cv_" + "2" * 32
 _ARTIFACT_DIGEST = "sha256:" + "3" * 64
-_SIGNED_URL = "https://storage.example/fresh-signed-url"
+_LINK = f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}/files/{_ARTIFACT_DIGEST}"
 
 _ENTITIES_TYPE = pa.list_(pa.struct([("role", pa.string()), ("ref", pa.string())]))
 
@@ -183,11 +182,10 @@ def _snapshot_payload(
     subject_id: str = _SPEC_ID,
     content_version: str = _CONTENT_VERSION,
     artifact_digest: str = _ARTIFACT_DIGEST,
-    url: str = _SIGNED_URL,
+    url: str = _LINK,
     rendering: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The snapshot route's own response shape `read_artifact` re-validates and signs from."""
-    url_expires_at = (datetime.now(UTC) + timedelta(seconds=900)).isoformat()
+    """The snapshot route's own response shape `read_artifact` re-validates and reads the link from."""
     return {
         "schema_version": 1,
         "definition": {"schema_version": 1, "spec_id": subject_id, "identity": {}},
@@ -206,7 +204,6 @@ def _snapshot_payload(
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
                 "url": url,
-                "url_expires_at": url_expires_at,
             }
         ],
     }
@@ -276,6 +273,41 @@ async def test_fetch_series_statistics_decodes_every_row() -> None:
     assert result[0].change.absolute == -2_600_000.0
     assert result[0].change.percent == -21.0
     assert result[1].change is None
+
+
+async def test_fetch_series_statistics_follows_the_links_redirect_without_credentials() -> None:
+    data = _parquet_bytes([])
+    digest = _digest_for(data)
+    manifest = _manifest(rendering={"statistics": "series"}, artifact_digest=digest)
+    artifact = manifest.artifacts[0]
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.host == "storage.example":
+            return httpx2.Response(200, content=data)
+        return httpx2.Response(
+            302, headers={"Location": "https://storage.example/signed?X-Goog-Signature=abc"}
+        )
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        result = await fetch_series_statistics(
+            subject_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            artifact=artifact,
+            expected_rows=0,
+            transport=httpx2.MockTransport(get_handler),
+        )
+
+    assert result == []
+    assert [r.url.path for r in seen] == [_LINK, "/signed"]
+    credential_headers = {"authorization", "cookie", "x-dfo-principal"}
+    for request in seen:
+        assert credential_headers.isdisjoint(request.headers.keys())
 
 
 async def test_fetch_series_statistics_zero_rows() -> None:

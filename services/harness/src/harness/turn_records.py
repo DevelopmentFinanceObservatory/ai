@@ -25,8 +25,10 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
-from compiler.sources import stat_var_count
-from planner.parties import column_party_roles
+from common.place_type import FLOW_ROLE_COLUMNS
+from compiler.evidence import read_unit_currency
+from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from planner.parties import PARTY_ROLES, column_party_roles
 from planner.plan import (
     DatasetRequirement,
     Decline,
@@ -37,16 +39,22 @@ from planner.plan import (
     cut_user_text,
     plan_revision,
 )
-from planner.records import StatVarReading, StrictModel
-from planner.workflow import ResolvedGroup
+from planner.records import (
+    AmbiguousSourceReading,
+    ResolvedSourceMention,
+    StatVarReading,
+    StrictModel,
+)
+from planner.workflow import ElectedMeasure, MeasureAlternative, ResolvedGroup
 from pydantic import ConfigDict, Field
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
-from harness.tool_contracts import requested_range
+from harness.tool_contracts import requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
-# translator's own discovery, or a dataset seeded from the user's canvas.
+# translator's own discovery, or a dataset the user brought from Search
+# (`harness.graph`'s `seed` node).
 Origin = Literal["search", "translator", "seed"]
 
 # How many characters of a decision rationale or warning detail, a reading's
@@ -54,6 +62,12 @@ Origin = Literal["search", "translator", "seed"]
 _RATIONALE_CUT = 80
 _SENTENCE_CUT = 160
 _LABEL_CUT = 60
+_REFUSED_PHRASES_CUT = 80
+_FLAGGED_MATCH_CUT = 160
+_TIGHT_REFUSED_PHRASES_CUT = 40
+_TIGHT_FLAGGED_MATCH_CUT = 80
+_FOLDED_REFUSED_PHRASES_CUT = 30
+_FOLDED_FLAGGED_MATCH_CUT = 60
 
 # A revision is a SHA-256 hex digest; this many characters name it in text.
 _REVISION_CHARS = 12
@@ -104,6 +118,9 @@ class PlanSource(StrictModel):
     (`harness.studio_state.ConversationState.recorded_identity`). No
     rendering of the record reads it. `groups` are the sets its places were
     asked for as, kept beside it for the same pin, and left out when none.
+    `elected_measure` is the source's `SelectedSource.elected_measure`, so a
+    later turn's reading of the source states how it is counted
+    (`source_readings`); left out when the source carried none.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -123,6 +140,14 @@ class PlanSource(StrictModel):
     origin: Origin
     identity: dict[str, Any] | None = None
     groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
+    resolved_sources: tuple[ResolvedSourceMention, ...] = Field(
+        default=(), exclude_if=lambda mentions: not mentions
+    )
+    provenance_ref: str | None = Field(default=None, exclude_if=lambda ref: ref is None)
+    provenance_account: str | None = Field(default=None, exclude_if=lambda account: account is None)
+    elected_measure: ElectedMeasure | None = Field(
+        default=None, exclude_if=lambda elected: elected is None
+    )
 
 
 class RecordedIdentity(StrictModel):
@@ -139,6 +164,9 @@ class RecordedIdentity(StrictModel):
     model_config = ConfigDict(extra="ignore")
 
     identity: dict[str, Any]
+    resolved_sources: tuple[ResolvedSourceMention, ...] = Field(
+        default=(), exclude_if=lambda mentions: not mentions
+    )
     groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
 
 
@@ -216,7 +244,6 @@ class PlanRecord(StrictModel):
         plan: Plan,
         *,
         searched: Collection[str] = (),
-        seeded: Collection[str] = (),
         failed_step: str | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
@@ -224,11 +251,10 @@ class PlanRecord(StrictModel):
         Args:
             plan: A plan carrying a translation and a workflow.
             searched: Spec ids the turn's `search` calls returned.
-            seeded: Spec ids seeded from the user's canvas.
             failed_step: The id of the step the run stopped at, if any.
 
-        A source's origin is `seed` when `seeded` names it, else `search`
-        when `searched` does, else `translator`.
+        A source's origin is `search` when `searched` names it, else
+        `translator`.
         """
         assert plan.workflow is not None, "PlanRecord needs a compiled plan"
         workflow = plan.workflow
@@ -248,7 +274,7 @@ class PlanRecord(StrictModel):
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
             periods=_periods(plan),
-            sources=_sources(plan, searched=searched, seeded=seeded),
+            sources=_sources(plan, searched=searched),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -305,19 +331,27 @@ class PlanRecord(StrictModel):
     def source_readings(self, *, observed_at: datetime) -> tuple[SearchReading, ...]:
         """A reading for each source no `search` of the turn returned.
 
-        A source the translator discovered or the canvas seeded is otherwise
-        in no ledger, so a later turn's planner would never be shown it
+        A source the translator discovered is otherwise in no ledger, so a
+        later turn's planner would never be shown it
         (`harness.studio_state.ConversationState.prior_ledger_state`). The
         reading carries no spec block, so a later pin of it is confirmed by
         a fresh search. The reading states the source's measure, spec_id,
-        coverage kind, origin and, when the record states coverage, its
-        window.
+        coverage kind, origin, how it is counted and the other counts it
+        offers (`ElectedMeasure.other_counts`) and, when the record states
+        coverage, its window.
         """
         return tuple(
             SearchReading(
                 text=source.measure,
                 status="definite",
                 spec_id=source.spec_id,
+                counted_as=source.elected_measure.label if source.elected_measure else None,
+                alternatives=tuple(
+                    CandidateReading(spec_id=other.spec_id, label=other.label)
+                    for other in source.elected_measure.other_counts()
+                )
+                if source.elected_measure
+                else (),
                 window=(
                     WindowReading(
                         start=source.coverage.start,
@@ -328,6 +362,8 @@ class PlanRecord(StrictModel):
                     else None
                 ),
                 coverage_kind=source.coverage_kind,
+                provenance_ref=source.provenance_ref,
+                provenance_account=source.provenance_account,
                 origin=source.origin,
                 observed_at=observed_at,
             )
@@ -458,6 +494,13 @@ class WarningReading(StrictModel):
     message: str | None = None
 
 
+class DepartureReading(StrictModel):
+    """One way a search part's answer differs from what was asked: its code and its text."""
+
+    code: str
+    text: str
+
+
 class CandidateReading(StrictModel):
     """One spec a `candidates` part offers."""
 
@@ -491,21 +534,41 @@ class SearchReading(StrictModel):
     """One search part as the turn read it.
 
     `text` is the part's variable text and `sentence` the resolved sentence
-    of a `definite` part. `skills` are the ids of the skills the search
+    of a `definite` part. `separate` preserves the part's comparison intent
+    when search keeps it independent of other parts. `departures` are the ways search says the answer
+    differs from what was asked. `skills` are the ids of the skills the search
     result named. `coverage_kind` (`exact`, `breadth`, `bare`),
     `requested_window_kind` (`range`, `all`, `latest`), `roles`,
     `open_axes` and `recent_years` (newest first) are empty when the part
-    did not state them. `refusal_code` is the reason code a `no_data`
-    part gave. `fetch` is what a later `fetch` of `spec_id` returned.
-    `observed_at` is stored and not rendered.
+    did not state them. `roles` and `open_axes` are the series' own;
+    `asked_roles` are the flow parties the search part asked for, each a
+    `planner.parties.PARTY_ROLES` word, empty when it named none. `refusal_code` is the reason code a `no_data`
+    part gave. `unbound_qualifiers` and `flagged_match` explain a
+    `qualifier_not_bound` refusal: its rejected phrase and the broader match
+    search left unused. `fetch` is what a later `fetch` of `spec_id` returned.
+    `counted_as` is the measure the part's block names and `alternatives`
+    each other way of counting the flow it offers, with its spec_id
+    (`harness.tool_contracts.measure_choice`); both empty when it offers
+    none. `other_count_of` is the spec_id of the reading that offered this
+    one's spec_id among its `alternatives`, set on the reading a `fetch` of
+    such a spec_id gains (`harness.orchestrator_tools`): search elected that
+    reading's measure for the part, not this one's `counted_as`. It and
+    `observed_at` are stored and not rendered.
     """
 
     text: str | None
     status: str
+    separate: bool = Field(default=False, exclude_if=lambda separate: not separate)
     spec_id: str | None = None
     sentence: str | None = None
     warnings: tuple[WarningReading, ...] = ()
+    departures: tuple[DepartureReading, ...] = ()
     candidates: tuple[CandidateReading, ...] = ()
+    ambiguous_sources: tuple[AmbiguousSourceReading, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
+    provenance_ref: str | None = Field(default=None, exclude_if=lambda ref: ref is None)
+    provenance_account: str | None = Field(default=None, exclude_if=lambda account: account is None)
     window: WindowReading | None = None
     wide: bool | None = None
     skills: tuple[str, ...] = ()
@@ -513,9 +576,18 @@ class SearchReading(StrictModel):
     requested_window_kind: str | None = None
     roles: tuple[str, ...] = ()
     open_axes: tuple[OpenAxisReading, ...] = ()
+    asked_roles: tuple[str, ...] = ()
     recent_years: tuple[YearCount, ...] = ()
     refusal_code: str | None = None
+    # Search may refuse a same-variable match rather than silently widen the
+    # request. These carry the rejected user language and the broader match it
+    # deliberately left unused; neither is a source a later turn may fetch.
+    unbound_qualifiers: tuple[str, ...] = ()
+    flagged_match: str | None = None
     fetch: FetchReading | None = None
+    counted_as: str | None = None
+    alternatives: tuple[CandidateReading, ...] = ()
+    other_count_of: str | None = None
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -531,13 +603,16 @@ class SearchReading(StrictModel):
         """Read one `_part_summary` entry.
 
         Besides the keys `_part_summary` writes, reads the keys
-        `harness.tool_contracts.reading_facts` writes when present. A
-        `no_data` part's `reason` is the reading's `refusal_code`.
+        `harness.tool_contracts.reading_facts` writes and `asked_roles`
+        (`harness.orchestrator_tools`) when present. A `no_data` part's
+        `reason` is the reading's `refusal_code`, and `counted_as` and
+        `alternatives` are `harness.tool_contracts.measure_choice`'s.
         """
         window = part.get("window")
         return cls(
             text=_str_or_none(part.get("variable")),
             status=str(part.get("status") or "unsupported"),
+            separate=part.get("separate") is True,
             spec_id=_str_or_none(part.get("spec_id")),
             sentence=_str_or_none(part.get("resolved")),
             warnings=tuple(
@@ -549,11 +624,21 @@ class SearchReading(StrictModel):
                 for warning in part.get("warnings") or ()
                 if isinstance(warning, Mapping) and warning.get("code")
             ),
+            departures=tuple(
+                DepartureReading.model_validate(departure)
+                for departure in part.get("departures") or ()
+            ),
             candidates=tuple(
                 CandidateReading(spec_id=str(c["spec_id"]), label=str(c.get("label") or ""))
                 for c in part.get("candidates") or ()
                 if isinstance(c, Mapping) and c.get("spec_id")
             ),
+            ambiguous_sources=tuple(
+                AmbiguousSourceReading.model_validate(group)
+                for group in part.get("ambiguous_sources") or ()
+            ),
+            provenance_ref=_str_or_none(part.get("provenance_ref")),
+            provenance_account=_str_or_none(part.get("provenance_account")),
             window=WindowReading.model_validate(window) if isinstance(window, Mapping) else None,
             wide=part.get("wide"),
             skills=tuple(skills),
@@ -565,10 +650,29 @@ class SearchReading(StrictModel):
                 for axis in part.get("open_entity_axes") or ()
                 if isinstance(axis, Mapping) and axis.get("column")
             ),
+            asked_roles=tuple(str(role) for role in part.get("asked_roles") or ()),
             recent_years=tuple(
                 YearCount.model_validate(year) for year in part.get("recent_years") or ()
             ),
             refusal_code=_str_or_none(part.get("reason")),
+            unbound_qualifiers=tuple(
+                dict.fromkeys(
+                    qualifier
+                    for qualifier in part.get("unbound_qualifiers") or ()
+                    if isinstance(qualifier, str) and qualifier
+                )
+            ),
+            flagged_match=(
+                flagged_match
+                if isinstance(flagged_match := part.get("flagged_match"), str)
+                else None
+            ),
+            counted_as=_str_or_none(part.get("counted_as")),
+            alternatives=tuple(
+                CandidateReading(spec_id=str(a["spec_id"]), label=str(a.get("label") or ""))
+                for a in part.get("alternatives") or ()
+                if isinstance(a, Mapping) and a.get("spec_id")
+            ),
             origin=origin,
             observed_at=observed_at,
         )
@@ -596,6 +700,164 @@ def newest_per_spec_id(readings: Sequence[SearchReading]) -> list[SearchReading]
     ]
 
 
+def measure_choice_text(
+    counted_as: str,
+    alternatives: Sequence[CandidateReading | MeasureAlternative],
+    *,
+    cap: int | None = None,
+) -> str:
+    """How a source is counted and each other count with its spec_id.
+
+    For example "counted as gross disbursements; other counts: net
+    disbursements [spec_…]", at most `cap` characters when set. An
+    alternative past the cap is left out whole, since a cut spec_id pins
+    nothing. Empty when none is offered or none fits.
+    """
+    text = f"counted as {counted_as}; other counts: "
+    others: list[str] = []
+    for alternative in alternatives:
+        other = f"{alternative.label} [{alternative.spec_id}]"
+        if cap is not None and len(text) + len(", ".join([*others, other])) > cap:
+            break
+        others.append(other)
+    return text + ", ".join(others) if others else ""
+
+
+# What marks a search part as a loose match: search's weak-score warning on a
+# reading search left as candidates, or its departure saying the answer shows
+# the closest measure it holds. Search attaches the weak-score warning to
+# `definite` readings too, and every recorded one bound the measure asked for
+# ("official development assistance" to gross ODA disbursements), so on a
+# `definite` reading the warning alone marks nothing.
+RETRIEVAL_SCORE_WEAK = "retrieval_score_weak"
+CLOSEST_MATCH = "closest_match"
+# What a loose match whose scope is the one place `Earth` lacks.
+_WORLDWIDE = "a worldwide total with no breakdown by country"
+
+
+def loose_match_notes(
+    readings: Sequence[Mapping[str, Any]],
+    *,
+    specs: Mapping[str, Mapping[str, Any]],
+    plans: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """One sentence for each spec_id the turn used as a loose match, on what its series covers and lacks.
+
+    A reading is a loose match when it carries a `closest_match` departure,
+    or `retrieval_score_weak` and is no `definite` reading. The turn used it
+    when a fetch of its spec_id returned data or a plan record names it as a
+    source. The sentence
+    names what was asked and the series' heading and byline
+    (`harness.tool_contracts.series_description` of its block in `specs`,
+    the reading's resolved sentence when the block is missing), then what
+    the series lacks, read from its block:
+
+    - "a worldwide total with no breakdown by country" when the block's
+      scope (`resolved.scope.members`) is the one place `Earth`;
+    - "no donor or recipient detail" when the search part asked for a flow
+      party (`SearchReading.asked_roles`), the series measures money, and
+      neither flow side is one of its entity roles or open axes. The clause
+      names the two parties of each kind of flow asked about, so a creditor
+      asked gives "no creditor or debtor detail". A block
+      measures money when its unit (`resolved.facets.unit`) names a
+      currency (`compiler.evidence.read_unit_currency`) or its provenance
+      (`resolved.facets.provenance`) states account `provider`
+      (`compiler.sources.PROVIDER_ACCOUNT`).
+
+    A reading with no block gets neither clause.
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        specs: The spec blocks the turn's searches returned, by spec_id.
+        plans: The turn's plan records, as `PlanRecord` JSON.
+    """
+    planned = {
+        source.get("spec_id")
+        for plan in plans
+        for source in plan.get("sources") or ()
+        if isinstance(source, Mapping)
+    }
+    notes: dict[str, str] = {}
+    for reading in (SearchReading.model_validate(r) for r in readings):
+        if reading.spec_id is None or reading.spec_id in notes or not _loose(reading):
+            continue
+        fetched = reading.fetch is not None and reading.fetch.refusal_code is None
+        if fetched or reading.spec_id in planned:
+            notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
+    return list(notes.values())
+
+
+def _loose(reading: SearchReading) -> bool:
+    weak = reading.status != "definite" and any(
+        w.code == RETRIEVAL_SCORE_WEAK for w in reading.warnings
+    )
+    return weak or any(d.code == CLOSEST_MATCH for d in reading.departures)
+
+
+def _loose_match_note(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
+    asked = f' to "{reading.text}"' if reading.text else ""
+    described = series_description(block) if block else None
+    if described is not None:
+        heading, byline = described
+        series = f"{heading} ({', '.join(byline)})" if byline else heading
+    else:
+        series = (reading.sentence or "").strip().removesuffix(".")
+    lead = f"The closest series{asked} is a loose match"
+    lacks = _lacks(reading, block) if block else ""
+    return f"{lead}: {series}{lacks}." if series else f"{lead}{lacks}."
+
+
+# Each `PARTY_ROLES` word's flow kind, as its giving and receiving words:
+# `PartyRole` lists one giving and one receiving word per kind, in that order.
+_FLOW_PARTIES: dict[str, tuple[str, str]] = {
+    role: pair for pair in zip(PARTY_ROLES[::2], PARTY_ROLES[1::2], strict=True) for role in pair
+}
+
+
+def _lacks(reading: SearchReading, block: Mapping[str, Any]) -> str:
+    """The clause `loose_match_notes` closes a note with, on what the series lacks."""
+    worldwide = _worldwide(block)
+    sides = set(reading.roles) | {axis.column for axis in reading.open_axes}
+    parties = list(
+        dict.fromkeys(word for role in reading.asked_roles for word in _FLOW_PARTIES.get(role, ()))
+    )
+    no_parties = bool(parties) and _measures_money(block) and not sides & FLOW_ROLE_COLUMNS.keys()
+    detail = f"no {_either(parties)} detail"
+    if worldwide and no_parties:
+        return f", {_WORLDWIDE} and {detail}"
+    if worldwide:
+        return f", {_WORLDWIDE}"
+    return f", with {detail}" if no_parties else ""
+
+
+def _either(words: Sequence[str]) -> str:
+    """`words` as alternatives: "donor or recipient", "donor, recipient, creditor, or debtor"."""
+    if len(words) <= 2:
+        return " or ".join(words)
+    return f"{', '.join(words[:-1])}, or {words[-1]}"
+
+
+def _worldwide(block: Mapping[str, Any]) -> bool:
+    """Whether a spec block's scope is the one place `Earth`."""
+    members = ((block.get("resolved") or {}).get("scope") or {}).get("members") or ()
+    return (
+        len(members) == 1 and isinstance(members[0], Mapping) and members[0].get("ref") == "Earth"
+    )
+
+
+def _measures_money(block: Mapping[str, Any]) -> bool:
+    """Whether a spec block's unit names a currency or its dataset is a table of a provider's flows."""
+    facets = (block.get("resolved") or {}).get("facets") or {}
+    unit = facets.get("unit") or {}
+    ref, label = unit.get("ref"), unit.get("label")
+    currency = read_unit_currency(
+        ref if isinstance(ref, str) else None, label if isinstance(label, str) else None
+    )
+    return (
+        currency is not None or (facets.get("provenance") or {}).get("account") == PROVIDER_ACCOUNT
+    )
+
+
 def named_spec_ids(reading: SearchReading) -> list[str]:
     """The reading's own spec_id, when it has one, and each candidate's."""
     own = [reading.spec_id] if reading.spec_id else []
@@ -603,10 +865,19 @@ def named_spec_ids(reading: SearchReading) -> list[str]:
 
 
 class RenderedReadings(NamedTuple):
-    """`render_readings`' text, and every spec_id it names, in the order it names them."""
+    """`render_readings`' text, the spec_ids it names, and the other counts it names.
+
+    `spec_ids` are the readings' own and their candidates', in the order the
+    text names them. `other_counts` are the spec_ids of the other ways of
+    counting a reading's flow the text names (`measure_choice_text`). A pin
+    of one is honoured through the measure choice of the reading that
+    offered it (`planner.agent._measure_choices`), so it needs no pin source
+    of its own.
+    """
 
     text: str
     spec_ids: tuple[str, ...]
+    other_counts: tuple[str, ...] = ()
 
 
 def render_readings(
@@ -627,6 +898,8 @@ def render_readings(
 
     `spec_ids` holds each reading's own spec_id and, unless the reading is
     folded, each of its candidates', for every reading the text shows.
+    `other_counts` holds the spec_id of each other count an unfolded
+    reading names. A folded reading drops its measure choice.
     """
     rendered = RenderedReadings("", ())
     for detail in range(3):
@@ -643,7 +916,7 @@ def render_readings(
         )
         if len(rendered.text) <= budget:
             return rendered
-    return RenderedReadings(cut_user_text(rendered.text, budget), rendered.spec_ids)
+    return rendered._replace(text=cut_user_text(rendered.text, budget))
 
 
 def _ledger(
@@ -656,6 +929,7 @@ def _ledger(
 ) -> RenderedReadings:
     lines = ["Search readings (oldest first):"]
     named: dict[str, None] = {}
+    counts: dict[str, None] = {}
     if dropped:
         lines.append(f"({dropped} earlier reading{'s' if dropped > 1 else ''} not shown)")
     for number, reading in enumerate(readings, 1):
@@ -666,16 +940,18 @@ def _ledger(
             named[reading.spec_id] = None
         if number > folded:
             named.update(dict.fromkeys(candidate.spec_id for candidate in reading.candidates))
+            if _measure_choice(reading):
+                counts.update(dict.fromkeys(other.spec_id for other in reading.alternatives))
     skills = dict.fromkeys(skill for reading in readings for skill in reading.skills)
     if skills:
         listed = ", ".join(skill + ("*" if skill in skills_read else "") for skill in skills)
         lines.append(f"Skills named (* = already read): {listed}")
-    return RenderedReadings("\n".join(lines), tuple(named))
+    return RenderedReadings("\n".join(lines), tuple(named), tuple(counts))
 
 
 def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: bool) -> list[str]:
     status = f"no data: {reading.refusal_code}" if reading.refusal_code else reading.status
-    head = f'{number}. "{reading.text or ""}" {status}'
+    head = f'{number}. "{reading.text}" {status}' if reading.text else f"{number}. {status}"
     if reading.spec_id:
         head += f" {reading.spec_id}"
     if reading.origin != "search":
@@ -684,17 +960,29 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
     if folded:
         if reading.fetch is not None:
             head += "; fetch refused" if reading.fetch.refusal_code else "; fetched"
+        if refusal := _refusal_context(reading, detail=3):
+            head += f"; {refusal}"
         return [head + (f"; warnings: {codes}" if codes else "")]
     lines = [head]
     if reading.sentence and detail < 2:
         sentence = reading.sentence if detail == 0 else _cut(reading.sentence, _SENTENCE_CUT)
         lines.append(f"   {sentence}")
+    if refusal := _refusal_context(reading, detail=detail):
+        lines.append(f"   {refusal}")
     for candidate in reading.candidates:
         label = "" if detail == 2 else f" {_cut(candidate.label, _LABEL_CUT if detail else None)}"
         lines.append(f"   candidate {candidate.spec_id}{label}")
+    for group in reading.ambiguous_sources:
+        lines.append(f"   source {group.text!r} could mean:")
+        lines.extend(
+            f"   {candidate.label} [{candidate.ref}] ({candidate.kind})"
+            for candidate in group.candidates
+        )
     facts = _reading_facts(reading)
     if facts:
         lines.append(f"   {facts}")
+    if choice := _measure_choice(reading):
+        lines.append(f"   {choice}")
     if codes:
         lines.append(f"   warnings: {codes}")
     if reading.fetch is not None:
@@ -703,6 +991,12 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         else:
             lines.append(f"   fetched: {reading.fetch.summary or 'no summary'}")
     return lines
+
+
+def _measure_choice(reading: SearchReading) -> str:
+    if reading.counted_as is None:
+        return ""
+    return measure_choice_text(reading.counted_as, reading.alternatives)
 
 
 def _reading_facts(reading: SearchReading) -> str:
@@ -729,6 +1023,29 @@ def _reading_facts(reading: SearchReading) -> str:
     for axis in reading.open_axes:
         members = f" ({axis.members:,} members)" if axis.members is not None else ""
         facts.append(f"open {column_party_roles(axis.column)}{members}")
+    return "; ".join(facts)
+
+
+def _refusal_context(reading: SearchReading, *, detail: int) -> str:
+    """The user language a `qualifier_not_bound` refusal must keep visible.
+
+    The flagged sentence is explanatory only. It has no spec id and is not a
+    candidate, so rendering it cannot make the broader match fetchable.
+    """
+    facts: list[str] = []
+    if detail == 0:
+        phrase_cap, match_cap = None, None
+    elif detail == 1:
+        phrase_cap, match_cap = _REFUSED_PHRASES_CUT, _FLAGGED_MATCH_CUT
+    elif detail == 2:
+        phrase_cap, match_cap = _TIGHT_REFUSED_PHRASES_CUT, _TIGHT_FLAGGED_MATCH_CUT
+    else:
+        phrase_cap, match_cap = _FOLDED_REFUSED_PHRASES_CUT, _FOLDED_FLAGGED_MATCH_CUT
+    if reading.unbound_qualifiers:
+        phrases = ", ".join(reading.unbound_qualifiers)
+        facts.append(f"refused phrases: {_cut(phrases, phrase_cap)}")
+    if reading.flagged_match:
+        facts.append(f"broader unused match: {_cut(reading.flagged_match, match_cap)}")
     return "; ".join(facts)
 
 
@@ -766,9 +1083,7 @@ def _periods(plan: Plan) -> tuple[PlanPeriod, ...]:
     )
 
 
-def _sources(
-    plan: Plan, *, searched: Collection[str], seeded: Collection[str]
-) -> tuple[PlanSource, ...]:
+def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]:
     """One entry per distinct spec_id the workflow retrieves, in binding order."""
     assert plan.workflow is not None
     measures = {
@@ -784,16 +1099,13 @@ def _sources(
         family = source.stat_var_reading is not None
         window = source.coverage_window
         asked = requested_range(source.identity or {})
-        origin: Origin = (
-            "seed"
-            if source.spec_id in seeded
-            else "search"
-            if source.spec_id in searched
-            else "translator"
-        )
+        origin: Origin = "search" if source.spec_id in searched else "translator"
         seen[source.spec_id] = PlanSource(
             spec_id=source.spec_id,
             name=source.provenance_label,
+            provenance_ref=source.provenance_ref,
+            provenance_account=source.provenance_account,
+            resolved_sources=source.resolved_sources,
             measure=measures.get(binding.requirement_id),
             coverage_kind=source.coverage_kind,
             coverage=YearSpan(start=window.start, end=window.end) if window else None,
@@ -808,6 +1120,7 @@ def _sources(
             origin=origin,
             identity=source.identity,
             groups=source.groups,
+            elected_measure=source.elected_measure,
         )
     return tuple(seen.values())
 

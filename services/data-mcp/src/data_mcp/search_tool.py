@@ -2,23 +2,19 @@
 
 A conjunction arrives already split into `parts`, one per variable asked
 for. The door's field names are close to the tool's without matching them
-(`variable`/`time`/`unit`/`source`/`role`/`dataset` versus the wire's
-`variable_text`/`time_text`/`unit_text`/`source_text`/`role_text`/`provenance`),
-so `to_wire_request` translates. The datasets a part can name are read from the
-door's served request schema at startup (`fetch_declared_datasets`) and listed
-in the tool description (`describe_search`). A success result puts the digest in
-`content`, a small model-facing answer in `structuredContent`, and the upstream
-envelope in `_meta` (see `data_mcp.search_result`). Rendering the digest and the answer
+(`variable`/`time`/`unit`/`role` versus the wire's
+`variable_text`/`time_text`/`unit_text`/`role_text`, and a source's `exclude`
+flag versus the wire's `polarity`), so `to_wire_request` translates. A success
+result puts the digest in `content`, a small model-facing answer in
+`structuredContent`, and the upstream envelope in `_meta` (see `data_mcp.search_result`). Rendering the digest and the answer
 lives in `data_mcp.digest`; the shared upstream client lives in
 `data_mcp.client_holder`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastmcp.tools import ToolResult
@@ -43,8 +39,9 @@ _MAX_ENTITY_TEXT_CHARS = 128
 _MAX_ROLE_CHARS = 64
 _MAX_TIME_CHARS = 100
 _MAX_UNIT_CHARS = 100
-MAX_SOURCE_CHARS = 200
-_MAX_DATASET_CHARS = 200
+_MAX_PART_SOURCES = 8
+_MAX_SOURCE_TEXT_CHARS = 120
+_MAX_SOURCE_REF_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
 
 # The wall-clock budget for one call to the Search API's resolve route, retries
@@ -63,11 +60,6 @@ TIME_FORMS = (
     "between YYYY and the latest",
     "latest",
 )
-
-_SCHEMA_ROUTE = "/api/search/schema"
-# Bounds the whole startup read, so an unreachable dfo-apis delays startup by
-# at most this long.
-_SCHEMA_FETCH_TIMEOUT_S = 5.0
 
 
 class SearchEntity(BaseModel):
@@ -97,8 +89,37 @@ class SearchEntity(BaseModel):
     )
 
 
+class SearchSource(BaseModel):
+    """One publisher or dataset the user named for a part, to read from or to leave out."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        min_length=1,
+        max_length=_MAX_SOURCE_TEXT_CHARS,
+        description="the source's name as the user said it, e.g. 'IDS' or 'the OECD'",
+    )
+    ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_SOURCE_REF_CHARS,
+        description=(
+            "the reference of a source candidate the user chose from a source_ambiguous "
+            "response; keep its original text and exclude flag, and set this to select "
+            "that exact candidate instead of matching the text again"
+        ),
+    )
+    exclude: bool = Field(
+        default=False,
+        description=(
+            "true when the user asks to leave this source out, as in 'not from CRS' or "
+            "'excluding IMF data'"
+        ),
+    )
+
+
 class SearchPart(BaseModel):
-    """One variable ask within the request, with its own entities, time, unit, source, and dataset."""
+    """One variable ask within the request, with its own entities, time, unit, and sources."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -125,15 +146,9 @@ class SearchPart(BaseModel):
         default=None,
         min_length=1,
         max_length=_MAX_UNIT_CHARS,
-        description="unit and price basis, e.g. 'constant 2015 US dollars'",
-    )
-    source: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=MAX_SOURCE_CHARS,
         description=(
-            "who reported it, refused when no unit is given and ignored when one is, so "
-            "choose the source through get_data's facets instead"
+            "unit and price basis only, e.g. 'constant 2015 US dollars'; a flow's counting "
+            "basis goes in `variable` only if the user named it, else search elects it"
         ),
     )
     open_roles: list[Annotated[str, Field(min_length=1, max_length=_MAX_ROLE_CHARS)]] | None = (
@@ -147,92 +162,40 @@ class SearchPart(BaseModel):
             ),
         )
     )
-    dataset: str | None = Field(
+    sources: list[SearchSource] | None = Field(
         default=None,
         min_length=1,
-        max_length=_MAX_DATASET_CHARS,
+        max_length=_MAX_PART_SOURCES,
         description=(
-            "the dcid of a declared table the part asks for, from the list in the tool "
-            "description; leave it out unless the user asks for that table"
+            "the publishers or datasets the user names for this part, in their own "
+            "words, each with `exclude` when the user asks to leave it out; a lender, "
+            "donor or recipient the flow runs from or to is an entity, not a source"
+        ),
+    )
+    separate: bool | None = Field(
+        default=None,
+        description=(
+            "true on each part of a comparison sent as several parts, such as 'health aid' "
+            "and 'education aid' for 'health versus education aid', so search answers each "
+            "part on its own; leave unset otherwise, since search may merge parts that "
+            "differ only in one category or place into one answer"
         ),
     )
 
 
-@dataclass(frozen=True)
-class DeclaredDataset:
-    """One table the parsed door accepts as a part's `provenance`."""
-
-    dcid: str
-    title: str
-    description: str
-    opt_in: bool
-
-
-def declared_datasets(schema: Mapping[str, Any]) -> list[DeclaredDataset]:
-    """Read the declared datasets, in rank order, from the door's served schema document.
-
-    They are the `oneOf` values of the string branch of `ParsedPart.provenance`
-    in the document's `request` schema. A document of another shape raises
-    `LookupError`, `StopIteration` or `TypeError`.
-    """
-    field = schema["request"]["$defs"]["ParsedPart"]["properties"]["provenance"]
-    named = next(branch for branch in field["anyOf"] if branch.get("type") == "string")
-    return [
-        DeclaredDataset(
-            dcid=value["const"],
-            title=value["title"],
-            description=value["description"],
-            opt_in=value["x-opt-in"],
-        )
-        for value in named.get("oneOf", [])
-    ]
-
-
-async def fetch_declared_datasets() -> list[DeclaredDataset] | None:
-    """Read the declared datasets from dfo-apis once, within `_SCHEMA_FETCH_TIMEOUT_S`.
-
-    Returns `None`, and logs a warning, when the schema cannot be read or does
-    not have the expected shape.
-    """
-    try:
-        async with asyncio.timeout(_SCHEMA_FETCH_TIMEOUT_S):
-            response = await get_client().request(
-                "GET",
-                _SCHEMA_ROUTE,
-                route=_SCHEMA_ROUTE,
-                timeout=_SCHEMA_FETCH_TIMEOUT_S,
-                retry=False,
-            )
-        return declared_datasets(response.json())
-    except (TimeoutError, UpstreamError, ValueError, LookupError, StopIteration, TypeError) as exc:
-        logger.warning(
-            "could not read the declared datasets from %s; the search tool lists none: %r",
-            _SCHEMA_ROUTE,
-            exc,
-        )
-        return None
-
-
-def describe_search(base: str, datasets: Sequence[DeclaredDataset] | None) -> str:
-    """The search tool's description: `base` followed by the datasets a part can name."""
-    if not datasets:
-        return f"{base}\n\nNo datasets are listed, so leave `dataset` out."
-    lines = [
-        f"- `{dataset.dcid}`: {dataset.title}. {dataset.description}"
-        + (" Served only when a part names it." if dataset.opt_in else "")
-        for dataset in datasets
-    ]
-    return (
-        f"{base}\n\nSet a part's `dataset` to one of these dcids only when the user asks "
-        "for that table:\n" + "\n".join(lines)
-    )
-
-
-def to_wire_request(parts: Sequence[SearchPart], raw_query: str | None) -> dict[str, Any]:
-    """Translate tool-facing parts into the parsed door's wire request body."""
-    input_block: dict[str, Any] = {"kind": "parsed", "parts": [_wire_part(part) for part in parts]}
-    if raw_query is not None:
-        input_block["raw_query"] = raw_query
+def to_wire_request(parts: Sequence[SearchPart] | None, raw_query: str | None) -> dict[str, Any]:
+    """Translate tool-facing parts into the parsed door's wire request body, or,
+    with no parts, `raw_query` into the raw-text door's, where Search reads the
+    question itself."""
+    input_block: dict[str, Any]
+    if parts:
+        input_block = {"kind": "parsed", "parts": [_wire_part(part) for part in parts]}
+        if raw_query is not None:
+            input_block["raw_query"] = raw_query
+    else:
+        if raw_query is None:
+            raise ValueError("a search with no parts needs raw_query, the question Search reads")
+        input_block = {"kind": "raw_text", "query": raw_query}
     return {
         "schema_version": 1,
         "input": input_block,
@@ -252,12 +215,19 @@ def _wire_part(part: SearchPart) -> dict[str, Any]:
         wire["time_text"] = part.time
     if part.unit is not None:
         wire["unit_text"] = part.unit
-    if part.source is not None:
-        wire["source_text"] = part.source
     if part.open_roles is not None:
         wire["open_roles"] = part.open_roles
-    if part.dataset is not None:
-        wire["provenance"] = part.dataset
+    if part.sources is not None:
+        wire["sources"] = [
+            {
+                "text": source.text,
+                "polarity": "exclude" if source.exclude else "include",
+                **({"ref": source.ref} if source.ref is not None else {}),
+            }
+            for source in part.sources
+        ]
+    if part.separate:
+        wire["separate"] = True
     return wire
 
 
@@ -299,14 +269,48 @@ def _spec_nodes(envelope: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return nodes
 
 
+def _verified_siblings(node: Mapping[str, Any]) -> list[StoredDefinition]:
+    """The definitions of `node`'s sibling measures that hash to their spec_id.
+
+    A sibling whose identity does not hash is logged with both spec_ids and
+    removed from `resolved.alternative_measures`, so the digest never offers
+    an id `get_data` cannot resolve. A mismatch in the elected spec refuses
+    the call (`_register_definitions`). A `resolved` that is not an object
+    offers no siblings, and the spec's own reader refuses it downstream.
+    """
+    resolved = node.get("resolved")
+    if not isinstance(resolved, dict):
+        return []
+    alternatives = resolved.get("alternative_measures") or []
+    kept: list[Mapping[str, Any]] = []
+    definitions: list[StoredDefinition] = []
+    for alternative in alternatives:
+        try:
+            stored = stored_definition(alternative)
+        except IdentityMismatch:
+            logger.warning(
+                "skipped sibling measure %s of %s: its identity does not hash to its spec_id",
+                alternative["definition"]["spec_id"],
+                node.get("spec_id"),
+            )
+            continue
+        kept.append(alternative)
+        if stored is not None:
+            definitions.append(stored)
+    if len(kept) != len(alternatives):
+        resolved["alternative_measures"] = kept
+    return definitions
+
+
 async def _register_definitions(envelope: Mapping[str, Any]) -> ToolResult | None:
     """Write every spec_id-carrying definition in `envelope` to the definition store.
 
     A node with no `definition`, or a `definition` with no `spec_id`, is
-    skipped silently. Returns a refusal `ToolResult` in place of the search's
-    own result when a definition's identity doesn't reproduce its own
-    spec_id, or when the store itself can't be written to; returns `None`
-    otherwise, including when there was nothing to write. Awaited before
+    skipped silently. Each spec's `resolved.alternative_measures` entries are
+    written too (`_verified_siblings`). Returns a refusal `ToolResult` in
+    place of the search's own result when a spec's definition identity doesn't
+    reproduce its own spec_id, or when the store itself can't be written to;
+    returns `None` otherwise, including when there was nothing to write. Awaited before
     `search` returns, so an id the digest names is always registered by the
     time the call completes. A fast model racing its own ids cannot beat it.
     """
@@ -318,6 +322,7 @@ async def _register_definitions(envelope: Mapping[str, Any]) -> ToolResult | Non
             return to_tool_result(ToolRefusal.capability_unavailable(detail=str(exc)))
         if stored is not None:
             definitions.append(stored)
+        definitions.extend(_verified_siblings(node))
     return await put_definitions(definitions)
 
 
@@ -394,7 +399,7 @@ async def resolve_and_register(
 
 
 async def search(
-    parts: Annotated[list[SearchPart], Field(min_length=1, max_length=MAX_PARTS)],
+    parts: Annotated[list[SearchPart] | None, Field(min_length=1, max_length=MAX_PARTS)] = None,
     raw_query: Annotated[str | None, Field(min_length=1, max_length=_MAX_RAW_QUERY_CHARS)] = None,
 ) -> ToolResult:
     """Find what data and indicators exist for the user's ask.
@@ -425,13 +430,29 @@ async def search(
     of a side, as in "which creditors does Nigeria pay", in the same role words.
     A `role_text_not_recognised` or `time_text_not_parsed` warning in the
     response means that field needs rephrasing into that grammar. A
-    `source` value refuses when no unit is given and is ignored when one is,
-    so leave it out and choose the source through `get_data`'s facets
-    instead.
+    publisher or dataset the user names, to read from or to leave out, goes
+    in the part's `sources` as spoken: "Ghana's debt service from IDS" is
+    `{"text": "IDS"}`, and "aid to Kenya, not from CRS" is `{"text": "CRS",
+    "exclude": true}`. A lender or recipient the flow runs to or from stays
+    an entity with its role: "debt service to the World Bank" names the
+    World Bank as an entity. When a source is ambiguous, ask the user which
+    candidate they mean, then retry with that candidate's `ref` on the same
+    source entry, keeping its `text` and `exclude` flag.
+
+    A comparison of two categories of one measure ("health versus education
+    aid") is one part per category, each with `separate: true`, and so is
+    any other comparison sent as several parts. Search may otherwise merge
+    parts that differ in one category or place into one answer. A total
+    over several categories ("health and education aid") stays one part.
+
+    Leave `parts` out to have Search read `raw_query` itself, as its raw-text
+    door does: send one question at a time this way, since Search applies the
+    places and years it reads to every part of the text.
 
     Args:
-        parts: One entry per variable asked about, 1..6.
-        raw_query: The user's original query.
+        parts: One entry per variable asked about, 1..6; leave out to search
+            `raw_query` as text.
+        raw_query: The user's original query; required when `parts` is left out.
 
     Returns:
         Search's reading of the question. For a question that names data, a
@@ -451,6 +472,13 @@ async def search(
         of scope or asks for a judgement rather than for data. Each names the
         country the question named, when it named one.
     """
+    if not parts and raw_query is None:
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                pointer="/raw_query",
+                detail="search needs `parts`, or `raw_query` for Search to read as text",
+            )
+        )
     wire = to_wire_request(parts, raw_query)
     envelope = await resolve_and_register(wire)
     if isinstance(envelope, ToolResult):

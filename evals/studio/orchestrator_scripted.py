@@ -1,15 +1,13 @@
-"""The orchestrator engine, scripted: real graph, real planner seam, no model.
+"""The studio, scripted: real workflow, real planner seam, no model.
 
-`harness-studio-v1`'s classic scripted mode runs the deterministic seams in
-`harness.scripted`; none of them is the orchestrator. This module builds the
-studio the orchestrator engine serves (`STUDIO_ENGINE=orchestrator`) around
-the same graph, and replaces only what a model or an upstream would answer:
+This module builds the studio `harness.server` serves and replaces only what
+a model or an upstream would answer:
 
 - the orchestrator agent's model answers from a script of tool calls and
   text, one entry per model call, across every turn of a case;
 - the planner is the real `harness.planner_seam.PlannerSeam`. Its model
   either submits the canned plan `harness.scripted_plan` builds, so the seam
-  renders its real first message and the graph's approval, execution and
+  renders its real first message and the workflow's approval, execution and
   hand-back nodes run as served, or, when the case scripts it (`planner`),
   answers from that script and drives the real `propose_plan`, whose
   translation discovers through the case's canned `translator_search`
@@ -40,20 +38,18 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from google.adk import Context
-from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
-from harness.graph import GenerativeNodes, create_root_workflow
+from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_seam import PlannerSeam
-from harness.scripted import SCRIPTED_SPEC, ScriptedEdit, ScriptedExecutor, ScriptedSurface
+from harness.scripted import SCRIPTED_SPEC, ScriptedExecutor, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_translate import _OrchestratorTranslator
 from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
@@ -207,7 +203,7 @@ def planner_tool_log(
 
 
 class ScriptedPairPlanner:
-    """`harness.graph.PlannerModel` over the real `PlannerSeam` and a `PlannerLlm`.
+    """`harness.graph.seams.PlannerModel` over the real `PlannerSeam` and a `PlannerLlm`.
 
     A first draft offers `scripted_plan`; an amendment or a replan offers the
     next version of the plan the graph holds, as `harness.scripted.
@@ -222,7 +218,7 @@ class ScriptedPairPlanner:
     async def __call__(
         self, *, ctx: Any, question: str, prior_plan: dict[str, Any] | None = None, **kwargs: Any
     ) -> dict[str, Any]:
-        plan = scripted_plan(question, spec_id=self._spec_id, parts=1)
+        plan = scripted_plan(question, spec_id=self._spec_id)
         if prior_plan is not None:
             prior_version = int(prior_plan.get("version", 1))
             plan = plan.model_copy(
@@ -295,7 +291,7 @@ def _spec_block(part: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class CannedResolver:
-    """`harness.graph.Resolver` answering from the case's search results, in order.
+    """`harness.orchestrator_tools.Resolver` answering from the case's search results, in order.
 
     Builds the digest from each envelope with `resolver_digest`, as
     `harness.mcp_client.McpResolver` does.
@@ -442,8 +438,8 @@ async def _real_schemas() -> list[ToolSchema]:
 def build_studio(
     scenario: Mapping[str, Any], *, log: Log
 ) -> tuple[FastAPI, OrchestratorLlm, CannedResolver]:
-    """The orchestrator studio for one case: the app, its model and its resolver."""
-    settings = Settings(studio_engine="orchestrator")
+    """The studio for one case: the app, its model and its resolver."""
+    settings = Settings()
     sessions = InMemorySessionService()
 
     orchestrator_llm = OrchestratorLlm(
@@ -491,25 +487,20 @@ def build_studio(
             ),
         ).model_copy(update={"model": orchestrator_llm})
         return create_root_workflow(
-            resolver=resolver,
+            planner=planner,
+            orchestrator=agent,
             executor=recorder,
-            generative=GenerativeNodes(planner=planner),
             tool_surface=surface_recorder,
             definition_surface=surface,
             max_concurrent_steps=settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
-            orchestrator=agent,
         )
 
     studio = StudioRunner(
         create_workflow=create_workflow,
         executor=LoggingExecutor(log=log),
         session_service=sessions,
-        edit_model=ScriptedEdit(),
         tool_surface=surface,
-        settings=settings,
-        translator=_OrchestratorTranslator,
-        run_config=RunConfig(streaming_mode=StreamingMode.SSE),
     )
     app = FastAPI()
     app.state.settings = settings
@@ -521,7 +512,7 @@ def build_studio(
 async def orchestrator_client(
     scenario: Mapping[str, Any],
 ) -> AsyncIterator[tuple[httpx2.AsyncClient, Log]]:
-    """An in-process client on the orchestrator studio for `scenario`, and its log."""
+    """An in-process client on the studio for `scenario`, and its log."""
     log = Log()
     app, _llm, _resolver = build_studio(scenario, log=log)
     token = app.state.settings.studio_api_token or _TOKEN

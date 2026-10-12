@@ -8,16 +8,24 @@ holds under it, and the dataset's versions in dfo-apis.
 Recoverable:
 
 - The dfo-apis pair. A frame minted with the default columns is held under the
-  dfo-apis pair itself. A frame minted with `options.columns` is held under a
-  `content_version` that is a one-way hash of the dfo-apis `content_version` and the
-  columns (`frame_ref_for`), so the routine recomputes that hash for each stored
-  version of the dataset and each column selection `get_data` can send
-  (`RECOVERABLE_COLUMNS`) and takes the one that matches.
+  dfo-apis pair itself. A frame minted with `options.columns` or `options.groupby`
+  is held under a `content_version` that is a one-way hash of the dfo-apis
+  `content_version`, the columns and the groupby (`frame_ref_for`), so the routine
+  recomputes that hash for each stored version of the dataset, each column selection
+  `get_data` can send (`RECOVERABLE_COLUMNS`), and no groupby or the one dfo-apis
+  recorded for the version, and takes the one that matches.
 - `options.columns`, by the same match.
+- A sum that kept its version, held under the pair that names its groupby. dfo-apis
+  records no groupby on an unsummed version, so no candidate above reproduces the
+  pair. The frame's own trace keeps the options it was minted with
+  (`MaterialisationTrace.options`), and the pair `frame_ref_for` derives from them
+  and a listed version is the match. The record holds those options.
 - `options.groupby` of a summed frame with a `content_version` of its own. dfo-apis
   records the version it was summed from as `base_content_version`, and its
   versions route returns the `groupby` the mint sent whenever a file stored under
-  the version records one.
+  the version records one. A frame registered before `frame_ref_for` named a
+  groupby is held under the summed version's own pair, and one registered since
+  under the pair that names it; both are recovered.
 - `scope`, as empty: the dataset's `spec_id` is the identity after any scope was
   applied, so minting it with no scope names the same dataset.
 - `stat_var_count`, read off the frame the store holds under the pair.
@@ -37,6 +45,9 @@ Not recoverable:
 - A frame under an unsummed version that the store no longer holds. Its StatVar
   count cannot be read, so the case above cannot be told apart, and it fails with
   `frame_not_held`.
+- A sum that kept its version whose frame the store no longer holds, or holds with a
+  trace written before it kept the mint's options. It fails with
+  `no_version_matches`.
 - A frame whose dataset version dfo-apis no longer lists, or one minted with a
   column selection outside `RECOVERABLE_COLUMNS`. Both fail with
   `no_version_matches`.
@@ -45,19 +56,23 @@ Not recoverable:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping, Sequence
+from itertools import product
 from typing import Any, Protocol
 
 from common.materialisation import (
     FrameExpired,
     FrameRef,
     MaterialisationStore,
+    MaterialisationTrace,
     MintRecord,
     MintRecordUnrecoverableError,
 )
+from dfo_frame_grammar import Frame
 
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
-    PLACE_TYPE_COLUMNS,
+    KIND_COLUMNS,
+    TYPE_COLUMN_SELECTIONS,
     frame_ref_for,
     observed_shape,
 )
@@ -94,8 +109,9 @@ class DatasetVersions(Protocol):
     def __call__(self, *, spec_id: str) -> Awaitable[Sequence[DatasetVersion]]: ...
 
 
-# Every `options.columns` `get_data` sends: none, and the place-type column.
-RECOVERABLE_COLUMNS: tuple[tuple[str, ...], ...] = ((), PLACE_TYPE_COLUMNS)
+# Every `options.columns` a recorded mint may hold: none, some of the type columns, or a
+# flow table's kinds.
+RECOVERABLE_COLUMNS: tuple[tuple[str, ...], ...] = (*TYPE_COLUMN_SELECTIONS, KIND_COLUMNS)
 
 
 async def recover_mint_record(
@@ -106,7 +122,8 @@ async def recover_mint_record(
     and cannot be rebuilt.
 
     The frame is read in full with the store's own row ceiling and no claim on the
-    process row budget, once the matching version is found.
+    process row budget, once the matching version is found, or when no candidate
+    matches and the held frame's trace is the last source of its options.
 
     Args:
         ref: A root frame's pair, as the materialisation store holds it.
@@ -120,10 +137,15 @@ async def recover_mint_record(
             `groupby` dfo-apis did not record, and `frame_not_held` when the matching
             version is unsummed and `store` no longer holds the frame.
     """
-    for version in await dataset_versions(spec_id=ref.spec_id):
-        for columns in RECOVERABLE_COLUMNS:
+    versions = await dataset_versions(spec_id=ref.spec_id)
+    for version in versions:
+        groupbys = (None,) if version.groupby is None else (None, version.groupby)
+        for groupby, columns in product(groupbys, RECOVERABLE_COLUMNS):
             candidate = frame_ref_for(
-                spec_id=ref.spec_id, content_version=version.content_version, columns=columns
+                spec_id=ref.spec_id,
+                content_version=version.content_version,
+                columns=columns,
+                groupby=groupby,
             )
             if candidate != ref:
                 continue
@@ -143,16 +165,48 @@ async def recover_mint_record(
                 options=options,
                 stat_var_count=stat_var_count,
             )
+    return await _recover_from_trace(ref, versions=versions, store=store)
+
+
+async def _recover_from_trace(
+    ref: FrameRef, *, versions: Sequence[DatasetVersion], store: MaterialisationStore
+) -> MintRecord:
+    """The mint record of `ref` rebuilt from the options its held frame's trace keeps,
+    matched against `versions` by `frame_ref_for`."""
+    held = await _held(store, ref)
+    trace = None if held is None else held[1]
+    options = trace.options if isinstance(trace, MaterialisationTrace) else None
+    if held is None or options is None:
+        raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
+    for version in versions:
+        candidate = frame_ref_for(
+            spec_id=ref.spec_id,
+            content_version=version.content_version,
+            columns=tuple(options.get("columns") or ()),
+            groupby=options.get("groupby"),
+        )
+        if candidate == ref:
+            return MintRecord(
+                frame=ref,
+                dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
+                options=dict(options),
+                stat_var_count=observed_shape(held[0])[1],
+            )
     raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
+
+
+async def _held(store: MaterialisationStore, ref: FrameRef) -> tuple[Frame, Any] | None:
+    """The frame and trace `store` holds under `ref`, or `None` when it holds none."""
+    try:
+        return await store.get(ref)
+    except FrameExpired:
+        return None
 
 
 async def _held_stat_var_count(store: MaterialisationStore, ref: FrameRef) -> int | None:
     """The distinct StatVars of the frame `store` holds under `ref`, or `None` when it
     holds none."""
-    try:
-        held = await store.get(ref)
-    except FrameExpired:
-        return None
+    held = await _held(store, ref)
     if held is None:
         return None
     _role_keys, stat_var_count = observed_shape(held[0])

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+from collections.abc import Awaitable, Callable
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -184,21 +184,47 @@ async def test_one_unreadable_server_fails_the_whole_read() -> None:
         ).list_tools()
 
 
-class _SleepBeforeListing(Middleware):
-    """Delays a server's own `tools/list` answer, to prove two sources are read
-    concurrently rather than one after the other."""
+class _Rendezvous:
+    """Holds each caller until `parties` have arrived, or `timeout_s` passes.
 
-    def __init__(self, delay_s: float) -> None:
-        self._delay_s = delay_s
+    `stranded` is set when a caller gave up waiting, which is what happens to
+    the first arrival when the others only start after it has finished.
+    """
+
+    def __init__(self, parties: int, *, timeout_s: float = 5.0) -> None:
+        self._parties = parties
+        self._timeout_s = timeout_s
+        self._arrived = 0
+        self._met = asyncio.Event()
+        self.stranded = False
+
+    async def arrive(self) -> None:
+        self._arrived += 1
+        if self._arrived == self._parties:
+            self._met.set()
+        try:
+            await asyncio.wait_for(self._met.wait(), self._timeout_s)
+        except TimeoutError:
+            self.stranded = True
+
+
+class _BeforeListing(Middleware):
+    """Runs `hook` before a server's own `tools/list` answer."""
+
+    def __init__(self, hook: Callable[[], Awaitable[None]]) -> None:
+        self._hook = hook
 
     async def on_list_tools(self, context, call_next):
-        await asyncio.sleep(self._delay_s)
+        await self._hook()
         return await call_next(context)
 
 
-def _slow_listing_server(name: str, delay_s: float) -> FastMCP:
+def _listing_server(
+    name: str, *, before_listing: Callable[[], Awaitable[None]] | None = None
+) -> FastMCP:
     server = FastMCP(name=name)
-    server.add_middleware(_SleepBeforeListing(delay_s))
+    if before_listing is not None:
+        server.add_middleware(_BeforeListing(before_listing))
 
     @server.tool(name=f"{name}_tool")
     async def _tool() -> str:
@@ -208,16 +234,16 @@ def _slow_listing_server(name: str, delay_s: float) -> FastMCP:
 
 
 async def test_list_tools_reads_every_source_concurrently() -> None:
-    first = _slow_listing_server("first", 0.1)
-    second = _slow_listing_server("second", 0.1)
+    # Each server holds its listing until the other has started its own, so a
+    # surface that read the sources one after the other would never meet.
+    rendezvous = _Rendezvous(parties=2)
+    first = _listing_server("first", before_listing=rendezvous.arrive)
+    second = _listing_server("second", before_listing=rendezvous.arrive)
 
-    start = time.monotonic()
     tools = await McpSurface(sources={"first": first, "second": second}).list_tools()
-    elapsed = time.monotonic() - start
 
+    assert not rendezvous.stranded
     assert sorted(tool.name for tool in tools) == ["first_tool", "second_tool"]
-    # Serial reads would take roughly 0.2s; concurrent reads take roughly 0.1s.
-    assert elapsed < 0.18
 
 
 def _surface_with_a_slow_tool() -> FastMCP:
@@ -379,8 +405,8 @@ async def test_call_tool_gives_each_source_its_own_held_client() -> None:
     # `ToolId.server` is a `Literal["data-mcp", "analysis-mcp"]`, so the two
     # sources have to be named that way even though this test only cares
     # that each gets its own client.
-    data_server = _slow_listing_server("data-mcp", 0.0)
-    analysis_server = _slow_listing_server("analysis-mcp", 0.0)
+    data_server = _listing_server("data-mcp")
+    analysis_server = _listing_server("analysis-mcp")
     surface = McpSurface(sources={"data-mcp": data_server, "analysis-mcp": analysis_server})
 
     await surface.call_tool(tool=ToolId(server="data-mcp", name="data-mcp_tool"), arguments={})

@@ -75,6 +75,7 @@ from planner.records import (
     RankDirection,
     RankLimit,
     Reduction,
+    ResolvedSourceMention,
     RollingIssue,
     RollingPlanError,
     RollingWindow,
@@ -107,7 +108,7 @@ from planner.shapes import (
     year_filter,
 )
 from planner.shapes import rejects as shape_rejects
-from planner.workflow import ResolvedGroup, SelectedSource, Workflow
+from planner.workflow import ResolvedGroup, Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +139,8 @@ OPTIONAL_DECLINES_STATE_KEY = "planner:optional_declines"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
-# (`pin_sources`). `harness.planner_seam` writes it: on the orchestrator
-# engine from the search readings its first message renders, one entry per
-# spec_id they name; on the classic engine from the resolve envelope, one
-# entry for the envelope's own `spec_id` when the planner was shown it as a
-# pin (`harness.planner_seam._exposed_spec_id`), none otherwise.
+# (`pin_sources`). `harness.planner_seam` writes it from the search
+# readings its first message renders, one entry per spec_id they name.
 # `propose_plan` (`planner.agent`) writes the citing `Decision` for a pin of
 # a settled entry, and `translator.discovery.discover_source` builds a pinned
 # requirement's source from an entry's block with no `search` call.
@@ -155,40 +153,13 @@ PIN_SOURCES_STATE_KEY = "planner:pin_sources"
 # and clears the slot. Unset on a turn with no seeds.
 SEEDS_STATE_KEY = "seeds"
 
-# The session-state slot holding a `SeededSource` for every dataset the user
-# handed over from Search whose identity `harness.graph`'s `seed` node
-# resolved again through Search this turn, and for every copy of one over
-# another window that the plan `planner.agent.propose_plan` last recorded pins
-# (`seeded_sources`). Only those two write it, so it names exactly the user's
-# own datasets:
-# `planner.agent.propose_plan` counts each spec_id as the user's own election,
-# and `translator.discovery.discover_source` takes a dataset requirement's
-# source straight from the one its `source_spec_id` names, with no `search`
-# call. It stores each seed whole and each copy as its seed's spec_id and its
-# window, which `seeded_sources` rebuilds into the copy (`windowed_copy`).
-# Unset on a turn the seeds did not start.
-SEEDED_SOURCES_STATE_KEY = "planner:seeded_sources"
-
-# The session-state slot holding a `SeededSource` for every dataset the turn
-# dropped, each seed and each copy of it over another window
-# (`dropped_seeds`). `harness.graph`'s `seed` node writes it when Search's
-# answer for a seed's identity is not the seed's dataset and the turn plans
-# from the other seeds;
-# the user is then told the plan leaves that dataset out. For the rest of the
-# turn `planner.agent.propose_plan` refuses a plan that pins one, and
-# `translator.discovery.discover_source` takes no source from a search that
-# answers with one (`names_dropped_seed`). It is stored as
-# `SEEDED_SOURCES_STATE_KEY` is. Unset on a turn that dropped none.
-DROPPED_SEEDS_STATE_KEY = "planner:dropped_seeds"
-
 # The session-state slot holding a `WindowedPin` for every pin of a dataset
-# no seed names, whose identity a search in the conversation recorded
+# whose identity a search in the conversation recorded
 # (`recorded_identity`), that the plan `planner.agent.propose_plan` last
 # recorded moves to that identity over a dataset requirement's own period.
 # `translator.discovery.discover_source` takes such a requirement's source
-# from Search's answer for the copy's identity, with no `search` call. A
-# copy here carries none of a seed's standing: the user never chose it, and
-# no drop of a seed takes it. Each is stored whole, its identity included.
+# from Search's answer for the copy's identity, with no `search` call. Each
+# is stored whole, its identity included.
 # Unset until a plan pins such a copy.
 WINDOWED_PINS_STATE_KEY = "planner:windowed_pins"
 
@@ -201,12 +172,12 @@ FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 
 # The session-state slot holding the outputs the user asked for, as a JSON
 # list of strings numbered by position, at most `MAX_PLAN_ASKS` of at most
-# `MAX_ASK_CHARS` characters each (`load_asks`). The orchestrator engine's
+# `MAX_ASK_CHARS` characters each (`load_asks`). The orchestrator's
 # `plan_start` node writes it beside the brief on every plan call, and clears
-# it when the call lists none; the classic engine never writes it. `harness.planner_seam` lists the asks in the planner's first message,
-# and `planner.agent.propose_plan` copies them onto every plan it records, so
-# `Plan` refuses one that does not account for each exactly once. Unset, a
-# plan carries no asks and no ask is accounted for.
+# it when the call lists none. `harness.planner_seam` lists the asks in the
+# planner's first message, and `planner.agent.propose_plan` copies them onto
+# every plan it records, so `Plan` refuses one that does not account for each
+# exactly once. Unset, a plan carries no asks and no ask is accounted for.
 ASKS_STATE_KEY = "orchestrator:asks"
 
 # How many plans one entry into the planner may propose -- a first draft and
@@ -262,7 +233,9 @@ MAX_DECISION_RATIONALE_CHARS = 800
 MAX_DECISION_OPTIONS = 24
 MAX_OPTION_CHARS = 200
 MAX_MEASURE_CHARS = 200
-MAX_SOURCE_CHARS = 200
+# The most characters `search` takes for one source's wording, so a plan never
+# holds a source `search` would refuse.
+MAX_SOURCE_CHARS = 120
 MAX_PREDICATES = 8
 MAX_GROUP_BY = 2
 
@@ -318,6 +291,19 @@ class Entity(StrictModel):
             "place a measure is about, and unless the question or measure identifies it."
         ),
         json_schema_extra={"enum": list(PARTY_ROLES)},
+    )
+    # Left out of every dump while unset, so a plan naming no set's members
+    # keeps its serialised form, rendering and size against
+    # `MAX_PLAN_RECORD_CHARS`.
+    members: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda members: not members,
+        description=(
+            "Set when `name` is a set, such as a region or a group of countries or donors, "
+            "and the question asks about its members one by one: 'African countries' is "
+            "'Africa' with `members` set. Unset, a set named alone is one entity, its own "
+            "figure. A set is named once, never listed member by member."
+        ),
     )
 
 
@@ -651,7 +637,10 @@ class DatasetRequirement(TaggedModel):
     measure: str = Field(
         min_length=1,
         max_length=MAX_MEASURE_CHARS,
-        description="What this requirement retrieves, in the words of the question.",
+        description=(
+            "What this requirement retrieves, in the words of the question, naming how a "
+            "flow is counted only when the question does."
+        ),
     )
     entities: tuple[Entity, ...] = Field(
         default=(),
@@ -667,8 +656,8 @@ class DatasetRequirement(TaggedModel):
             "such as 'donor', 'recipient' or 'country', when the question ranks them or its "
             "answer is their total, and names none of them; no stand-in entity such as "
             "'World' is named for them, and no entity in the party it covers. A narrower "
-            "population, such as a region, an income group or a donor type, names its "
-            "members in `entities` instead. A world figure set beside a named entity names "
+            "population, such as a region, an income group or a donor type, is named itself "
+            "in `entities` instead (see `members`). A world figure set beside a named entity names "
             "'World' instead."
         ),
     )
@@ -698,6 +687,16 @@ class DatasetRequirement(TaggedModel):
         min_length=1,
         max_length=MAX_SOURCE_CHARS,
         description="The source the question names for this requirement, when it names one, in the question's own words.",
+    )
+    source_ref: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="The admitted source reference the user chose from Search's source ambiguity candidates; leave unset before the user chooses.",
+    )
+    source_exclude: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        description="Set when the question excludes the named source instead of requesting it.",
     )
     source_spec_id: SpecId | None = Field(
         default=None,
@@ -730,6 +729,12 @@ class DatasetRequirement(TaggedModel):
             "group_by 'breakdown' reads. Needs stat_vars 'separate'."
         ),
     )
+
+    @model_validator(mode="after")
+    def _source_modifiers_name_a_source(self) -> DatasetRequirement:
+        if self.source is None and (self.source_ref is not None or self.source_exclude):
+            raise ValueError("source_ref and source_exclude require source wording")
+        return self
 
     @model_validator(mode="after")
     def _entities_are_unique(self) -> DatasetRequirement:
@@ -916,8 +921,10 @@ class GrowthRequirement(TaggedModel):
     change: GrowthChange = Field(
         default=GrowthChange.RELATIVE,
         description=(
-            "How the two endpoint values are compared: 'relative' reads a dimensionless ratio, "
-            "'absolute' reads a difference in the input's own unit."
+            "How the two endpoint values are compared: 'relative' divides the difference by the "
+            "start value and reads a dimensionless ratio, so a share moving 10% to 15% reads +50%; "
+            "'absolute' subtracts and reads a difference in the input's own unit, so the same move "
+            "reads +5 percentage points."
         ),
     )
     rolling: Annotated[RollingWindow | None, HASHED_WHEN_SET] = Field(
@@ -2228,8 +2235,7 @@ def _check_pin_rests_on_a_fixing_decision(
     it checks a `resolved_by=user` pin against the spec_ids the user
     actually chose answering `adk_request_input`
     (`planner.agent._elected_spec_ids`, read off the session's own event
-    history) or handed over from Search (`seeded_sources`), before a plan
-    carrying one ever reaches this validator.
+    history), before a plan carrying one ever reaches this validator.
     """
     if requirement.source_spec_id is None:
         return
@@ -2789,7 +2795,7 @@ class Plan(StrictModel):
     def approve(self) -> Plan:
         """Return a new `Plan` marked `APPROVED`, recording what was approved.
 
-        The harness graph's own approval step enforces the actual gate; this
+        The harness workflow's `approve` node enforces the actual gate; this
         records the resulting state and the revision it applies to, which
         `start_execution` checks against.
 
@@ -2953,209 +2959,6 @@ class SessionState(Protocol):
     def __setitem__(self, key: str, value: Any) -> None: ...
 
 
-class SeededSource(StrictModel):
-    """One dataset the user handed over from Search, or a copy of one over another window.
-
-    `source` is the dataset as the plan pins it. A seed's is read from the
-    Search API's own answer for the seed's identity (`harness.graph`'s
-    `seed` node, `compiler.sources.source_from_spec_block`). `seen_year` is
-    the year whose figures Search showed when the question named no year and
-    Search chose the latest one; `None` when the question named its years or
-    Search showed no such headline. `windowed_from` is the spec_id of the
-    seed this source copies over another window (`planner.agent`'s
-    `propose_plan`); `None` on the seed itself. A copy is `windowed_copy`
-    of its seed: its spec_id, its identity and the seed's sentence, and no
-    data or coverage, which the translator reads from Search's answer for the
-    copy (`translator.discovery`).
-    """
-
-    source: SelectedSource
-    seen_year: Year | None = None
-    windowed_from: SpecId | None = None
-
-
-def windowed_copy(seed: SeededSource, window: Mapping[str, Any]) -> SeededSource:
-    """`seed` over `window` in place of its own years, as a copy of it.
-
-    The copy's identity and spec_id are the seed's identity over `window`
-    (`data_mcp.definition_writes.windowed_identity`), the ones `get_data`'s
-    `scope.window` would mint. It keeps the seed's sentence as a name, and
-    states nothing Search stated for the seed's own years.
-
-    Raises:
-        ValueError: If `seed` is a copy itself or states no identity.
-    """
-    if seed.windowed_from is not None or seed.source.identity is None:
-        raise ValueError(f"{seed.source.spec_id!r} is not a seed with an identity to copy")
-    spec_id, identity = windowed_identity(seed.source.identity, window)
-    return SeededSource(
-        source=SelectedSource(
-            spec_id=spec_id,
-            sentence=seed.source.sentence,
-            has_data=None,
-            identity=identity,
-            groups=seed.source.groups,
-        ),
-        windowed_from=seed.source.spec_id,
-    )
-
-
-class _StoredCopy(StrictModel):
-    """A copy as session state stores it: the seed it copies and the window it copies it over."""
-
-    windowed_from: SpecId
-    window: dict[str, Any]
-
-
-class _StoredSources(StrictModel):
-    """Seeded sources as session state stores them: each seed whole, each copy by reference.
-
-    A seed is held as its own dump, a `SeededSource` once `_read_sources`
-    validates it, so one seed stored in a shape `SeededSource` rejects is
-    left out by itself.
-    """
-
-    seeds: list[dict[str, Any]]
-    copies: list[_StoredCopy]
-
-
-def _store_sources(sources: Sequence[SeededSource]) -> str:
-    """`sources` as session state holds them, every copy reduced to its seed and window.
-
-    Raises:
-        ValueError: If a copy's seed is not among `sources`, or a copy is not
-            `windowed_copy` of its seed, so reading it back would change it.
-    """
-    seeds = [item for item in sources if item.windowed_from is None]
-    by_spec_id = {item.source.spec_id: item for item in seeds}
-    copies: list[_StoredCopy] = []
-    for item in sources:
-        if item.windowed_from is None:
-            continue
-        seed = by_spec_id.get(item.windowed_from)
-        if seed is None:
-            raise ValueError(
-                f"the copy {item.source.spec_id!r} names the seed {item.windowed_from!r}, "
-                "which the sources do not hold"
-            )
-        window = (item.source.identity or {}).get("requested_window")
-        if not isinstance(window, dict) or windowed_copy(seed, window) != item:
-            raise ValueError(
-                f"{item.source.spec_id!r} is not its seed {item.windowed_from!r} over another "
-                "window (`windowed_copy`)"
-            )
-        copies.append(_StoredCopy(windowed_from=item.windowed_from, window=window))
-    stored = _StoredSources(seeds=[seed.model_dump(mode="json") for seed in seeds], copies=copies)
-    return json.dumps(stored.model_dump(mode="json"))
-
-
-def _read_sources(state: SessionState, state_key: str) -> list[SeededSource]:
-    """The sources `_store_sources` stored under `state_key`, each copy rebuilt from its seed; empty when unset.
-
-    A seed stored in a shape `SeededSource` rejects, one a release with other
-    fields wrote, is left out with every copy that names it. The dataset is
-    then none of the session's own: the turn searches for it, and the user
-    hands it over again to pin it. The omission is logged where the stored
-    text is first read (`_parsed_sources`), so a turn that reads the slot
-    many times logs it once.
-
-    Raises:
-        ValueError: If a copy names a seed the stored sources never held.
-    """
-    raw = state.get(state_key)
-    return list(_parsed_sources(raw, state_key)) if raw else []
-
-
-@functools.lru_cache(maxsize=32)
-def _parsed_sources(raw: str, state_key: str) -> tuple[SeededSource, ...]:
-    """What `raw`, the text stored under `state_key`, reads as (`_read_sources`).
-
-    Kept by the stored text, which a turn leaves unchanged between its
-    reads of a slot, so one stored text is validated once and what it leaves
-    out is logged once.
-    """
-    stored = _StoredSources.model_validate_json(raw)
-    seeds: dict[str, SeededSource] = {}
-    rejected: set[str] = set()
-    errors: list[ValidationError] = []
-    for value in stored.seeds:
-        try:
-            seed = SeededSource.model_validate(value)
-        except ValidationError as exc:
-            source = value.get("source")
-            if isinstance(source, dict) and isinstance(source.get("spec_id"), str):
-                rejected.add(source["spec_id"])
-            errors.append(exc)
-        else:
-            seeds[seed.source.spec_id] = seed
-    copies: list[SeededSource] = []
-    orphaned = 0
-    for copy in stored.copies:
-        seed = seeds.get(copy.windowed_from)
-        if seed is not None:
-            copies.append(windowed_copy(seed, copy.window))
-        elif copy.windowed_from in rejected:
-            orphaned += 1
-        else:
-            raise ValueError(
-                f"a stored copy over {copy.window!r} names the seed {copy.windowed_from!r}, "
-                "which the stored sources do not hold"
-            )
-    if errors:
-        warn_left_out(
-            logger,
-            state_key,
-            errors,
-            entries=len(errors) + orphaned,
-            detail="%d seeds, %d copies of them",
-            counts=(len(errors), orphaned),
-        )
-    return (*seeds.values(), *copies)
-
-
-def seeded_sources(state: SessionState) -> list[SeededSource]:
-    """The datasets `SEEDED_SOURCES_STATE_KEY` holds; empty when the seeds did not start this turn.
-
-    The seeds come first, then the copies, each rebuilt from its seed
-    (`windowed_copy`). A seed stored in a shape `SeededSource` rejects is
-    left out with its copies (`_read_sources`).
-
-    Raises:
-        ValueError: If a copy names a seed the slot never held.
-    """
-    return _read_sources(state, SEEDED_SOURCES_STATE_KEY)
-
-
-def save_seeded_sources(state: SessionState, sources: Sequence[SeededSource]) -> None:
-    """Record `sources` as the datasets the user handed over from Search.
-
-    Each seed is stored whole and each copy as its seed's spec_id and its
-    window, so a copy costs the slot about 130 characters whatever its seed
-    holds.
-
-    Raises:
-        ValueError: If two of them share a spec_id, since every reader looks a
-            seeded dataset up by spec_id (`seeded_source`), so one spec_id
-            names one entry; or if a copy's seed is not among them, or the
-            copy is not `windowed_copy` of it.
-    """
-    spec_ids = [item.source.spec_id for item in sources]
-    repeated = sorted({spec_id for spec_id in spec_ids if spec_ids.count(spec_id) > 1})
-    if repeated:
-        raise ValueError(f"seeded sources name {repeated!r} more than once")
-    state[SEEDED_SOURCES_STATE_KEY] = _store_sources(sources)
-
-
-def seeded_source(sources: Sequence[SeededSource], spec_id: str | None) -> SeededSource | None:
-    """The one of `sources` whose spec_id is `spec_id`, a seed or a copy of one; `None` when none is."""
-    return next((item for item in sources if item.source.spec_id == spec_id), None)
-
-
-def seed_of(item: SeededSource) -> str:
-    """The spec_id of the seed `item` is: its own, or the seed it copies over another window."""
-    return item.windowed_from or item.source.spec_id
-
-
 def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
     """`period` as an identity's `requested_window`.
 
@@ -3272,6 +3075,9 @@ class WindowedPin(StrictModel):
     spec_id: SpecId
     identity: dict[str, Any]
     windowed_from: SpecId
+    resolved_sources: tuple[ResolvedSourceMention, ...] = Field(
+        default=(), exclude_if=lambda mentions: not mentions
+    )
     groups: tuple[ResolvedGroup, ...] = Field(default=(), exclude_if=lambda groups: not groups)
 
 
@@ -3314,7 +3120,11 @@ def windowed_pin(
     """The dataset `spec_id`, whose definition is `recorded`, over `window` in place of its own years."""
     copy_id, copied = windowed_identity(recorded.identity, window)
     return WindowedPin(
-        spec_id=copy_id, identity=copied, windowed_from=spec_id, groups=recorded.groups
+        spec_id=copy_id,
+        identity=copied,
+        windowed_from=spec_id,
+        groups=recorded.groups,
+        resolved_sources=getattr(recorded, "resolved_sources", ()),
     )
 
 
@@ -3399,18 +3209,24 @@ class PinSource(StrictModel):
     `block` is the spec block this turn's search returned for it, `None` when
     none was carried forward. `warnings` are the warning codes of the search
     part that returned it. `settled` says the search settled on it: a
-    `definite` part, a fetched (`chosen`) candidate, or the resolve
-    envelope's own `spec_id`. A pin of a settled dataset needs no decision
-    from the planner; a pin of an unsettled one, a candidate, needs the
-    planner's own. `earlier_turn` says an earlier turn of the conversation
+    `definite` part or a fetched (`chosen`) candidate. A pin of a settled
+    dataset needs no decision from the planner; a pin of an unsettled one, a
+    candidate, needs the planner's own. `earlier_turn` says an earlier turn of the conversation
     read it and no search this turn returned it; its block is then not held
-    here but read through `earlier_block` (`spec_block`).
+    here but read through `earlier_block` (`spec_block`). `other_count_of`
+    is the spec_id of the source that offered this one as another way of
+    counting its flow, when only a `fetch` of it settled it
+    (`harness.turn_records.SearchReading.other_count_of`): its block then
+    names its own measure, which search did not elect.
     """
 
+    provenance_ref: str | None = None
+    provenance_account: str | None = None
     block: dict[str, Any] | None = None
     warnings: tuple[str, ...] = ()
     settled: bool = False
     earlier_turn: bool = False
+    other_count_of: str | None = None
 
     def spec_block(self, spec_id: str) -> Mapping[str, Any] | None:
         """The spec block a pin of `spec_id`, this source, reuses."""
@@ -3430,70 +3246,9 @@ def save_pin_sources(state: SessionState, sources: Mapping[str, PinSource]) -> N
     }
 
 
-def dropped_seeds(state: SessionState) -> list[SeededSource]:
-    """The datasets `DROPPED_SEEDS_STATE_KEY` holds; empty when the turn dropped none.
-
-    The seeds come first, then the copies, each rebuilt from its seed
-    (`windowed_copy`). A seed stored in a shape `SeededSource` rejects is
-    left out with its copies (`_read_sources`), so the turn no longer holds
-    it as dropped.
-
-    Raises:
-        ValueError: If a copy names a seed the slot never held.
-    """
-    return _read_sources(state, DROPPED_SEEDS_STATE_KEY)
-
-
-def save_dropped_seeds(state: SessionState, sources: Sequence[SeededSource]) -> None:
-    """Record `sources` as the datasets the turn dropped, stored as `save_seeded_sources` stores them.
-
-    Raises:
-        ValueError: If a copy's seed is not among `sources`, or the copy is
-            not `windowed_copy` of it.
-    """
-    state[DROPPED_SEEDS_STATE_KEY] = _store_sources(sources)
-
-
 def dataset_of(identity: Mapping[str, Any]) -> dict[str, Any]:
-    """`identity` without its years: what a seed and every copy of it over another window share."""
+    """`identity` without its years: what a dataset and every copy of it over another window share."""
     return {key: value for key, value in identity.items() if key != "requested_window"}
-
-
-def names_dropped_seed(
-    state: SessionState, *, spec_id: str | None, identity: Mapping[str, Any] | None = None
-) -> bool:
-    """Whether a dataset is one the turn dropped, which no plan may pin and no retrieval may take.
-
-    The one rule every reader asks: `planner.agent.propose_plan` of a pin,
-    with its spec_id alone, and `translator.discovery` of a source, with its
-    identity too. A dataset the turn still holds as a seed or a copy of one
-    (`seeded_sources`) is not dropped, whatever
-    else matches: a second seed over the dropped one's dataset and other
-    years stays usable. Otherwise it is dropped when its spec_id is a dropped
-    one, or when its identity equals a dropped one's apart from
-    `requested_window`: a search for the dropped dataset over other years
-    resolves the same StatVar family under another spec_id
-    (`data_mcp.definition_writes.windowed_identity`).
-
-    A pin states no identity, so a pin on the dropped dataset under a
-    spec_id the turn never held passes here and is caught where its source
-    is read, with its identity: the translator refers it back as
-    `seed_dropped`. A held seed pinned over a dropped sibling's own window
-    moves to the dropped spec_id, which `propose_plan` checks before it
-    records any copy, so that spec_id is never held again.
-    """
-    if seeded_source(seeded_sources(state), spec_id) is not None:
-        return False
-    dropped = dropped_seeds(state)
-    if seeded_source(dropped, spec_id) is not None:
-        return True
-    if identity is None:
-        return False
-    dataset = dataset_of(identity)
-    return any(
-        item.source.identity is not None and dataset_of(item.source.identity) == dataset
-        for item in dropped
-    )
 
 
 def load_asks(state: SessionState) -> tuple[str, ...]:

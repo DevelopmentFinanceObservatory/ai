@@ -14,11 +14,10 @@ The `search` tool finds datasets and indicators matching a structured query. It 
 
 #### Parameters
 
-- `parts`: List of 1 to 6 `SearchPart` objects. Each part contains `variable` (string, 1 to 200 characters) and optional fields `entities` (list of `SearchEntity` objects with `text`, optional `role`, and optional `members`), `time` (string, 1 to 100 characters), `unit` (string, 1 to 100 characters), `source` (string, 1 to 200 characters), and `dataset` (string, 1 to 200 characters).
+- `parts`: List of 1 to 6 `SearchPart` objects. Each part contains `variable` (string, 1 to 200 characters) and optional fields `entities` (list of `SearchEntity` objects with `text`, optional `role`, and optional `members`), `time` (string, 1 to 100 characters), `unit` (string, 1 to 100 characters), and `sources` (list of 1 to 8 `SearchSource` objects with `text`, 1 to 120 characters, and optional `exclude` and `ref` (1 to 200 characters)).
 - `variable` and each entity's `text` take the caller's own words. `role` and `time` are matched against a fixed grammar. `role` names which side of a flow the entity sits on: a word for where something originates resolves to "from", a word for where it is directed resolves to "to". `time` takes a bare year, a range ("2015 to 2020"), an open start ("since 2015"), or "latest". A `role_text_not_recognised` or `time_text_not_parsed` warning means that field needs rephrasing in the grammar.
 - An entity whose `text` names a set of places (a continent, a subregion, or a group such as the European Union) takes `members: true` to ask for each member as its own series: "African countries" is `{"text": "Africa", "members": true}`. Without it the set reads as one place where the data holds a figure for it, and as its members where it holds none. The flag has no effect on a single place, and the wire request carries it only when true.
-- A `source` value refuses when no unit is given and is ignored when one is. Leave it out and choose the source through `get_data`'s facets instead.
-- `dataset` names the table a part asks for by its dcid and reaches dfo-apis as the part's `provenance`. On startup data-mcp reads the declared datasets from `GET /api/search/schema` (the `oneOf` list under `ParsedPart.provenance`), within 5 seconds and without retries, and lists each in the tool description with its title, its description, and whether it serves only a part that names it. When that read fails, the description lists none and data-mcp logs a warning. A dcid dfo-apis does not declare refuses `request_invalid`.
+- `sources` holds each publisher or dataset the user names for a part, in the user's words, with `exclude: true` for one the user asks to leave out: "aid to Kenya, not from CRS" is `{"text": "CRS", "exclude": true}`. Each reaches dfo-apis as a part's `sources` entry, with `exclude` as `polarity` (`include` or `exclude`). dfo-apis resolves the words against every source it holds, so the tool description lists none. A lender or recipient the flow runs to or from is an entity with its role, not a source. Words dfo-apis cannot resolve come back as `no_data` with reason `source_not_resolved`, and words that name several sources as `source_ambiguous`. Ask which candidate the user means, then retry the same source entry with its chosen `ref`, retaining `text` and `exclude`.
 - `raw_query`: Optional string up to 2000 characters holding the original query text.
 
 A compound ask splits into one part per measured variable.
@@ -65,7 +64,7 @@ The `get_data` tool retrieves the dataset behind a specified definition identifi
 Returns a `ToolResult` with the following items.
 
 - Text content with a digest of retrieved series, coverage details, and the frame reference pair `{spec_id, content_version}`. The coverage line states the requested window beside the served one when they differ, and a coverage-scope warning renders before the frame reference and the statistics. A recognised unit code (the SDG price-basis family, or this deployment's own currency and constant-price refs) reads in plain words beside its code, for example `SDG_CU_USD_M` as "current prices, US dollars, millions". On a `stat_vars_summed` warning the acknowledgement line names the family, by the warning's `stat_var_label` when it carries one, and says its StatVars were summed into one total series per provider, recipient, or entity, read from the role columns in `coverage.dimensions`. Each statistics block for the `dcid:<spec_id>` series is headed as the family's summed total, and the warning renders outside the five-warning budget.
-- Resource links pointing to artifact resources for signed download URLs.
+- Resource links pointing to artifact resources for download URLs.
 - Structured content containing the stripped manifest model, with the frame reference beside it as `frame_ref`. The manifest's own `{spec_id, content_version}` names dfo-apis' materialisation, which its artifacts are read under. A frame read with `place_types` is held under a `content_version` of its own (see Frame materialisation), so callers take the frame reference from `frame_ref`.
 
 An entity outside country, subregion, or continent scope refuses `entity_out_of_scope`. Drop it or replace it with a place. A mint over the coverage ceiling refuses `over_ceiling`, whose `fix.ceiling_kind` says whether narrowing `scope` can help. A `rows`, `bytes` or `requests` ceiling narrows with `scope`. A `member_cardinality` or `candidate_window` ceiling is fixed by the spec_id and calls for a narrower `search` instead, which `fix.remedy` tells the end user. A `candidate_window` ceiling is a family too broad for the mint to enumerate unaided, and its message gives the narrower `search`. A refusal that names no kind data-mcp maps states no `fix.ceiling_kind`. A stored definition that cannot be rebuilt because it binds an entity role the source no longer declares refuses `request_invalid`, names those roles in `fix.roles`, and offers a retry with them left out of `scope.entities` or a fresh `search`. A `stat_vars` `"sum"` mint over StatVars dfo-apis cannot add into one total refuses `rollup_not_summable` (`do_not_retry`). Its `fix.axes` names each axis the sum failed on, and its `fix.remedy` is a sentence for the end user.
@@ -168,7 +167,9 @@ Returns a `ToolResult` whose structured content is `{"spec_id": ..., "status": .
 
 ### dfo://artifact/{subject_id}/{content_version}/{artifact_digest}
 
-The artifact resource provides freshly signed download URLs for generated dataset artifacts. It is a URI template, listed by `resources/templates/list` and absent from `resources/list`.
+The artifact resource provides the stable download URL for a generated dataset artifact. It is a URI template, listed by `resources/templates/list` and absent from `resources/list`.
+
+The URL does not expire: a GET on it answers 302 to a URL signed for at most five minutes, so a client follows redirects. A `410` (`artifact_expired`, `snapshot_revoked`) means the artifact is gone.
 
 #### Parameters
 
@@ -180,9 +181,7 @@ The artifact resource provides freshly signed download URLs for generated datase
 
 Returns a JSON document with the following fields.
 
-- `url`: The freshly signed HTTPS URL.
-- `url_expires_at`: The ISO-8601 expiry timestamp.
-- `expires_in_s`: Integer seconds remaining before URL expiry.
+- `url`: The absolute download URL, the artifact's root-relative link resolved against `DFO_APIS_URL`.
 - `media_type`: MIME type of the artifact.
 - `bytes`: Integer byte size of the artifact.
 - `rendering`: Dictionary describing artifact format and layout.

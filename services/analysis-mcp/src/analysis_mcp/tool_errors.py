@@ -153,7 +153,13 @@ side by side. A type outside `PLACE_LEVELS`, such as `Place`,
 `ProvisionalNode` or `UNGeoRegion`, names no level, so places sharing only
 that type are refused, and one place alone passes whatever its type. It is
 retryable over a `filter` result that keeps one level (`place_level` on the
-type column).
+type column). On a flow party role (`financingProvider`,
+`financingRecipient`) the verbs leave out the parties whose
+`{role}_kind` cell is `total` and record them as `party_total` exclusions;
+the refusal fires there only when several parties include one with no
+kind, are all totals on a role the verb pools, or sit in a frame that
+carries no kind column for their role. `rank` ranks a role holding only
+totals.
 
 `service_unavailable` fires when the process's frame row budget
 (`common.row_budget`) has no room for a verb's input rows
@@ -187,7 +193,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from common.place_type import PLACE_LEVELS
+from common.place_type import PARTY_ROLES, PLACE_LEVELS, enrichment_role
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
@@ -1276,7 +1282,37 @@ class ToolRefusal:
     @classmethod
     def place_levels_mixed(cls, *, column: str, types: Sequence[str]) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
-        the engine that found them."""
+        the engine that found them, and empty when the frame carries no such
+        column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
+        message naming the role and the group-total exclusion, since a
+        `place_level` filter is not what its refusal asks for."""
+        role = enrichment_role(column, roles=PARTY_ROLES)
+        if role is not None and not types:
+            return cls(
+                code=ToolErrorCode.PLACE_LEVELS_MIXED,
+                message=(
+                    f"The {role} parties in this frame cannot be pooled or ranked: the frame "
+                    f"carries no {column!r} column, so its parties cannot be told apart from "
+                    "the group totals that hold them. Retrieve the data again with get_data "
+                    f"and place_types=true, which adds {column!r}, and retry with that "
+                    f"frame_ref, or filter the frame to a single {role} party."
+                ),
+                fix={"column": column, "types": []},
+            )
+        if role is not None:
+            return cls(
+                code=ToolErrorCode.PLACE_LEVELS_MIXED,
+                message=(
+                    f"The {role} parties in this frame cannot be pooled: {column!r} holds "
+                    f"{', '.join(types)}. Parties of kind total, such as a DAC regional total "
+                    "or the G7, are excluded from sums and ranks automatically, so this "
+                    "refusal means a party has no kind this server declares, or that every "
+                    f"party is a group total. Filter the frame with a category_match on {role!r} "
+                    f"naming the parties to keep, or a category_match on {column!r} keeping "
+                    "party and residual, then retry with that result's frame_ref."
+                ),
+                fix={"column": column, "types": list(types)},
+            )
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,
             message=(

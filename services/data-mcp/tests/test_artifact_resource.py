@@ -1,16 +1,14 @@
-"""Tests for the artifact resource: the snapshot read, signing, and the JSON-RPC refusal."""
+"""Tests for the artifact resource: the snapshot read, the download link, and the JSON-RPC refusal."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
 import pytest
 from data_mcp import client_holder
-from data_mcp.artifact_resource import _MAX_ADVERTISED_TTL_S
 from data_mcp.server import mcp
 from fastmcp import Client
 from mcp import MCPError
@@ -26,7 +24,9 @@ Handler = (
 _SUBJECT_ID = "spec_" + "1" * 32
 _CONTENT_VERSION = "cv_1"
 _ARTIFACT_DIGEST = "sha256:" + "1" * 64
-_SENTINEL_URL = "https://signed.example/fresh-url"
+_LINK = f"/api/datasets/{_SUBJECT_ID}/{_CONTENT_VERSION}/files/{_ARTIFACT_DIGEST}"
+# `_client` builds its `UpstreamClient` over `Settings.dfo_apis_url`'s default.
+_ORIGIN = "http://localhost:8083"
 
 
 def _uri(
@@ -43,21 +43,13 @@ def _snapshot_response(
     subject_id: str = _SUBJECT_ID,
     content_version: str = _CONTENT_VERSION,
     artifact_digest: str = _ARTIFACT_DIGEST,
-    url: str = _SENTINEL_URL,
-    expires_in_s: float = 900.0,
-    url_expires_at: str | None = None,
+    url: str = _LINK,
     tier: str = "working",
 ) -> dict[str, Any]:
-    """Mirrors `test_get_data_tool.py`'s `_manifest_response`, but with `url`/`url_expires_at`
-    populated -- this is the snapshot route's shape, the same `Manifest` shape mint returns,
-    with every currently-servable artifact re-signed.
-
-    `url_expires_at`, when passed, overrides the `expires_in_s`-derived value outright --
-    the escape hatch for tests pinning a raw timestamp string (e.g. a timezone-naive one)
-    that `expires_in_s` alone can't express.
+    """Mirrors `test_get_data_tool.py`'s `_manifest_response`, but with `url` populated --
+    this is the snapshot route's shape, the same `Manifest` shape mint returns, with each
+    artifact's `url` the root-relative stable link.
     """
-    if url_expires_at is None:
-        url_expires_at = (datetime.now(UTC) + timedelta(seconds=expires_in_s)).isoformat()
     return {
         "schema_version": 1,
         "definition": {
@@ -82,7 +74,6 @@ def _snapshot_response(
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": tier,
                 "url": url,
-                "url_expires_at": url_expires_at,
             }
         ],
     }
@@ -103,7 +94,7 @@ def _doc(contents: list[Any]) -> dict[str, Any]:
 # Happy path
 
 
-async def test_happy_path_reads_a_fresh_signed_url_and_metadata() -> None:
+async def test_happy_path_reads_the_absolute_download_link_and_metadata() -> None:
     requests: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -123,12 +114,13 @@ async def test_happy_path_reads_a_fresh_signed_url_and_metadata() -> None:
     assert doc["subject_id"] == _SUBJECT_ID
     assert doc["content_version"] == _CONTENT_VERSION
     assert doc["artifact_digest"] == _ARTIFACT_DIGEST
-    assert doc["url"] == _SENTINEL_URL
+    assert doc["url"] == _ORIGIN + _LINK
     assert doc["media_type"] == "application/octet-stream"
     assert doc["bytes"] == 100
     assert doc["tier"] == "working"
     assert doc["rendering"] == {"bundle": False, "format": "parquet", "layout": "frame"}
-    assert 0 < doc["expires_in_s"] <= _MAX_ADVERTISED_TTL_S
+    assert "url_expires_at" not in doc
+    assert "expires_in_s" not in doc
 
 
 async def test_call_uses_retry_true_and_the_default_timeout() -> None:
@@ -149,7 +141,7 @@ async def test_call_uses_retry_true_and_the_default_timeout() -> None:
 
     assert attempts == 3
     doc = _doc(contents)
-    assert doc["url"] == _SENTINEL_URL
+    assert doc["url"] == _ORIGIN + _LINK
     # No per-call override was passed, so every attempt used the client's own
     # default read timeout rather than mint's 125s override.
     for request in requests:
@@ -326,12 +318,12 @@ async def test_resource_read_failure_carries_no_tool_error_grammar() -> None:
     assert exc_info.value.error.data is None
 
 
-# Malformed / ambiguous snapshot responses -- never leak the signed URL
+# Malformed / ambiguous snapshot responses -- never leak the link
 
 
-async def test_malformed_artifact_entry_refuses_without_leaking_its_signed_url() -> None:
+async def test_malformed_artifact_entry_refuses_without_leaking_its_link() -> None:
     payload = _snapshot_response()
-    payload["artifacts"] = [{"url": "https://signed.example/should-not-leak"}]
+    payload["artifacts"] = [{"url": "/api/should-not-leak"}]
 
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, json=payload)
@@ -340,14 +332,14 @@ async def test_malformed_artifact_entry_refuses_without_leaking_its_signed_url()
         await _call_read_artifact(handler, _uri())
 
     assert exc_info.value.error.message.startswith("upstream_response_unusable: ")
-    assert "https://signed.example/should-not-leak" not in exc_info.value.error.message
+    assert "/api/should-not-leak" not in exc_info.value.error.message
 
 
 async def test_two_entries_sharing_a_digest_read_the_first_ones_bytes() -> None:
     payload = _snapshot_response()
     other_rendering = dict(payload["artifacts"][0])
     other_rendering["rendering"] = {"bundle": False, "format": "parquet", "layout": "long"}
-    other_rendering["url"] = "https://signed.example/a-second-rendering"
+    other_rendering["url"] = "/api/a-second-rendering"
     payload["artifacts"].append(other_rendering)
 
     def handler(_request: httpx2.Request) -> httpx2.Response:
@@ -355,15 +347,25 @@ async def test_two_entries_sharing_a_digest_read_the_first_ones_bytes() -> None:
 
     doc = _doc(await _call_read_artifact(handler, _uri()))
 
-    assert doc["url"] == _SENTINEL_URL
+    assert doc["url"] == _ORIGIN + _LINK
     assert doc["rendering"] == {"bundle": False, "format": "parquet", "layout": "frame"}
 
 
 @pytest.mark.parametrize(
     "bad_url",
-    ["", "/artifacts/foo.parquet", "   ", "http://[::1", "https:///path"],
+    [
+        "",
+        "   ",
+        "files/relative",
+        "https://signed.example/absolute",
+        "//other-origin.example/api/datasets",
+        "http://[::1",
+        "https:///path",
+    ],
 )
-async def test_unparseable_signed_url_refuses_without_leaking_its_value(bad_url: str) -> None:
+async def test_a_url_that_is_not_a_root_relative_link_refuses_without_leaking_its_value(
+    bad_url: str,
+) -> None:
     payload = _snapshot_response(url=bad_url)
 
     def handler(_request: httpx2.Request) -> httpx2.Response:
@@ -376,23 +378,6 @@ async def test_unparseable_signed_url_refuses_without_leaking_its_value(bad_url:
     assert message.startswith("upstream_response_unusable: ")
     if bad_url:
         assert bad_url not in message
-
-
-async def test_fake_store_scheme_is_accepted() -> None:
-    """The scheme check stays scheme-agnostic, so dfo-apis' `FakeArtifactStore` URLs
-    (`fake://artifact/<tier>/<digest>`) pass -- a later tightening to an https-only
-    rule would fail this test.
-    """
-    fake_url = "fake://artifact/working/sha256:" + "3" * 64
-    payload = _snapshot_response(url=fake_url)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    contents = await _call_read_artifact(handler, _uri())
-
-    doc = _doc(contents)
-    assert doc["url"] == fake_url
 
 
 # Local validation of the three URI parts -- no upstream call
@@ -420,104 +405,10 @@ async def test_malformed_uri_parts_refuse_locally_with_no_upstream_call(uri: str
     assert requests == []
 
 
-# Expiry is the caching bound
-
-
-async def test_expiry_within_bound_when_url_expires_fifteen_minutes_out() -> None:
-    payload = _snapshot_response(expires_in_s=900.0)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    contents = await _call_read_artifact(handler, _uri())
-
-    doc = _doc(contents)
-    assert 0 < doc["expires_in_s"] <= _MAX_ADVERTISED_TTL_S
-    assert doc["url_expires_at"] == payload["artifacts"][0]["url_expires_at"]
-
-
-async def test_expiry_floors_rather_than_rounds_up_a_fractional_remaining_lifetime() -> None:
-    payload = _snapshot_response(expires_in_s=10.9)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    contents = await _call_read_artifact(handler, _uri())
-
-    doc = _doc(contents)
-    true_remaining_s = (
-        datetime.fromisoformat(payload["artifacts"][0]["url_expires_at"]) - datetime.now(UTC)
-    ).total_seconds()
-    assert doc["expires_in_s"] <= true_remaining_s
-    assert doc["expires_in_s"] == 10
-
-
-async def test_already_expired_url_refuses_upstream_response_unusable() -> None:
-    payload = _snapshot_response(expires_in_s=-60.0)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    with pytest.raises(MCPError) as exc_info:
-        await _call_read_artifact(handler, _uri())
-
-    assert exc_info.value.error.message.startswith("upstream_response_unusable: ")
-
-
-async def test_expiry_within_the_skew_tolerance_of_already_past_still_succeeds() -> None:
-    payload = _snapshot_response(expires_in_s=-1.0)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    contents = await _call_read_artifact(handler, _uri())
-
-    doc = _doc(contents)
-    assert doc["expires_in_s"] == 0
-
-
-async def test_expiry_a_few_seconds_over_the_advertised_ttl_clamps_to_it() -> None:
-    payload = _snapshot_response(expires_in_s=_MAX_ADVERTISED_TTL_S + 3.0)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    contents = await _call_read_artifact(handler, _uri())
-
-    doc = _doc(contents)
-    assert doc["expires_in_s"] == _MAX_ADVERTISED_TTL_S
-
-
-async def test_naive_url_expires_at_refuses_upstream_response_unusable() -> None:
-    payload = _snapshot_response(url_expires_at="2026-08-12T10:00:00")
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    with pytest.raises(MCPError) as exc_info:
-        await _call_read_artifact(handler, _uri())
-
-    assert exc_info.value.error.message.startswith("upstream_response_unusable: ")
-
-
-async def test_expiry_beyond_the_advertised_ttl_refuses_upstream_response_unusable() -> None:
-    payload = _snapshot_response(expires_in_s=_MAX_ADVERTISED_TTL_S * 1000.0)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
-
-    with pytest.raises(MCPError) as exc_info:
-        await _call_read_artifact(handler, _uri())
-
-    assert exc_info.value.error.message.startswith("upstream_response_unusable: ")
-
-
 # The note, and the document's own JSON shape
 
 
-async def test_note_mentions_not_caching_and_the_document_is_valid_json_with_the_right_mime_type() -> (
-    None
-):
+async def test_the_document_is_valid_json_with_the_right_mime_type_and_a_note() -> None:
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, json=_snapshot_response())
 
@@ -525,4 +416,4 @@ async def test_note_mentions_not_caching_and_the_document_is_valid_json_with_the
 
     assert contents[0].mime_type == "application/json"
     doc = _doc(contents)
-    assert "must not be cached" in doc["note"]
+    assert "does not expire" in doc["note"]
