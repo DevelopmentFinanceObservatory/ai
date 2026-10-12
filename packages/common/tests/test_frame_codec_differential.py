@@ -1,21 +1,15 @@
 """Record-and-replay for the Parquet frame codec: every frame in
 `fixtures/frame_codec_differential.jsonl` goes through
-`frame_to_parquet_bytes` then `frame_from_parquet_bytes`, and the decoded
-frame's `frame_sha256` must equal the recorded one.
+`frame_to_parquet_bytes` then `frame_from_verified_parquet_bytes`, and the
+decoded frame's `frame_sha256` must equal the recorded one.
 
 The fixture pins the decoded frame, not the Parquet bytes, so a new on-disk
-layout passes as long as it round-trips every frame to the same bytes. That
-round trip runs on one revision, so `fixtures/legacy_parquet/` holds Parquet
-files written once by an earlier writer, with their `frame_sha256` in
-`manifest.json`; `test_legacy_parquet_decodes_to_recorded_frame` decodes the
-committed bytes, so objects already in storage must keep decoding.
+layout passes as long as it round-trips every frame to the same bytes.
 
 Cases are seeded (`_SEED`) and cover roleless and multi-role frames, string,
 converted (`UnitRequest`) and absent units in one column, facets, non-ASCII
 refs, extreme doubles and an empty frame. Record the fixture again with
 `uv run --package common python packages/common/tests/test_frame_codec_differential.py`.
-The legacy files are written only when `fixtures/legacy_parquet/` holds no
-manifest, so recording again never replaces bytes an earlier writer produced.
 """
 
 from __future__ import annotations
@@ -26,15 +20,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from common.materialisation.frame_codec import frame_from_parquet_bytes, frame_to_parquet_bytes
+from common.materialisation.frame_codec import (
+    frame_from_verified_parquet_bytes,
+    frame_to_parquet_bytes,
+)
 from dfo_frame_grammar import STATUS_COLUMN, Frame, canonical_frame_bytes, frame_sha256
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "frame_codec_differential.jsonl"
-_LEGACY_DIR = Path(__file__).parent / "fixtures" / "legacy_parquet"
-_LEGACY_MANIFEST = _LEGACY_DIR / "manifest.json"
-# Empty roleless frame, `-0.0`, then seeded frames with no, one, two and three
-# roles (the last with `Área`); the seeded frames mix string and dict units.
-_LEGACY_CASE_IDS = ("codec-001", "codec-002", "codec-003", "codec-004", "codec-005", "codec-006")
 _SEED = 20260930
 
 _UNITS: tuple[object, ...] = (
@@ -126,7 +118,7 @@ def generate_cases() -> list[dict[str, Any]]:
 
 
 def _roundtrip_sha256(frame: Frame) -> str:
-    return frame_sha256(frame_from_parquet_bytes(frame_to_parquet_bytes(frame)))
+    return frame_sha256(frame_from_verified_parquet_bytes(frame_to_parquet_bytes(frame)))
 
 
 def _load() -> list[dict[str, Any]]:
@@ -152,41 +144,6 @@ def test_generator_reproduces_fixture_inputs() -> None:
     assert json.dumps(generate_cases()) == json.dumps(recorded)
 
 
-def _load_legacy() -> dict[str, str]:
-    """File name to recorded `frame_sha256`; empty before the first recording."""
-    if not _LEGACY_MANIFEST.exists():
-        return {}
-    return json.loads(_LEGACY_MANIFEST.read_text())
-
-
-LEGACY = _load_legacy()
-
-
-def test_legacy_manifest_lists_every_case() -> None:
-    assert sorted(LEGACY) == sorted(f"{case_id}.parquet" for case_id in _LEGACY_CASE_IDS)
-    assert sorted(path.name for path in _LEGACY_DIR.glob("*.parquet")) == sorted(LEGACY)
-
-
-@pytest.mark.parametrize("name", sorted(LEGACY))
-def test_legacy_parquet_decodes_to_recorded_frame(name: str) -> None:
-    frame = frame_from_parquet_bytes((_LEGACY_DIR / name).read_bytes())
-    assert frame_sha256(frame) == LEGACY[name]
-
-
-def _record_legacy(cases: list[dict[str, Any]]) -> None:
-    if _LEGACY_MANIFEST.exists():
-        return
-    by_id = {case["id"]: case for case in cases}
-    manifest: dict[str, str] = {}
-    _LEGACY_DIR.mkdir(parents=True, exist_ok=True)
-    for case_id in _LEGACY_CASE_IDS:
-        frame = _frame(by_id[case_id]["frame"])
-        name = f"{case_id}.parquet"
-        (_LEGACY_DIR / name).write_bytes(frame_to_parquet_bytes(frame))
-        manifest[name] = frame_sha256(frame)
-    _LEGACY_MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
-
-
 def _record() -> None:
     cases = generate_cases()
     lines = []
@@ -200,7 +157,6 @@ def _record() -> None:
         lines.append(json.dumps(record, separators=(",", ":")) + "\n")
     _FIXTURE_PATH.parent.mkdir(exist_ok=True)
     _FIXTURE_PATH.write_text("".join(lines))
-    _record_legacy(cases)
 
 
 if __name__ == "__main__":

@@ -242,26 +242,8 @@ dev: _check-env
     PORT={{PORT}} PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         PRESENTATION_RELEASE_REQUIRED=false uv run --env-file {{ENV_FILE}} harness-server
 
-# Serve the studio surface from deterministic scripted seams: no model, no
-# upstream, no keys, sequential wire ids. Identical requests produce
-# identical streams -- for frontend development and testing.
-# The prompt picks the path: "comprehensive" -> plan pause, "ambiguous" ->
-# elicitation, "nothing" -> no-data close, "fail" -> error frame,
-# "canvas" -> answered from the canvas digest alone, no data fetch,
-# "compare" -> direct fetch of a two-country frame as one two-series chart,
-# "to the chart" / "to that chart" / "same chart" -> the same fetch, as a
-# change to the newest card on the canvas instead of a new one,
-# "misnamed" -> an approved plan whose analysis step refuses,
-# anything else -> direct fetch + one card.
-studio-scripted:
-    @echo "Scripted studio → http://localhost:{{PORT}}/api/studio/turn (any Bearer token)"
-    STUDIO_SCRIPTED=true SEED_FIXTURE_FRAMES=true PORT={{PORT}} \
-        PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
-        PRESENTATION_RELEASE_REQUIRED=false uv run harness-server
-
-# Serve the studio surface against the real model and the real platform: a
-# question is answered by the planner, not a script. Needs GOOGLE_API_KEY in
-# {{ENV_FILE}}. Costs model spend on every turn.
+# Serve the studio surface against the real model and the real platform.
+# Needs GOOGLE_API_KEY in {{ENV_FILE}}. Costs model spend on every turn.
 # A plan whose steps include an analysis verb runs and narrates its answer,
 # then cannot render a card: the platform refuses a frame_ref an analysis verb
 # minted. The turn still reaches `done` with the figures in prose.
@@ -281,15 +263,14 @@ studio-live: _check-env
 
 # Ask the harness one question from a terminal: POST /api/studio/turn,
 # render every frame, and prompt through any plan or elicitation pause --
-# no interrupt_id to copy by hand. Works against studio-scripted or
-# studio-live (same contract, same port). Pass --yes to skip prompts.
+# no interrupt_id to copy by hand. Works against studio-live or dev (same
+# contract, same port). Pass --yes to skip prompts.
 # ARGS reaches the script as "$@" (positional-arguments, set above), never
 # through {{ARGS}} text substitution -- a question containing shell
 # metacharacters (';', quotes, ...) must stay inert, not run as a second
 # command. Loads {{ENV_FILE}} when present, matching studio-live, so a real
 # STUDIO_API_TOKEN there reaches this script instead of the CLI falling back
-# to a token the live server would reject; studio-scripted needs no env
-# file at all, so its absence stays fine.
+# to a token the live server would reject.
 ask *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -335,13 +316,7 @@ PLANNER_AGENT    := "evals/agents/harness_planner_v2"
 PLANNER_SET      := "harness-planner-v2"
 PAIR_AGENT       := "evals/agents/harness_pair_v1"
 PAIR_SET         := "harness-pair-v1"
-SKILLS_AGENT     := "evals/agents/harness_planner_skills_v1"
-SKILLS_SET       := "harness-planner-skills-v1"
 EVAL_ADK         := 'uv run --with "google-adk[eval]"'
-
-# Port the ADK web UI listens on. `just dev` owns {{PORT}}, and the web UI
-# has to reach those mounts, so the two cannot share one.
-ADK_WEB_PORT     := "8000"
 
 # --config_file_path is not optional. Omitted, the CLI silently substitutes
 # ADK's hardcoded defaults instead of test_config.json's criteria.
@@ -358,12 +333,6 @@ eval-pair: _check-env
         --config_file_path {{PAIR_AGENT}}/test_config.json \
         --print_detailed_results
 
-# Score harness-planner-skills-v1 -- does the planner load the skill a question needs -- from the CLI
-eval-planner-skills: _check-env
-    {{EVAL_ADK}} adk eval {{SKILLS_AGENT}} {{SKILLS_SET}} \
-        --config_file_path {{SKILLS_AGENT}}/test_config.json \
-        --print_detailed_results
-
 # The UI takes the agents dir, not one agent folder, and finds eval sets by
 # scanning each agent folder for *.evalset.json.
 #
@@ -378,71 +347,20 @@ eval-web: _check-env
     @echo "For reading runs. Score from the CLI -- not the Run evaluation dialog."
     {{EVAL_ADK}} adk web evals/agents
 
-# Read a real turn's events in the ADK web UI: the whole system as one app,
-# not the eval agents `eval-web` lists. Needs `just dev` running.
-adk-web: _check-env
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -z "$(grep -s '^GOOGLE_API_KEY=' {{ENV_FILE}} | cut -d= -f2-)" ]; then
-        echo "ERROR: GOOGLE_API_KEY is blank in {{ENV_FILE}} -- run 'just env' to fill it." >&2
-        exit 1
-    fi
-    token="$(grep -s '^MCP_API_TOKEN=' {{ENV_FILE}} | cut -d= -f2-)"
-    if [ -z "$token" ]; then
-        echo "ERROR: MCP_API_TOKEN is blank in {{ENV_FILE}} -- run 'just env' to fill it." >&2
-        echo "  The MCP mounts require the token 'just dev' resolved; without the same value here, every tool call 401s." >&2
-        exit 1
-    fi
-    # An empty JSON body is not a valid MCP message, so a healthy mount that
-    # accepts the bearer answers 400 with a JSON-RPC protocol error (and mints
-    # no MCP session). A missing or wrong bearer is refused earlier, at the
-    # auth middleware, with 401. Nothing listening is 000. Every other status
-    # (404 from a wrong server or a missing mount, 405, 5xx from a broken
-    # harness) is refused rather than passed through to fail later.
-    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:{{PORT}}/mcp/data/mcp" \
-        -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' -d '{}' || true)"
-    if [ "$code" = "000" ]; then
-        echo "ERROR: nothing is serving the MCP mounts on port {{PORT}} -- run 'just dev' (or 'just studio-live') in another terminal first." >&2
-        exit 1
-    fi
-    if [ "$code" = "401" ]; then
-        echo "ERROR: the harness on port {{PORT}} rejects MCP_API_TOKEN from {{ENV_FILE}} -- restart 'just dev' after setting it, since a server with none minted a token only it knows." >&2
-        exit 1
-    fi
-    if [ "$code" != "400" ]; then
-        echo "ERROR: POST /mcp/data/mcp on port {{PORT}} answered HTTP $code, not the 400 protocol error a healthy MCP mount returns -- check that 'just dev' is what serves port {{PORT}} and that its log shows the mounts started." >&2
-        exit 1
-    fi
-    echo "ADK web → http://127.0.0.1:{{ADK_WEB_PORT}} (app: dfo_analyst_graph)"
-    echo "  MCP mounts → http://127.0.0.1:{{PORT}}/mcp/{data,analysis,presentation}/mcp"
-    echo "  Startup takes 15-20s: translation reads both MCP servers' schemas."
-    PORT={{PORT}} uv run --env-file {{ENV_FILE}} --with "google-adk" adk web evals/agents \
-        --port {{ADK_WEB_PORT}} --session_service_uri memory://
-
-# harness-studio-v1's contract layer: deterministic, in-process, no key.
-# (CI runs the same battery via services/harness/tests/test_studio_conformance.py.)
+# The real workflow and planner seam run with scripted models, and every model
+# request is recorded and checked. Cases marked xfail hold a known gap (see
+# evals/studio/README.md). CI runs the same battery via
+# services/harness/tests/test_studio_orchestrator_eval.py.
+# The studio's model-free contract: deterministic, in-process, no key.
 eval-studio-contract:
     uv run --package harness python evals/studio/run.py --mode scripted
 
-# The orchestrator engine's model-free contract. The real graph and planner seam
-# run with scripted models, and every model request is recorded and checked.
-# Cases marked xfail hold a known gap. See evals/studio/README.md.
-eval-studio-orchestrator:
-    uv run --package harness python evals/studio/run.py --mode orchestrator
-
-# harness-studio-v1 in full: live agent + rubric judge. Start the harness
-# first (and the datasets stub if the hosted mint is down); needs the model
-# key. See evals/studio/README.md.
+# Start the harness with `just studio-live` first; needs the model key. See
+# evals/studio/README.md.
+# The studio's live cases with the rubric judge.
 eval-studio: _check-env
     uv run --env-file {{ENV_FILE}} --package harness python evals/studio/run.py \
         --mode live --url http://localhost:{{PORT}} --judge
-
-# The orchestrator engine's live cases with the rubric judge. Start the harness
-# with `STUDIO_ENGINE=orchestrator just studio-live` first; needs the model key.
-eval-studio-orchestrator-live: _check-env
-    uv run --env-file {{ENV_FILE}} --package harness python evals/studio/run.py \
-        --mode orchestrator-live --url http://localhost:{{PORT}} --judge
 
 # ── Quality ──────────────────────────────────────────
 

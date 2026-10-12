@@ -12,9 +12,9 @@ import hashlib
 import io
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -36,18 +36,22 @@ from common.materialisation import (
     frame_to_parquet_bytes,
     gcs_store,
 )
+from common.recipe import build_recipe
 from dfo_frame_grammar import (
+    ComposedUnit,
     Frame,
+    FrameError,
+    StatVarPart,
+    UnitRequest,
     canonical_frame_bytes,
     canonical_frame_schema,
     frame_sha256,
-    unit_cell_to_json,
+    mint_content_version,
 )
 from google.api_core.exceptions import NotFound, PreconditionFailed
 
 _BUCKET = "dev-fin-observatory-frames"
-_LEGACY_DIR = Path(__file__).parent / "fixtures" / "legacy_parquet"
-_WRITTEN_PREFIX = "frames/v3"
+_WRITTEN_PREFIX = "frames/v4"
 
 
 class _FakeBlob:
@@ -372,13 +376,12 @@ async def test_get_returns_none_for_a_pair_never_registered() -> None:
     assert result is None
 
 
-@pytest.mark.parametrize("prefix", ["frames/v3", "frames/v2", "frames/v1"])
-async def test_get_raises_frame_integrity_error_on_a_digest_mismatch(prefix: str) -> None:
+async def test_get_raises_frame_integrity_error_on_a_digest_mismatch() -> None:
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
-    frame_object_name = _object_name(ref, prefix=prefix)
-    _store_table(client, frame_object_name, _LAYOUT_TABLES[prefix](_frame()), ref)
+    frame_object_name = _object_name(ref, prefix=_WRITTEN_PREFIX)
+    _store_table(client, frame_object_name, _frame().table, ref)
     # Tamper with the stored bytes directly, standing in for bit rot or a
     # tampered object -- the recorded sha256 in the blob's metadata no
     # longer matches.
@@ -407,7 +410,7 @@ async def test_verify_content_version_on_read_raises_on_a_mismatch() -> None:
         bucket_name=_BUCKET,
         client=client,
         verify_content_version_on_read=True,
-        derive_content_version=lambda frame, upstream_trace: "cv_" + "z" * 32,
+        derive_content_version=lambda frame: "cv_" + "z" * 32,
     )
     ref = _ref()
     await store.put(ref, frame=_frame(), trace=_trace(ref), writer="writer-1")
@@ -423,13 +426,38 @@ async def test_verify_content_version_on_read_passes_on_a_match() -> None:
         bucket_name=_BUCKET,
         client=client,
         verify_content_version_on_read=True,
-        derive_content_version=lambda frame, upstream_trace: ref.content_version,
+        derive_content_version=lambda frame: ref.content_version,
     )
     await store.put(ref, frame=_frame(), trace=_trace(ref), writer="writer-1")
 
     result = await store.get(ref)
 
     assert result is not None
+
+
+@pytest.mark.parametrize("order", [[1, 0], [0, 0]], ids=["out-of-order", "duplicated"])
+async def test_verify_content_version_on_read_refuses_rows_no_frame_holds(
+    order: list[int],
+) -> None:
+    """The decoder wraps the canonical schema and trusts the rows, so the recompute
+    is what finds them out of order."""
+    client = _FakeStorageClient()
+    ref = _ref()
+    store = GcsMaterialisationStore(
+        bucket_name=_BUCKET,
+        client=client,
+        verify_content_version_on_read=True,
+        derive_content_version=lambda frame: mint_content_version(frame_sha256=frame_sha256(frame)),
+    )
+    table = _two_row_frame().table.take(order)
+    _store_table(client, _object_name(ref, prefix=_WRITTEN_PREFIX), table, ref)
+
+    with pytest.raises(FrameIntegrityError) as raised:
+        await store.get(ref)
+
+    assert raised.value.ref == ref
+    assert isinstance(raised.value.__cause__, FrameError)
+    assert raised.value.__cause__.category == "row_key_not_increasing"
 
 
 def test_constructor_requires_derive_content_version_when_verification_is_on() -> None:
@@ -548,9 +576,6 @@ async def test_get_refuses_an_over_row_ceiling_frame_without_decoding_it(
 
     monkeypatch.setattr(
         "common.materialisation.gcs_store.frame_from_verified_parquet_bytes", _fail_if_called
-    )
-    monkeypatch.setattr(
-        "common.materialisation.gcs_store.frame_from_parquet_bytes", _fail_if_called
     )
 
     with pytest.raises(FrameTooLarge, match=r"2 rows.*1-row ceiling"):
@@ -704,14 +729,19 @@ def _store_table(client: _FakeStorageClient, name: str, table: pa.Table, ref: Fr
     client.metadata[name] = {"frame_sha256": hashlib.sha256(sink.getvalue()).hexdigest()}
 
 
-def _every_unit_frame(units: int = 4) -> Frame:
-    """One row for each of the first `units` forms a `unit` cell takes: none, a ref,
-    a converted unit and a composed unit."""
+def _every_unit_frame() -> Frame:
+    """One row for each form a `unit` cell takes: none, a ref, a converted unit, a
+    composed unit over a ref and a StatVar, and a composed unit over two converted
+    units."""
     forms: list[object] = [
         None,
         "dcid:USDollar",
         {"currency": "USD", "prices": "constant", "base_year": 2015},
         {"numerator": "dcid:USDollar", "denominator": {"stat_var": "dcid:Count_Person"}},
+        {
+            "numerator": {"currency": "EUR", "prices": "current"},
+            "denominator": {"currency": "USD", "prices": "constant", "base_year": 2015},
+        },
     ]
     return Frame.build(
         role_keys=["reporter"],
@@ -723,13 +753,14 @@ def _every_unit_frame(units: int = 4) -> Frame:
                 "value": 100.5 - offset,
                 "unit": unit,
             }
-            for offset, unit in enumerate(forms[:units])
+            for offset, unit in enumerate(forms)
         ],
     )
 
 
 def _two_member_unit_table(frame: Frame) -> pa.Table:
-    """`frame`'s table in the `frames/v2/` layout: `unit` as `struct<ref, request>`."""
+    """`frame`'s table with `unit` as `struct<ref, request>`, the layout `frames/v2/`
+    held."""
     position = frame.table.schema.get_field_index("unit")
     unit = frame.table.column(position).combine_chunks()
     assert isinstance(unit, pa.StructArray)
@@ -741,71 +772,70 @@ def _two_member_unit_table(frame: Frame) -> pa.Table:
     return frame.table.set_column(position, "unit", two_member)
 
 
-def _text_unit_table(frame: Frame) -> pa.Table:
-    """`frame`'s rows in the `frames/v1/` layout: `unit` as JSON text, no `status`."""
+def _struct_composed_part(part: str | UnitRequest | StatVarPart) -> dict[str, object]:
+    if isinstance(part, str):
+        return {"ref": part}
+    if isinstance(part, UnitRequest):
+        return {"request": part.as_json()}
+    return {"stat_var": part.stat_var}
+
+
+def _struct_composed_cell(cell: object) -> dict[str, object] | None:
+    if cell is None:
+        return None
+    if isinstance(cell, ComposedUnit):
+        return {
+            "composed": {
+                "numerator": _struct_composed_part(cell.numerator),
+                "denominator": _struct_composed_part(cell.denominator),
+            }
+        }
+    return _struct_composed_part(cast("str | UnitRequest", cell))
+
+
+def _struct_composed_unit_table(frame: Frame) -> pa.Table:
+    """`frame`'s rows with `unit`'s `composed` member as `struct<numerator,
+    denominator>`, each side a `struct<ref, request, stat_var>`: the layout of the
+    `frames/v3/` objects written before `composed` became JCS text."""
+    request = pa.struct(
+        [
+            pa.field("currency", pa.string()),
+            pa.field("prices", pa.string()),
+            pa.field("base_year", pa.int64()),
+        ]
+    )
+    part = pa.struct(
+        [
+            pa.field("ref", pa.string()),
+            pa.field("request", request),
+            pa.field("stat_var", pa.string()),
+        ]
+    )
+    unit_type = pa.struct(
+        [
+            pa.field("ref", pa.string()),
+            pa.field("request", request),
+            pa.field(
+                "composed",
+                pa.struct([pa.field("numerator", part), pa.field("denominator", part)]),
+            ),
+        ]
+    )
     position = frame.columns.index("unit")
-    texts = [
-        None if row[position] is None else json.dumps(unit_cell_to_json(row[position]))
-        for row in frame.rows
-    ]
-    table = frame.table.drop_columns("status")
-    return table.set_column(
-        table.schema.get_field_index("unit"), "unit", pa.array(texts, type=pa.string())
+    cells = [_struct_composed_cell(row[position]) for row in frame.rows]
+    return frame.table.set_column(
+        frame.table.schema.get_field_index("unit"), "unit", pa.array(cells, type=unit_type)
     )
 
 
-# Each prefix the store reads, with a frame's table as that layout holds it.
-_LAYOUT_TABLES: dict[str, Callable[[Frame], pa.Table]] = {
-    "frames/v3": lambda frame: frame.table,
-    "frames/v2": _two_member_unit_table,
-    "frames/v1": _text_unit_table,
-}
-
-
-@pytest.mark.parametrize(
-    ("prefix", "units"), [("frames/v3", 4), ("frames/v2", 3), ("frames/v1", 4)]
-)
-async def test_get_reads_the_frame_its_rows_build_from_every_layout(
-    prefix: str, units: int
-) -> None:
-    """Each layout holds a null, a ref and a converted unit; the two-member struct
-    alone holds no composed unit."""
-    client = _FakeStorageClient()
-    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
-    ref = _ref()
-    frame = _every_unit_frame(units)
-    _store_table(client, _object_name(ref, prefix=prefix), _LAYOUT_TABLES[prefix](frame), ref)
-
-    result = await store.get(ref)
-
-    assert result is not None
-    assert result[0] == frame
-    assert canonical_frame_bytes(result[0]) == canonical_frame_bytes(frame)
-    assert result[1] == _trace(ref)
-
-
-async def test_get_reads_the_first_layout_that_holds_the_reference() -> None:
-    client = _FakeStorageClient()
-    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
-    ref = _ref()
-    _store_table(client, _object_name(ref, prefix="frames/v3"), _frame().table, ref)
-    two_member = _two_member_unit_table(_two_row_frame())
-    _store_table(client, _object_name(ref, prefix="frames/v2"), two_member, ref)
-
-    result = await store.get(ref)
-
-    assert result is not None
-    assert result[0] == _frame()
-
-
-async def test_put_writes_the_canonical_table_under_the_v3_prefix_and_get_reads_it_back() -> None:
+async def test_put_writes_the_canonical_table_under_the_v4_prefix_and_get_reads_it_back() -> None:
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
     frame = _every_unit_frame()
 
     await store.put(ref, frame=frame, trace=_trace(ref), writer="writer-1")
-    name = _object_name(ref, prefix="frames/v3")
+    name = _object_name(ref, prefix="frames/v4")
     stored_schema = pq.read_schema(io.BytesIO(client.objects[name]))
     result = await store.get(ref)
 
@@ -814,7 +844,26 @@ async def test_put_writes_the_canonical_table_under_the_v3_prefix_and_get_reads_
     assert result is not None
     assert result[0] == frame
     assert result[0].table.schema.metadata is None
+    assert canonical_frame_bytes(result[0]) == canonical_frame_bytes(frame)
     assert frame_sha256(result[0]) == frame_sha256(frame)
+    assert result[1] == _trace(ref)
+
+
+@pytest.mark.parametrize("prefix", ["frames/v3", "frames/v2", "frames/v1"])
+async def test_an_object_held_only_under_an_older_prefix_is_a_miss(prefix: str) -> None:
+    """The object holds the canonical table and passes every byte check, so only
+    its prefix keeps it out."""
+    client = _FakeStorageClient()
+    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
+    ref = _ref()
+    name = _object_name(ref, prefix=prefix)
+    _store_table(client, name, _frame().table, ref)
+    client.created[name] = datetime(2026, 9, 14, tzinfo=UTC)
+
+    assert await store.open(ref) is None
+    assert await store.get(ref) is None
+    assert await store.get_trace(ref) is None
+    assert await store.list_frames() == []
 
 
 def _float32_value_table() -> pa.Table:
@@ -823,55 +872,48 @@ def _float32_value_table() -> pa.Table:
     return table.set_column(position, "value", table.column("value").cast(pa.float32()))
 
 
-def _legacy_text_unit_table() -> pa.Table:
-    return pq.read_table(_LEGACY_DIR / "codec-004.parquet")
+def _text_unit_table() -> pa.Table:
+    """`_frame()`'s rows with `unit` as JSON text and no `status`, the layout
+    `frames/v1/` held."""
+    table = _frame().table.drop_columns("status")
+    position = table.schema.get_field_index("unit")
+    texts = [
+        None if cell is None else json.dumps(cell)
+        for cell in _frame().table.column("unit").to_pylist()
+    ]
+    return table.set_column(position, "unit", pa.array(texts, type=pa.string()))
 
 
 @pytest.mark.parametrize(
-    ("prefix", "table"),
+    "table",
     [
-        pytest.param("frames/v3", _legacy_text_unit_table, id="v3-text-unit"),
-        pytest.param("frames/v3", _float32_value_table, id="v3-float32-value"),
+        pytest.param(_text_unit_table, id="text-unit"),
+        pytest.param(_float32_value_table, id="float32-value"),
+        pytest.param(lambda: _two_member_unit_table(_frame()), id="two-member-unit"),
         pytest.param(
-            "frames/v3", lambda: _two_member_unit_table(_frame()), id="v3-two-member-unit"
+            lambda: _struct_composed_unit_table(_every_unit_frame()), id="struct-composed-unit"
         ),
-        pytest.param("frames/v2", _legacy_text_unit_table, id="v2-text-unit"),
-        pytest.param("frames/v2", _float32_value_table, id="v2-float32-value"),
     ],
 )
-async def test_get_refuses_an_object_whose_schema_is_not_its_layouts_own(
-    prefix: str, table: Callable[[], pa.Table]
+async def test_get_refuses_an_object_whose_schema_is_not_the_canonical_one(
+    table: Callable[[], pa.Table],
 ) -> None:
-    """Each object passes every byte check, and each holds cells a v1 read
-    would validate into a frame: the committed text-layout object
-    (JSON-text `unit`, no `status`), the canonical columns with a
-    `float32` value, and the two-member `unit` struct. The v3 and v2
-    decoders wrap only their own schemas, so each refuses."""
+    """Each object passes every byte check under `frames/v4/` and holds rows the
+    grammar reads in some layout: a text-layout object (JSON-text `unit`, no
+    `status`), the canonical columns with a `float32` value, the
+    two-member `unit` struct, and the struct-composed `unit` struct. The decoder
+    wraps only the canonical schema, so each refuses."""
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
-    _store_table(client, _object_name(ref, prefix=prefix), table(), ref)
+    _store_table(client, _object_name(ref, prefix=_WRITTEN_PREFIX), table(), ref)
 
-    with pytest.raises(FrameIntegrityError, match="does not decode to a frame"):
+    with pytest.raises(FrameIntegrityError) as raised:
         await store.get(ref)
 
-
-async def test_get_reads_an_earlier_layout_object_under_the_v1_prefix() -> None:
-    client = _FakeStorageClient()
-    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
-    ref = _ref()
-    manifest = json.loads((_LEGACY_DIR / "manifest.json").read_text())
-    legacy_table = pq.read_table(_LEGACY_DIR / "codec-004.parquet")
-    _store_table(client, _object_name(ref, prefix="frames/v1"), legacy_table, ref)
-
-    held = await store.open(ref)
-    result = await store.get(ref)
-
-    assert held is not None
-    assert held.num_rows is None
-    assert result is not None
-    assert frame_sha256(result[0]) == manifest["codec-004.parquet"]
-    assert result[1] == _trace(ref)
+    assert raised.value.ref == ref
+    assert isinstance(raised.value.__cause__, FrameError)
+    assert raised.value.__cause__.category == "schema_violation"
 
 
 async def test_get_trace_reads_the_trace_without_decoding_a_frame(
@@ -885,7 +927,6 @@ async def test_get_trace_reads_the_trace_without_decoding_a_frame(
         raise AssertionError("reading a trace decodes no frame")
 
     monkeypatch.setattr(gcs_store, "frame_from_verified_parquet_bytes", _fail_if_called)
-    monkeypatch.setattr(gcs_store, "frame_from_parquet_bytes", _fail_if_called)
 
     assert await store.get_trace(ref) == _trace(ref)
 
@@ -927,7 +968,7 @@ async def test_a_mint_record_is_written_beside_a_frame_the_bucket_already_holds(
     assert await store.get_mint_record(ref) is None
     await store.put_mint_record(_mint_record(ref))
 
-    record_name = f"mints/v1/{ref.spec_id}/{ref.content_version}.json"
+    record_name = f"mints/v4/{ref.spec_id}/{ref.content_version}.json"
     assert objects == {
         _object_name(ref, prefix=_WRITTEN_PREFIX): frame_bytes,
         record_name: encode_mint_record(_mint_record(ref)),
@@ -967,7 +1008,7 @@ async def test_a_stored_mint_record_that_is_wrong_raises_frame_integrity_error(
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     ref = _ref()
-    client.objects[f"mints/v1/{ref.spec_id}/{ref.content_version}.json"] = stored
+    client.objects[f"mints/v4/{ref.spec_id}/{ref.content_version}.json"] = stored
 
     with pytest.raises(FrameIntegrityError, match=reason) as raised:
         await store.get_mint_record(ref)
@@ -976,23 +1017,25 @@ async def test_a_stored_mint_record_that_is_wrong_raises_frame_integrity_error(
 
 
 async def test_list_frames_names_every_frame_object_oldest_first_and_downloads_none() -> None:
-    """A bucket lists by name, so the order comes from each object's creation time. A
-    pair under two layout prefixes is one frame, as old as its older object, and a
-    mint record or a name that is no frame's is left out."""
+    """A bucket lists by name, so the order comes from each object's creation time. An
+    object under an older layout prefix, a mint record, and a name that is no frame's
+    are left out."""
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     start = datetime(2026, 9, 14, tzinfo=UTC)
     root = _ref()
     derived = FrameRef(spec_id="ops_" + "1" * 32, content_version="ocv_" + "2" * 32)
     both = FrameRef(spec_id="ops_" + "0" * 32, content_version="ocv_" + "3" * 32)
+    older = FrameRef(spec_id="ops_" + "4" * 32, content_version="ocv_" + "5" * 32)
     written = {
-        _object_name(derived, prefix="frames/v3"): 2,
-        _object_name(root, prefix="frames/v2"): 0,
-        _object_name(both, prefix="frames/v3"): 5,
-        _object_name(both, prefix="frames/v1"): 1,
-        f"mints/v1/{root.spec_id}/{root.content_version}.json": 0,
-        "frames/v3/not-a-frame/ocv_x.parquet": 0,
-        "frames/v3/stray.txt": 0,
+        _object_name(derived, prefix="frames/v4"): 2,
+        _object_name(root, prefix="frames/v4"): 0,
+        _object_name(older, prefix="frames/v3"): 1,
+        _object_name(both, prefix="frames/v4"): 5,
+        _object_name(both, prefix="frames/v3"): 1,
+        f"mints/v4/{root.spec_id}/{root.content_version}.json": 0,
+        "frames/v4/not-a-frame/ocv_x.parquet": 0,
+        "frames/v4/stray.txt": 0,
     }
     for name, day in written.items():
         client.objects[name] = b"never read"
@@ -1000,8 +1043,8 @@ async def test_list_frames_names_every_frame_object_oldest_first_and_downloads_n
 
     assert await store.list_frames() == [
         FrameListing(ref=root, created_at=start),
-        FrameListing(ref=both, created_at=start + timedelta(days=1)),
         FrameListing(ref=derived, created_at=start + timedelta(days=2)),
+        FrameListing(ref=both, created_at=start + timedelta(days=5)),
     ]
 
 
@@ -1024,7 +1067,7 @@ async def test_an_anchor_record_is_one_object_under_its_key_and_the_first_stands
     await store.put_anchor_record(record)
     await store.put_anchor_record(_anchor_record(period="2022"))
 
-    assert client.objects == {f"anchors/v1/{record.anchor_key}.json": encode_anchor_record(record)}
+    assert client.objects == {f"anchors/v4/{record.anchor_key}.json": encode_anchor_record(record)}
     restarted = GcsMaterialisationStore(
         bucket_name=_BUCKET, client=_FakeStorageClient(client.objects, client.metadata)
     )
@@ -1046,9 +1089,113 @@ async def test_a_stored_anchor_record_that_is_wrong_raises_its_integrity_error(
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
     key = _anchor_record().anchor_key
-    client.objects[f"anchors/v1/{key}.json"] = stored
+    client.objects[f"anchors/v4/{key}.json"] = stored
 
     with pytest.raises(AnchorRecordIntegrityError, match=reason) as raised:
         await store.get_anchor_record(key)
 
     assert raised.value.anchor_key == key
+
+
+_DEFAULT_OPTIONS: dict[str, object] = {"format": "parquet", "bundle": False, "layout": "frame"}
+_SUM_OPTIONS = _DEFAULT_OPTIONS | {"groupby": {"by": ["time_period"], "op": "sum"}}
+
+
+async def test_records_held_only_under_the_older_prefixes_are_misses() -> None:
+    """Each record decodes and names the pair it is read under, so only its prefix
+    keeps it out."""
+    client = _FakeStorageClient()
+    store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
+    ref = _ref()
+    anchor = _anchor_record()
+    client.objects[f"mints/v1/{ref.spec_id}/{ref.content_version}.json"] = encode_mint_record(
+        _mint_record(ref)
+    )
+    client.objects[f"anchors/v1/{anchor.anchor_key}.json"] = encode_anchor_record(anchor)
+
+    assert await store.get_mint_record(ref) is None
+    assert await store.get_anchor_record(anchor.anchor_key) is None
+
+
+@dataclass(frozen=True)
+class _ExecutionRecord:
+    content: str
+
+
+@dataclass(frozen=True)
+class _Identity:
+    value: str
+
+    def canonical_string(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True)
+class _DerivedTrace:
+    """The attributes `build_recipe` reads off a toolkit verb's trace."""
+
+    execution_record: _ExecutionRecord
+    execution_identity: _Identity
+    frame_content_version: str = "cv_" + "0" * 32
+    upstream_trace: dict[str, object] = field(default_factory=dict)
+
+
+class _BucketRecordsMemoryTraces:
+    """Mint records from the bucket store, and derived traces from memory, where a
+    stand-in trace needs no codec."""
+
+    def __init__(self, bucket: GcsMaterialisationStore) -> None:
+        self.bucket = bucket
+        self.traces: dict[tuple[str, str], _DerivedTrace] = {}
+
+    async def get_trace(self, ref: FrameRef) -> _DerivedTrace | None:
+        return self.traces.get((ref.spec_id, ref.content_version))
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        return await self.bucket.get_mint_record(ref)
+
+    def derive(self, root: FrameRef) -> FrameRef:
+        """A filter over `root`, its trace held, with the toolkit's pair hashes."""
+        content = json.dumps(
+            {
+                "frame_ref": root.model_dump(),
+                "identity_version": "ops1",
+                "parameters": {"predicates": []},
+                "verb": "filter",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        identity = "0.3.0|1.0.0|0.2.0"
+        ref = FrameRef(
+            spec_id=f"ops_{hashlib.sha256(content.encode()).hexdigest()[:32]}",
+            content_version="ocv_"
+            + hashlib.sha256(f"{content}|{identity}".encode()).hexdigest()[:32],
+        )
+        self.traces[(ref.spec_id, ref.content_version)] = _DerivedTrace(
+            _ExecutionRecord(content), _Identity(identity)
+        )
+        return ref
+
+
+async def test_a_legacy_groupby_record_leaves_a_new_default_mints_recipe_unsummed() -> None:
+    """Before groupby sums had pairs of their own, a sum one StatVar contributed to was
+    recorded under the version's own pair. That pair now holds the unsummed canonical
+    frame, and the recipe of a frame built on it states the default mint's options."""
+    client = _FakeStorageClient()
+    bucket = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
+    root = _ref()
+    legacy = MintRecord(frame=root, dataset=root, options=_SUM_OPTIONS, stat_var_count=1)
+    client.objects[f"mints/v1/{root.spec_id}/{root.content_version}.json"] = encode_mint_record(
+        legacy
+    )
+    # A new default mint registers the canonical frame and writes its record.
+    await bucket.put(root, frame=_frame(), trace=_trace(root), writer="writer-1")
+    await bucket.put_mint_record(
+        MintRecord(frame=root, dataset=root, options=_DEFAULT_OPTIONS, stat_var_count=1)
+    )
+    store = _BucketRecordsMemoryTraces(bucket)
+
+    recipe = await build_recipe(store.derive(root), store=cast("Any", store))
+
+    assert [entry["options"] for entry in recipe["roots"]] == [_DEFAULT_OPTIONS]

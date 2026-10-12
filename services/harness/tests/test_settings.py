@@ -359,3 +359,19 @@ def test_an_unknown_orchestrator_thinking_level_is_refused(monkeypatch, value) -
 
     with pytest.raises(ValueError, match="orchestrator_thinking_level"):
         Settings()
+
+
+def test_a_variable_no_field_reads_is_ignored_in_the_env_and_the_env_file(
+    monkeypatch, tmp_path
+) -> None:
+    """A deployment can set a variable no settings field reads, such as
+    STUDIO_ENGINE. Construction ignores it, from the process environment and
+    from an env file alike."""
+    monkeypatch.setenv("STUDIO_ENGINE", "orchestrator")
+    env_file = tmp_path / ".env"
+    env_file.write_text("STUDIO_SCRIPTED=true\n")
+
+    settings = Settings(_env_file=env_file)  # type: ignore[call-arg]
+
+    assert not hasattr(settings, "studio_engine")
+    assert not hasattr(settings, "studio_scripted")

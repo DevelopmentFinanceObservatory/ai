@@ -67,13 +67,14 @@ from dfo_frame_grammar.grammar import (
 )
 
 from analysis_mcp.engine.aggregate import ComposedUnitSumError
-from analysis_mcp.engine.columnar import frame_from_columns, repeated
+from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     agreed_facets,
     combine_exclusions,
     facet_columns,
+    frame_keeping_role_types,
     require_single_stat_var,
 )
 from analysis_mcp.engine.two_sided import (
@@ -474,7 +475,7 @@ def run_quotient_of(
     )
 
     count = len(period_quotients)
-    output_frame = frame_from_columns(
+    output_frame = frame_keeping_role_types(
         {
             STAT_VAR_COLUMN: repeated(stat_var, count),
             TIME_PERIOD_COLUMN: pa.array(
@@ -493,6 +494,7 @@ def run_quotient_of(
             },
         },
         role_keys=numerator_by,
+        source=numerator_frame,
     )
 
     return QuotientOfResult(

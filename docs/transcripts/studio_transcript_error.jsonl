@@ -1,2 +1,0 @@
-{"event":"message.delta","seq":0,"text":"Looking up the population of Ghana."}
-{"event":"error","seq":1,"error":{"error":"capability_unavailable","retry":"do_not_retry","detail":"identity does not reproduce spec_id: expected 'spec_0e8100e4fbcc20df63cc0b0ceda8096e', got 'spec_f85f560d6d59caf6220dee712e52bb71'"}}

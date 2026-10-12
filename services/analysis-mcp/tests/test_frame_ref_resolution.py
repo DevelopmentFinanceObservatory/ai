@@ -273,8 +273,5 @@ def test_derive_frame_content_version_is_registered_as_the_stores_deriver() -> N
             }
         ],
     )
-    upstream_trace = {"graph_revision": "rev1", "source_revisions": [], "facets": []}
 
-    assert registered(frame, upstream_trace) == derive_frame_content_version(
-        frame=frame, upstream_trace=upstream_trace
-    )
+    assert registered(frame) == derive_frame_content_version(frame=frame)

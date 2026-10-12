@@ -14,6 +14,7 @@ from compiler.sources import (
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    wire_groups,
 )
 from planner.records import Period
 from planner.workflow import OpenEntityAxis
@@ -586,3 +587,133 @@ def test_an_axis_a_resolved_entity_binds_is_not_open() -> None:
 
 def test_a_block_stating_no_scope_and_no_role_axis_fact_opens_nothing() -> None:
     assert source_from_spec_block(_spec()).open_entity_axes == ()
+
+
+# Africa as a DAC2A recipient, bound to the one party DAC publishes as its
+# total, and the G7 read as its members, as dfo-apis states `entity_groups`.
+_GROUPS = {
+    "destination": {
+        "dcid": "africa",
+        "label": "Africa",
+        "entity_type": "Continent",
+        "total": "DACAfrica",
+    },
+    "origin": {"dcid": None, "label": "G7", "entity_type": None, "total": None},
+}
+_ENTITIES = [
+    {"role": "destination", "label": "Africa, Total", "ref": "DACAfrica"},
+    {"role": "origin", "label": "France", "ref": "country/FRA"},
+]
+
+
+def test_a_set_bound_as_its_published_total_is_read_with_that_party() -> None:
+    source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
+
+    assert [(group.role, group.ref, group.total) for group in source.groups] == [
+        ("destination", "africa", "DACAfrica"),
+        ("origin", None, None),
+    ]
+
+
+def test_a_resubmit_posts_each_set_without_its_total() -> None:
+    source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
+
+    assert wire_groups(source.groups) == {
+        "destination": {"label": "Africa", "dcid": "africa"},
+        "origin": {"label": "G7"},
+    }
+
+
+def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:
+    source = source_from_spec_block(_spec())
+
+    dumped = source.model_dump(mode="json")
+
+    assert "entity_refs" not in dumped
+    assert "elected_measure" not in dumped
+
+
+def _alternative(spec_id: str, label: str, axis: str) -> dict[str, Any]:
+    """One `resolved.alternative_measures` entry as dfo-apis states it."""
+    return {
+        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": {"stat_var": "y"}},
+        "label": label,
+        "axis": axis,
+        "measure_axis_values": [],
+        "served_rows": 9,
+        "served_rows_exact": True,
+    }
+
+
+SPEC_CONSTANT = "spec_" + "c" * 32
+
+
+def test_the_elected_measure_is_read_with_every_alternative_search_offers() -> None:
+    block = _spec(
+        shape={"label": "official development assistance"},
+        measure_label="gross disbursements",
+        alternative_measures=[
+            _alternative(SPEC_OTHER, "net disbursements", "what"),
+            _alternative(SPEC_CONSTANT, "constant prices", "unit"),
+        ],
+    )
+
+    source = source_from_spec_block(block)
+
+    assert source.measure_label == "official development assistance"
+    assert source.elected_measure is not None
+    assert source.elected_measure.label == "gross disbursements"
+    assert source.elected_measure.alternatives[0].identity == {"stat_var": "y"}
+    assert [(a.spec_id, a.label, a.axis) for a in source.elected_measure.alternatives] == [
+        (SPEC_OTHER, "net disbursements", "what"),
+        (SPEC_CONSTANT, "constant prices", "unit"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "alternative",
+    [
+        {"definition": {}, "label": "net disbursements", "axis": "what"},
+        {"definition": {"spec_id": SPEC_OTHER}, "label": "", "axis": "what"},
+        {"definition": {"spec_id": SPEC_OTHER}, "label": "net disbursements"},
+    ],
+    ids=["no-spec-id", "no-label", "no-axis"],
+)
+def test_an_alternative_naming_no_spec_label_or_axis_is_left_out(
+    alternative: dict[str, Any],
+) -> None:
+    block = _spec(measure_label="gross disbursements", alternative_measures=[alternative])
+
+    source = source_from_spec_block(block)
+
+    assert source.elected_measure is not None
+    assert source.elected_measure.alternatives == ()
+
+
+def test_a_block_stating_no_measure_label_elects_no_measure() -> None:
+    block = _spec(
+        shape={"label": "external debt service"},
+        alternative_measures=[_alternative(SPEC_OTHER, "net disbursements", "what")],
+    )
+
+    assert source_from_spec_block(block).elected_measure is None
+
+
+def test_ignored_source_constraints_are_not_saved_as_applied():
+    envelope = {
+        "parts": [
+            {
+                "status": "definite",
+                "restatement": {"sources": [{"text": "XYZ", "ref": None, "polarity": "exclude"}]},
+                "warnings": [
+                    {
+                        "code": "query_qualifier_dropped",
+                        "severity": "warning",
+                        "message": 'The requested exclusion "XYZ" was not applied.',
+                    }
+                ],
+                "spec": {"spec_id": "spec_" + "a" * 32, "resolved": {"rendered_sentence": "aid"}},
+            }
+        ]
+    }
+    assert outcome_from_envelope(envelope).sources[0].resolved_sources == ()

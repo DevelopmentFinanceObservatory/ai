@@ -316,7 +316,7 @@ class ToolRefusal:
         # append verbatim: unlike `detail` (upstream's own prose about what
         # was over the ceiling), it is written for the end user, plain
         # words already, naming the thing they can actually do about it --
-        # `harness.graph._failed_step`/`narrate` read it off `fix` and
+        # `harness.graph.execute._failed_step`/`narrate` read it off `fix` and
         # place it in the turn's closing text by code, not by asking a
         # narrator model to restate it.
         remedy = _CEILING_REMEDIES.get(ceiling_kind) if ceiling_kind is not None else None

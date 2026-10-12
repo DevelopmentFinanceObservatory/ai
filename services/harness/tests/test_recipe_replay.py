@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
@@ -30,9 +31,10 @@ from common.materialisation import (
     MintRecord,
     set_store,
 )
-from common.recipe import build_recipe
+from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
 from data_mcp.deadline import CallDeadline
+from data_mcp.frame_materialisation import frame_ref_for, replayed_mint_options
 from data_mcp.get_data_tool import RootMint
 from data_mcp.mint_recovery import recover_mint_record
 from data_mcp.operations import QueuedOperation
@@ -68,6 +70,8 @@ _SINCE = {
 }
 _KEPT = ["dcid:FRA", "dcid:GBR"]
 _GROUPBY = {"by": ["reporter"], "op": "sum"}
+# A definition's identity naming a flow's origin.
+_FLOW_IDENTITY = {"entities": {"origin": ["country/FRA"]}}
 _BUSY = SimpleNamespace(
     is_error=True,
     structured_content={
@@ -106,10 +110,14 @@ class Tools:
 
 class Dataset:
     """data-mcp's root mint for one dataset: registers the current frame under the
-    current version and writes its mint record. `answers` are returned first, one
-    for each call. `others` holds the frame of any other dataset, by spec id."""
+    current version's pair, or a groupby mint's under the pair `frame_ref_for` names
+    its groupby by, and writes its mint record. `answers` are returned first, one for each call. `others`
+    holds the frame of any other dataset, by spec id. With `names_groupby` off, a
+    groupby mint registers under the version's own pair, as data-mcp did before
+    `frame_ref_for` named a groupby."""
 
     def __init__(self, store: InMemoryMaterialisationStore) -> None:
+        self.names_groupby = True
         self._store = store
         self.content_version = FIRST
         self.frame: Frame = reporter_frame(FIRST_VALUES)
@@ -124,7 +132,12 @@ class Dataset:
         self.minted.append(record)
         if self.answers:
             return self.answers.pop(0)
-        ref = FrameRef(spec_id=record.dataset.spec_id, content_version=self.content_version)
+        dataset = FrameRef(spec_id=record.dataset.spec_id, content_version=self.content_version)
+        ref = frame_ref_for(
+            spec_id=dataset.spec_id,
+            content_version=dataset.content_version,
+            groupby=record.options.get("groupby") if self.names_groupby else None,
+        )
         trace = MaterialisationTrace(
             upstream_trace={
                 "graph_revision": "rev_test",
@@ -141,13 +154,13 @@ class Dataset:
         await self._store.put_mint_record(
             MintRecord(
                 frame=ref,
-                dataset=ref,
+                dataset=dataset,
                 options=record.options,
                 scope=record.scope,
                 stat_var_count=count,
             )
         )
-        return RootMint(frame=ref, dataset=ref, stat_var_count=count)
+        return RootMint(frame=ref, dataset=dataset, options=record.options, stat_var_count=count)
 
     def move(self, values: Mapping[str, Mapping[str, float]], *, to: str = SECOND) -> None:
         """Serve `values` as the dataset's next version."""
@@ -301,6 +314,19 @@ class Scene:
         return {row["reporter"]: row["value"] for row in self.apis.frames[pair(frame)]}
 
 
+def _minting_kinds(dataset: Dataset) -> Any:
+    """`dataset`'s mint behind data-mcp's mapping of recorded options for a flow
+    root, as `mint_recorded_root` applies it."""
+
+    async def mint(
+        record: MintRecord, *, deadline: CallDeadline
+    ) -> RootMint | QueuedOperation | ToolResult:
+        options = replayed_mint_options(record.options, identity=_FLOW_IDENTITY)
+        return await dataset(record.model_copy(update={"options": options}), deadline=deadline)
+
+    return mint
+
+
 class _Unrecorded:
     """`store` as it reads for a root registered before mint records: it holds no
     mint record."""
@@ -345,6 +371,37 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
     # The root is minted as recorded, and a tree of fixed periods resolves no anchor.
     assert scene.dataset.minted == [MintRecord.model_validate(recipe["roots"][0])]
     assert scene.tools.names == ["filter", "growth"]
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [OPTIONS | {"columns": ["financingProvider_type", "financingRecipient_type"]}, OPTIONS],
+    ids=["flow-party-types", "flow-no-columns"],
+)
+async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
+    scene: Scene, recorded: dict[str, Any]
+) -> None:
+    _, recipe = await scene.fixed(recorded)
+    scene.dataset.move(SECOND_VALUES)
+
+    replayed = await scene.replay(recipe, mint_root=_minting_kinds(scene.dataset))
+
+    assert isinstance(replayed, Replayed), replayed
+    (minted,) = scene.dataset.minted
+    assert minted.options == OPTIONS | {"columns": ["kind"]}
+    current = FrameRef(spec_id=SPEC, content_version=SECOND)
+    held = await scene.store.get_mint_record(current)
+    assert held is not None
+    assert held.options == minted.options
+    assert replayed.normal_form_changed is False
+    assert replayed.recipe["normal_form_hash"] == recipe["normal_form_hash"]
+    assert replayed.recipe["roots"][0]["options"] == recorded
+    # The key a live refresh looks the replay up by, from the stored recipe.
+    assert replayed.recipe["replay_key"] == replay_key(
+        normal_form_hash=recipe["normal_form_hash"],
+        root_datasets=[current.model_dump()],
+        execution_identities=[current_execution_identity().canonical_string()],
+    )
 
 
 async def test_a_second_replay_calls_no_verb_and_publishes_nothing(scene: Scene) -> None:
@@ -518,9 +575,11 @@ async def test_a_root_recorded_with_one_stat_var_that_now_holds_two_is_refused(
 
 
 async def test_a_recovered_one_stat_var_sum_that_now_holds_two_is_refused(scene: Scene) -> None:
-    """A `groupby` sum over one StatVar is held under the raw version, so recovery
-    cannot say it was a sum. It keeps the held frame's count, which the replay
-    refuses on once a second StatVar contributes."""
+    """A `groupby` sum over one StatVar registered under the raw version's own pair,
+    as data-mcp registered one before `frame_ref_for` named a groupby, cannot be told
+    from the unsummed frame by recovery. It keeps the held frame's count, which the
+    replay refuses on once a second StatVar contributes."""
+    scene.dataset.names_groupby = False
     root = await scene.root(OPTIONS | {"groupby": _GROUPBY})
     kept = _ref(
         await filter_verb(
@@ -555,13 +614,21 @@ async def test_a_recovered_one_stat_var_sum_that_now_holds_two_is_refused(scene:
 
 
 @pytest.mark.parametrize(
-    ("recorded_base", "ambiguous"),
-    [(None, True), ("cv_" + "9" * 32, False)],
-    ids=["recorded-under-a-raw-version", "recorded-as-a-collapse"],
+    ("recorded_base", "names_groupby", "ambiguous"),
+    [(None, False, True), ("cv_" + "9" * 32, False, False), (None, True, False)],
+    ids=[
+        "recorded-under-a-raw-version",
+        "recorded-as-a-collapse",
+        "recorded-under-the-pair-naming-its-groupby",
+    ],
 )
 async def test_a_summed_root_that_comes_back_as_a_collapse_is_refused_unless_recorded_as_one(
-    scene: Scene, recorded_base: str | None, ambiguous: bool
+    scene: Scene, recorded_base: str | None, names_groupby: bool, ambiguous: bool
 ) -> None:
+    """A sum registered under its raw version's own pair shared it with the unsummed
+    frame, so its record cannot say which it was. One registered under the pair
+    naming its groupby was the sum, whatever version it comes back under."""
+    scene.dataset.names_groupby = names_groupby
     _, recipe = await scene.fixed(OPTIONS | {"groupby": _GROUPBY})
     scene.dataset.move(SECOND_VALUES)
     scene.apis.versions[SPEC] = [
@@ -607,6 +674,35 @@ async def test_a_replay_whose_normal_form_moved_is_refused_and_nothing_is_publis
     assert isinstance(refused, Refused)
     assert (refused.code, refused.stage) == ("recipe_normal_form_changed", "publish")
     assert len(scene.apis.published()) == posts
+
+
+async def test_a_frame_another_card_published_under_another_normal_form_is_refused(
+    scene: Scene,
+) -> None:
+    _, recipe = await scene.fixed(
+        OPTIONS | {"columns": ["financingProvider_type", "financingRecipient_type"]}
+    )
+    scene.dataset.move(SECOND_VALUES)
+
+    async def unpublished(**_: Any) -> bool:
+        return True
+
+    # A card made on the new version with kinds computes the same frame, and
+    # publishes it first under the recipe its own mint records give.
+    computed = await scene.replay(
+        recipe, mint_root=_minting_kinds(scene.dataset), publish=unpublished
+    )
+    assert isinstance(computed, Replayed), computed
+    _, fresh = await scene._published(computed.frame)
+    assert fresh["normal_form_hash"] != recipe["normal_form_hash"]
+
+    refused = await scene.replay(recipe, mint_root=_minting_kinds(scene.dataset))
+
+    assert isinstance(refused, Refused), refused
+    assert (refused.code, refused.stage) == ("recipe_normal_form_changed", "publish")
+    assert fresh["normal_form_hash"] in refused.detail
+    assert recipe["normal_form_hash"] in refused.detail
+    assert scene.apis.recipes[pair(computed.frame)] == fresh
 
 
 async def test_a_publish_refusal_is_returned_under_the_doors_code(scene: Scene) -> None:

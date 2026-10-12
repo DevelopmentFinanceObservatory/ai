@@ -7,6 +7,7 @@ import decimal
 import hashlib
 import io
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -23,6 +24,8 @@ from common.materialisation import (
     InMemoryMaterialisationStore,
     MaterialisationTrace,
     MintRecord,
+    frame_from_verified_parquet_bytes,
+    frame_to_parquet_bytes,
     gcs_store,
 )
 from common.materialisation import get_store as get_frame_store
@@ -33,6 +36,7 @@ from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     _ARTIFACT_GET_ATTEMPTS,
+    CANONICAL_FRAME_RENDERING,
     MaterialisationOutcome,
     frame_ref_for,
     materialise_and_register,
@@ -46,6 +50,8 @@ from dfo_frame_grammar import (
     FrameError,
     StatVarPart,
     UnitRequest,
+    frame_sha256,
+    mint_content_version,
     unit_cell_array,
 )
 from google.api_core.exceptions import NotFound
@@ -55,12 +61,48 @@ from .test_client import _client
 from .test_operations import _FakeClock
 
 _SPEC_ID = "spec_" + "1" * 32
-_CONTENT_VERSION = "cv_" + "2" * 32
-_FRAME_REF = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
 _ARTIFACT_DIGEST = "sha256:" + "3" * 64
-_SIGNED_URL = "https://storage.example/fresh-signed-url"
 # The options `get_data` posts for the default rendering.
 _OPTIONS: dict[str, object] = {"bundle": False, "format": "parquet", "layout": "frame"}
+
+
+def _parquet_bytes(
+    *,
+    role_values: list[str] | None = None,
+    time_periods: list[str] | None = None,
+    values: list[float] | None = None,
+    stat_vars: list[str] | None = None,
+) -> bytes:
+    """A tiny frame in the canonical layout dfo-apis writes a version's canonical
+    frame in (`frame_to_parquet_bytes`): `stat_var`, one role column
+    (`observationAbout`), `time_period`, `value`, and the null `unit`, facet and
+    `status` columns. Every row carries `dcid:Test` unless `stat_vars` names one per
+    row. A rendering's decoder (`_frame_from_parquet_bytes`) reads it too.
+    """
+    role_values = role_values if role_values is not None else ["country/FRA"]
+    time_periods = time_periods if time_periods is not None else ["2020"]
+    values = values if values is not None else [1.5]
+    stat_vars = stat_vars or ["dcid:Test"] * len(role_values)
+    frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {"stat_var": stat_var, "observationAbout": role, "time_period": period, "value": value}
+            for stat_var, role, period, value in zip(
+                stat_vars, role_values, time_periods, values, strict=True
+            )
+        ],
+    )
+    return frame_to_parquet_bytes(frame)
+
+
+def _content_version_of(data: bytes) -> str:
+    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
+
+
+_CONTENT_VERSION = _content_version_of(_parquet_bytes())
+_FRAME_REF = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
+_LINK = f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}/files/{_ARTIFACT_DIGEST}"
 
 
 def _digest_for(data: bytes) -> str:
@@ -112,44 +154,17 @@ def _manifest(
     return strip_manifest(payload)
 
 
-def _parquet_bytes(
-    *,
-    role_values: list[str] | None = None,
-    time_periods: list[str] | None = None,
-    values: list[float] | None = None,
-    stat_vars: list[str] | None = None,
-) -> bytes:
-    """A tiny Parquet blob shaped like a real fetched artifact:
-    `stat_var`, one role column (`observationAbout`), `time_period`, and `value`, all
-    already in the types `build_frame_from_arrow` reads directly -- no conversion needed.
-    Every row carries `dcid:Test` unless `stat_vars` names one per row.
-    """
-    role_values = role_values if role_values is not None else ["country/FRA"]
-    time_periods = time_periods if time_periods is not None else ["2020"]
-    values = values if values is not None else [1.5]
-    n = len(role_values)
-    table = pa.table(
-        {
-            "stat_var": pa.array(stat_vars or ["dcid:Test"] * n, type=pa.string()),
-            "observationAbout": pa.array(role_values, type=pa.string()),
-            "time_period": pa.array(time_periods, type=pa.string()),
-            "value": pa.array(values, type=pa.float64()),
-        }
-    )
-    buf = io.BytesIO()
-    pq.write_table(table, buf)
-    return buf.getvalue()
-
-
 def _snapshot_payload(
     *,
     subject_id: str = _SPEC_ID,
     content_version: str = _CONTENT_VERSION,
     artifact_digest: str = _ARTIFACT_DIGEST,
-    url: str = _SIGNED_URL,
+    url: str = _LINK,
+    rendering: dict[str, object] | None = None,
 ) -> dict[str, Any]:
-    """The snapshot route's own response shape `read_artifact` re-validates and signs from."""
-    url_expires_at = (datetime.now(UTC) + timedelta(seconds=900)).isoformat()
+    """The snapshot route's own response shape `read_artifact` re-validates and reads
+    the link from, listing one artifact under `rendering`, by default the canonical
+    frame a default mint reads."""
     return {
         "schema_version": 1,
         "definition": {"schema_version": 1, "spec_id": subject_id, "identity": {}},
@@ -161,13 +176,12 @@ def _snapshot_payload(
         "artifacts": [
             {
                 "artifact_digest": artifact_digest,
-                "rendering": {"bundle": False, "format": "parquet", "layout": "frame"},
+                "rendering": rendering or dict(CANONICAL_FRAME_RENDERING),
                 "bytes": 100,
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
                 "url": url,
-                "url_expires_at": url_expires_at,
             }
         ],
     }
@@ -358,7 +372,7 @@ async def test_a_fetched_frames_stat_var_count_is_read_off_its_rows() -> None:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
             options=_OPTIONS,
-            manifest=_manifest(artifact_digest=digest),
+            manifest=_manifest(artifact_digest=digest, content_version=_content_version_of(data)),
             settings=_settings(),
             writer="tester",
             transport=httpx2.MockTransport(get_handler),
@@ -554,7 +568,7 @@ async def test_a_cache_hit_whose_recomputed_content_version_mismatches_refuses()
         bucket_name="frames",
         client=_FakeGcsClient(),
         verify_content_version_on_read=True,
-        derive_content_version=lambda _frame, _upstream_trace: "cv_" + "9" * 32,
+        derive_content_version=lambda _frame: "cv_" + "9" * 32,
     )
     await store.put(
         ref,
@@ -839,11 +853,12 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
 
 # A done operation lists every rendering dfo-apis stores under the pair. Dev listed
 # another caller's groupby sum first, then the plain rendering and its statistics.
+_SUM_GROUPBY: dict[str, object] = {"by": ["time_period", "crsPurpose"], "op": "sum"}
 _SUM_SIBLING_RENDERING: dict[str, object] = {
     "bundle": False,
     "format": "parquet",
     "layout": "frame",
-    "groupby": {"by": ["time_period", "crsPurpose"], "op": "sum"},
+    "groupby": _SUM_GROUPBY,
 }
 _TYPED_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["observationAbout_type"]}
 _STATISTICS_RENDERING: dict[str, object] = {"statistics": "series"}
@@ -859,10 +874,14 @@ def _bytes_by_digest(count: int) -> dict[str, bytes]:
     ("listed", "options", "requested_at", "ref_content_version"),
     [
         (
-            [_SUM_SIBLING_RENDERING, _OPTIONS, _STATISTICS_RENDERING],
-            _OPTIONS,
+            [_OPTIONS, _SUM_SIBLING_RENDERING, _STATISTICS_RENDERING],
+            _SUM_SIBLING_RENDERING,
             1,
-            _CONTENT_VERSION,
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                groupby=_SUM_GROUPBY,
+            ).content_version,
         ),
         (
             [_OPTIONS, _TYPED_OPTIONS],
@@ -875,7 +894,7 @@ def _bytes_by_digest(count: int) -> dict[str, bytes]:
             ).content_version,
         ),
     ],
-    ids=["separate-listed-after-a-sum-sibling", "place-types-listed-after-the-plain-rendering"],
+    ids=["sum-listed-after-the-plain-rendering", "place-types-listed-after-the-plain-rendering"],
 )
 async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requested(
     monkeypatch: pytest.MonkeyPatch,
@@ -911,9 +930,12 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     )
 
 
+@pytest.mark.parametrize("deadline_s", [None, 4.0], ids=["no-deadline", "under-the-fetch-floor"])
 async def test_a_manifest_without_the_requested_rendering_refuses_without_fetching(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, deadline_s: float | None
 ) -> None:
+    """The refusal holds whatever deadline is left, under the 5 s fetch floor too."""
+
     async def unreachable(**_: Any) -> bytes:
         raise AssertionError("no fetch is expected without the requested rendering")
 
@@ -921,7 +943,7 @@ async def test_a_manifest_without_the_requested_rendering_refuses_without_fetchi
     set_frame_store(InMemoryMaterialisationStore())
     blobs = _bytes_by_digest(2)
     outcome = await materialise_and_register(
-        options=_OPTIONS,
+        options=_TYPED_OPTIONS,
         manifest=_manifest(
             renderings=dict(
                 zip(blobs, [_SUM_SIBLING_RENDERING, _STATISTICS_RENDERING], strict=True)
@@ -929,6 +951,7 @@ async def test_a_manifest_without_the_requested_rendering_refuses_without_fetchi
         ),
         settings=_settings(),
         writer="tester",
+        deadline=None if deadline_s is None else CallDeadline.after(deadline_s, clock=_FakeClock()),
     )
 
     assert outcome.status == "refused"
@@ -1020,24 +1043,22 @@ async def test_a_sign_failure_before_any_get_returns_degraded_with_zero_attempts
     assert outcome.refusal is None
 
 
-async def test_a_signed_url_expiry_response_re_signs_once_and_succeeds() -> None:
+async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> None:
     data = _parquet_bytes()
     digest = _digest_for(data)
     manifest = _manifest(artifact_digest=digest)
-    snapshot_calls = 0
-    get_attempts = 0
+    seen: list[httpx2.Request] = []
 
     def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
-        nonlocal snapshot_calls
-        snapshot_calls += 1
         return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
 
-    def get_handler(_request: httpx2.Request) -> httpx2.Response:
-        nonlocal get_attempts
-        get_attempts += 1
-        if get_attempts == 1:
-            return httpx2.Response(403, content=b"expired")
-        return httpx2.Response(200, content=data)
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        if request.url.host == "storage.example":
+            return httpx2.Response(200, content=data)
+        return httpx2.Response(
+            302, headers={"Location": "https://storage.example/signed?X-Goog-Signature=abc"}
+        )
 
     set_frame_store(InMemoryMaterialisationStore())
     async with _client(snapshot_handler) as upstream:
@@ -1051,8 +1072,40 @@ async def test_a_signed_url_expiry_response_re_signs_once_and_succeeds() -> None
         )
 
     assert outcome.status == "registered"
-    assert snapshot_calls == 2
-    assert get_attempts == 2
+    assert [r.url.path for r in seen] == [_LINK, "/signed"]
+    assert seen[1].url.host == "storage.example"
+    credential_headers = {"authorization", "cookie", "x-dfo-principal"}
+    for request in seen:
+        assert credential_headers.isdisjoint(request.headers.keys())
+
+
+async def test_a_link_answering_410_degrades_without_retrying() -> None:
+    data = _parquet_bytes()
+    digest = _digest_for(data)
+    manifest = _manifest(artifact_digest=digest)
+    get_attempts = 0
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal get_attempts
+        get_attempts += 1
+        return httpx2.Response(410, json={"code": "artifact_expired"})
+
+    set_frame_store(InMemoryMaterialisationStore())
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=manifest,
+            settings=_settings(),
+            writer="tester",
+            transport=httpx2.MockTransport(get_handler),
+        )
+
+    assert outcome.status == "degraded"
+    assert get_attempts == 1
 
 
 async def test_bytes_not_matching_the_artifact_digest_refuse_with_no_store_write() -> None:
@@ -1139,7 +1192,7 @@ async def test_a_store_row_ceiling_below_the_service_ceiling_refuses_rather_than
         values=[1.0, 2.0, 3.0],
     )
     digest = _digest_for(data)
-    manifest = _manifest(artifact_digest=digest)
+    manifest = _manifest(artifact_digest=digest, content_version=_content_version_of(data))
 
     def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
@@ -1191,7 +1244,7 @@ async def test_a_fetched_artifact_is_refused_while_the_row_budget_is_full() -> N
         values=[1.0, 2.0, 3.0],
     )
     digest = _digest_for(data)
-    manifest = _manifest(artifact_digest=digest)
+    manifest = _manifest(artifact_digest=digest, content_version=_content_version_of(data))
 
     def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
@@ -1309,11 +1362,8 @@ async def test_a_parquet_file_missing_a_reserved_column_refuses_rather_than_rais
 
 async def test_a_mismatched_recompute_still_registers_under_the_manifest_content_version() -> None:
     """No cv_ integrity gate is wired at all (see the module's own comment at the gate
-    site): `manifest.trace`'s facets here carry a `basis` value (`deployment_fallback`,
-    observed on a real live mint) outside `mint_content_version`'s own closed vocabulary
-    (`bound`/`declared_default`) -- attempting a recompute over this trace would raise
-    `ContentVersionError` rather than merely disagree, so this proves no such attempt is
-    made: the frame still registers under the manifest's own `content_version`.
+    site): the frame registers under the manifest's own `content_version` whatever its
+    `manifest.trace` carries.
     """
     data = _parquet_bytes()
     digest = _digest_for(data)
@@ -1429,8 +1479,8 @@ async def _fetch_budget_under(
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
     set_frame_store(InMemoryMaterialisationStore())
     outcome = await materialise_and_register(
-        options=_OPTIONS,
-        manifest=_manifest(),
+        options=_TYPED_OPTIONS,
+        manifest=_manifest(renderings={_ARTIFACT_DIGEST: _TYPED_OPTIONS}),
         settings=_settings(artifact_fetch_budget_s=60.0),
         writer="tester",
         deadline=deadline,
@@ -1629,7 +1679,9 @@ async def test_a_store_write_that_outruns_the_deadline_keeps_its_rows_claimed_un
             client_holder.set_client(upstream)
             outcome = await materialise_and_register(
                 options=_OPTIONS,
-                manifest=_manifest(artifact_digest=digest),
+                manifest=_manifest(
+                    artifact_digest=digest, content_version=_content_version_of(data)
+                ),
                 settings=_settings(),
                 writer="tester",
                 transport=httpx2.MockTransport(get_handler),
@@ -1643,7 +1695,7 @@ async def test_a_store_write_that_outruns_the_deadline_keeps_its_rows_claimed_un
     async with asyncio.timeout(5.0):
         while row_budget().in_flight:
             await asyncio.sleep(0.01)
-    assert await store.get(FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION))
+    assert await store.get(FrameRef(spec_id=_SPEC_ID, content_version=_content_version_of(data)))
 
 
 _UNIT_STRUCT = pa.struct(
@@ -2164,6 +2216,60 @@ def test_a_place_type_column_is_a_role_and_an_empty_cell_reads_untyped() -> None
     }
 
 
+@pytest.mark.parametrize("described", ["financingRecipient_kind", "financingRecipient_type"])
+def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> None:
+    # dfo-apis leaves the kind cell empty for a party it declares no kind for. Filled, the
+    # frame registers, and a sum across the parties refuses `place_levels_mixed`.
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:Oda"] * 3),
+            "financingProvider": pa.array(["country/FRA"] * 3),
+            "financingRecipient": pa.array(["country/KEN", "DACAfrica", "dcid:Unknown"]),
+            "time_period": pa.array(["2022"] * 3),
+            "value": pa.array([1.0, 2.0, 3.0]),
+            described: pa.array(["party", "total", None]),
+            "financingProvider_kind": pa.array([""] * 3),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+
+    frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+
+    cells = dict(
+        zip(
+            frame.table.column("financingRecipient").to_pylist(),
+            frame.table.column(described).to_pylist(),
+            strict=True,
+        )
+    )
+    assert cells == {"country/KEN": "party", "DACAfrica": "total", "dcid:Unknown": "untyped"}
+    assert set(frame.table.column("financingProvider_kind").to_pylist()) == {"untyped"}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [{"entities": {"origin": ["country/FRA"]}}, {"entities": {"recipient": ["country/KEN"]}}, None],
+    ids=["flow", "place", "unheld"],
+)
+@pytest.mark.parametrize("recorded", frame_materialisation.TYPE_COLUMN_SELECTIONS, ids="+".join)
+def test_a_replayed_selection_asks_a_flow_root_for_kinds(
+    recorded: tuple[str, ...], identity: dict[str, Any] | None
+) -> None:
+    options = {"format": "parquet", "bundle": False, "layout": "frame"}
+    if recorded:
+        options["columns"] = list(recorded)
+
+    replayed = frame_materialisation.replayed_mint_options(options, identity=identity)
+
+    party_typed = {"financingProvider_type", "financingRecipient_type"} & set(recorded)
+    flow_unselected = not recorded and identity is not None and "origin" in identity["entities"]
+    if party_typed or flow_unselected:
+        assert replayed == options | {"columns": ["kind"]}
+    else:
+        assert replayed == options
+
+
 def test_a_place_type_column_of_nulls_reads_untyped() -> None:
     nulls = pa.array([None] * len(_EVERY_PLACE_ROWS), type=pa.string())
     frame = frame_materialisation._frame_from_parquet_bytes(_every_place_parquet(nulls))
@@ -2213,3 +2319,309 @@ def test_extra_columns_name_a_frame_of_their_own() -> None:
         spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, columns=("a_type", "b_type")
     )
     assert len({_FRAME_REF.content_version, typed.content_version, two.content_version}) == 3
+
+
+@pytest.mark.parametrize(
+    ("columns", "recorded"),
+    [
+        (("observationAbout_type",), "cv_ec8eccaeb4265cbfca527550b24d3d3b"),
+        (("kind",), "cv_5279bdb960ddb0938351c08b4ada5390"),
+        (
+            ("financingRecipient_type", "financingProvider_type"),
+            "cv_3b6c33d24aa1d42e0de5d54574aa1ca5",
+        ),
+    ],
+)
+def test_a_columns_only_pair_keeps_the_recorded_derivation(
+    columns: tuple[str, ...], recorded: str
+) -> None:
+    """Recorded from the derivation before `frame_ref_for` took a groupby: stored
+    typed frames and `mint_recovery`'s matching of recorded selections depend on it."""
+    ref = frame_ref_for(spec_id=_SPEC_ID, content_version="cv_" + "2" * 32, columns=columns)
+
+    assert ref == FrameRef(spec_id=_SPEC_ID, content_version=recorded)
+
+
+def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> None:
+    summed = frame_ref_for(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, groupby=_SUM_GROUPBY)
+    summed_typed = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=_CONTENT_VERSION,
+        columns=("observationAbout_type",),
+        groupby=_SUM_GROUPBY,
+    )
+    typed = frame_ref_for(
+        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, columns=("observationAbout_type",)
+    )
+
+    assert (
+        summed.content_version
+        == "cv_"
+        + hashlib.sha256(
+            b'{"columns":[],"content_version":"'
+            + _CONTENT_VERSION.encode()
+            + b'","groupby":{"by":["time_period","crsPurpose"],"op":"sum"}}'
+        ).hexdigest()[:32]
+    )
+    assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4
+
+
+# A mint response lists the requested rendering and its statistics. The snapshot of
+# the same version lists them and the version's canonical frame.
+_RENDERED_LINK = f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}/files/rendered"
+_CANONICAL_LINK = f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}/files/canonical"
+
+
+def _snapshot_listing(*entries: tuple[str, dict[str, object], str]) -> dict[str, Any]:
+    """A snapshot response listing one artifact per `(digest, rendering, url)`."""
+    payload = _snapshot_payload()
+    payload["artifacts"] = [
+        {**payload["artifacts"][0], "artifact_digest": digest, "rendering": rendering, "url": url}
+        for digest, rendering, url in entries
+    ]
+    return payload
+
+
+async def _register_default(
+    *,
+    snapshot: dict[str, Any] | Callable[[], Awaitable[httpx2.Response]],
+    served: dict[str, bytes],
+    manifest: Manifest,
+    settings: Settings | None = None,
+) -> tuple[MaterialisationOutcome, list[str], list[str]]:
+    """`materialise_and_register` of a default mint whose snapshot read answers
+    `snapshot`, or what it returns, and whose link GETs answer `served` by path, with
+    the paths read."""
+    snapshot_paths: list[str] = []
+    fetched: list[str] = []
+
+    async def snapshot_handler(request: httpx2.Request) -> httpx2.Response:
+        snapshot_paths.append(request.url.path)
+        if callable(snapshot):
+            return await snapshot()
+        return httpx2.Response(200, json=snapshot)
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        fetched.append(request.url.path)
+        return httpx2.Response(200, content=served[request.url.path])
+
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=manifest,
+            settings=settings or _settings(),
+            writer="tester",
+            transport=httpx2.MockTransport(get_handler),
+        )
+    return outcome, snapshot_paths, fetched
+
+
+async def test_a_default_mint_registers_the_snapshots_canonical_frame() -> None:
+    """The rendering the mint lists carries a decoded column the canonical frame does
+    not, so registering it would hold a frame its pair does not name."""
+    canonical = _parquet_bytes()
+    rendered = _decoded_column_parquet()
+    manifest = _manifest(artifact_digest=_digest_for(rendered))
+    snapshot = _snapshot_listing(
+        (_digest_for(rendered), _OPTIONS, _RENDERED_LINK),
+        (_digest_for(canonical), dict(CANONICAL_FRAME_RENDERING), _CANONICAL_LINK),
+    )
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome, snapshot_paths, fetched = await _register_default(
+        snapshot=snapshot,
+        served={_RENDERED_LINK: rendered, _CANONICAL_LINK: canonical},
+        manifest=manifest,
+    )
+
+    assert outcome.status == "registered"
+    assert outcome.frame_ref == _FRAME_REF
+    assert snapshot_paths == [f"/api/datasets/{_SPEC_ID}/{_CONTENT_VERSION}"]
+    assert fetched == [_CANONICAL_LINK]
+    held = await get_frame_store().get(_FRAME_REF)
+    assert held is not None
+    assert mint_content_version(frame_sha256=frame_sha256(held[0])) == _CONTENT_VERSION
+    assert held[0] == frame_from_verified_parquet_bytes(canonical)
+    assert held[1].options == _OPTIONS
+
+
+async def test_a_snapshot_without_a_canonical_frame_refuses_without_fetching() -> None:
+    rendered = _parquet_bytes()
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome, _snapshot_paths, fetched = await _register_default(
+        snapshot=_snapshot_listing((_digest_for(rendered), _OPTIONS, _RENDERED_LINK)),
+        served={_RENDERED_LINK: rendered},
+        manifest=_manifest(artifact_digest=_digest_for(rendered)),
+    )
+
+    assert outcome.status == "refused"
+    assert outcome.attempts == 0
+    assert outcome.refusal is not None
+    assert outcome.refusal.code == ToolErrorCode.UPSTREAM_ERROR
+    assert outcome.refusal.retry_mode == RetryMode.DO_NOT_RETRY
+    assert fetched == []
+    assert await get_frame_store().get(_FRAME_REF) is None
+
+
+async def _unavailable() -> httpx2.Response:
+    return httpx2.Response(503, json={"code": "service_unavailable", "retryable": True})
+
+
+async def _slower_than_the_budget() -> httpx2.Response:
+    await asyncio.sleep(1.0)
+    return httpx2.Response(200, json=_snapshot_payload())
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "budget_s"),
+    [(_unavailable, 5.0), (_slower_than_the_budget, 0.05)],
+    ids=["snapshot-unavailable", "snapshot-past-the-budget"],
+)
+async def test_a_failed_snapshot_read_degrades_without_fetching(
+    snapshot: Callable[[], Awaitable[httpx2.Response]], budget_s: float
+) -> None:
+    canonical = _parquet_bytes()
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome, snapshot_paths, fetched = await _register_default(
+        snapshot=snapshot,
+        served={_CANONICAL_LINK: canonical},
+        manifest=_manifest(),
+        settings=_settings(artifact_fetch_budget_s=budget_s),
+    )
+
+    assert outcome.status == "degraded"
+    assert outcome.degraded_reason == "fetch"
+    assert outcome.attempts == 0
+    assert snapshot_paths
+    assert fetched == []
+    assert await get_frame_store().get(_FRAME_REF) is None
+    assert await get_frame_store().get_mint_record(_FRAME_REF) is None
+
+
+async def test_a_canonical_frame_that_does_not_mint_its_content_version_refuses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bytes match the digest the snapshot lists, and their frame hashes to
+    another version than the pair names. The refusal names the pair, and a warning
+    records it with the token the frame re-mints."""
+    other = _parquet_bytes(values=[2.5])
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome, _snapshot_paths, fetched = await _register_default(
+        snapshot=_snapshot_listing(
+            (_digest_for(other), dict(CANONICAL_FRAME_RENDERING), _CANONICAL_LINK)
+        ),
+        served={_CANONICAL_LINK: other},
+        manifest=_manifest(),
+    )
+
+    assert _content_version_of(other) != _CONTENT_VERSION
+    assert outcome.status == "refused"
+    assert outcome.attempts == 1
+    assert outcome.refusal is not None
+    assert outcome.refusal.code == ToolErrorCode.UPSTREAM_ERROR
+    assert outcome.refusal.retry_mode == RetryMode.DO_NOT_RETRY
+    assert fetched == [_CANONICAL_LINK]
+    assert _SPEC_ID in outcome.refusal.message
+    assert _CONTENT_VERSION in outcome.refusal.message
+    assert [
+        record.args
+        for record in caplog.records
+        if record.name == frame_materialisation.__name__ and record.levelname == "WARNING"
+    ] == [(_SPEC_ID, _CONTENT_VERSION, _content_version_of(other))]
+    assert await get_frame_store().get(_FRAME_REF) is None
+    assert await get_frame_store().get_mint_record(_FRAME_REF) is None
+
+
+def _reordered_canonical_parquet(order: list[int]) -> bytes:
+    """A two-row canonical frame's table in the canonical schema with its rows taken
+    in `order`: the schema `frame_from_verified_parquet_bytes` wraps, and rows no
+    `Frame` holds in that order."""
+    table = pq.read_table(
+        io.BytesIO(
+            _parquet_bytes(
+                role_values=["country/FRA", "country/KEN"],
+                time_periods=["2020", "2020"],
+                values=[1.5, 2.5],
+            )
+        )
+    ).replace_schema_metadata(None)
+    buf = io.BytesIO()
+    pq.write_table(table.take(order), buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("order", [[1, 0], [0, 0]], ids=["out-of-order", "duplicated"])
+async def test_a_canonical_frame_whose_rows_no_frame_holds_refuses(order: list[int]) -> None:
+    """The schema is canonical, so the decode wraps the table, and hashing it is
+    what finds the rows out of order."""
+    data = _reordered_canonical_parquet(order)
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome, _snapshot_paths, fetched = await _register_default(
+        snapshot=_snapshot_listing(
+            (_digest_for(data), dict(CANONICAL_FRAME_RENDERING), _CANONICAL_LINK)
+        ),
+        served={_CANONICAL_LINK: data},
+        manifest=_manifest(),
+    )
+
+    assert outcome.status == "refused"
+    assert outcome.attempts == 1
+    assert outcome.refusal is not None
+    assert outcome.refusal.code == ToolErrorCode.UPSTREAM_ERROR
+    assert outcome.refusal.retry_mode == RetryMode.DO_NOT_RETRY
+    assert fetched == [_CANONICAL_LINK]
+    assert await get_frame_store().get(_FRAME_REF) is None
+    assert await get_frame_store().get_mint_record(_FRAME_REF) is None
+
+
+def _decoded_column_parquet() -> bytes:
+    """`_parquet_bytes()`'s row in the rendering's frame layout, with the decoded
+    `stat_var_dac2aAidType` column dfo-apis adds to it."""
+    table = pq.read_table(io.BytesIO(_parquet_bytes())).replace_schema_metadata(None)
+    table = table.add_column(2, "stat_var_dac2aAidType", pa.array(["A01"], type=pa.string()))
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+async def test_a_groupby_mint_registers_its_rendering_under_the_pair_naming_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sum is held apart from the version's canonical frame, read from the
+    rendering the mint lists and with no snapshot read."""
+    summed = _parquet_bytes(values=[9.0], stat_vars=[f"dcid:{_SPEC_ID}"])
+    fetched: list[tuple[str, str | None]] = []
+
+    async def fake_fetch(*, artifact_digest: str, link: str | None, **_: Any) -> bytes:
+        fetched.append((artifact_digest, link))
+        return summed
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+
+    outcome = await materialise_and_register(
+        options=_SUM_SIBLING_RENDERING,
+        manifest=_manifest(renderings={_digest_for(summed): _SUM_SIBLING_RENDERING}),
+        settings=_settings(),
+        writer="tester",
+    )
+
+    expected = frame_ref_for(
+        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, groupby=_SUM_GROUPBY
+    )
+    assert outcome.status == "registered"
+    assert outcome.frame_ref == expected
+    assert expected != _FRAME_REF
+    assert fetched == [(_digest_for(summed), None)]
+    held = await get_frame_store().get(expected)
+    assert held is not None
+    assert held[1].options == _SUM_SIBLING_RENDERING
+    assert await get_frame_store().get(_FRAME_REF) is None
+    assert await get_frame_store().get_mint_record(expected) == MintRecord(
+        frame=expected, dataset=_FRAME_REF, options=_SUM_SIBLING_RENDERING, stat_var_count=1
+    )

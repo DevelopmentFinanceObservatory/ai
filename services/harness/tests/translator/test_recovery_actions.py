@@ -20,18 +20,27 @@ from typing import Any
 
 import pytest
 from compiler.compile import compile_plan
-from compiler.sources import DiscoveryStatus
+from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import FixtureSurface, McpSurface, ToolSchema
+from data_mcp.digest import render_answer
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from planner.agent import _choice_not_offered
 from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Decision,
+    Entity,
+    PinSource,
     Plan,
     Unit,
     plan_revision,
+    save_pin_sources,
 )
+from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
@@ -41,7 +50,10 @@ from translator.discovery import (
     save_log,
 )
 from translator.mechanical import TranslatorCore
+from translator.referral import load_referral
 from translator.tool import build_translator_core
+
+from .conftest import _envelope, _spec
 
 DraftFactory = Callable[..., Plan]
 DecisionFactory = Callable[..., Decision]
@@ -321,6 +333,169 @@ async def test_pinned_source_not_found_action_carries_the_logs_candidates(
     assert referred["outcome"] == "referred"
     assert referred["referral"]["kind"] == "pinned_source_not_found"
     assert {c["spec_id"] for c in referred["referral"]["candidates"]} == {SPEC_OTHER, SPEC_THIRD}
+
+
+# The France to Africa turn: the pin (fb3c) is France's aid to Africa, its
+# recipients closed to the group; the fresh search, sent with `across:
+# recipient` and no Africa, answers France's aid to all 266 recipients.
+SPEC_AFRICA = "spec_fb3cc27e" + "0" * 24
+SPEC_EVERY_RECIPIENT = "spec_4c330b1c" + "0" * 24
+_FRANCE = {"role": "origin", "label": "France", "ref": "country/FRA"}
+_WINDOW = {"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}}
+
+
+def _every_recipient_server() -> FastMCP:
+    """A `data-mcp` whose `search` answers every ask with France's aid to 266 recipients."""
+    server = FastMCP(name="data-mcp")
+
+    @server.tool(name="search")
+    async def search(parts: list[dict[str, Any]], raw_query: str | None = None) -> ToolResult:
+        """Find what data exists for the ask."""
+        del parts, raw_query
+        spec = _spec(
+            SPEC_EVERY_RECIPIENT,
+            "France's gross disbursements to 266 recipients",
+            coverage=_WINDOW,
+            entities=[_FRANCE],
+            role_axis_facts=[
+                {"role": "destination", "member_count": 266, "members_available": True}
+            ],
+        )
+        envelope = _envelope("definite", [], spec=spec)
+        return ToolResult(
+            content="digest",
+            structured_content=render_answer(envelope),
+            meta={SEARCH_ENVELOPE_META_KEY: envelope},
+        )
+
+    return server
+
+
+@pytest.mark.parametrize("held_by", ["shown", "found"])
+@pytest.mark.parametrize("named_source", [None, "IDS"])
+async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinned(
+    held_by: str,
+    named_source: str | None,
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    africa = _spec(
+        SPEC_AFRICA,
+        "France's gross disbursements to the 59 countries and territories in Africa",
+        coverage=_WINDOW,
+        entities=[
+            _FRANCE,
+            {"role": "destination", "label": "Ghana", "ref": "country/GHA"},
+            {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+        ],
+        entity_groups={"destination": {"label": "Africa", "dcid": "africa"}},
+    )
+    france = [Entity(name="France", role="donor"), Entity(name="Germany", role="donor")]
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_AFRICA)],
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    entities=france,
+                    across="recipient",
+                    source_spec_id=SPEC_AFRICA,
+                    source=named_source,
+                ),
+                derived_requirement(),
+            ],
+        )
+    )
+    if held_by == "shown":
+        save_pin_sources(context.state, {SPEC_AFRICA: PinSource(block=africa, settled=True)})
+    else:
+        # The G7 turn: an earlier proposal, naming Africa and stating no
+        # `across`, had the translator find the pin's source itself.
+        found = DiscoveryRecord(
+            revision="earlier",
+            tool="search",
+            requirement_id="annual_debt_service",
+            requirement_key="earlier",
+            status=DiscoveryStatus.DEFINITE,
+            spec_ids=(SPEC_AFRICA,),
+        )
+        log = load_log(context.state).with_record(found, (source_from_spec_block(africa),))
+        save_log(context.state, log)
+    core = _core(McpSurface(sources={"data-mcp": _every_recipient_server()}))
+
+    result = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
+    referred = await _replay_action(core, result["action"], context)
+
+    referral = referred["referral"]
+    assert (referral["kind"], referral["candidates"]) == ("pinned_source_not_found", [])
+    (withheld,) = referral["withheld"]
+    assert "spec_id" not in withheld
+    assert withheld["sentence"] == "France's gross disbursements to 266 recipients"
+    (dropped,) = withheld["dropped"]
+    assert "Africa" in dropped and "266" in dropped
+    repair = "name 'Africa' as recipient in `entities` and drop `across`"
+    assert referral["repair"] == repair
+    assert f"none keeps it, so {repair}" in referral["reason"]
+    stored = load_referral(context.state)
+    assert stored is not None
+    assert stored.offered() == {"annual_debt_service": ()}
+
+    repinned = draft(
+        decisions=[pinning_decision(SPEC_EVERY_RECIPIENT)],
+        evidence_requirements=[
+            requirement(
+                measure="official development assistance",
+                entities=france,
+                across="recipient",
+                source_spec_id=SPEC_EVERY_RECIPIENT,
+            ),
+            derived_requirement(),
+        ],
+    )
+    refused = _choice_not_offered(repinned, context)
+
+    assert refused is not None
+    assert refused["code"] == ProblemCode.SOURCE_NOT_OFFERED.value
+
+    # Unpinned, asking `search` for what it asked before, the requirement would
+    # have the fresh search settle on the withheld source, whatever order it
+    # names its entities in and whichever word it uses for the open role; the
+    # repair passes.
+    def unpinned(
+        entities: list[Entity], across: str | None, source: str | None = named_source
+    ) -> Plan:
+        return draft(
+            evidence_requirements=[
+                requirement(
+                    measure="official development assistance",
+                    entities=entities,
+                    across=across,
+                    source=source,
+                ),
+                derived_requirement(),
+            ]
+        )
+
+    for entities, across in [
+        (france, "recipient"),
+        (france[::-1], "recipient"),
+        (france, "recipients"),
+    ]:
+        dropped_by_unpinning = _choice_not_offered(unpinned(entities, across), context)
+        assert dropped_by_unpinning is not None, (entities, across)
+        assert dropped_by_unpinning["code"] == ProblemCode.SOURCE_NOT_OFFERED.value
+        assert dropped_by_unpinning["detail"]["repair"] == repair
+    if named_source is not None:
+        for variant in ["  ids  ", "the IDS", "THE (IDS)."]:
+            assert _choice_not_offered(unpinned(france, "recipient", variant), context) is not None
+    # A different named table changes the search too, so the translator may
+    # try it rather than rejecting the proposal before discovery runs.
+    assert _choice_not_offered(unpinned(france, "recipient", "DAC2a"), context) is None
+    africa_named = [*france, Entity(name="Africa", role="recipient")]
+    assert _choice_not_offered(unpinned(africa_named, None), context) is None
 
 
 async def test_requirement_unmeetable_action_refers(

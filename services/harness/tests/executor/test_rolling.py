@@ -375,6 +375,7 @@ async def test_a_fixed_plan_resolves_no_period_and_its_records_are_unchanged(
             "tool",
             "attempts",
             "frame_ref",
+            "manifest_ref",
             "digest",
             "row_count",
             "role_keys",

@@ -97,48 +97,9 @@ if TYPE_CHECKING:
     from analysis_mcp.identity import OpSpecVariant
 
 
-# The `basis` vocabulary `dfo_frame_grammar.content_version.mint_content_version`'s
-# own preimage builder accepts (`_FACET_BASES` in that module) -- anything
-# outside this set is normalised to `"declared_default"` by `_sanitised_facets`
-# below.
-_MINTABLE_FACET_BASES = frozenset({"bound", "declared_default"})
-
-
-def _sanitised_facets(facets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Project each of `facets` down to `mint_content_version`'s own closed
-    `{axis, ref, basis}` shape, preserving entry order.
-
-    A live `upstream_trace["facets"]` entry carries bookkeeping members
-    (`default_policy`, `default_policy_version`, `dispatch_facet_id`,
-    `selection_reason`, observed on real dfo-apis manifests) beyond that
-    closed shape, and its own `basis` vocabulary is wider than the two
-    literals (`bound`, `declared_default`) the preimage builder accepts --
-    `"deployment_fallback"` is one observed value. Dropping the extra
-    members and mapping any out-of-vocabulary `basis` to
-    `"declared_default"` reproduces upstream's own minted `content_version`
-    bit-for-bit on every live manifest checked so far.
-
-    A live entry's `ref` can be `None` -- an axis with no facet selected.
-    Upstream's own mint omits such an entry from its preimage and records
-    it only in the trace, and the preimage builder refuses a `None` ref,
-    so the entry is dropped here before minting.
-    """
-    return [
-        {
-            "axis": facet["axis"],
-            "ref": facet["ref"],
-            "basis": (
-                facet["basis"] if facet["basis"] in _MINTABLE_FACET_BASES else "declared_default"
-            ),
-        }
-        for facet in facets
-        if facet["ref"] is not None
-    ]
-
-
-def derive_frame_content_version(*, frame: Frame, upstream_trace: dict[str, Any]) -> str:
-    """`frame`'s frame-grammar `cv_` content version, minted fresh from
-    `upstream_trace`'s lineage fields plus `frame`'s bytes.
+def derive_frame_content_version(*, frame: Frame) -> str:
+    """`frame`'s frame-grammar `cv_` content version: a hash of its canonical
+    bytes alone, so one frame has one token whatever lineage produced it.
 
     A verb tool calls this once, when its output is written
     (`Trace.frame_content_version`). A verb resolving a stored input reads
@@ -152,33 +113,15 @@ def derive_frame_content_version(*, frame: Frame, upstream_trace: dict[str, Any]
     carries the toolkit's `ocv_` family instead, which
     `mint_toolkit_content_version`'s `input_content_versions` parameter
     requires the `cv_` family for.
-
-    `upstream_trace` is carried forward verbatim through every toolkit hop,
-    so its `graph_revision`/`source_revisions`/`facets` are always the
-    original materialisation's lineage, however many toolkit ops sit
-    between it and this call. `facets` is sanitised (`_sanitised_facets`)
-    before the derivation, since a live trace's `facets` entries cannot be
-    passed through unmodified.
     """
-    conversion = upstream_trace.get("conversion")
-    kwargs: dict[str, Any] = {}
-    if conversion is not None:
-        kwargs["conversion"] = conversion
-    return mint_content_version(
-        frame_sha256=frame_sha256(frame),
-        graph_revision=upstream_trace["graph_revision"],
-        source_revisions=upstream_trace.get("source_revisions", []),
-        facets=_sanitised_facets(upstream_trace.get("facets", [])),
-        **kwargs,
-    )
+    return mint_content_version(frame_sha256=frame_sha256(frame))
 
 
-def _derive_content_version_for_store(frame: Frame, upstream_trace: dict[str, Any]) -> str:
+def _derive_content_version_for_store(frame: Frame) -> str:
     """Adapts `derive_frame_content_version`'s keyword-only signature to the
-    positional `(frame, upstream_trace)` shape
-    `common.materialisation.content_version`'s registry calls a deriver
-    with."""
-    return derive_frame_content_version(frame=frame, upstream_trace=upstream_trace)
+    positional `(frame)` shape `common.materialisation.content_version`'s
+    registry calls a deriver with."""
+    return derive_frame_content_version(frame=frame)
 
 
 register_content_version_deriver(_derive_content_version_for_store)

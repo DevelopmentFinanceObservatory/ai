@@ -87,8 +87,8 @@ declare it under `criteria` (`{"workflow_outcome": 1.0}`) and under
 (`google/adk/evaluation/custom_metric_evaluator.py:31-42`) imports that dotted
 path with `importlib.import_module`, which needs `evals/agents` on `sys.path`
 to resolve `harness_translator_v1` as a top-level package -- the `__init__.py`
-of every set that turns it on (`harness_pair_v1`, `harness_planner_v2`,
-`harness_planner_skills_v1`) inserts it for exactly this.
+of every set that turns it on (`harness_pair_v1`, `harness_planner_v2`)
+inserts it for exactly this.
 """
 
 from __future__ import annotations

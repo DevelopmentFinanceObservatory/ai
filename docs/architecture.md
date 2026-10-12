@@ -9,10 +9,9 @@ dfo-ai is the AI layer of the Development Finance Observatory
 **`services/harness`** runs the agent. It's built on Google ADK and
 FastAPI, and powers the site's chat-and-canvas workspace (DFO Studio) over
 an SSE event stream: the frozen wire contract in
-`docs/studio-contract-v1.md`. Data turns run a deterministic workflow
-graph whose generative seams are gemini calls, or, with
-`STUDIO_ENGINE=orchestrator`, one agent that calls its own tools
-(`services/harness/src/orchestrator/README.md`); card edits, canvas
+`docs/studio-contract-v1.md`. A data turn runs one agent that calls its
+own tools (`services/harness/src/orchestrator/README.md`) inside an ADK
+workflow that owns routing, approval and execution; card edits, canvas
 mutations, and cancellation are direct studio routes (see
 `services/harness/README.md`). It mounts data-mcp, analysis-mcp, and
 presentation-mcp as FastMCP ASGI sub-apps inside its own process,
@@ -24,7 +23,7 @@ drafts a methodological plan for a question, recording each decision it makes,
 the alternatives it considered, and the evidence an acceptable answer rests on.
 It holds the plan at the user's approval, ships inside `harness` as a sibling
 top-level module, and knows nothing about execution. The DFO Studio runs the
-modules described below, adapted for its graph by
+modules described below, adapted for its workflow by
 `harness.planner_seam.PlannerSeam`.
 
 The plan-approve-execute workflow spans four top-level modules beside it,
@@ -49,7 +48,7 @@ verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
 stopped on.
 Nothing runs until the user approves. The planner's own tool is `submit_plan`:
 it approves nothing and executes nothing, and declares a compiled plan ready
-for the user's answer. The gate is the graph's own approval interrupt, raised
+for the user's answer. The gate is the workflow's approval interrupt, raised
 by its `approve` node and answered through `POST /api/studio/interrupt`, keyed
 on the plan's revision rather than its version integer, so what runs is
 exactly what was approved. The executor, also code, takes the
@@ -163,9 +162,9 @@ which `search` carries in `_meta` and the other tools in `structuredContent`
 and drops it at that point, so a model's boundary sits at a function's
 return value.
 `harness.mcp_client.McpResolver` and `McpExecutor` read a result's
-`structuredContent` to decide an outcome and return the graph's own
+`structuredContent` to decide an outcome and return the workflow's own
 `frame_refs` and one-line `summary`, or a typed `refusal` merging the
-refusal's `code`, `retry_mode` and `fix` into the graph's grammar. A
+refusal's `code`, `retry_mode` and `fix` into the workflow's grammar. A
 successful `search` puts its upstream envelope in the result's `_meta`
 (`data_mcp.search_result.SEARCH_ENVELOPE_META_KEY`) and a small answer in
 `structuredContent`, so a host that hands `structuredContent` to a model
@@ -175,9 +174,9 @@ for the More Info panel. `translator.discovery` reads a `search` envelope
 through `compiler.sources.outcome_from_envelope` and answers with
 `compact_source`'s own field set, and keeps one `definition` string per
 source out of a `describe` answer. `executor.run` keeps each server's digest
-text as its step's `StepRecord.digest`, which `harness.graph` carries into
-`narrate`'s `step_summaries`. The planner's model reaches these Python
-functions through `FunctionTool`s
+text as its step's `StepRecord.digest`, which the workflow's `plan_done`
+node hands to the agent as `step_summaries`. The planner's model reaches
+these Python functions through `FunctionTool`s
 (`harness.agents.create_planner_with_translator`). ADK's `McpTool` plays no
 part, so no `CallToolResult` dump is built for them and an
 `after_tool_callback` editing one would have nothing to edit. Where a tool
@@ -191,8 +190,8 @@ proxy-level metrics do not dilute the agent traces.
 
 A deployed service with the Langfuse variables set sends Langfuse Cloud (EU
 region) the text of each Studio question and the assistant's replies; the
-planner and compose prompts, which include the canvas and conversation digests
-(ADK's `call_llm` spans carry them); tool arguments and results at digest
+orchestrator and planner prompts, which include the canvas and conversation
+digests (ADK's `call_llm` spans carry them); tool arguments and results at digest
 level; and refusal codes with the refusal fields recorded on the trace events
 below. Everything above is sent unmasked. `LANGFUSE_SAMPLE_RATE` and a
 Langfuse `mask` function limit it.
@@ -214,12 +213,6 @@ Every studio stream calls `common.telemetry.flush_telemetry` before its
 response ends, so queued spans export while the request still has CPU.
 `POST /api/studio/cancel` calls it when it ends a paused turn's span, since no
 stream runs then.
-
-A card the harness cannot add leaves a trace event beside the closing text.
-`compose.write_refused` (a refused `write_component`, or an `ok` write with no
-usable component) and `compose.describe_frame_refused` are `WARNING` events on
-the turn's trace. The raw code, origin and retry mode go to the event, and the
-model sees the `reason` alone.
 
 **Evals.** Evaluation runs on ADK's own eval framework. `evals/` holds one
 folder per eval set (the agent wiring, the cases, and the criteria they're

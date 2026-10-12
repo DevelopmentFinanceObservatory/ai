@@ -1,9 +1,8 @@
-"""Assembly of the graph's model seams for the live server.
+"""Assembly of the planner seam for the live server.
 
-The one place that knows which implementation stands behind each seam: the
-constrained Gemini calls in `harness.generative` and the planner-translator
-pair behind `harness.planner_seam`. `harness.server.create_app` calls
-this; tests and the scripted mode build their own `GenerativeNodes`.
+The one place that knows which implementation stands behind the workflow's
+`PlannerModel`: the planner-translator pair behind `harness.planner_seam`.
+`harness.server.create_app` calls this.
 """
 
 from __future__ import annotations
@@ -12,16 +11,8 @@ import logging
 from typing import Any
 
 from compiler.surface import ToolSurface
-from google.genai import Client
 
-from harness.generative import (
-    GeminiCompose,
-    GeminiConverse,
-    GeminiDenominatorSplit,
-    GeminiNarrate,
-    GeminiRefusal,
-)
-from harness.graph import GenerativeNodes, PlannerModel
+from harness.graph.seams import PlannerModel
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
@@ -29,49 +20,29 @@ from harness.settings import Settings
 logger = logging.getLogger(__name__)
 
 
-def build_generative_nodes(
+def build_planner(
     *,
     settings: Settings,
-    model_name: str,
-    client: Client | None = None,
-    surface: ToolSurface | None = None,
+    surface: ToolSurface,
     prefix_cache: PrefixCache | None = None,
-) -> GenerativeNodes:
-    """The seams as a `GenerativeNodes`.
-
-    The model seams here are single constrained calls that build their genai
-    client lazily on first use; pass `client` to share one across them. The
-    planner is `planner.agent`'s planner with `translator.tool.build_translate`'s
-    translation attached to `propose_plan`, adapted by
+) -> PlannerSeam:
+    """The planner seam: `planner.agent`'s planner with the translation from
+    `translator.tool.build_translate` attached to `propose_plan`, adapted by
     `harness.planner_seam.PlannerSeam`. `surface` is the tool surface the
-    translation discovers on, the compiler checks
-    against, the planner's `get_skill` and `get_skill_file` call through,
-    and converse reads dfo-faq through for a reply about DFO itself;
-    pass the one `harness.server.create_app` already built for the
-    `execute` node, so the two compile against one set of schemas, read
-    once, rather than each fetching its own copy. Left unset, the seam
-    builds its own from `settings`, for callers with no surface of their own
-    to share (tests, the scripted-mode wiring), and converse answers a
-    question about DFO with `harness.dfo_faq.CANNOT_DESCRIBE_DFO`.
-    `prefix_cache` is the process's shared prompt-prefix cache, passed on
-    to the planner's model.
+    translation discovers on, the compiler checks against, and the planner's
+    `get_skill` and `get_skill_file` call through. Pass the one
+    `harness.server.create_app` already built for the `execute` node, so the
+    two compile against one set of schemas, read once. `prefix_cache` is the
+    process's shared prompt-prefix cache, passed on to the planner's model.
     """
-    shared = client
-    return GenerativeNodes(
-        converse=GeminiConverse(model_name=model_name, client=shared, surface=surface),
-        planner=PlannerSeam(settings=settings, surface=surface, prefix_cache=prefix_cache),
-        compose=GeminiCompose(model_name=model_name, client=shared),
-        narrate=GeminiNarrate(model_name=model_name, client=shared),
-        refusal=GeminiRefusal(model_name=model_name, client=shared),
-        denominator_split=GeminiDenominatorSplit(model_name=model_name, client=shared),
-    )
+    return PlannerSeam(settings=settings, surface=surface, prefix_cache=prefix_cache)
 
 
 def handing_back_planner_failures(seam: PlannerModel) -> PlannerModel:
     """`seam`, answering a draft it cannot finish (`PlannerSeamError`) with a
-    refusal instead of raising. On the orchestrator engine the planner node
-    then takes its "refused" route and `plan_done` hands the reason back to
-    the agent, which answers with what it can. The failure is logged in full."""
+    refusal instead of raising. The planner node then takes its "refused"
+    route and `plan_done` hands the reason back to the agent, which answers
+    with what it can. The failure is logged in full."""
 
     async def planner(**kwargs: Any) -> dict[str, Any]:
         try:
@@ -85,4 +56,4 @@ def handing_back_planner_failures(seam: PlannerModel) -> PlannerModel:
     return planner
 
 
-__all__ = ["build_generative_nodes", "handing_back_planner_failures"]
+__all__ = ["build_planner", "handing_back_planner_failures"]

@@ -1,14 +1,12 @@
 """What the resolver and the MCP clients agree on.
 
-The resolver's refusal type, `graph_envelope` (the digest of a search
-envelope that becomes the graph's decision inputs: status / spec_id /
-candidates / choice_points / parts / warnings / wide / skills), the
-presentation tool names `McpExecutor` routes on, and the
-refusal helpers: the `origin` values an executor stamps, `harness_refusal` for a refusal the harness mints,
-and `platform_trace_id_of`. The full envelope, with its dozens of unbound
-definition slots, never reaches graph state.
-
-`harness.graph`, `harness.mcp_client` and `harness.scripted` import this module.
+The resolver's refusal type, `resolver_digest` (the digest of a search
+envelope the orchestrator's `search` tool stores and reads: status / spec_id /
+candidates / parts / warnings / wide / skills, and each part's spec block),
+the presentation tool names `McpExecutor` routes on, and the refusal helpers:
+the `origin` values an executor stamps, `harness_refusal` for a refusal the
+harness mints, and `platform_trace_id_of`. The full envelope, with its dozens
+of unbound definition slots, never reaches session state.
 """
 
 from __future__ import annotations
@@ -18,7 +16,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from common.skills import ordered_skill_ids
-from compiler.sources import DESCRIBED_SHAPE_KIND, open_entity_axes_of
+from compiler.sources import (
+    DESCRIBED_SHAPE_KIND,
+    block_groups,
+    open_entity_axes_of,
+    resolved_source_mentions,
+    total_reading,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +33,6 @@ _PRESENTATION_TOOLS = frozenset({"describe_frame", "write_component", "describe_
 # A refusal that states neither is treated as unattributed.
 REFUSAL_ORIGIN_SERVICE = "service"
 REFUSAL_ORIGIN_HARNESS = "harness"
-
-# The `no_data.reason` search gives a part that asks for a measure divided by
-# a denominator (a per-head figure) when no series is published in that form.
-DENOMINATOR_NOT_AVAILABLE = "denominator_not_available"
-
-# The `no_data.reason` search gives a part whose unit phrase it could not read.
-UNIT_NOT_RESOLVED = "unit_not_resolved"
 
 # The platform states warning severities as info/warning/degraded; the wire
 # vocabulary is info/warn/degraded. Anything unrecognised maps to "warn" --
@@ -216,10 +213,7 @@ def _wide_facts(spec: dict[str, Any]) -> dict[str, Any]:
     it holds, read by `compiler.sources.open_entity_axes_of` as a selected source
     reads them, so a planner can state the party a rank covers. Used
     for the `definite` branch's chosen spec and for each offered spec in a
-    `candidates` branch, so a clarify choice's width is known at a clarify
-    re-entry without a second upstream `search` call
-    (`harness.mcp_client.McpResolver.__call__`'s `spec_id`-set shortcut
-    reads it back off the graph's own state)."""
+    `candidates` branch."""
     resolved = spec.get("resolved") or {}
     stat_vars = resolved.get("stat_vars") or {}
     member_count = _whole(stat_vars.get("member_count"))
@@ -247,19 +241,17 @@ def _whole(value: Any) -> int | None:
 
 
 def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
-    """Map the search resolve envelope to the graph's decision inputs.
+    """Map the search resolve envelope to its digest.
 
     The envelope carries one part per variable asked, each with its own
-    status. The graph decides on the first part: v1 runs one spec per turn,
-    and the envelope's own `status` is the parts' shared value or `mixed`.
-    `parts` reports how many parts search returned so the graph can say so.
+    status. The top-level fields read the first part, and the envelope's
+    own `status` is the parts' shared value or `mixed`. `parts` reports how
+    many parts search returned.
 
     `choice_points` counts the methodological forks the resolution settled
     by default on the user's behalf: facet axes on the resolved spec whose
     basis is a default or a fallback (anything but `bound`), plus per-series
-    facet variation. The depth policy's own docstring leaves the source of
-    choice_points open; this is the deployment's answer, and it is
-    deterministic from the envelope.
+    facet variation.
 
     `window`, on the `definite` branch only, and only when either side
     states a usable range (`_window` has the full read): the settled time
@@ -282,9 +274,9 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     single series. It is not "every slot unbound" -- that condition is true
     of essentially every ordinary ask (the `when`/source slots are always
     unbound, and a demographic slot is unbound whenever the query did not
-    name it), so treating it as wide would route to the planner and the
-    approval gate exactly the asks that mint as one series. A pinned-arm
-    identity (`shape.kind == "stat_var"`) is one series. Any other identity
+    name it), so treating it as wide would mark wide exactly the asks that
+    mint as one series. A pinned-arm identity (`shape.kind == "stat_var"`)
+    is one series. Any other identity
     is one series when `resolved.stat_vars.served_count` is one: `search`
     states how many StatVars the mint serves once the membership settled,
     so "population of Guatemala" (the family's root, `Count_Person`, serves
@@ -299,23 +291,29 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     them never needs another trip back into `mcp_client.py`'s raw envelope.
 
     A `no_data` part maps by its `category`: `unresolved` (or nearest-real
-    suggestions present) keeps `no_data` status so the graph's clarify edge
-    can offer the suggestions; an understood-but-absent result maps to
-    `unsupported`: absent data gets a plain statement, and the graph's
-    clarify loop has no give-up edge of its own.
+    suggestions present) keeps `no_data` status, with the suggestions as its
+    `candidates`. An understood-but-absent result maps to `unsupported`,
+    with search's reason as a `no_data` warning.
 
     `part_digests` keeps every part, the first included, as a short summary
     (`_part_summary`): what was asked, its status, its spec_id or
-    candidates, what it resolved to, and for a `no_data` part its `reason`
-    code. The decision fields above still read the first part only.
+    candidates, what it resolved to, for a `no_data` part its `reason`
+    code (with, for `qualifier_not_bound`, the phrases search could not
+    apply and the sentence of the match it found without them), and, when
+    search states any, its `departures`, each a `code` and
+    the `text` saying how the answer differs from what was asked. A
+    `definite` part binding a named set as its published total carries
+    `group_readings`, a sentence each saying so (`_total_readings`). A
+    `definite` part whose count Search elected beside others carries
+    `counted_as` and `alternatives`, each by its own spec_id
+    (`measure_choice`). The top-level fields above read the first part only.
 
     `skills`, on every branch, reads the whole envelope: the skills the
     envelope's `skills` map attaches to any part's specs, as
     `{"id", "description"}` pairs in `common.skills.ordered_skill_ids`
-    order, every one of them. `harness.planner_seam` renders the first five
-    and counts the rest. The planner loads one with `get_skill` when its
-    description bears on the question. A resolve that names none gives an
-    empty list.
+    order, every one of them. The orchestrator's `search` result shows the
+    first five and counts the rest, and each stored reading keeps the ids.
+    A resolve that names none gives an empty list.
     """
     return {**_decision_digest(envelope), "skills": _named_skills(envelope)}
 
@@ -345,19 +343,16 @@ def _decision_digest(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
-    """The digest a `harness.graph.Resolver` returns for a search envelope.
+    """The digest a `harness.orchestrator_tools.Resolver` returns for a search envelope.
 
-    `graph_envelope` reduces the raw envelope to `spec_id` alone.
-    `harness.planner_seam` needs the `definite` part's own `spec` block
-    whole, to build a pinned requirement's source from it with no second
-    `search` call (`translator.discovery.discover_source`), so `spec_block`
-    holds it, `None` on every other status, matching `graph_envelope`'s own
-    `spec_id`. Each part digest carries its own block the same way, for a
-    caller that fetches each part (`harness.orchestrator_tools`), and
-    `candidate_blocks`, each candidate's block keyed by its spec_id, so a
-    candidate the caller picks is fetched as a family or a single series
-    the same way a definite part is. `kind` is what the envelope says of
-    itself: a resolution, a catalogue, or a declined question, `resolution`
+    `graph_envelope` reduces each spec to its `spec_id`. Each part digest
+    also carries a `definite` part's own `spec` block whole as `spec_block`,
+    `None` on every other status, and `candidate_blocks`, each candidate's
+    block keyed by its spec_id. `harness.graph.state.store_search` stores them, so
+    `fetch` and the planner's pins read a part's or a picked candidate's
+    block with no second `search` call. The top-level `spec_block` holds
+    the first part's block the same way. `kind` is what the envelope says
+    of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
     `graph_envelope`'s own `skills`.
     """
@@ -446,14 +441,124 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
             for candidate in digest["candidates"]
         ],
     }
+    if part.get("separate") is True:
+        summary["separate"] = True
     for key in ("window", "wide"):
         if key in digest:
             summary[key] = digest[key]
+    if digest["status"] in ("definite", "candidates") and (
+        mentions := resolved_source_mentions(part)
+    ):
+        summary["resolved_sources"] = [mention.model_dump(mode="json") for mention in mentions]
     no_data = part.get("no_data") or {}
     for key in ("reason", "message"):
         if value := no_data.get(key):
             summary[key] = value
+    if no_data.get("reason") == "qualifier_not_bound":
+        summary.update(_unapplied_phrases(no_data))
+    if ambiguous := no_data.get("ambiguous_sources"):
+        summary["ambiguous_sources"] = ambiguous
+    departures = [
+        {"code": str(departure["code"]), "text": str(departure["text"])}
+        for departure in part.get("departures") or ()
+        if isinstance(departure, Mapping) and departure.get("code") and departure.get("text")
+    ]
+    if departures:
+        summary["departures"] = departures
+    if digest["status"] == "definite" and (readings := _total_readings(part.get("spec") or {})):
+        summary["group_readings"] = readings
+    if digest["status"] == "definite":
+        summary.update(measure_choice(part.get("spec") or {}))
     return summary
+
+
+def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The count Search elected for `spec` and the other counts it offers, as data.
+
+    `counted_as` is `resolved.measure_label`. `alternatives` holds each
+    `resolved.alternative_measures` entry on axis "what" as `{spec_id, label}`,
+    in wire order; an entry missing its spec_id or label is left out, as
+    data-mcp's `digest._measure_choice` leaves it out. Empty when no
+    alternative remains.
+    """
+    resolved = spec.get("resolved") or {}
+    label = resolved.get("measure_label")
+    alternatives = [
+        {"spec_id": spec_id, "label": alternative["label"]}
+        for alternative in resolved.get("alternative_measures") or ()
+        if alternative.get("axis") == "what"
+        and alternative.get("label")
+        and (spec_id := (alternative.get("definition") or {}).get("spec_id"))
+    ]
+    if not isinstance(label, str) or not label or not alternatives:
+        return {}
+    return {"counted_as": label, "alternatives": alternatives}
+
+
+def _total_readings(spec: Mapping[str, Any]) -> list[str]:
+    """A sentence per named set `spec` binds as its published total (`compiler.sources.total_reading`).
+
+    Search states no departure for a set read whole, so this is where the
+    reading is said. A set read as its members has search's own
+    `group_read_as_members` departure.
+    """
+    entities = (spec.get("resolved") or {}).get("entities") or ()
+    labels = {
+        str(entity["ref"]): str(entity["label"])
+        for entity in entities
+        if isinstance(entity, Mapping) and entity.get("ref") and entity.get("label")
+    }
+    return [
+        text for group in block_groups(spec) if (text := total_reading(group, labels)) is not None
+    ]
+
+
+def _unapplied_phrases(no_data: Mapping[str, Any]) -> dict[str, Any]:
+    """A `qualifier_not_bound` refusal's phrases and the match it found without them.
+
+    `unbound_qualifiers` is each phrase's text, in query order, without
+    repeats. `flagged_match` is the rendered sentence of the same-variable
+    spec search found but would not answer with. Either key is left out
+    when the wire carries nothing for it.
+    """
+    facts: dict[str, Any] = {}
+    texts = [
+        str(qualifier["text"])
+        for qualifier in no_data.get("unbound_qualifiers") or ()
+        if isinstance(qualifier, Mapping) and qualifier.get("text")
+    ]
+    if texts:
+        facts["unbound_qualifiers"] = list(dict.fromkeys(texts))
+    flagged = no_data.get("flagged_match") or {}
+    if sentence := (flagged.get("resolved") or {}).get("rendered_sentence"):
+        facts["flagged_match"] = sentence
+    return facts
+
+
+def series_description(spec: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    """A spec block's heading and the terms of its byline, from `resolved.sentence_plan`.
+
+    The heading is the text of every `heading` token, without its closing
+    full stop: "Total climate-specific financial support provided worldwide,
+    2011 to 2022". The byline's terms are its slot tokens' texts, in order:
+    ("US dollars", "SDG Global Database"). `None` when the block carries no
+    heading tokens.
+    """
+    plan = (spec.get("resolved") or {}).get("sentence_plan") or ()
+    tokens = [token for token in plan if isinstance(token, Mapping)]
+    heading = "".join(
+        str(token.get("text") or "") for token in tokens if token.get("segment") == "heading"
+    ).strip()
+    if not heading:
+        return None
+    byline = tuple(
+        text
+        for token in tokens
+        if token.get("segment") == "byline"
+        and token.get("kind") == "slot"
+        and (text := str(token.get("text") or "").strip())
+    )
+    return heading.removesuffix("."), byline
 
 
 def _answer_kind_digest(envelope: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -573,10 +678,9 @@ def _part_digest(envelope: dict[str, Any], part: dict[str, Any], count: int) -> 
 
 
 __all__ = [
-    "DENOMINATOR_NOT_AVAILABLE",
-    "UNIT_NOT_RESOLVED",
     "ResolverError",
     "chosen_part",
     "graph_envelope",
     "reading_facts",
+    "series_description",
 ]

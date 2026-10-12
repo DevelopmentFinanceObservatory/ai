@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness.planner_seam import _render_envelope
 from harness.tool_contracts import graph_envelope
 
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
@@ -62,6 +61,18 @@ _ROLE_BEARING_IDENTITY = {
     "entities": {"observationAbout": ["country/KEN"], "destination": ["country/KEN"]},
 }
 _PINNED_IDENTITY = {"shape": {"kind": "stat_var", "id": "Count_Person"}}
+
+
+@pytest.mark.parametrize("separate", [True, False, None])
+def test_part_summary_preserves_explicit_comparison_intent(separate: bool | None) -> None:
+    part = _definite("spec_1")
+    if separate is not None:
+        part["separate"] = separate
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+    if separate is True:
+        assert summary["separate"] is True
+    else:
+        assert "separate" not in summary
 
 
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:
@@ -285,10 +296,96 @@ def test_a_no_data_part_summary_carries_the_message_when_search_gave_one() -> No
     assert stated["part_digests"][0]["message"] == message
 
 
+def test_a_qualifier_not_bound_summary_names_the_phrases_and_the_flagged_match() -> None:
+    """The orchestrator reads which phrases search could not apply, and what it
+    found without them, from the summary alone."""
+    no_data = {
+        "category": "absent",
+        "reason": "qualifier_not_bound",
+        "unbound_qualifiers": [
+            {"text": "HIV", "disposition": "unbound"},
+            {"text": "AIDS", "disposition": "unbound"},
+            {"text": "HIV", "disposition": "unbound"},
+            {"disposition": "unbound"},
+        ],
+        "flagged_match": {
+            "spec_id": "spec_health",
+            "resolved": {"rendered_sentence": "Gross ODA disbursements to Kenya for health."},
+        },
+    }
+
+    summary = graph_envelope({"parts": [{"status": "no_data", "no_data": no_data}]})[
+        "part_digests"
+    ][0]
+
+    assert summary["unbound_qualifiers"] == ["HIV", "AIDS"]
+    assert summary["flagged_match"] == "Gross ODA disbursements to Kenya for health."
+
+
+def test_a_gate_failure_summary_leaves_its_flagged_match_out() -> None:
+    no_data = {
+        "category": "absent",
+        "reason": "gate_failed",
+        "gate": "min_countries_5",
+        "flagged_match": {"spec_id": "spec_f", "resolved": {"rendered_sentence": "flagged"}},
+    }
+
+    summary = graph_envelope({"parts": [{"status": "no_data", "no_data": no_data}]})[
+        "part_digests"
+    ][0]
+
+    assert "flagged_match" not in summary
+    assert "unbound_qualifiers" not in summary
+
+
 def test_a_part_that_is_not_no_data_summarises_without_a_reason() -> None:
     digest = graph_envelope({"parts": [_definite("spec_a")]})
 
     assert "reason" not in digest["part_digests"][0]
+
+
+def test_a_part_summary_carries_the_departures_search_states() -> None:
+    departure = {
+        "code": "closest_match",
+        "text": "You asked for climate finance. This shows ODA, the closest measure.",
+        "asked": "climate finance",
+        "binding_ref": None,
+    }
+    plain = graph_envelope({"parts": [_definite("spec_a")]})
+    departed = graph_envelope({"parts": [{**_definite("spec_a"), "departures": [departure]}]})
+
+    assert "departures" not in plain["part_digests"][0]
+    assert departed["part_digests"][0]["departures"] == [
+        {"code": departure["code"], "text": departure["text"]}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("total", "readings"),
+    [
+        (
+            "GroupOfSeven",
+            [
+                "The figures for G7 are the total the source publishes for the group as a whole "
+                "(G7 countries, Total), not its members' figures added up."
+            ],
+        ),
+        (None, None),
+    ],
+    ids=["total", "members"],
+)
+def test_a_part_summary_says_a_set_is_read_as_its_published_total(
+    total: str | None, readings: list[str] | None
+) -> None:
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entities": [{"role": "origin", "ref": "GroupOfSeven", "label": "G7 countries, Total"}],
+        "entity_groups": {"origin": {"dcid": None, "label": "G7", "total": total}},
+    }
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert summary.get("group_readings") == readings
 
 
 def test_unsupported_part_carries_its_detail_as_a_warning() -> None:
@@ -647,19 +744,13 @@ def test_skills_read_every_part_in_digest_order_with_descriptions() -> None:
     ]
 
 
-def test_skills_keep_every_named_skill_for_the_seam_to_count() -> None:
+def test_skills_keep_every_named_skill() -> None:
     skill_ids = [f"skill-{index}" for index in range(7)]
     envelope = _named_skills_envelope([_skilled("spec_a", *skill_ids)], skill_ids)
 
     digest = graph_envelope(envelope)
 
     assert [skill["id"] for skill in digest["skills"]] == skill_ids
-    rendered = _render_envelope(digest).splitlines()
-    skills_at = rendered.index("- skills (7):")
-    assert rendered[skills_at + 1 : skills_at + 7] == [
-        *(f"  - {skill_id} -- When {skill_id} applies." for skill_id in skill_ids[:5]),
-        "  - and 2 more",
-    ]
 
 
 def test_an_envelope_with_no_skills_map_gives_an_empty_list_on_every_branch() -> None:

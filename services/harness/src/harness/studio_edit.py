@@ -20,8 +20,8 @@ before tokens existed) is rebuilt as a new card from its stored intent
 with the patch merged in, so the edit still lands in the card's slot. The
 new card has a new id and a fresh revision history, and the reply says so.
 
-Failures serialise into the stream as a stream-fatal error frame, exactly
-like a graph turn.
+Failures serialise into the stream as a stream-fatal error frame, as
+they do in a turn.
 """
 
 from __future__ import annotations

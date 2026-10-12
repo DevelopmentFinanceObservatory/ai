@@ -23,12 +23,11 @@ from common.mcp_telemetry import LangfuseSessionMiddleware, LangfuseToolIoMiddle
 from common.telemetry import init_telemetry
 from common.tool_annotations import READ_ONLY_CATALOGUE
 from fastmcp import FastMCP
-from fastmcp.tools import Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from data_mcp import search_tool
-from data_mcp.artifact_resource import _MAX_ADVERTISED_TTL_S, serve_artifact
+from data_mcp.artifact_resource import serve_artifact
 from data_mcp.client import UpstreamClient
 from data_mcp.client_holder import aclose_client, set_client
 from data_mcp.definition_store import (
@@ -79,9 +78,8 @@ def _build_store(settings: Settings) -> DefinitionStore:
 
 @asynccontextmanager
 async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
-    """Builds the definition store and lists the declared datasets in the search tool's
-    description on startup; closes the store, the upstream client, and the shared frame
-    materialisation store on shutdown.
+    """Builds the definition store on startup; closes the store, the upstream client, and
+    the shared frame materialisation store on shutdown.
 
     This lifespan, not `main()`, is what actually runs in production: the
     harness mounts this app's ASGI sub-app via `combine_lifespans` and never
@@ -108,9 +106,6 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
             bucket_name=settings.frame_store_bucket,
             verify_content_version_on_read=settings.frame_store_verify_content_version,
         )
-    _search.description = search_tool.describe_search(
-        _SEARCH_DESCRIPTION, await search_tool.fetch_declared_datasets()
-    )
     try:
         yield
     finally:
@@ -138,18 +133,7 @@ async def healthz(_request: Request) -> JSONResponse:
 # schema on every call is a risk left untaken here. `resolve_definition` is
 # the harness's: the combined server outside clients reach leaves it out
 # (`harness.combined_mcp`).
-# `search` is held as a `Tool` so the lifespan can list the declared datasets
-# in its description, read from dfo-apis at startup. Until then, and when that
-# read fails, the description lists none.
-_search = Tool.from_function(
-    search_tool.search,
-    version="1",
-    title="Search DFO data",
-    annotations=READ_ONLY_CATALOGUE,
-)
-_SEARCH_DESCRIPTION = _search.description or ""
-_search.description = search_tool.describe_search(_SEARCH_DESCRIPTION, None)
-mcp.add_tool(_search)
+mcp.tool(search_tool.search, version="1", title="Search DFO data", annotations=READ_ONLY_CATALOGUE)
 mcp.tool(get_data, version="1", title="Get data", annotations=READ_ONLY_CATALOGUE)
 mcp.tool(
     describe,
@@ -182,9 +166,9 @@ mcp.resource(
     name="artifact",
     mime_type="application/json",
     description=(
-        "Read this to obtain a short-lived signed download URL for one artifact. "
-        f"The URL is minted fresh at read time and expires in up to {_MAX_ADVERTISED_TTL_S // 60} "
-        "minutes -- do not cache it; read this resource again to get a current one."
+        "Read this to obtain the download URL for one artifact. The URL does not "
+        "expire: a GET on it answers 302 to a download link that lasts a few minutes, "
+        "so follow redirects and fetch the bytes when you need them."
     ),
 )(serve_artifact)
 

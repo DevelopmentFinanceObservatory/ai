@@ -2269,8 +2269,7 @@
         "media_type": "application/vnd.apache.parquet",
         "created_at": "2026-10-02T05:20:53.126937+00:00",
         "tier": "working",
-        "url": "http://127.0.0.1:44462/p1-working/sha256:ecd27d8c771c3eea377afe3595474eeb61fd32b9a00a5446defa3340d3aace39",
-        "url_expires_at": "2026-10-02T05:35:53.126937+00:00"
+        "url": "/api/datasets/spec_b1d96bc4c8d3bb377f96b8fed43dddef/cv_4ec9627605db62bcc37512d70884ff02/files/sha256:ecd27d8c771c3eea377afe3595474eeb61fd32b9a00a5446defa3340d3aace39"
       },
       {
         "artifact_digest": "sha256:0f33f417c4567deec176dc0df59f21005460626a06f25b3a783ea7189d15f407",
@@ -2281,8 +2280,7 @@
         "media_type": "application/vnd.apache.parquet",
         "created_at": "2026-10-02T05:20:53.177429+00:00",
         "tier": "working",
-        "url": "http://127.0.0.1:44462/p1-working/sha256:0f33f417c4567deec176dc0df59f21005460626a06f25b3a783ea7189d15f407",
-        "url_expires_at": "2026-10-02T05:35:53.177429+00:00"
+        "url": "/api/datasets/spec_b1d96bc4c8d3bb377f96b8fed43dddef/cv_4ec9627605db62bcc37512d70884ff02/files/sha256:0f33f417c4567deec176dc0df59f21005460626a06f25b3a783ea7189d15f407"
       }
     ],
     "series_count": 55,

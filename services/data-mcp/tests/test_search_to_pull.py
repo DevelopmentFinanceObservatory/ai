@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
@@ -58,8 +57,8 @@ def _stub_materialise_and_register(monkeypatch: pytest.MonkeyPatch) -> None:
 # this has to be the real hash of `_identity_doc()`, not an arbitrary id.
 _SPEC_ID = spec_id_for(canonicalize(_identity_doc()))
 _CONTENT_VERSION = "cv_1"
-_MINT_SENTINEL = "https://signed.example/never-in-a-tool-result"
-_RESOURCE_READ_SENTINEL = "https://signed.example/only-on-the-resource-read"
+_MINT_SENTINEL = "/links/never-in-a-tool-result"
+_RESOURCE_READ_SENTINEL = "/links/only-on-the-resource-read"
 
 
 def _search_envelope() -> dict[str, Any]:
@@ -105,9 +104,6 @@ def _routing_handler() -> Handler:
 
     snapshot_payload = _manifest_response(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
     snapshot_payload["artifacts"][0]["url"] = _RESOURCE_READ_SENTINEL
-    snapshot_payload["artifacts"][0]["url_expires_at"] = (
-        datetime.now(UTC) + timedelta(seconds=900)
-    ).isoformat()
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.method == "POST" and request.url.path == "/api/search/resolve":
@@ -159,8 +155,8 @@ async def test_no_signed_url_survives_the_full_search_to_pull_sequence() -> None
             read_contents = await client.read_resource(str(resource_link.uri))
 
     doc = json.loads(read_contents[0].text)
-    assert doc["url"] == _RESOURCE_READ_SENTINEL
-    assert doc["url"] != _MINT_SENTINEL
+    assert doc["url"].endswith(_RESOURCE_READ_SENTINEL)
+    assert _MINT_SENTINEL not in doc["url"]
 
     every_tool_result_seen = [
         dumped_search_content,

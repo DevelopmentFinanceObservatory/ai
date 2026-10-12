@@ -18,29 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
-from compiler.sources import DiscoveryStatus, source_from_spec_block
+from compiler.sources import DiscoveryStatus
 from compiler.surface import McpSurface
-from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefinitionStore
-from data_mcp.definition_store import set_store as set_definition_store
-from data_mcp.definition_writes import windowed_identity
+from data_mcp import resolution
 from data_mcp.server import mcp as real_data_mcp
 from fastmcp import FastMCP
 
 # The key set and the walker that hold the model-facing boundary, shared
 # with the module that established it on the discovery and refusal paths.
-from harness.wire import (
-    MAX_SEED_RECORD_CHARS,
-    MAX_SEED_SOURCE_CHARS,
-    MAX_SEEDS,
-)
-from planner.agent import _window_pins
 from planner.operations import (
     FilterOperation,
     JoinOperation,
@@ -51,47 +41,37 @@ from planner.operations import (
     Translation,
 )
 from planner.plan import (
-    MAX_MEASURE_CHARS,
-    MAX_PLAN_RECORD_CHARS,
-    MAX_PLAN_REQUIREMENTS,
-    PLAN_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
     AskAnswer,
     DatasetRequirement,
     Decision,
-    Entity,
     FilterRequirement,
     GrowthRequirement,
     JoinRequirement,
-    Period,
     PinSource,
     Plan,
     PlanStatus,
     QuotientRequirement,
     RankRequirement,
     RequirementSide,
-    SeededSource,
     ShareOfRequirement,
+    load_plan,
     plan_revision,
-    save_dropped_seeds,
     save_pin_sources,
     save_plan,
-    save_seeded_sources,
 )
 from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
     EntityIn,
-    PlaceLevel,
-    PlaceType,
     RankAmong,
     RankDirection,
     Reduction,
     RelativePeriod,
     RollingWindow,
 )
-from planner.tool_results import Outcome, ProblemCode
+from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource
 from translator import mechanical
 from translator.discovery import (
@@ -110,7 +90,6 @@ from translator.mechanical import (
     run_translate,
 )
 from translator.referral import (
-    OUTCOME_OF,
     Referral,
     ReferralKind,
     clear_referral,
@@ -119,18 +98,12 @@ from translator.referral import (
 )
 from translator.tool import build_translate, build_translator_core
 
-from ..bounded_seeds import fullest_described_seed, read_seed
-from ..data_mcp_definitions import SearchStub, search_api
 from .conftest import _spec
 from .test_model_facing_tool_results import _ENVELOPE_KEYS, _flat_keys
 
 RequirementFactory = Callable[..., DatasetRequirement]
 DerivedRequirementFactory = Callable[..., AggregateRequirement]
 
-# A seeded turn request whose one seed is a real Search API Spec block.
-SEEDED_REQUEST_FIXTURE = (
-    Path(__file__).parents[1] / "wire_fixtures" / "studio" / "request-11-turn-seeded.json"
-)
 DraftFactory = Callable[..., Plan]
 DecisionFactory = Callable[..., Decision]
 PinningDecisionFactory = Callable[..., Decision]
@@ -148,7 +121,7 @@ async def combined_surface(data_server: FastMCP) -> McpSurface:
     `resolve_definition` tool objects.
 
     `discover_source` answers from `data_server`'s canned `search`, and reads
-    a seed's copy over a plan's period through the real `resolve_definition`,
+    a pin's copy over a plan's period through the real `resolve_definition`,
     over the Search API a test installs (`search_api`);
     `propose_operations` needs `get_data`'s and every analysis-mcp verb's
     real capability schema to compile, or every attempt reports
@@ -681,506 +654,6 @@ async def test_a_budget_spent_on_timed_out_searches_stays_a_transient_referral(
     )
 
 
-async def test_run_translate_refers_a_search_that_finds_a_dropped_dataset_as_seed_dropped(
-    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
-) -> None:
-    """The planner reads why the requirement has no source: the turn dropped the dataset
-    its search found, and the plan is not compiled around it."""
-    context = context_holding(draft())
-    save_dropped_seeds(
-        context.state,
-        [SeededSource(source=SelectedSource(spec_id=SPEC_KENYA, sentence="s", has_data=True))],
-    )
-
-    result = await run_translate(context, core=core)
-
-    assert result["outcome"] == "referred", result
-    referral = result["referral"]
-    assert referral["kind"] == "seed_dropped"
-    assert referral["requirement_id"] == "annual_debt_service"
-    assert "Remove this requirement" in referral["reason"]
-    assert load_referral(context.state).kind is ReferralKind.SEED_DROPPED
-
-
-async def test_run_translate_takes_no_source_from_a_search_answered_before_the_drop(
-    draft: DraftFactory,
-    core: TranslatorCore,
-    context_holding: ContextHolding,
-    search_calls: list[dict[str, Any]],
-) -> None:
-    """A search that settled the requirement before the turn dropped its dataset
-    is not reused: the requirement is searched again and referred as `seed_dropped`."""
-    context = context_holding(draft())
-    found = await core.discover_source(requirement_id="annual_debt_service", tool_context=context)
-    assert found["status"] == "definite"
-    assert len(search_calls) == 1
-    save_dropped_seeds(
-        context.state,
-        [SeededSource(source=SelectedSource(spec_id=SPEC_KENYA, sentence="s", has_data=True))],
-    )
-
-    proposals: list[object] = []
-
-    async def propose_operations(**kwargs: object) -> dict[str, object]:
-        proposals.append(kwargs)
-        return await core.propose_operations(**kwargs)
-
-    result = await run_translate(
-        context, core=dataclasses.replace(core, propose_operations=propose_operations)
-    )
-
-    # Searched again at once: no translation is proposed around a missing source.
-    assert proposals == []
-    assert len(search_calls) == 2
-    assert result["outcome"] == "referred", result
-    assert result["referral"]["kind"] == "seed_dropped"
-    assert result["referral"]["requirement_id"] == "annual_debt_service"
-
-
-async def test_run_translate_compiles_a_seed_whose_sibling_over_other_years_was_dropped(
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    context_holding: ContextHolding,
-    core: TranslatorCore,
-    search_calls: list[dict[str, Any]],
-) -> None:
-    """Two seeds over one dataset and different years, one dropped. The plan
-    pins the one the turn still holds, which is honoured from the seeded
-    source and compiled: the pin check and the source filter agree. The seed
-    leaves its 193 countries open, so the requirement covers every country
-    and a filter keeps the countries."""
-    set_definition_store(InMemoryDefinitionStore())
-    try:
-        block = json.loads(SEEDED_REQUEST_FIXTURE.read_text())["seed_spec"][0]["spec"]
-        seed = source_from_spec_block(block)
-        identity = block["definition"]["identity"]
-
-        def over(start: int, end: int) -> SelectedSource:
-            window = {"kind": "range", "start_year": start, "end_year": end}
-            spec_id, windowed = windowed_identity(identity, window)
-            return seed.model_copy(update={"spec_id": spec_id, "identity": windowed})
-
-        dropped, held = over(2010, 2010), over(2015, 2024)
-        pinned = requirement(
-            id="annual_debt_service",
-            entities=[],
-            across="country",
-            source_spec_id=held.spec_id,
-            decision_ids=["measure", "source"],
-            period=Period(start=2015, end=2024),
-        )
-        source_decision = pinning_decision(
-            held.spec_id,
-            slot="source",
-            description="Which source.",
-            options=[held.spec_id, "x"],
-            chosen=held.spec_id,
-        )
-        context = context_holding(
-            draft(
-                decisions=[decision(), source_decision],
-                evidence_requirements=[
-                    pinned,
-                    FilterRequirement(
-                        id="countries",
-                        decision_ids=["measure"],
-                        input_id="annual_debt_service",
-                        predicates=(PlaceLevel(level=PlaceType.COUNTRY),),
-                    ),
-                ],
-            )
-        )
-        save_seeded_sources(context.state, [SeededSource(source=held)])
-        save_dropped_seeds(context.state, [SeededSource(source=dropped)])
-
-        result = await run_translate(context, core=core)
-    finally:
-        set_definition_store(None)
-
-    assert result["outcome"] == "ok", result
-    assert search_calls == []
-
-
-# What one further retrieval of a dataset adds to a `run_translate` result: its
-# spec_id and the phrase it was searched as (`translator.discovery.described_sources`).
-_ALSO_RETRIEVED_CHARS = (
-    len(json.dumps({"spec_id": "spec_" + "0" * 32, "searched_as": ""}))
-    + MAX_MEASURE_CHARS
-    + len(", ")
-)
-# The `sources` of a `run_translate` result for a plan over seeds: each seed
-# described once, at most `MAX_SEED_SOURCE_CHARS` with its stamped phrase, and
-# one `_ALSO_RETRIEVED_CHARS` for every other requirement that retrieves one.
-TRANSLATE_SEEDED_SOURCES_CEILING = (
-    MAX_SEEDS
-    * (
-        MAX_SEED_SOURCE_CHARS
-        + len('""')
-        + MAX_MEASURE_CHARS
-        + len(', "also_retrieved_as": []')
-        + len(", ")
-    )
-    + (MAX_PLAN_REQUIREMENTS - MAX_SEEDS) * _ALSO_RETRIEVED_CHARS
-    + len("[]")
-)
-# The rest of the result is per requirement: one step, an id and a tool in
-# 128 characters, and the compiler's warnings about its source, which quote
-# the source's unit and window. Three warnings a requirement measure 2,787
-# characters with every quoted string at `MAX_SEED_TEXT_CHARS`; 4,096 is
-# allowed.
-TRANSLATE_SEEDED_RESULT_CEILING = (
-    TRANSLATE_SEEDED_SOURCES_CEILING + 1_024 + MAX_PLAN_REQUIREMENTS * (128 + 4_096)
-)
-# `planner:plan` holds the workflow, which keeps one source record and one
-# `get_data` step per retrieval: the record at most `MAX_SEED_RECORD_CHARS`
-# with its stamped phrase, and 4,096 for the step, its binding and its
-# operation. The plan's own text is at most `MAX_PLAN_RECORD_CHARS`.
-PLAN_STATE_SEEDED_CEILING = MAX_PLAN_RECORD_CHARS + MAX_PLAN_REQUIREMENTS * (
-    MAX_SEED_RECORD_CHARS + MAX_MEASURE_CHARS + 4_096
-)
-
-
-def _answered_over_its_window(seed_block: dict[str, Any], copy: SeededSource) -> dict[str, Any]:
-    """Search's block for `copy`: the seed's own, under the copy's spec_id and identity,
-    with exact coverage over the copy's years."""
-    identity = copy.source.identity
-    assert identity is not None
-    window = identity["requested_window"]
-    return {
-        "spec_id": copy.source.spec_id,
-        "definition": {
-            "schema_version": 1,
-            "spec_id": copy.source.spec_id,
-            "identity": identity,
-        },
-        "resolved": {
-            **seed_block["resolved"],
-            "coverage": {
-                **seed_block["resolved"]["coverage"],
-                "window": {"start_year": window["start_year"], "end_year": window["end_year"]},
-            },
-        },
-    }
-
-
-@pytest.mark.parametrize("a_period_each", [False, True], ids=["one-period", "a-period-each"])
-async def test_translate_describes_each_seed_once_however_many_requirements_retrieve_it(
-    a_period_each: bool,
-    draft: DraftFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    context_holding: ContextHolding,
-    core: TranslatorCore,
-) -> None:
-    """`MAX_SEEDS` seeds at the description bound, retrieved by `MAX_PLAN_REQUIREMENTS`
-    requirements: under one period per seed, or under a period per requirement, which
-    pins a copy of the seed for each, whose coverage Search states for its own years.
-    The result and the plan in state stay under ceilings derived from the seed bounds."""
-    set_definition_store(InMemoryDefinitionStore())
-    try:
-        seeds: list[SeededSource] = []
-        blocks: dict[str, dict[str, Any]] = {}
-        decisions: list[Decision] = []
-        requirements: list[DatasetRequirement] = []
-        # A plan's own text is capped (`MAX_PLAN_RECORD_CHARS`), which a pin
-        # decision per copy reaches at two periods a seed.
-        per_seed = 2 if a_period_each else MAX_PLAN_REQUIREMENTS // MAX_SEEDS
-        for number in range(MAX_SEEDS):
-            wire_seed = fullest_described_seed(number)[0]
-            # The entity every requirement here names.
-            wire_seed["spec"]["resolved"]["entities"][0] = {
-                "role": "destination",
-                "ref": "country/KEN",
-                "label": "Kenya",
-            }
-            seed = read_seed(number, wire_seed).source
-            seeds.append(seed)
-            blocks[seed.source.spec_id] = wire_seed["spec"]
-            for index in range(per_seed):
-                slot = f"source_{number}_{index if a_period_each else 0}"
-                if all(decision.slot != slot for decision in decisions):
-                    decisions.append(
-                        pinning_decision(
-                            seed.source.spec_id,
-                            slot=slot,
-                            description="Which source.",
-                            options=[seed.source.spec_id, "x"],
-                            chosen=seed.source.spec_id,
-                        )
-                    )
-                requirements.append(
-                    requirement(
-                        id=f"req_{number}_{index}",
-                        source_spec_id=seed.source.spec_id,
-                        decision_ids=[slot],
-                        measure=f"measure {number} {index}",
-                        period=Period(start=2000 + (index if a_period_each else 0), end=2024),
-                    )
-                )
-        assert len(requirements) == MAX_SEEDS * per_seed
-        # As `propose_plan` records it: each pin moved to the seed over the
-        # requirement's period, and a copy for each.
-        plan, copies, _ = _window_pins(
-            draft(decisions=decisions, evidence_requirements=requirements), seeds
-        )
-        assert len(copies) == MAX_SEEDS * (per_seed if a_period_each else 1)
-        pinned = {
-            item.source_spec_id
-            for item in plan.evidence_requirements
-            if isinstance(item, DatasetRequirement)
-        }
-        assert pinned == {copy.source.spec_id for copy in copies}
-        context = context_holding(plan)
-        save_seeded_sources(context.state, [*seeds, *copies])
-        search = SearchStub(
-            _answered_over_its_window(blocks[cast(str, copy.windowed_from)], copy)
-            for copy in copies
-        )
-
-        with search_api(search):
-            result = await run_translate(context, core=core)
-    finally:
-        set_definition_store(None)
-
-    assert result["outcome"] == "ok", str(result.get("referral"))[:1500]
-    sources = cast(list[dict[str, Any]], result["sources"])
-    assert len(sources) == MAX_SEEDS
-    named = [
-        retrieval["spec_id"]
-        for source in sources
-        for retrieval in (source, *source.get("also_retrieved_as", []))
-    ]
-    assert sorted(set(named)) == sorted(pinned)
-    assert len(json.dumps(sources)) <= TRANSLATE_SEEDED_SOURCES_CEILING
-    assert len(json.dumps(result)) <= TRANSLATE_SEEDED_RESULT_CEILING
-    assert len(json.dumps(sources)) > MAX_SEEDS * MAX_SEED_SOURCE_CHARS * 0.98
-    assert len(context.state[PLAN_STATE_KEY]) <= PLAN_STATE_SEEDED_CEILING
-
-
-# Search's own answers for one dataset over three periods, keyed by the years.
-_KENYA_OVER: dict[str, dict[str, Any]] = json.loads(
-    (Path(__file__).parents[1] / "fixtures" / "resubmit_education_oda_kenya.json").read_text()
-)["specs"]
-
-
-def _kenya_seed_pinned_over_2010_to_2023(
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-) -> tuple[Any, SeededSource]:
-    """A context whose plan pins the education-aid-to-Kenya seed over 2015-2023 by a
-    requirement over 2010-2023, as `propose_plan` records it, and the copy it retrieves."""
-    seed = source_from_spec_block(_KENYA_OVER["2015-2023"])
-    assert seed.coverage_window == Period(start=2015, end=2023)
-    pinned = requirement(
-        source_spec_id=seed.spec_id,
-        decision_ids=["measure", "source"],
-        entities=[Entity(name="Kenya", role="recipient")],
-        period=Period(start=2010, end=2023),
-    )
-    source_decision = pinning_decision(
-        seed.spec_id,
-        slot="source",
-        description="Which source.",
-        options=[seed.spec_id, "x"],
-        chosen=seed.spec_id,
-    )
-    plan, copies, _ = _window_pins(
-        draft(
-            decisions=[decision(), source_decision],
-            evidence_requirements=[pinned, derived_requirement()],
-        ),
-        [SeededSource(source=seed)],
-    )
-    (copy,) = copies
-    assert copy.source.spec_id == _KENYA_OVER["2010-2023"]["spec_id"]
-    context = context_holding(plan)
-    save_seeded_sources(context.state, [SeededSource(source=seed), copy])
-    return context, copy
-
-
-@pytest.mark.parametrize(
-    ("stated", "short"),
-    [
-        ({"start_year": 2010, "end_year": 2023}, False),
-        ({"start_year": 2015, "end_year": 2023}, True),
-    ],
-    ids=["search-states-2010-2023", "search-states-2015-2023"],
-)
-async def test_a_seed_pinned_over_a_wider_period_compiles_against_searchs_coverage_for_it(
-    stated: dict[str, int],
-    short: bool,
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-    core: TranslatorCore,
-    search_calls: list[dict[str, Any]],
-) -> None:
-    """A seed over 2015-2023 pinned by a requirement over 2010-2023. The plan retrieves
-    the seed's copy over 2010-2023, and the compiler checks the period against the
-    coverage Search states for the copy: no `window_short` when that is 2010-2023, and
-    `window_short` when Search states the data starts in 2015."""
-    answered = _KENYA_OVER["2010-2023"]
-    assert answered["resolved"]["coverage"]["window"] == {"start_year": 2010, "end_year": 2023}
-    answered = {
-        **answered,
-        "resolved": {
-            **answered["resolved"],
-            "coverage": {**answered["resolved"]["coverage"], "window": stated},
-        },
-    }
-    context, copy = _kenya_seed_pinned_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
-    )
-    set_definition_store(InMemoryDefinitionStore())
-    try:
-        with search_api(SearchStub([answered])):
-            result = await run_translate(context, core=core)
-    finally:
-        set_definition_store(None)
-
-    assert search_calls == []
-    assert result["outcome"] == "ok", result
-    codes = [warning["code"] for warning in cast(list[dict[str, Any]], result["warnings"])]
-    assert ("window_short" in codes) is short
-    # The source the plan holds is Search's for the copy.
-    (described,) = cast(list[dict[str, Any]], result["sources"])
-    assert described["spec_id"] == copy.source.spec_id
-    assert described["sentence"] == answered["resolved"]["rendered_sentence"]
-    assert "2010 to 2023" in described["sentence"]
-    assert described["coverage_window"] == {"start": stated["start_year"], "end": 2023}
-
-
-def _kenya_without_its_definition() -> dict[str, Any]:
-    block = dict(_KENYA_OVER["2010-2023"])
-    del block["definition"]
-    return block
-
-
-def _answering(part: dict[str, Any]) -> dict[str, Any]:
-    """A one-part Search envelope answering `part`."""
-    return {"schema_version": 1, "status": part["status"], "parts": [part]}
-
-
-# What Search answers for the copy's identity (`None`: it refuses it), the referral
-# the planner reads, and the reason code that referral carries.
-_COPY_REFERRALS: dict[str, tuple[dict[str, Any] | None, ReferralKind, str | None]] = {
-    "no-data": (
-        _answering({"status": "no_data", "no_data": {"reason": "no_series"}}),
-        ReferralKind.NO_DATA,
-        "no_series",
-    ),
-    "refused": (None, ReferralKind.REQUIREMENT_UNMEETABLE, None),
-    "candidates": (
-        _answering({"status": "candidates", "candidates": {"specs": []}}),
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-        None,
-    ),
-    "another-spec-id": (
-        _answering({"status": "definite", "spec": _KENYA_OVER["2015-2023"]}),
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-        None,
-    ),
-    "no-definition": (
-        _answering({"status": "definite", "spec": _kenya_without_its_definition()}),
-        ReferralKind.REQUIREMENT_UNMEETABLE,
-        None,
-    ),
-}
-
-
-@pytest.mark.parametrize("answer", sorted(_COPY_REFERRALS))
-async def test_a_seed_copy_search_answers_for_good_is_referred_as_a_fact_about_the_requirement(
-    answer: str,
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-    core: TranslatorCore,
-    search_calls: list[dict[str, Any]],
-) -> None:
-    """Search's answer for the copy's period is final, so the planner is told what it
-    means for the requirement: no data over those years, or a pinned dataset that cannot
-    serve them. A `discovery_unavailable` referral would have the planner propose the
-    same plan again, and Search would answer it the same way."""
-    envelope, kind, reason_code = _COPY_REFERRALS[answer]
-    context, copy = _kenya_seed_pinned_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
-    )
-    answers = {copy.source.spec_id: envelope} if envelope is not None else None
-    set_definition_store(InMemoryDefinitionStore())
-    try:
-        with search_api(SearchStub(answer=answers)):
-            result = await run_translate(context, core=core)
-    finally:
-        set_definition_store(None)
-
-    assert search_calls == []
-    assert result["outcome"] == "referred", result
-    payload = dict(result["referral"])
-    assert payload.pop("outcome") == OUTCOME_OF[kind]
-    referral = Referral.model_validate(payload)
-    assert referral.kind is kind
-    assert referral.requirement_id == "annual_debt_service"
-    assert "over 2010 to 2023" in referral.reason
-    assert referral.no_data_reason == reason_code
-    assert referral.candidates == ()
-    assert load_referral(context.state) == referral
-
-
-class _UnreachableDefinitionStore:
-    """A definition store whose backend cannot be reached."""
-
-    async def put_many(self, definitions: Any) -> None:
-        raise DefinitionStoreUnavailable("backend unreachable")
-
-    async def get(self, spec_id: str, *, schema_version: int) -> None:
-        raise DefinitionStoreUnavailable("backend unreachable")
-
-    async def aclose(self) -> None:
-        pass
-
-
-async def test_a_seed_copy_data_mcp_cannot_store_is_referred_as_discovery_unavailable(
-    draft: DraftFactory,
-    decision: DecisionFactory,
-    pinning_decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-    context_holding: ContextHolding,
-    core: TranslatorCore,
-) -> None:
-    """A service that could not answer just now is the one answer the same plan can
-    succeed on later."""
-    context, _ = _kenya_seed_pinned_over_2010_to_2023(
-        draft, decision, pinning_decision, requirement, derived_requirement, context_holding
-    )
-    set_definition_store(_UnreachableDefinitionStore())
-    try:
-        with search_api(SearchStub([_KENYA_OVER["2010-2023"]])):
-            result = await run_translate(context, core=core)
-    finally:
-        set_definition_store(None)
-
-    assert result["outcome"] == "referred", result
-    payload = dict(result["referral"])
-    assert payload.pop("outcome") == Outcome.TRANSIENT
-    referral = Referral.model_validate(payload)
-    assert referral.kind is ReferralKind.DISCOVERY_UNAVAILABLE
-    assert referral.requirement_id == "annual_debt_service"
-    assert "the definition store is unreachable" in referral.reason
-
-
 async def test_run_translate_refuses_an_unmodeled_requirement_kind_rather_than_raising(
     requirement: RequirementFactory,
     decision: DecisionFactory,
@@ -1339,7 +812,7 @@ def _needs_repair(code: str) -> dict[str, object]:
 async def test_a_translation_failing_the_same_way_again_is_referred_as_repeated(
     draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
 ) -> None:
-    """The guard keys on the translation plus its issue codes, in session
+    """The guard keys on the translation plus its issues, in session
     state: the second identical failure, after `propose_plan` cleared the
     first referral, is marked `repeated`; a different issue on the same
     translation is not."""
@@ -1366,6 +839,57 @@ async def test_a_translation_failing_the_same_way_again_is_referred_as_repeated(
     assert second["referral"]["repeated"] is True
     assert other["referral"]["repeated"] is False
     assert len(context.state[mechanical.COMPILE_FAILURES_STATE_KEY]) == 2
+
+
+def _source_unusable(entity: str) -> dict[str, object]:
+    """The G7 turn's compile failure: the pinned source resolves no entity named `entity`."""
+    reason = (
+        "source spec_4ba8cec3a9a2e45d971080daaa39db6a cannot serve requirement "
+        f"'annual_debt_service': the source resolves no entity named {entity!r}"
+    )
+    return {
+        "outcome": "invalid_input",
+        "code": "compile_failed",
+        "message": "did not compile",
+        "action": {
+            "call": "return_to_planner",
+            "arguments": {
+                "kind": "requirement_unmeetable",
+                "requirement_id": "annual_debt_service",
+                "reason": reason,
+            },
+        },
+        "detail": {
+            "issues": [
+                {
+                    "code": "source_unusable",
+                    "reason": reason,
+                    "operation_id": "annual_debt_service",
+                    "requirement_id": "annual_debt_service",
+                    "finding": "entity_missing",
+                }
+            ],
+            "warnings": [],
+        },
+    }
+
+
+async def test_a_failure_whose_reason_moved_within_one_code_is_not_repeated(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    """The G7 turn: the retry named the members, and the same `source_unusable`
+    code came back about "United States" where it had been about "G7". The
+    reason moved, so the plan changed where it failed and the guard lets the
+    planner go on."""
+    core = _compile_failure_core(core, [_source_unusable("G7"), _source_unusable("United States")])
+    context = context_holding(draft())
+
+    first = await run_translate(context, core=core)
+    clear_referral(context.state)
+    second = await run_translate(context, core=core)
+
+    assert first["referral"]["repeated"] is False
+    assert second["referral"]["repeated"] is False
 
 
 async def test_a_transient_failure_proposed_again_is_retried_and_may_repeat_unmarked(
@@ -1544,6 +1068,50 @@ async def test_a_reused_block_whose_entities_miss_the_requirement_is_refused_at_
         assert result["outcome"] == "referred", result
         assert result["referral"]["kind"] == ReferralKind.REQUIREMENT_UNMEETABLE.value
         assert result["referral"]["requirement_id"] == "annual_debt_service"
+
+
+async def test_a_name_the_block_labels_otherwise_compiles_by_the_ref_the_graph_resolves_it_to(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    pinning_decision: PinningDecisionFactory,
+    core: TranslatorCore,
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The block labels Kenya "Republic of Kenya", so the requirement's
+    "Kenya" matches no label until the graph resolves it to the block's ref;
+    the approved source carries that ref for the run-time check."""
+
+    async def resolve(scope: dict[str, list[str]]) -> dict[str, dict[str, object]]:
+        found = resolution.ResolvedEntity(dcid="country/KEN", name="Kenya", entity_type="Country")
+        return {role: dict.fromkeys(names, found) for role, names in scope.items()}
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[requirement(source_spec_id=SPEC_KENYA), derived_requirement()],
+        )
+    )
+    block = _spec(
+        SPEC_KENYA,
+        "debt service paid by the Republic of Kenya",
+        coverage={
+            "kind": "exact",
+            "has_data": True,
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+        entities=[{"role": "recipient", "label": "Republic of Kenya", "ref": "country/KEN"}],
+    )
+    save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
+
+    result = await run_translate(context, core=core)
+
+    assert result["outcome"] == "ok", result
+    workflow = load_plan(context.state).workflow
+    assert workflow is not None
+    assert [source.entity_refs for source in workflow.sources] == [{"kenya": "country/KEN"}]
 
 
 @pytest.mark.parametrize(

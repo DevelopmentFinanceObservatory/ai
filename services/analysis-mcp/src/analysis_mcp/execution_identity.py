@@ -19,7 +19,7 @@ from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 # The engine's own version, hand-set as a literal.
-ENGINE_VERSION = "0.4.0"
+ENGINE_VERSION = "0.7.0"
 
 # The reduction policy's version -- separate from `ENGINE_VERSION` because a
 # reduction policy (e.g. "skip nulls, use fsum") can change independently of
@@ -36,8 +36,7 @@ class ExecutionIdentity:
     """The engine-version binding of a toolkit result's identity.
 
     Frozen and closed to exactly these three fields -- nothing else describes
-    "which engine computed this," the same discipline `dfo_frame_grammar`'s
-    `FrameTrace` preimage fields follow.
+    "which engine computed this."
     """
 
     engine_version: str

@@ -11,6 +11,7 @@ from typing import Any, get_args
 
 import pytest
 from compiler.sources import source_from_spec_block
+from data_mcp.search_tool import SearchSource
 from planner.agent import _Patch
 from planner.operations import (
     AggregateOperation,
@@ -61,7 +62,6 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
-    SeededSource,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
@@ -75,7 +75,6 @@ from planner.plan import (
     plan_revision,
     retrieves_period,
     rolls_from_its_start,
-    windowed_copy,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -4542,6 +4541,17 @@ _LIMITS: list[tuple[str, tuple[str | int, ...], int]] = [
     ("Join.decision_ids", ("evidence_requirements", 23, "decision_ids"), MAX_PLAN_DECISIONS),
 ]
 
+
+def test_a_plans_source_fits_the_wording_search_takes() -> None:
+    (limit,) = (
+        meta.max_length
+        for meta in SearchSource.model_fields["text"].metadata
+        if getattr(meta, "max_length", None) is not None
+    )
+
+    assert limit == MAX_SOURCE_CHARS
+
+
 # Discriminator tags pydantic adds to an error's location inside a union.
 _UNION_TAGS = frozenset(
     {
@@ -5157,17 +5167,17 @@ class _Recorded:
     groups: tuple[ResolvedGroup, ...] = ()
 
 
-def test_a_copy_of_a_seed_over_another_window_keeps_the_set_its_places_stand_for() -> None:
-    # A seed or a recorded dataset over Africa's countries, copied over the
+def test_a_copy_of_a_recorded_dataset_over_another_window_keeps_the_set_its_places_stand_for() -> (
+    None
+):
+    # A recorded dataset over Africa's countries, copied over the
     # question's own years, still names Africa, so the copy's resubmit asks for it.
     fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
     africa = source_from_spec_block(json.loads(fixture.read_text())["spec"])
     assert africa.identity is not None
     window = {"kind": "range", "start_year": 2010, "end_year": 2020}
 
-    copied = windowed_copy(SeededSource(source=africa), window)
     pinned = windowed_pin(africa.spec_id, _Recorded(africa.identity, africa.groups), window)
 
     assert africa.groups
-    assert copied.source.groups == africa.groups
     assert pinned.groups == africa.groups

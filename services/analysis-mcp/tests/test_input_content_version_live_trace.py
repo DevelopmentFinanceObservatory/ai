@@ -1,20 +1,16 @@
-"""`frame_ref_resolution.derive_frame_content_version` against a live-shaped
-`upstream_trace`: a real dfo-apis manifest's `facets` entries carry
-bookkeeping members beyond `dfo_frame_grammar.content_version.mint_content_version`'s
-closed `{axis, ref, basis}` shape, a `basis` value
-(`"deployment_fallback"`) outside its `bound`/`declared_default`
-vocabulary, and an entry with `ref: None` (an axis with no facet selected)
--- all raise `ContentVersionError` if passed through unmodified
-(see `frame_ref_resolution._sanitised_facets`'s own docstring).
+"""Verbs over a frame registered under a live-shaped `upstream_trace`: a real
+dfo-apis manifest's `facets` entries carry bookkeeping members beyond
+`{axis, ref, basis}`, a `basis` of `"deployment_fallback"`, and an entry with
+`ref: None` (an axis with no facet selected).
 
-Checked here: the derivation itself succeeds and matches a hand-projected
-mint (unit level); a verb resolves and runs over a frame registered under
-such a trace (verb level); a *second* verb call over the first verb's own
-`{ops_, ocv_}` result also succeeds, reading the first result's own stored
-`frame_content_version`; and, at the identity level, that a chained call's
-`input_content_versions` binds exactly the value the prior hop stored, and
-that a root-frame call's `input_content_versions` binds exactly the
-reference's own `content_version`.
+Checked here: a verb's output `frame_content_version` is one token for one
+frame whatever lineage its input carries; a verb resolves and runs over a
+frame registered under such a trace (verb level); a *second* verb call over
+the first verb's own `{ops_, ocv_}` result also succeeds, reading the first
+result's own stored `frame_content_version`; and, at the identity level, that
+a chained call's `input_content_versions` binds exactly the value the prior
+hop stored, and that a root-frame call's `input_content_versions` binds
+exactly the reference's own `content_version`.
 """
 
 from __future__ import annotations
@@ -22,79 +18,47 @@ from __future__ import annotations
 import pytest
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.fixtures import live_shaped_trace, plain_single_unit_frame, seed_fixture_store
-from analysis_mcp.frame_ref_resolution import derive_frame_content_version
 from analysis_mcp.growth_tool import growth
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar.content_version import frame_sha256, mint_content_version
 
 
-def test_derive_frame_content_version_sanitises_a_live_shaped_upstream_trace() -> None:
-    frame = plain_single_unit_frame()
-    upstream_trace = {
-        "graph_revision": "rev_live_1",
-        "source_revisions": [{"source": "live_ledger", "revision": "2026-08-01"}],
-        "facets": [
-            {
-                "axis": "unit",
-                "ref": "dcid:USDollar",
-                "basis": "deployment_fallback",
-                "default_policy": "latest",
-                "default_policy_version": "v3",
-                "dispatch_facet_id": "df_live_1",
-                "selection_reason": "no explicit pin",
-            }
-        ],
-        "conversion": None,
-    }
-
-    result = derive_frame_content_version(frame=frame, upstream_trace=upstream_trace)
-
-    expected = mint_content_version(
-        frame_sha256=frame_sha256(frame),
-        graph_revision="rev_live_1",
-        source_revisions=[{"source": "live_ledger", "revision": "2026-08-01"}],
-        facets=[{"axis": "unit", "ref": "dcid:USDollar", "basis": "declared_default"}],
-    )
-    assert result == expected
-    assert result.startswith("cv_")
-
-
-def test_derive_frame_content_version_drops_a_null_ref_facet() -> None:
-    """A facet entry's `ref` can be `None`: an axis with no facet selected,
-    carrying `selection_reason: "absent_on_selected_facet"`.
-    `mint_content_version` refuses a `None` ref, and an absent axis pins
-    nothing, so `_sanitised_facets` drops the entry from the derivation's
-    preimage.
+async def test_a_verbs_frame_content_version_is_the_same_under_either_lineage(seeded) -> None:
+    """One frame registered under two references whose `upstream_trace`s differ
+    in `graph_revision`, `source_revisions` and `facets`. The same verb call
+    over each writes byte-identical output frames, so both results carry one
+    `frame_content_version`, the token `mint_content_version` gives that frame.
     """
+    store, handles = seeded
     frame = plain_single_unit_frame()
-    upstream_trace = {
-        "graph_revision": "rev_live_1",
-        "source_revisions": [{"source": "live_ledger", "revision": "2026-08-01"}],
-        "facets": [
-            {
-                "axis": "unit",
-                "ref": "dcid:USDollar",
-                "basis": "declared_default",
-            },
-            {
-                "axis": "measurementMethod",
-                "ref": None,
-                "basis": "declared_default",
-                "selection_reason": "absent_on_selected_facet",
-            },
-        ],
-        "conversion": None,
-    }
+    live_trace = live_shaped_trace("live_plain_single_unit", frame)
+    live_ref = FrameRef(spec_id=live_trace.spec_id, content_version=live_trace.content_version)
+    await store.put(live_ref, frame=frame, trace=live_trace, writer="test")
+    fixture_ref = FrameRef(**handles.plain_single_unit)
+    _fixture_frame, fixture_trace = await store.get(fixture_ref)
+    assert fixture_trace.upstream_trace != live_trace.upstream_trace
 
-    result = derive_frame_content_version(frame=frame, upstream_trace=upstream_trace)
+    results = [
+        await aggregate(
+            frame_ref={"spec_id": ref.spec_id, "content_version": ref.content_version},
+            aggregation="sum",
+            group_by=("reporter", "time_period"),
+        )
+        for ref in (fixture_ref, live_ref)
+    ]
 
-    expected = mint_content_version(
-        frame_sha256=frame_sha256(frame),
-        graph_revision="rev_live_1",
-        source_revisions=[{"source": "live_ledger", "revision": "2026-08-01"}],
-        facets=[{"axis": "unit", "ref": "dcid:USDollar", "basis": "declared_default"}],
+    output_frame, _output_trace = await store.get(
+        FrameRef(
+            spec_id=results[0].structured_content["spec_id"],
+            content_version=results[0].structured_content["content_version"],
+        )
     )
-    assert result == expected
+    expected = mint_content_version(frame_sha256=frame_sha256(output_frame))
+    assert [r.structured_content["frame_content_version"] for r in results] == [expected, expected]
+    assert (
+        results[0].structured_content["content_version"]
+        != results[1].structured_content["content_version"]
+    )
 
 
 @pytest.fixture
@@ -125,10 +89,8 @@ async def test_a_verb_resolves_and_runs_over_a_live_shaped_input(seeded_live) ->
 
 async def test_a_second_verb_over_the_first_verbs_own_result_also_succeeds(seeded_live) -> None:
     """The first call's own output stores `frame_content_version`, derived
-    once from the live-shaped lineage at write time
-    (`derive_frame_content_version`). The second call's own input
-    resolution reads that stored value (`input_content_version`), so it
-    succeeds even though nothing here re-sanitises anything for it.
+    once at write time (`derive_frame_content_version`). The second call's
+    own input resolution reads that stored value (`input_content_version`).
     """
     _store, ref = seeded_live
 

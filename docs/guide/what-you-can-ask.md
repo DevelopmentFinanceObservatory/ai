@@ -4,11 +4,11 @@ description: How a question to the DFO MCP server becomes a cited answer, and th
 
 # How the MCP server answers questions
 
-Once the DFO is connected to your AI assistant (see [Connect](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years and unit you want. The DFO can't answer questions about organisations such as the World Bank, and it can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative. The rest of this page explains, for developers, what happens behind the scenes: which tools the assistant calls, how each answer is linked to the exact data it used, and how the server responds when a request can't be completed.
+Once the DFO is connected to your AI assistant (see [Connect](connect.md)), you can ask it questions about development finance in plain language, such as "What is health spending per person in Kenya?" or "How much health aid did Nigeria receive between 2020 and 2024?" The DFO covers countries, subregions, and continents. It can look up a figure or trend, compare places, rank them, or calculate per-person amounts, and every answer names the dataset it came from. You'll get the best results by naming the place, years, and unit you want. The DFO can't answer questions about organisations such as the World Bank, and it can't handle very large requests in one go. If you ask for something it can't do, or for years it doesn't have data for, the assistant will tell you and suggest an alternative. The rest of this page explains, for developers, what happens behind the scenes: which tools the assistant calls, how each answer is linked to the exact data it used, and how the server responds when a request can't be completed.
 
 ## For developers
 
-The DFO MCP server answers questions about any series it holds for a country, subregion or continent. You can compare, rank, aggregate or divide the results. Every answer carries the dataset's source and a frame reference that names the exact data used. The server refuses requests over 250,000 rows and tells the model why and how to retry.
+The DFO MCP server answers questions about any series it holds for a country, subregion, or continent. You can compare, rank, aggregate, or divide the results. Every answer carries the dataset's source and a frame reference that names the exact data used. The server refuses requests over 250,000 rows and tells the model why and how to retry.
 
 ## One question, start to finish
 
@@ -43,7 +43,7 @@ in Kenya spanned from 2000 to 2023 across 24 observations:
 
 The omitted calls are Studio's chart-drawing tools. The MCP server does not serve those tools.
 
-`search` turned the question into one dataset definition with the id `spec_0002907ee44bf25fc98f343372614a84`. The id identifies what is measured, where and when. It stays the same when the data is refreshed.
+`search` turned the question into one dataset definition with the id `spec_0002907ee44bf25fc98f343372614a84`. The id identifies what is measured, where, and when. It stays the same when the data is refreshed.
 
 `get_data` returns the data for that id and a frame reference containing `spec_id` and `content_version`. The `content_version` identifies this retrieval. When the World Bank revises the series, the same `spec_id` returns a new `content_version`. An answer that quotes both ids can be checked against the data it used.
 

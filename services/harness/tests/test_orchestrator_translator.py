@@ -1,4 +1,4 @@
-"""`_OrchestratorTranslator` over real ADK events, in the order a streamed run yields them."""
+"""`_Translator` over real ADK events, in the order a streamed run yields them."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from google.adk.events.event import NodeInfo
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from harness.conversation import current_conversation_id
-from harness.graph import (
+from harness.graph.state import (
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
     ORCHESTRATOR_STATUS_KEY,
@@ -20,15 +20,15 @@ from harness.graph import (
 )
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import ProvenanceStore
-from harness.studio_state import ConversationState, StudioStore
+from harness.studio_state import ConversationState, StudioStore, land_component, remove_cards
 from harness.studio_translate import (
     _ExecutorRecord,
-    _OrchestratorTranslator,
     _record_detail,
     _record_label,
     _RecordingExecutor,
     _RecordingSurface,
     _tool_call_label,
+    _Translator,
 )
 from harness.wire import StepStatus
 from planner.workflow import ToolId
@@ -38,8 +38,8 @@ async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, objec
     raise AssertionError(f"no tool call expected, got {tool}")
 
 
-def _translator() -> _OrchestratorTranslator:
-    return _OrchestratorTranslator(
+def _translator() -> _Translator:
+    return _Translator(
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
     )
@@ -51,7 +51,7 @@ def _event(
     return Event(author=author, partial=partial, content=types.Content(parts=list(parts)))
 
 
-def _frames(translator: _OrchestratorTranslator, *events: Event) -> list:
+def _frames(translator: _Translator, *events: Event) -> list:
     return [frame for event in events for frame in translator.translate(event)]
 
 
@@ -78,6 +78,49 @@ def test_streamed_text_is_sent_once_and_completed_whole():
         "Life expectancy was 54.5 years."
     ]
     assert closing[-1].event == "done"
+
+
+def test_the_closing_message_ends_with_a_note_on_each_loose_match_the_turn_used():
+    """The note is sent as one more delta, so the deltas add up to the message."""
+    translator = _translator()
+    conversation = translator._conversation
+    conversation.turn_readings = [
+        {
+            "text": "climate finance",
+            "status": "chosen",
+            "spec_id": "spec_c",
+            "warnings": [{"code": "retrieval_score_weak"}],
+            "asked_roles": ["recipient"],
+            "fetch": {"summary": "12 observations"},
+        }
+    ]
+    conversation.turn_specs = {
+        "spec_c": {
+            "resolved": {
+                "facets": {
+                    "provenance": {
+                        "ref": "provenance/OECDCreditorReportingSystem",
+                        "account": "provider",
+                    }
+                },
+                "sentence_plan": [
+                    {"kind": "slot", "text": "Climate support worldwide.", "segment": "heading"}
+                ],
+            }
+        }
+    }
+
+    frames = _frames(translator, _event(types.Part(text="Climate support grew.")))
+    closing = translator.finish()
+
+    deltas = [f.text for f in frames + closing if f.event == "message.delta"]
+    complete = [f.text for f in closing if f.event == "message.complete"]
+    assert complete == [
+        'Climate support grew.\n\nThe closest series to "climate finance" is a loose '
+        "match: Climate support worldwide, with no donor or recipient detail."
+    ]
+    assert "".join(deltas) == complete[0]
+    assert conversation.turn_final_text == complete[0]
 
 
 @pytest.mark.parametrize(
@@ -205,8 +248,8 @@ def test_step_ids_stay_unique_across_the_segments_of_one_turn():
     and each segment gets a fresh translator over the same conversation."""
     conversation = ConversationState(conversation_id="c1")
     recorder = _RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService()))
-    first = _OrchestratorTranslator(conversation=conversation, recorder=recorder)
-    second = _OrchestratorTranslator(conversation=conversation, recorder=recorder)
+    first = _Translator(conversation=conversation, recorder=recorder)
+    second = _Translator(conversation=conversation, recorder=recorder)
     ask = types.FunctionCall(id="call_1", name="ask_user", args={"question": "Which?"})
     explain = types.FunctionCall(id="call_2", name="explain_dfo", args={})
     status = Event(author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your answer"})
@@ -474,7 +517,7 @@ def test_a_fetch_names_its_measure_from_the_conversations_readings_after_a_resum
             "candidates": [{"spec_id": "spec_debt_gni", "label": "External debt (% of GNI)"}],
         },
     ]
-    resumed = _OrchestratorTranslator(
+    resumed = _Translator(
         conversation=conversation,
         recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
     )
@@ -604,7 +647,7 @@ def test_a_hand_off_to_a_question_opens_no_line():
     assert [f for f in frames if f.event == "activity.step" and f.tool is None] == []
 
 
-def test_plan_path_events_go_through_the_graphs_own_translation():
+def test_plan_path_step_progress_becomes_a_running_fetch_line():
     progress = Event(
         author="t",
         custom_metadata={
@@ -629,6 +672,11 @@ def test_tool_call_labels_come_from_the_arguments():
     assert _tool_call_label("plan", {"brief": "b"}) == "Handing the question to the planner"
     assert _tool_call_label("explain_dfo", {}) == "Reading about DFO"
     assert _tool_call_label("recall", {"part": "plan"}) == "Looking back at an earlier turn"
+    assert _tool_call_label("recall", {"part": "canvas"}) == "Looking at your canvas"
+    assert (
+        _tool_call_label("recall", {"part": "canvas", "component_id": "cmp_1"})
+        == "Looking back at an earlier turn"
+    )
     # A tool with no label is never shown by its machine name.
     assert _tool_call_label("sources", {}) == "Working on your request"
 
@@ -753,7 +801,7 @@ async def test_one_fetch_names_its_measure_and_the_years_its_retrieval_covers(wi
         {"text": "life expectancy", "status": "definite", "spec_id": "spec_le"}
     ]
     recorder = _RecordingExecutor(get_data, store=StudioStore(InMemorySessionService()))
-    translator = _OrchestratorTranslator(
+    translator = _Translator(
         conversation=conversation,
         recorder=recorder,
         surface_recorder=_RecordingSurface(_NoSurface(), provenance=provenance),
@@ -856,3 +904,39 @@ def test_a_skill_read_keeps_the_reading_line_running():
     )
 
     assert _reading_lines(frames) == [("Reading what the search found", StepStatus.RUNNING, None)]
+
+
+def test_cards_the_agent_removed_reach_the_client_as_a_composition_update():
+    """The website drops a card only on a manifest without it; a refused
+    removal changes nothing and sends none."""
+    conversation = ConversationState(conversation_id="c1")
+    for cid in ("cmp_01", "cmp_02"):
+        land_component(
+            conversation,
+            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+    )
+    remove_cards(conversation, ["cmp_01"], all_cards=False)
+
+    frames = _frames(
+        translator,
+        *_batch(("remove_cards", {"component_ids": ["cmp_01"]}, {"removed": ["cmp_01"]})),
+        *_batch(("remove_cards", {"component_ids": []}, {"error": "names no card"})),
+        *_batch(("remove_cards", {"component_ids": ["cmp_01"]}, {"removed": [], "note": "n"})),
+    )
+
+    updates = [f for f in frames if f.event == "composition.updated"]
+    assert len(updates) == 1
+    assert [b.component_id for b in updates[0].manifest.blocks] == ["cmp_02"]
+    assert ("Removing cards from the canvas", StepStatus.FAILED) in _steps(frames)
+
+
+def test_a_canvas_listing_is_read_under_its_own_line():
+    translator = _translator()
+
+    frames = _frames(translator, *_batch(("recall", {"part": "canvas"}, {"on_canvas": []})))
+
+    assert ("Going over your canvas", StepStatus.RUNNING) in _steps(frames)

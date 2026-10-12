@@ -27,8 +27,8 @@ from compiler.sources import member_digest, source_from_spec_block, stat_var_rea
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
 from planner.plan import Coverage, DatasetRequirement, Entity, Unit
-from planner.records import EvidenceIssue, Period, StatVarReading
-from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource
+from planner.records import EvidenceIssue, Period, ResolvedSourceMention, StatVarReading
+from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 
 RequirementFactory = Callable[..., DatasetRequirement]
 SourceFactory = Callable[..., SelectedSource]
@@ -2477,4 +2477,274 @@ def test_only_a_series_off_the_period_is_read_row_by_row(
         "7 observations across 10 years",
         "series CRS_Disbursement_39 for ['country/D19', 'country/R49', 'sector/199'] has "
         "7 observations across 10 years",
+    ]
+
+
+# --- Named sets ------------------------------------------------------------------------
+
+# The G7 turn's source (spec_4ba8cec3): G7 donors to Africa, as `search` names
+# both sets in `resolved.entity_groups` and binds their members. Two African
+# members stand in for the 59.
+_G7_MEMBERS = {
+    "CAN": "Canada",
+    "DEU": "Germany",
+    "FRA": "France",
+    "GBR": "United Kingdom",
+    "ITA": "Italy",
+    "JPN": "Japan",
+    "USA": "United States of America",
+}
+_G7_GROUPS = (
+    ResolvedGroup(role="destination", label="Africa", ref="africa"),
+    ResolvedGroup(role="origin", label="G7"),
+)
+
+
+def _g7_source(source: SourceFactory) -> SelectedSource:
+    donors = tuple(
+        ResolvedEntity(role="origin", ref=f"country/{code}", label=label)
+        for code, label in _G7_MEMBERS.items()
+    )
+    recipients = (
+        ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
+        ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    )
+    return source(entities=donors + recipients, groups=_G7_GROUPS, identity=None)
+
+
+@pytest.mark.parametrize(
+    ("entities", "missing"),
+    [
+        ([Entity(name="G7", role="donor"), Entity(name="Africa", role="recipient")], []),
+        ([Entity(name="g7", role="origin"), Entity(name="Africa")], []),
+        ([Entity(name="G7", role="recipient"), Entity(name="Africa", role="recipient")], ["G7"]),
+        ([Entity(name="G20", role="donor"), Entity(name="Africa", role="recipient")], ["G20"]),
+    ],
+    ids=["by-flow-side", "by-column-and-unstated", "wrong-side", "unnamed-set"],
+)
+def test_a_named_set_the_source_binds_meets_an_entity_naming_it(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entities: list[Entity],
+    missing: list[str],
+) -> None:
+    issues = check_evidence(
+        requirement(entities=entities), evidence_from_source(_g7_source(source))
+    )
+
+    assert [
+        issue.required for issue in errors(issues) if issue.code is EvidenceIssueCode.ENTITY_MISSING
+    ] == missing
+
+
+def test_an_identity_binding_a_named_sets_members_is_not_wider_than_the_requirement(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    # France and Africa's members are every ref the identity binds, so none
+    # is unnamed.
+    identity = _identity(
+        entities={"donor": ["country/FRA"], "recipient": ["country/GHA", "country/KEN"]}
+    )
+    wanted = requirement(
+        entities=[Entity(name="France", role="donor"), Entity(name="Africa", role="recipient")]
+    )
+
+    assert _scope_codes(wanted, _g7_source(source).model_copy(update={"identity": identity})) == []
+
+
+def _g7_retrieval(*refs: str) -> RetrievalEvidence:
+    return evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            *(
+                _stat("DebtServicePaid", entities=[{"role": "financingProvider", "ref": ref}])
+                for ref in refs
+            )
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("refs", "present"),
+    [(("country/USA", "country/JPN"), True), (("country/CHN",), False)],
+    ids=["holds-members", "holds-none"],
+)
+def test_a_retrieval_meets_a_named_set_when_it_holds_a_member_the_approved_source_bound(
+    requirement: RequirementFactory, source: SourceFactory, refs: tuple[str, ...], present: bool
+) -> None:
+    issues = check_evidence(
+        requirement(entities=[Entity(name="G7", role="donor")]),
+        _g7_retrieval(*refs),
+        approved=_g7_source(source),
+    )
+
+    missing = [i for i in errors(issues) if i.code is EvidenceIssueCode.ENTITY_MISSING]
+    assert (missing == []) is present
+
+
+# A set Search bound as the one party its dataset publishes as the set's total
+# (dfo-apis `entity_groups[role].total`): the G7 as donor, a resolver group with
+# no graph node, and Africa as recipient.
+_TOTAL_GROUPS = (
+    ResolvedGroup(role="origin", label="G7", total="GroupOfSeven"),
+    ResolvedGroup(role="destination", label="Africa", ref="africa", total="DACAfrica"),
+)
+
+
+def _entity_codes(issues: list[EvidenceIssue]) -> list[str]:
+    # These sources state no identity, which is an error of its own.
+    return [
+        issue.code.value
+        for issue in errors(issues)
+        if issue.code is not EvidenceIssueCode.IDENTITY_UNVERIFIED
+    ]
+
+
+def _total_source(source: SourceFactory) -> SelectedSource:
+    return source(
+        entities=(
+            ResolvedEntity(role="origin", ref="GroupOfSeven", label="G7 countries, Total"),
+            ResolvedEntity(role="destination", ref="DACAfrica", label="Africa, Total"),
+        ),
+        groups=_TOTAL_GROUPS,
+        identity=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("entities", "codes"),
+    [
+        ([Entity(name="G7", role="donor"), Entity(name="Africa", role="recipient")], []),
+        (
+            [Entity(name="G7"), Entity(name="Africa", role="recipient", members=True)],
+            ["group_read_as_total"],
+        ),
+        ([Entity(name="G7", role="donor", members=True)], ["group_read_as_total"]),
+    ],
+    ids=["bare-names", "africa-members", "g7-members"],
+)
+def test_a_set_bound_as_its_published_total_meets_a_bare_name_and_refuses_members(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entities: list[Entity],
+    codes: list[str],
+) -> None:
+    issues = check_evidence(
+        requirement(entities=entities), evidence_from_source(_total_source(source))
+    )
+
+    assert _entity_codes(issues) == codes
+
+
+@pytest.mark.parametrize(("members", "codes"), [(False, []), (True, ["group_read_as_total"])])
+def test_a_retrieval_of_a_set_bound_as_its_total_holds_the_total_party(
+    requirement: RequirementFactory, source: SourceFactory, members: bool, codes: list[str]
+) -> None:
+    issues = check_evidence(
+        requirement(entities=[Entity(name="G7", role="donor", members=members)]),
+        _g7_retrieval("GroupOfSeven"),
+        approved=_total_source(source),
+    )
+
+    assert _entity_codes(issues) == codes
+
+
+def test_a_set_read_as_its_members_meets_an_entity_asking_for_them(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    issues = check_evidence(
+        requirement(entities=[Entity(name="G7", role="donor", members=True)]),
+        evidence_from_source(_g7_source(source)),
+    )
+
+    assert _entity_codes(issues) == []
+
+
+_US_REF = {"united states": "country/USA"}
+
+
+@pytest.mark.parametrize(
+    ("entity_refs", "missing"),
+    [(_US_REF, []), ({}, ["United States"])],
+    ids=["by-ref", "unresolved"],
+)
+def test_a_member_named_other_than_its_label_is_met_by_the_ref_its_name_resolves_to(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entity_refs: dict[str, str],
+    missing: list[str],
+) -> None:
+    # The graph labels country/USA "United States of America".
+    asked = requirement(
+        entities=[Entity(name="United States", role="donor"), Entity(name="Japan", role="donor")]
+    )
+    found = _g7_source(source).model_copy(update={"entity_refs": entity_refs})
+
+    issues = check_evidence(asked, evidence_from_source(found))
+
+    assert [
+        issue.required for issue in errors(issues) if issue.code is EvidenceIssueCode.ENTITY_MISSING
+    ] == missing
+
+
+@pytest.mark.parametrize(
+    ("refs", "missing"),
+    [(("country/USA",), []), (("country/JPN",), ["United States"])],
+    ids=["holds-it", "holds-another"],
+)
+def test_a_retrieval_meets_a_member_by_the_ref_its_name_resolved_to_at_approval(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    refs: tuple[str, ...],
+    missing: list[str],
+) -> None:
+    approved = _g7_source(source).model_copy(update={"entity_refs": _US_REF})
+
+    issues = check_evidence(
+        requirement(entities=[Entity(name="United States", role="donor")]),
+        _g7_retrieval(*refs),
+        approved=approved,
+    )
+
+    assert [
+        issue.required for issue in errors(issues) if issue.code is EvidenceIssueCode.ENTITY_MISSING
+    ] == missing
+
+
+@pytest.mark.parametrize("exclude", [False, True])
+def test_search_confirmed_source_wording_is_authoritative(requirement, source, exclude):
+    provenance = "provenance/OECDDAC2A"
+    wording = "CRS" if exclude else "DAC"
+    mention = {
+        "text": wording,
+        "ref": "provenance/CRS" if exclude else None,
+        "polarity": "exclude" if exclude else "include",
+    }
+    resolved = source().model_copy(
+        update={"provenance_ref": provenance, "provenance_label": "OECD DAC2a"}
+    )
+    # Preserve the resolved source's other evidence, attaching only the API's authoritative constraint.
+
+    resolved = resolved.model_copy(
+        update={"resolved_sources": (ResolvedSourceMention.model_validate(mention),)}
+    )
+    ask = requirement(source=wording, source_exclude=exclude)
+    assert not [
+        f
+        for f in check_evidence(ask, evidence_from_source(resolved))
+        if f.code in (EvidenceIssueCode.SOURCE_MISMATCH, EvidenceIssueCode.SOURCE_UNVERIFIED)
+    ]
+    manifest_evidence = evidence_from_source(resolved).model_copy(
+        update={"origin": "manifest", "resolved_sources": ()}
+    )
+    assert not [
+        f
+        for f in check_evidence(ask, manifest_evidence, approved=resolved)
+        if f.code in (EvidenceIssueCode.SOURCE_MISMATCH, EvidenceIssueCode.SOURCE_UNVERIFIED)
+    ]
+    unrelated = resolved.model_copy(update={"resolved_sources": ()})
+    assert [
+        f
+        for f in check_evidence(ask, evidence_from_source(unrelated))
+        if f.code in (EvidenceIssueCode.SOURCE_MISMATCH, EvidenceIssueCode.SOURCE_UNVERIFIED)
     ]

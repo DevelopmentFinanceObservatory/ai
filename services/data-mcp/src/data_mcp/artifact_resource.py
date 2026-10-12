@@ -1,16 +1,18 @@
-"""The artifact resource: reads dfo-apis' snapshot route and mints a fresh signed URL.
+"""The artifact resource: reads dfo-apis' snapshot route and returns an artifact's stable download link.
 
-Signing stays upstream. Cloud Run's runtime service account has no downloadable
-private key, so this module holds no key and mints nothing itself -- it asks the
-snapshot route (`GET /api/datasets/{id}/{content_version}`) to re-sign, and the
-freshly signed URL it returns exists only in this resource's own read response,
-never in a tool result. `get_data_tool.py` mints and strips a manifest whose
-artifacts carry no URL at all; each artifact's `resource_uri` (`manifest.py`)
-points here, so a caller pulls a URL only at the moment it needs one.
+Each artifact in a manifest carries a root-relative link,
+`/api/datasets/{id}/{content_version}/files/{digest}`. The link never
+expires: a GET on it answers 302 to an object-store URL signed for a few
+minutes, so the signed URL is minted at the moment of use and never sits in a
+manifest, a tool result or this resource's response. This module holds no key
+and signs nothing. It resolves the link against the dfo-apis origin this
+service calls and returns the absolute URL beside the artifact's metadata.
+`get_data_tool.py` strips the link from the manifest it returns; each
+artifact's `resource_uri` (`manifest.py`) points here, so a caller pulls a link
+only when it needs one.
 
 The `dfo://artifact` URI is a bearer credential. Any session holding it can
-read it and mint a fresh signed URL, no matter which session's call built
-it.
+read it and get the link, no matter which session's call built it.
 
 A resource-read failure is a JSON-RPC code and message, thinner than the tool
 path's typed refusal grammar (`tool_errors.py`): the code fastmcp assigns is
@@ -26,25 +28,16 @@ sees (`upstream_response_unusable`, `request_invalid`,
 `artifact_not_in_snapshot`) -- one vocabulary across the boundary, so an
 upstream problem document is traceable straight from a model-facing string.
 
-MCP has no way to mark a response uncacheable, so the short, upstream-set
-advertised TTL in the response body (`expires_in_s`, bounded by
-`_MAX_ADVERTISED_TTL_S`) is the whole mechanism for telling a caller not to hold
-onto the URL.
-
-The signature says nothing about whether the bytes survive to the moment a
-caller fetches them. Upstream's own retention filter drops a working-tier
-artifact past thirty days before signing is even attempted, so an
-already-aged-out artifact refuses reliably here -- but an artifact collected
-between that retention check and a caller's actual use of the minted URL still
-yields a 404 at the object store. That race is a known limit of this layer.
+The link answers `410 artifact_expired` when the object aged out of the
+working tier and cannot render again, and a missing digest answers 404. Those
+answers come from the link itself, at the moment a caller follows it.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import re
-from datetime import UTC, datetime
+from collections.abc import Mapping
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
@@ -56,7 +49,7 @@ from pydantic import ValidationError
 from data_mcp.client_holder import get_client
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
 from data_mcp.get_data_tool import _SPEC_ID_PATTERN
-from data_mcp.manifest import render_validation_errors, strip_manifest
+from data_mcp.manifest import ArtifactEntry, Manifest, render_validation_errors, strip_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -64,20 +57,6 @@ logger = logging.getLogger(__name__)
 # `UpstreamClient.request` so span cardinality stays bounded the same way
 # `get_data_tool.py` bounds it for the mint route.
 _SNAPSHOT_ROUTE = "/api/datasets/{id}/{content_version}"
-
-# Mirrors dfo-apis' `SIGNED_URL_ADVERTISED_TTL` (`datasets_api/config.py`), the
-# bound a caller must treat as authoritative. Upstream fixes it as a module
-# constant with no env override, so this line reflects that value rather than
-# setting one.
-_MAX_ADVERTISED_TTL_S = 900
-
-# Absorbs drift between this service's clock and upstream's when checking
-# `url_expires_at` against the [0, _MAX_ADVERTISED_TTL_S] window a signed URL
-# must fall within -- skew can push either boundary the wrong way, reading a
-# freshly minted URL as already expired or as further out than the advertised
-# TTL, depending on which clock is ahead. It does not extend the window for a
-# URL that has genuinely expired or fallen outside it.
-_EXPIRY_CLOCK_SKEW_TOLERANCE_S = 5.0
 
 # The marker vocabulary -- see the module docstring for the mirrored-vs-owned
 # split.
@@ -132,6 +111,17 @@ def _refuse(code: str, detail: str) -> NoReturn:
     raise ArtifactRefusalError(code, detail)
 
 
+def _validate_pair(*, subject_id: str, content_version: str) -> None:
+    """Validate the snapshot's two path parts before any upstream call. A malformed
+    part refuses locally and never reaches the network."""
+    if not re.fullmatch(_SPEC_ID_PATTERN, subject_id):
+        _refuse(_REQUEST_INVALID, f"subject_id {subject_id!r} is not a valid spec_ id")
+    if not _CONTENT_VERSION_PATTERN.fullmatch(content_version):
+        _refuse(
+            _REQUEST_INVALID, f"content_version {content_version!r} does not look like a cv_ id"
+        )
+
+
 def _validate_uri_parts(*, subject_id: str, content_version: str, artifact_digest: str) -> None:
     """Validate all three path parts before any upstream call.
 
@@ -139,12 +129,7 @@ def _validate_uri_parts(*, subject_id: str, content_version: str, artifact_diges
     interpolated straight into an upstream path, so a malformed part refuses
     locally and never reaches the network.
     """
-    if not re.fullmatch(_SPEC_ID_PATTERN, subject_id):
-        _refuse(_REQUEST_INVALID, f"subject_id {subject_id!r} is not a valid spec_ id")
-    if not _CONTENT_VERSION_PATTERN.fullmatch(content_version):
-        _refuse(
-            _REQUEST_INVALID, f"content_version {content_version!r} does not look like a cv_ id"
-        )
+    _validate_pair(subject_id=subject_id, content_version=content_version)
     if not _ARTIFACT_DIGEST_PATTERN.fullmatch(artifact_digest):
         _refuse(_REQUEST_INVALID, f"artifact_digest {artifact_digest!r} is not a sha256: digest")
 
@@ -221,9 +206,9 @@ def _select_raw_artifact(payload: dict[str, Any], *, artifact_digest: str) -> di
     The first match in manifest order is taken; any entry would read the same.
 
     Runs over the raw payload, since `strip_manifest` has already dropped
-    every `url`/`url_expires_at`. This is the one place in the module that
-    deliberately reads them back off the raw response, having already
-    confirmed the payload validates as a `Manifest`.
+    every `url`. This is the one place in the module that deliberately reads
+    it back off the raw response, having already confirmed the payload
+    validates as a `Manifest`.
     """
     matches = [a for a in payload["artifacts"] if a.get("artifact_digest") == artifact_digest]
     if not matches:
@@ -237,58 +222,37 @@ def _select_raw_artifact(payload: dict[str, Any], *, artifact_digest: str) -> di
     return matches[0]
 
 
-def _expires_in_s(url_expires_at: str) -> int:
-    """Seconds remaining before `url_expires_at`, floored at 0, capped at `_MAX_ADVERTISED_TTL_S`.
+def _root_relative_link(url: object) -> str:
+    """`url` if it is a root-relative path, else a refusal.
 
-    A value that won't parse, has no UTC offset to compare against, is
-    already in the past, or sits further out than `_MAX_ADVERTISED_TTL_S`
-    refuses rather than shipping a dead credential or a URL whose real
-    validity outruns the bound this document advertises for it.
-    `_EXPIRY_CLOCK_SKEW_TOLERANCE_S` gives room for clock skew at either
-    boundary before this module treats a value as a genuine violation.
+    `ArtifactEntryModel.url` upstream is a bare, unconstrained `str`. A scheme
+    or a host (`//host/...`) would send the caller to an origin other than the
+    dfo-apis this service calls. `urlsplit` can also raise `ValueError` on
+    malformed input.
     """
+    refusal = "the matched artifact entry's url is not a root-relative link"
+    if not isinstance(url, str):
+        _refuse(_UPSTREAM_RESPONSE_UNUSABLE, refusal)
     try:
-        expires_at = datetime.fromisoformat(url_expires_at)
+        split = urlsplit(url)
     except ValueError:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            f"url_expires_at {url_expires_at!r} did not parse as an ISO-8601 timestamp",
-        )
-    if expires_at.tzinfo is None:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            f"url_expires_at {url_expires_at!r} has no UTC offset to compare against",
-        )
-    delta_s = (expires_at - datetime.now(UTC)).total_seconds()
-    if delta_s < -_EXPIRY_CLOCK_SKEW_TOLERANCE_S:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            f"url_expires_at {url_expires_at!r} is already in the past",
-        )
-    if delta_s > _MAX_ADVERTISED_TTL_S + _EXPIRY_CLOCK_SKEW_TOLERANCE_S:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            f"url_expires_at {url_expires_at!r} is further out than the "
-            f"{_MAX_ADVERTISED_TTL_S}s this service advertises as its bound",
-        )
-    # The check above accepts values up to `tolerance` seconds past
-    # `_MAX_ADVERTISED_TTL_S` as clock skew. Flooring the result and clamping
-    # it to `_MAX_ADVERTISED_TTL_S` means `expires_in_s` can only understate a
-    # URL's real remaining life.
-    return min(_MAX_ADVERTISED_TTL_S, max(0, math.floor(delta_s)))
+        _refuse(_UPSTREAM_RESPONSE_UNUSABLE, refusal)
+    if split.scheme or split.netloc or not split.path.startswith("/"):
+        _refuse(_UPSTREAM_RESPONSE_UNUSABLE, refusal)
+    return url
 
 
 async def read_artifact(
     subject_id: str, content_version: str, artifact_digest: str
 ) -> dict[str, Any]:
-    """Read one artifact's freshly signed URL and expiry off dfo-apis' snapshot route.
+    """Read one artifact's stable download link off dfo-apis' snapshot route.
 
-    Reading this resource re-signs the artifact identified by `subject_id`
-    (a `spec_` id), `content_version`, and `artifact_digest` -- a
-    metadata lookup plus re-sign, with no graph call and no re-derivation.
-    The returned URL is short-lived (`expires_in_s`, bounded by
-    `_MAX_ADVERTISED_TTL_S`) and must not be cached: read this resource again
-    to mint a fresh one.
+    Reading this resource looks up the artifact identified by `subject_id`
+    (a `spec_` id), `content_version`, and `artifact_digest` -- a metadata
+    lookup, with no graph call and no re-derivation. The returned `url` is the
+    absolute form of the artifact's stable link. It does not expire: a GET on
+    it answers 302 to an object-store URL signed for a few minutes, so a caller
+    follows redirects and reads the link again only if it lost it.
 
     Args:
         subject_id: The `spec_` id this artifact's manifest was minted
@@ -298,9 +262,8 @@ async def read_artifact(
             as carried on the manifest's `resource_uri`.
 
     Returns:
-        A document carrying the fresh signed `url`, its `url_expires_at`,
-        `expires_in_s`, and the artifact's own metadata fields
-        (`media_type`, `bytes`, `rendering`, `tier`).
+        A document carrying the absolute `url` and the artifact's own
+        metadata fields (`media_type`, `bytes`, `rendering`, `tier`).
 
     Raises:
         fastmcp.exceptions.ResourceError: Always, on every failure path. The
@@ -310,7 +273,56 @@ async def read_artifact(
     _validate_uri_parts(
         subject_id=subject_id, content_version=content_version, artifact_digest=artifact_digest
     )
+    payload, manifest = await _read_snapshot(subject_id, content_version)
+    raw_entry = _select_raw_artifact(payload, artifact_digest=artifact_digest)
+    stripped_entry = next(
+        (a for a in manifest.artifacts if a.artifact_digest == artifact_digest), None
+    )
+    if stripped_entry is None:
+        # Unreachable: `strip_manifest` already validated every entry in
+        # `payload["artifacts"]`, including the one `_select_raw_artifact`
+        # just matched by the same digest field.
+        raise AssertionError("digest matched in the raw payload but not in the stripped manifest")
+    return _link_document(
+        subject_id=subject_id,
+        content_version=content_version,
+        raw_entry=raw_entry,
+        entry=stripped_entry,
+    )
 
+
+async def read_artifact_by_rendering(
+    subject_id: str, content_version: str, rendering: Mapping[str, object]
+) -> dict[str, Any] | None:
+    """`read_artifact`'s document for the first artifact the snapshot lists under
+    `rendering`, or `None` when it lists none.
+
+    `frame_materialisation` reads a version's canonical frame this way: dfo-apis
+    links it on the version record, so the snapshot lists it and a mint's own
+    response does not. The digest comes from the snapshot, so the caller checks the
+    bytes against the document's `artifact_digest`.
+
+    Raises:
+        fastmcp.exceptions.ResourceError: On every failure `read_artifact` raises
+            for, except a missing artifact, which returns `None`.
+    """
+    _validate_pair(subject_id=subject_id, content_version=content_version)
+    payload, manifest = await _read_snapshot(subject_id, content_version)
+    # `strip_manifest` validated `payload["artifacts"]` entry for entry, in order.
+    for raw_entry, entry in zip(payload["artifacts"], manifest.artifacts, strict=True):
+        if entry.rendering == dict(rendering):
+            return _link_document(
+                subject_id=subject_id,
+                content_version=content_version,
+                raw_entry=raw_entry,
+                entry=entry,
+            )
+    return None
+
+
+async def _read_snapshot(subject_id: str, content_version: str) -> tuple[dict[str, Any], Manifest]:
+    """The snapshot route's raw payload for the pair and its stripped manifest, or a
+    refusal for a failed call or an unusable body."""
     client = get_client()
     try:
         response = await client.request(
@@ -335,8 +347,8 @@ async def read_artifact(
     try:
         manifest = strip_manifest(payload)
     except ValidationError as exc:
-        # Never `str(exc)` here: the snapshot response is full of signed
-        # URLs, and pydantic-core's default rendering embeds the raw,
+        # Never `str(exc)` here: the snapshot response is full of artifact
+        # links, and pydantic-core's default rendering embeds the raw,
         # un-stripped input for a failing field.
         _refuse(
             _UPSTREAM_RESPONSE_UNUSABLE,
@@ -344,56 +356,32 @@ async def read_artifact(
             f"{render_validation_errors(exc)}",
         )
 
-    raw_entry = _select_raw_artifact(payload, artifact_digest=artifact_digest)
-    stripped_entry = next(
-        (a for a in manifest.artifacts if a.artifact_digest == artifact_digest), None
-    )
-    if stripped_entry is None:
-        # Unreachable: `strip_manifest` above already validated every entry
-        # in `payload["artifacts"]`, including the one `_select_raw_artifact`
-        # just matched by the same digest field.
-        raise AssertionError("digest matched in the raw payload but not in the stripped manifest")
+    return payload, manifest
 
-    url = raw_entry.get("url")
-    url_expires_at = raw_entry.get("url_expires_at")
-    if not isinstance(url, str) or not isinstance(url_expires_at, str):
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            "the matched artifact entry is missing its signed url or expiry",
-        )
-    # `ArtifactEntryModel.url` upstream is a bare, unconstrained `str`, so an
-    # empty, relative, or whitespace-only value reaches here unfiltered. The
-    # scheme/netloc check stays scheme-agnostic because dfo-apis'
-    # `FakeArtifactStore.signed_get_url` signs URLs as
-    # `fake://artifact/<tier>/<digest>`. `urlsplit` can also raise
-    # `ValueError` on malformed input.
-    try:
-        split_url = urlsplit(url)
-    except ValueError:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            "the matched artifact entry's signed url did not parse as a URL",
-        )
-    if not split_url.scheme or not split_url.netloc:
-        _refuse(
-            _UPSTREAM_RESPONSE_UNUSABLE,
-            "the matched artifact entry's signed url is not an absolute URL",
-        )
 
+def _link_document(
+    *,
+    subject_id: str,
+    content_version: str,
+    raw_entry: dict[str, Any],
+    entry: ArtifactEntry,
+) -> dict[str, Any]:
+    """The document `read_artifact` returns for one listed artifact: its absolute
+    stable link beside its metadata."""
+    link = _root_relative_link(raw_entry.get("url"))
     return {
         "subject_id": subject_id,
         "content_version": content_version,
-        "artifact_digest": artifact_digest,
-        "url": url,
-        "url_expires_at": url_expires_at,
-        "expires_in_s": _expires_in_s(url_expires_at),
-        "media_type": stripped_entry.media_type,
-        "bytes": stripped_entry.bytes,
-        "rendering": stripped_entry.rendering,
-        "tier": stripped_entry.tier,
+        "artifact_digest": entry.artifact_digest,
+        "url": get_client().absolute_url(link),
+        "media_type": entry.media_type,
+        "bytes": entry.bytes,
+        "rendering": entry.rendering,
+        "tier": entry.tier,
         "note": (
-            f"This URL expires at {url_expires_at} and must not be cached or stored. "
-            "Read this resource again to mint a fresh one."
+            "This link does not expire. A GET on it answers 302 to a URL signed "
+            "for a few minutes, so follow redirects and fetch the bytes when you "
+            "need them."
         ),
     }
 

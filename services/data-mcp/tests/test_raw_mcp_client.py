@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
@@ -34,7 +33,7 @@ from mcp.types import ResourceLink, TextContent
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .test_get_data_tool import _manifest_response, _stored_definition, mint_pair
 
-_SENTINEL_URL = "https://signed.example/only-on-the-raw-session-read"
+_SENTINEL_URL = "/links/only-on-the-raw-session-read"
 _TEST_TOKEN = "test-token"
 
 
@@ -109,9 +108,6 @@ async def test_raw_client_session_walks_the_whole_artifact_surface() -> None:
 
     snapshot_payload = _manifest_response(spec_id=stored.spec_id)
     snapshot_payload["artifacts"][0]["url"] = _SENTINEL_URL
-    snapshot_payload["artifacts"][0]["url_expires_at"] = (
-        datetime.now(UTC) + timedelta(seconds=900)
-    ).isoformat()
 
     upstream = UpstreamClient(
         settings=Settings(),
@@ -144,9 +140,9 @@ async def test_raw_client_session_walks_the_whole_artifact_surface() -> None:
     content = read_result.contents[0]
     assert content.mime_type == "application/json"
     doc = json.loads(content.text)
-    assert doc["url"] == _SENTINEL_URL
+    assert doc["url"].endswith(_SENTINEL_URL)
     assert doc["artifact_digest"] == digest
-    assert "expires_in_s" in doc
+    assert "url_expires_at" not in doc
 
 
 async def test_raw_client_session_reading_an_aged_out_artifact_gets_the_marker_prefix() -> None:

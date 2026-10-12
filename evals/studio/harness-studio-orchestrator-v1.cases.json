@@ -1,6 +1,6 @@
 {
   "suite": "harness-studio-orchestrator-v1",
-  "description": "Orchestrator-engine eval: what each model is shown (scripted, mechanical, every case) and agent behavior (rubric-judged, live cases). Run with evals/studio/run.py --mode orchestrator or orchestrator-live; see evals/studio/README.md.",
+  "description": "Studio eval: what each model is shown (scripted, mechanical, every case) and agent behavior (rubric-judged, live cases). Run with evals/studio/run.py --mode scripted or live; see evals/studio/README.md.",
   "scenarios": {
     "approved-plan": {
       "search": [
@@ -828,7 +828,7 @@
     {
       "id": "orchestrator-approved-plan-runs-and-answers",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "approved-plan",
       "turns": [
@@ -855,7 +855,7 @@
     {
       "id": "orchestrator-approval-payload-stays-out-of-model-requests",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "approved-plan",
       "checks": [
@@ -874,7 +874,7 @@
     {
       "id": "orchestrator-hand-back-reaches-the-agent-unfenced",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "approved-plan",
       "checks": [
@@ -893,7 +893,7 @@
     {
       "id": "orchestrator-second-plan-entry-sees-no-fenced-hand-back",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "refused-step-then-second-plan",
       "checks": [
@@ -912,7 +912,7 @@
     {
       "id": "orchestrator-an-answered-turn-holds-no-fenced-block",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "answer-only",
       "checks": [
@@ -931,7 +931,7 @@
     {
       "id": "orchestrator-search-evidence-reaches-the-planner",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "approved-plan",
       "checks": [
@@ -950,7 +950,7 @@
     {
       "id": "orchestrator-a-later-yes-resolves-the-previous-offer",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "long-offer",
       "checks": [
@@ -979,7 +979,7 @@
     {
       "id": "orchestrator-a-short-closing-message-reaches-the-next-turn",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "short-offer",
       "checks": [
@@ -1008,7 +1008,7 @@
     {
       "id": "orchestrator-a-later-turn-sees-the-plan-an-earlier-turn-ran",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "plan-then-a-question-about-it",
       "checks": [
@@ -1034,7 +1034,7 @@
     {
       "id": "orchestrator-a-repeated-compile-failure-is-not-translated-a-third-time",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "repeated-compile-failure",
       "checks": [
@@ -1052,7 +1052,7 @@
     {
       "id": "orchestrator-a-blocked-reading-is-searched-again-before-it-is-retrieved",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "blocked-reading-searched-again",
       "checks": [
@@ -1071,7 +1071,7 @@
     {
       "id": "orchestrator-every-ask-reaches-the-card-and-the-hand-back",
       "modes": [
-        "orchestrator"
+        "scripted"
       ],
       "scenario": "plan-with-asks",
       "checks": [
@@ -1090,7 +1090,7 @@
     {
       "id": "orchestrator-live-a-period-outside-the-data-is-a-recorded-decision",
       "modes": [
-        "orchestrator-live"
+        "live"
       ],
       "xfail": "period policy: the planner is not yet required to record a period that departs from the data's coverage as a decision, so a plan can narrow the period without saying so. Retire this marker when a departure is always a recorded decision.",
       "turns": [
@@ -1112,7 +1112,7 @@
     {
       "id": "orchestrator-live-every-requested-output-is-accounted-for",
       "modes": [
-        "orchestrator-live"
+        "live"
       ],
       "xfail": "requested-output accounting: nothing yet requires each output the user asked for to be planned, declined with a code or put to the user, so one can drop out silently. Retire this marker when the plan maps every ask.",
       "turns": [
@@ -1134,7 +1134,7 @@
     {
       "id": "orchestrator-live-a-later-yes-resolves-the-previous-offer",
       "modes": [
-        "orchestrator-live"
+        "live"
       ],
       "xfail": "conversation digest: the previous closing message reaches the next turn cut at 280 characters, so an offer made at its end can be gone when the user says yes. Retire this marker when the previous closing message is carried whole.",
       "turns": [
@@ -1161,7 +1161,7 @@
     {
       "id": "orchestrator-live-a-blocking-warning-is-not-reused-as-an-answer",
       "modes": [
-        "orchestrator-live"
+        "live"
       ],
       "xfail": "source reuse: a source found with a blocking warning (role or time text dropped) can still be reused by the planner as if it answered the whole part. Retire this marker when a reused source must carry no blocking warning.",
       "turns": [
@@ -1183,7 +1183,7 @@
     {
       "id": "orchestrator-live-an-unchanged-failure-is-not-repeated",
       "modes": [
-        "orchestrator-live"
+        "live"
       ],
       "xfail": "loop guard: an unchanged plan step that failed deterministically can be proposed and run again, whatever the brief says. Retire this marker when the repeat is refused before it runs.",
       "checks": [
@@ -1202,6 +1202,297 @@
         {
           "id": "failure-not-repeated",
           "property": "When a plan step fails with a refusal a retry cannot change, no later plan or fetch in the conversation puts the same step again: each differs from the failed one, or the closing message says what could not be done and why. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-donor-to-a-region-sums-only-the-region",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "France's aid to Africa",
+          "expect": {
+            "terminal": "done",
+            "message_excludes": [
+              "$106"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "region-answer-is-not-an-all-recipient-sum",
+          "property": "The answer to 'France's aid to Africa' covers the African countries only, or the turn asks the user a question or declines with a reason. It never adds recipient rows that are regional, income-group or all-developing-country totals to country rows, and no yearly figure it gives exceeds France's whole ODA to all recipients, which is about $18bn a year in recent years. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-share-of-the-donor-total-stays-within-the-whole",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "France's aid to Africa",
+          "expect": {
+            "terminal": "done",
+            "message_excludes": [
+              "$106"
+            ]
+          }
+        },
+        {
+          "message": "How about as a share of France's total aid",
+          "expect": {
+            "terminal": "done",
+            "message_excludes": [
+              "585"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "share-does-not-exceed-the-whole",
+          "property": "No share the second turn gives is above 100%. A share above 100% is allowed only when the message says why (for example, a gross figure over a net one) or when the turn declines or asks instead of giving the share. A share stated without such a reason is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-group-donor-and-region-recipient-is-answered-or-asked",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Total aid from G7 to Africa since 1965",
+          "elicitation_text": "Add up the seven G7 countries' aid to Africa",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "group-question-gets-a-total-or-a-question",
+          "property": "The turn ends with the total of the G7 countries' aid to Africa since 1965 drawn as a component, or with a question to the user that was answered and led to that total. A closing message that says the plan failed, could not be translated, or the calculation is unavailable, with no total, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-aid-plus-debt-net-flows-asks-how-to-combine",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Help me calculate net flows to Ghana combining aid and debt",
+          "elicitation_text": "Keep aid and debt flows as separate series; do not add them",
+          "expect": {
+            "terminal": "done",
+            "elicitation": {
+              "min_options": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "combination-is-put-to-the-user",
+          "property": "Before any figure that combines aid and debt flows is shown, the turn asks the user how to combine them, and the question or the closing message says that official development assistance loans appear in both the aid and the debt flows. Figures shown after the user's answer follow that answer. A combined figure shown before that question, or with no such question, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-donor-total-per-person-comes-from-the-donor-headline",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much aid does France provide per person",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "How about in grant equivalents since 2018?",
+          "expect": {
+            "terminal": "done",
+            "message_contains": [
+              "DAC1"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "per-person-uses-the-headline-total",
+          "property": "The grant-equivalent aid per person is France's whole grant-equivalent ODA from the DAC1 headline series divided by its population, or the turn asks which source to use. A figure built by summing recipient-level Creditor Reporting System rows, which leaves out core contributions to multilaterals and unallocated aid, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-what-happened-about-a-figure-restates-its-source",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much aid does France provide per person",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "How about in grant equivalents since 2018?",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "What happened?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "what-happened-restates-source-and-scope",
+          "property": "The third turn's answer to 'What happened?' restates where the figure on screen comes from (the source dataset or series) and what it covers. An answer that only says the data cannot establish causes, with no source and scope, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-weak-theme-match-states-what-it-covers",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Do you have any climate finance data",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "weak-match-states-scope-and-values",
+          "property": "The closing message states in one sentence what the series it offers covers and what it lacks (for example a worldwide total with no donor or recipient split), and gives the first and last values of that series. A message that presents a weak match as complete climate finance data is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-oecd-climate-finance-is-offered",
+      "modes": [
+        "live"
+      ],
+      "xfail": "climate markers: the CRS pipeline drops the policy markers, so the catalogue holds no OECD climate finance and only a worldwide total can be offered. Retire this marker when the markers are ingested.",
+      "turns": [
+        {
+          "message": "Do you have any climate finance data",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "climate-markers-are-offered",
+          "property": "The answer offers OECD climate finance with donor and recipient detail (the Creditor Reporting System climate markers for mitigation and adaptation), not only a worldwide total. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-two-series-for-one-recipient-stay-separate",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "France's imputed multilateral ODA to Kenya, 2015 to 2024. France's gross ODA disbursements to Kenya for education, 2015 to 2024",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "both-series-produced-separately",
+          "property": "Both requested series are produced for 2015 to 2024: France's imputed multilateral ODA to Kenya and France's gross ODA disbursements to Kenya for education. They are shown as two series and are not added into one figure. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-african-countries-are-read-as-members",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much do African countries spend on government health expenditure?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "african-countries-read-as-members",
+          "property": "The plan reads Africa as its member countries: the step that retrieves the data names 'each member of Africa' or lists African countries one by one, and the answer gives figures for individual African countries. A plan whose retrieval names Africa alone, as one region with one figure, is a no, as is an answer that gives only a single total for Africa. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-g7-is-read-as-its-total",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "What were gross ODA disbursements from the G7 in 2022?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "g7-read-as-its-total",
+          "property": "The answer states one 2022 figure for the G7 as a whole and says it is the total DAC publishes for the G7, not the G7 members' figures added up. An answer that lists the seven members' figures, or that says it added the members' figures together, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-bilateral-plus-imputed-states-the-net-basis",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Bilateral plus imputed multilateral aid from France to Kenya, 2015 to 2022, summed",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "bilateral-part-is-stated-as-net",
+          "property": "The answer states that the bilateral part is net ODA (net disbursements) and gives the reason, that DAC counts a donor's total contribution to a recipient as net bilateral ODA plus imputed multilateral ODA. An answer that sums the two without naming the bilateral basis, or that names a gross bilateral basis, is a no. This property always applies and is never inapplicable."
         }
       ]
     }

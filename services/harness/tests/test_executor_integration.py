@@ -43,12 +43,8 @@ from data_mcp.series_statistics import series_statistics_table
 from data_mcp.settings import Settings as DataMcpSettings
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
-from harness.graph import (
-    ORCHESTRATOR_FRAMES_KEY,
-    _link_evidence_to_terminal_frames,
-    frame_id_for,
-    register_frames,
-)
+from harness.graph.answer import link_evidence_to_terminal_frames
+from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_id_for, register_frames
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.orchestrator_tools import build_orchestrator_tools
@@ -102,11 +98,11 @@ from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, Too
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from translator.mechanical import build_translation
 
+from .canonical_versions import serve_canonical_frames, version_of
 from .replay_support import FakeApis
 from .resolved_revision import resolved_revision
 
 SPEC_ID = "spec_" + "5" * 32
-CONTENT_VERSION = "cv_" + "6" * 32
 YEARS = [str(year) for year in range(2015, 2025)]
 
 IDENTITY: dict[str, Any] = {
@@ -189,8 +185,7 @@ def _register_statistics(registry: _StatsRegistry, response: dict[str, Any]) -> 
             "media_type": "application/vnd.apache.parquet",
             "created_at": "2026-08-11T00:00:00+00:00",
             "tier": "working",
-            "url": "https://signed.example/should-not-be-fetched",
-            "url_expires_at": "2026-08-11T00:15:00+00:00",
+            "url": "/links/should-not-be-fetched",
         },
     ]
     key = (response["definition"]["spec_id"], response["content_version"])
@@ -212,6 +207,10 @@ def _parquet_bytes() -> bytes:
     buf = io.BytesIO()
     pq.write_table(table, buf)
     return buf.getvalue()
+
+
+# The version whose frame file is `_parquet_bytes()`.
+CONTENT_VERSION = version_of(_parquet_bytes())
 
 
 def _mint_response() -> dict[str, Any]:
@@ -236,8 +235,7 @@ def _mint_response() -> dict[str, Any]:
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         "statistics": [
@@ -314,7 +312,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _parquet_bytes()
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
 
     mint_response = _register_statistics(_stats_registry, _mint_response())
 
@@ -361,10 +359,8 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
 
 HEALTH_SPEC = "spec_" + "7" * 32
 TOTAL_SPEC = "spec_" + "8" * 32
-SHARE_CONTENT_VERSION = "cv_" + "9" * 32
 
 RANK_SPEC = "spec_" + "e" * 32
-RANK_CONTENT_VERSION = "cv_" + "f" * 32
 RANK_YEARS = ["2010", "2011", "2012"]
 
 KENYA_RECIPIENT = ResolvedEntity(role="recipient", ref="country/KEN", label="Kenya")
@@ -394,10 +390,9 @@ def _donor_parquet_bytes(*, spec_id: str, values: dict[str, float]) -> bytes:
     return buf.getvalue()
 
 
-def _donor_mint_response(
-    *, spec_id: str, content_version: str, values: dict[str, float]
-) -> dict[str, Any]:
+def _donor_mint_response(*, spec_id: str, values: dict[str, float]) -> dict[str, Any]:
     parquet = _donor_parquet_bytes(spec_id=spec_id, values=values)
+    content_version = version_of(parquet)
     stat_var = (
         "OfficialDevelopmentAssistanceToHealth"
         if spec_id == HEALTH_SPEC
@@ -431,8 +426,7 @@ def _donor_mint_response(
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         # One series per entity, matching a real manifest's own shape: a
@@ -488,9 +482,9 @@ def _share_approved_plan(decision: Callable[..., Decision], schemas: dict[str, A
         unit_ref="USD",
         unit_label="US dollars",
         coverage_window=Period(start=2023, end=2023),
-        identity=_donor_mint_response(
-            spec_id=HEALTH_SPEC, content_version=SHARE_CONTENT_VERSION, values=HEALTH_VALUES
-        )["definition"]["identity"],
+        identity=_donor_mint_response(spec_id=HEALTH_SPEC, values=HEALTH_VALUES)["definition"][
+            "identity"
+        ],
     )
     total_source = SelectedSource(
         spec_id=TOTAL_SPEC,
@@ -502,9 +496,9 @@ def _share_approved_plan(decision: Callable[..., Decision], schemas: dict[str, A
         unit_ref="USD",
         unit_label="US dollars",
         coverage_window=Period(start=2023, end=2023),
-        identity=_donor_mint_response(
-            spec_id=TOTAL_SPEC, content_version=SHARE_CONTENT_VERSION, values=TOTAL_VALUES
-        )["definition"]["identity"],
+        identity=_donor_mint_response(spec_id=TOTAL_SPEC, values=TOTAL_VALUES)["definition"][
+            "identity"
+        ],
     )
     # `among='population'` means the *source* holds every donor; the
     # requirement itself names one focus entity, exactly like the compiler's
@@ -607,7 +601,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         values = HEALTH_VALUES if subject_id == HEALTH_SPEC else TOTAL_VALUES
         return _donor_parquet_bytes(spec_id=subject_id, values=values)
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
 
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path != "/api/datasets":
@@ -616,9 +610,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         values = HEALTH_VALUES if spec_id == HEALTH_SPEC else TOTAL_VALUES
         response = _register_statistics(
             _stats_registry,
-            _donor_mint_response(
-                spec_id=spec_id, content_version=SHARE_CONTENT_VERSION, values=values
-            ),
+            _donor_mint_response(spec_id=spec_id, values=values),
         )
         return httpx2.Response(200, json=response)
 
@@ -692,10 +684,11 @@ def _rank_parquet_bytes() -> bytes:
 
 def _rank_mint_response() -> dict[str, Any]:
     parquet = _rank_parquet_bytes()
+    rank_content_version = version_of(parquet)
     return {
         "schema_version": 1,
         "definition": {"schema_version": 1, "spec_id": RANK_SPEC, "identity": RANK_IDENTITY},
-        "content_version": RANK_CONTENT_VERSION,
+        "content_version": rank_content_version,
         "coverage": {"rows": 8, "dimensions": [{"label": "years", "count": 3}]},
         "citation": {"text": "OECD DAC", "sources": []},
         "trace": {"graph_revision": "g1", "facets": []},
@@ -708,8 +701,7 @@ def _rank_mint_response() -> dict[str, Any]:
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         # One series per entity -- Uganda's own span is 2010-2012 (three
@@ -876,7 +868,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _rank_parquet_bytes()
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
 
     rank_response = _register_statistics(_stats_registry, _rank_mint_response())
 
@@ -920,7 +912,6 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
 
 
 TOP_DONOR_SPEC = "spec_" + "c" * 32
-TOP_DONOR_CONTENT_VERSION = "cv_" + "d" * 32
 
 # ODA disbursed in 2023, in billions of US dollars, keyed by donor ref.
 TOP_DONOR_VALUES = {
@@ -968,6 +959,7 @@ def _top_donor_parquet_bytes() -> bytes:
 
 def _top_donor_mint_response() -> dict[str, Any]:
     parquet = _top_donor_parquet_bytes()
+    top_donor_content_version = version_of(parquet)
     return {
         "schema_version": 1,
         "definition": {
@@ -975,7 +967,7 @@ def _top_donor_mint_response() -> dict[str, Any]:
             "spec_id": TOP_DONOR_SPEC,
             "identity": TOP_DONOR_IDENTITY,
         },
-        "content_version": TOP_DONOR_CONTENT_VERSION,
+        "content_version": top_donor_content_version,
         "coverage": {
             "rows": len(TOP_DONOR_VALUES),
             "dimensions": [{"label": "years", "count": 1}],
@@ -991,8 +983,7 @@ def _top_donor_mint_response() -> dict[str, Any]:
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         "statistics": [
@@ -1082,7 +1073,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _top_donor_parquet_bytes()
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
 
     mint_response = _register_statistics(_stats_registry, _top_donor_mint_response())
 
@@ -1168,8 +1159,9 @@ def _rolling_parquet_bytes(last_years: Mapping[str, int]) -> bytes:
     return buf.getvalue()
 
 
-def _rolling_mint_response(last_years: Mapping[str, int], content_version: str) -> dict[str, Any]:
+def _rolling_mint_response(last_years: Mapping[str, int]) -> dict[str, Any]:
     parquet = _rolling_parquet_bytes(last_years)
+    content_version = version_of(parquet)
     return {
         "schema_version": 1,
         "definition": {
@@ -1193,8 +1185,7 @@ def _rolling_mint_response(last_years: Mapping[str, int], content_version: str) 
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         "statistics": [
@@ -1313,22 +1304,20 @@ def run_rolling_plan(
     """Return a coroutine function running the rolling plan twice over one version of its data.
 
     `reporting_2024` donors of six report 2024 in the version served under
-    `content_version`. Returns the first run's outcome, the recipe of its
+    version its frame file names. Returns the first run's outcome, the recipe of its
     final frame, the second run's outcome, and every call both runs made.
     """
 
     async def _run(
-        *, reporting_2024: int, content_version: str
+        *, reporting_2024: int
     ) -> tuple[Accepted, dict[str, Any], Accepted, list[tuple[str, dict[str, Any]]]]:
         last_years = _rolling_last_years(reporting_2024=reporting_2024)
 
         async def fake_fetch(**_kwargs: Any) -> bytes:
             return _rolling_parquet_bytes(last_years)
 
-        monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
-        mint_response = _register_statistics(
-            _stats_registry, _rolling_mint_response(last_years, content_version)
-        )
+        serve_canonical_frames(monkeypatch, fake_fetch)
+        mint_response = _register_statistics(_stats_registry, _rolling_mint_response(last_years))
 
         def mint_handler(request: httpx2.Request) -> httpx2.Response:
             if request.url.path == "/api/datasets":
@@ -1375,9 +1364,7 @@ async def test_a_rolling_plan_runs_from_the_newest_year_half_of_the_series_hold(
     from it, and analysis-mcp accepts both calls against the stored resolution,
     which the final frame's recipe then names."""
     # Two of six donors report 2024, so the newest year half of them hold is 2023.
-    outcome, recipe, again, calls = await run_rolling_plan(
-        reporting_2024=2, content_version="cv_" + "a" * 32
-    )
+    outcome, recipe, again, calls = await run_rolling_plan(reporting_2024=2)
 
     assert [name for name, _ in calls[:4]] == ["get_data", "resolve_anchor", "filter", "growth"]
     (_, kept), (_, growth) = calls[2:4]
@@ -1394,9 +1381,7 @@ async def test_a_rolling_plan_runs_from_the_newest_year_half_of_the_series_hold(
 
     # Three of six report 2024 in the next version: 2024 stands, the three
     # donors without it are named, and the final frame is another pair.
-    later, later_recipe, _, later_calls = await run_rolling_plan(
-        reporting_2024=3, content_version="cv_" + "b" * 32
-    )
+    later, later_recipe, _, later_calls = await run_rolling_plan(reporting_2024=3)
 
     _, later_growth = later_calls[3]
     assert (later_growth["window_start"], later_growth["window_end"]) == ("2019", "2024")
@@ -1546,10 +1531,8 @@ async def studio(
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _rolling_parquet_bytes(last_years)
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
-    mint_response = _register_statistics(
-        _stats_registry, _rolling_mint_response(last_years, "cv_" + "a" * 32)
-    )
+    serve_canonical_frames(monkeypatch, fake_fetch)
+    mint_response = _register_statistics(_stats_registry, _rolling_mint_response(last_years))
 
     closed_end: list[int] = []
 
@@ -1626,7 +1609,7 @@ async def studio(
         _, outcome = await execute_approved_plan(plan, surface=recording)
         assert isinstance(outcome, Accepted), outcome
         assert plan.workflow is not None
-        _link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
+        link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
         run_frame = outcome.results["change"].model_dump()
 
         # `plan_done` lists a plan's final frames to the agent this way.
@@ -1852,7 +1835,6 @@ async def test_a_surface_reading_the_mounted_services_without_the_token_is_refus
 # "Top 2 by GDP" with no place named: the mint covers every place with data, at every
 # level, and carries each place's types when asked (dfo-apis `materialise.enrichment`).
 GDP_SPEC = "spec_" + "4" * 32
-GDP_CONTENT_VERSION = "cv_" + "3" * 32
 GDP_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "Amount_EconomicActivity_GrossDomesticProduction_Nominal", "kind": "stat_var"},
@@ -1901,6 +1883,11 @@ def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
 _GDP_CREATED_AT = {False: "2026-10-01T00:00:00+00:00", True: "2026-10-02T00:00:00+00:00"}
 
 
+# Both GDP renderings come back under the version whose canonical frame is the
+# plain one.
+GDP_CONTENT_VERSION = version_of(_gdp_parquet_bytes(place_types=False))
+
+
 def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
     """dfo-apis' manifest for GDP. Both renderings come back under one
     `content_version`, each with its own artifact and the request's options as its
@@ -1929,8 +1916,7 @@ def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": _GDP_CREATED_AT[place_types],
                 "tier": "working",
-                "url": "https://signed.example/should-not-be-fetched",
-                "url_expires_at": "2026-10-02T00:15:00+00:00",
+                "url": "/links/should-not-be-fetched",
             }
         ],
         "statistics": [
@@ -2022,7 +2008,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _gdp_parquet_bytes()
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
 
     mint_response = _register_statistics(_stats_registry, _gdp_mint_response())
     options: list[dict[str, Any]] = []
@@ -2073,7 +2059,8 @@ def _serve_gdp_in_both_renderings(
     """Answer GDP's mint with the type column when `options.columns` asks for it, and
     without otherwise, under one `content_version`. Each manifest lists both renderings,
     the one not requested first, as dfo-apis lists every rendering stored under a pair.
-    Returns the artifact fetches as `(content_version, typed)`, in order."""
+    Returns the frame fetches as `(content_version, typed)`, in order: the plain read
+    fetches the version's canonical frame, and the typed read its rendering."""
     renderings = {
         typed: _register_statistics(stats_registry, _gdp_mint_response(place_types=typed))
         for typed in (False, True)
@@ -2091,13 +2078,21 @@ def _serve_gdp_in_both_renderings(
         fetched.append((content_version, typed))
         return _gdp_parquet_bytes(place_types=typed)
 
+    async def record_canonical(**kwargs: Any) -> bytes | None:
+        data = await fetch_any(**kwargs)
+        if kwargs["link"] is not None:
+            fetched.append((kwargs["content_version"], False))
+        return data
+
     def mint_handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/datasets":
             typed = "columns" in json.loads(request.content)["options"]
             return httpx2.Response(200, json=renderings[typed])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    serve_canonical_frames(monkeypatch, fake_fetch)
+    fetch_any = frame_materialisation._fetch_artifact_bytes
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", record_canonical)
     client_holder.set_client(
         UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
     )

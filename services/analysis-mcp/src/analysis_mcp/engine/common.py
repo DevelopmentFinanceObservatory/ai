@@ -55,13 +55,22 @@ is one matched key, complete on its own, claiming no total over either side.
 from __future__ import annotations
 
 import bisect
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Literal, cast
 
 import pyarrow as pa
-from common.place_type import at_one_level, type_column
+from common.place_type import (
+    PARTY_KINDS,
+    PARTY_ROLES,
+    TOTAL_KIND,
+    UNTYPED,
+    at_one_level,
+    enrichment_columns,
+    kind_column,
+    type_column,
+)
 from dfo_frame_grammar import Frame, array_kernel, unit_cells, unit_codes
 from dfo_frame_grammar.grammar import (
     FACET_IDENTITY_COLUMNS,
@@ -74,7 +83,13 @@ from dfo_frame_grammar.grammar import (
     cell_sort_key,
 )
 
-from analysis_mcp.engine.columnar import count_distinct, distinct, repeated
+from analysis_mcp.engine.columnar import (
+    count_distinct,
+    distinct,
+    frame_from_columns,
+    group_rows,
+    repeated,
+)
 
 # The closed set of reasons a narrowing step drops rows: `narrow_and_resolve`'s
 # unit narrowing (`unit_unbound`, `unit_not_selected`) and entity narrowing
@@ -85,10 +100,11 @@ from analysis_mcp.engine.columnar import count_distinct, distinct, repeated
 # non-finite value (`non_finite`), `engine.filter`'s predicate loop
 # (`predicate`), `engine.join`'s unmatched-key sets (`unmatched_key`),
 # `engine.compare`'s unintersected periods (`period_unmatched`),
-# `engine.rank`'s limit (`beyond_limit`), and `engine.quotient_of`'s matched
-# cells whose denominator sums to zero (`zero_denominator`). A heterogeneous
-# facet always refuses with `FacetHeterogeneousError`, so this set carries no
-# facet reason.
+# `engine.rank`'s limit (`beyond_limit`), `engine.quotient_of`'s matched
+# cells whose denominator sums to zero (`zero_denominator`), and the flow
+# parties `without_party_totals` leaves out of a sum or a rank because they
+# total other parties (`party_total`). A heterogeneous facet always refuses
+# with `FacetHeterogeneousError`, so this set carries no facet reason.
 ExclusionReason = Literal[
     "unit_unbound",
     "unit_not_selected",
@@ -102,6 +118,7 @@ ExclusionReason = Literal[
     "period_unmatched",
     "beyond_limit",
     "zero_denominator",
+    "party_total",
 ]
 
 # Which of a two-input verb's two sides a dropped row came from. `None` for
@@ -130,9 +147,12 @@ class PlaceLevelsMixedError(Exception):
     """A verb would set places that share no level side by side: a role it
     ranks or pools carries a `{role}_type` column and holds several places
     with no level of `common.place_type.PLACE_LEVELS` among every one's
-    levels. `types` is that column's distinct cells, sorted and capped at
-    `_PLACE_TYPE_CAP`. Maps to the tool boundary's `place_levels_mixed`
-    refusal.
+    levels. For a flow party role (`without_party_totals`), several parties
+    of which one has no kind, every one a total on a pooled role, or
+    several parties with no `{role}_kind` column at all. `column` is the type or
+    kind column, and `types` its distinct cells, sorted and capped at
+    `_PLACE_TYPE_CAP`, empty when the frame carries no such column.
+    Maps to the tool boundary's `place_levels_mixed` refusal.
     """
 
     def __init__(self, *, column: str, types: Sequence[str]) -> None:
@@ -145,13 +165,16 @@ class PlaceLevelsMixedError(Exception):
 
 def pooled_roles(frame: Frame, keys: Iterable[str]) -> tuple[str, ...]:
     """The role columns a verb keyed by `keys` sums or averages across: every
-    role column outside `keys` whose place-type column is outside `keys` too.
-    Grouping by a place's type keeps its levels apart."""
+    role column outside `keys`, less a place role whose type column is in
+    `keys`, since grouping by a place's type keeps its levels apart. A flow
+    party role (`common.place_type.PARTY_ROLES`) outside `keys` is always
+    pooled, whatever its type or kind column: the parties of one kind or
+    type can total one another, and `without_party_totals` reads the role."""
     kept = set(keys)
     return tuple(
         column
         for column in role_columns(frame)
-        if column not in kept and type_column(column) not in kept
+        if column not in kept and (column in PARTY_ROLES or type_column(column) not in kept)
     )
 
 
@@ -159,14 +182,69 @@ def require_one_place_level(frame: Frame, columns: Iterable[str]) -> None:
     """Refuse when a role in `columns` carries a place-type column and its
     places are not at one level (`common.place_type.at_one_level`,
     `PlaceLevelsMixedError`). A role with no such column, a role holding one
-    place, and a frame with no rows pass."""
+    place, and a frame with no rows pass, and so does a flow party role,
+    which `without_party_totals` reads instead."""
     for column in columns:
         types = type_column(column)
-        if types not in frame.columns:
+        if column in PARTY_ROLES or types not in frame.columns:
             continue
         cells = distinct(frame.table, types)
         if not at_one_level(cells, place_count=partial(count_distinct, frame.table, column)):
             raise PlaceLevelsMixedError(column=types, types=cells[:_PLACE_TYPE_CAP])
+
+
+def without_party_totals(
+    frame: Frame,
+    columns: Iterable[str],
+    *,
+    ranked: Collection[str] = (),
+    side: ExclusionSide | None = None,
+) -> tuple[Frame, Exclusions]:
+    """`frame` less the rows of every flow party in `columns` whose
+    `{role}_kind` cell is `total`, with one `party_total` exclusion per role
+    that lost rows, naming the totals left out and tagged `side`. Parties of
+    kind `party` and `residual` stay.
+
+    A role outside `common.place_type.PARTY_ROLES` and a role holding one
+    party keep every row, and so does a role in `ranked` whose parties are
+    all totals: ranking totals beside each other sums nothing across them.
+    Refuses (`PlaceLevelsMixedError`) when a role's several parties carry no
+    kind column or include one with no kind, since no sum or rank across
+    them is known to keep a total apart from the parties it holds, and when
+    a role outside `ranked` holds only totals.
+    """
+    table = frame.table
+    exclusions = Exclusions()
+    for column in dict.fromkeys(columns):
+        if column not in PARTY_ROLES or count_distinct(table, column) < 2:
+            continue
+        kinds = kind_column(column)
+        if kinds not in frame.columns:
+            raise PlaceLevelsMixedError(column=kinds, types=())
+        cells = distinct(table, kinds)
+        if not PARTY_KINDS.issuperset(cells):
+            raise PlaceLevelsMixedError(column=kinds, types=cells[:_PLACE_TYPE_CAP])
+        if cells == [TOTAL_KIND]:
+            if column in ranked:
+                continue
+            raise PlaceLevelsMixedError(column=kinds, types=cells)
+        if TOTAL_KIND not in cells:
+            continue
+        is_total = array_kernel(
+            "equal", table.column(kinds).combine_chunks(), pa.scalar(TOTAL_KIND, pa.string())
+        )
+        dropped = table.filter(is_total)
+        exclusions = record_counted_exclusion(
+            exclusions,
+            reason="party_total",
+            row_count=dropped.num_rows,
+            entities={column: distinct(dropped, column)},
+            side=side,
+        )
+        table = table.filter(array_kernel("invert", is_total))
+    if table is frame.table:
+        return frame, exclusions
+    return Frame.from_table(columns=frame.columns, table=table), exclusions
 
 
 def role_columns(frame: Frame) -> tuple[str, ...]:
@@ -175,6 +253,49 @@ def role_columns(frame: Frame) -> tuple[str, ...]:
     `analysis_mcp.artifact.Exclusion`'s `entities` mapping reports one entry
     for."""
     return tuple(column for column in frame.columns if column not in _FIXED_COLUMNS)
+
+
+def frame_keeping_role_types(
+    columns: Mapping[str, pa.Array | pa.ChunkedArray],
+    *,
+    role_keys: Sequence[str],
+    source: Frame,
+) -> Frame:
+    """An output frame of `columns` declaring `role_keys`, plus the
+    `{role}_type` and `{role}_kind` columns of every role in `role_keys` that
+    `source`, the verb's `frame_ref` input, carries and `role_keys` leaves
+    out (`common.place_type.enrichment_columns`).
+
+    A place's type and a party's kind belong to it, so a verb that keeps a
+    role column keeps them, and a later sum or rank over the output still
+    finds the parties that total others (`without_party_totals`) and the
+    places at different levels (`require_one_place_level`). The harness
+    predicts the same columns from the input's role keys
+    (`compiler.frame_columns.bound_role_keys`). Each output row's cell is
+    read off `source` for its place. A place `source` describes twice takes
+    the cell that sorts first, and a place it lacks takes `UNTYPED`, which
+    both checks refuse to pool beside other places."""
+    described: dict[str, pa.Array] = {}
+    for role in role_keys:
+        for enrichment in enrichment_columns(role):
+            if enrichment in role_keys or enrichment not in source.columns:
+                continue
+            cells_by_place = group_rows(source.table, (role, enrichment)).keys.sort_by(
+                [(role, "ascending"), (enrichment, "ascending")]
+            )
+            cells = columns[role]
+            positions = array_kernel(
+                "index_in",
+                cells.combine_chunks() if isinstance(cells, pa.ChunkedArray) else cells,
+                value_set=cells_by_place.column(role).combine_chunks(),
+            )
+            described[enrichment] = (
+                cells_by_place.column(enrichment)
+                .combine_chunks()
+                .take(positions)
+                .fill_null(UNTYPED)
+            )
+    return frame_from_columns({**columns, **described}, role_keys=(*role_keys, *described))
 
 
 @dataclass(frozen=True, kw_only=True)

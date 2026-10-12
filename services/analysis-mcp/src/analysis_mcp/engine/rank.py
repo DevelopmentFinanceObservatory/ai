@@ -85,7 +85,6 @@ from analysis_mcp.engine.columnar import (
     GroupMembers,
     Groups,
     distinct,
-    frame_from_columns,
     group_members,
     group_rows,
     in_periods,
@@ -96,7 +95,9 @@ from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     available_entity_columns,
+    combine_exclusions,
     facet_columns,
+    frame_keeping_role_types,
     narrow_and_resolve,
     record_counted_exclusion,
     record_exclusion,
@@ -105,6 +106,7 @@ from analysis_mcp.engine.common import (
     role_columns,
     table_before_unitless_exclusion,
     validate_entity_columns,
+    without_party_totals,
 )
 
 # One entity's or one cell's member rows: their values and `GroupMembers`
@@ -461,12 +463,17 @@ def run_rank(
     stat_var = require_single_stat_var(frame)
     rank_by = validate_entity_columns(frame, rank_by)
     require_one_place_level(frame, rank_by)
+    # A total of other parties is neither ranked beside them nor summed into
+    # an entity's value, whether its role is ranked or pooled. A ranked role
+    # holding only totals ("which regions receive the most?") ranks them.
+    frame, party_exclusions = without_party_totals(frame, role_columns(frame), ranked=rank_by)
     # `exclude_unitless=True`: `resolved.unit` labels every ranked entity's
     # output row alike. An entity whose rows leave `unit` unbound is excluded;
     # it must not be ranked alongside entities denominated in a real unit.
     table, resolved, exclusions = narrow_and_resolve(
         frame, pinned_unit=pinned_unit, exclude_unitless=True
     )
+    exclusions = combine_exclusions(party_exclusions, exclusions)
     refuse_sum_over_composed_unit(aggregation, resolved.unit)
     pre_exclusion_table = table_before_unitless_exclusion(frame, pinned_unit=pinned_unit)
 
@@ -626,7 +633,7 @@ def run_rank(
         columns[UNIT_COLUMN] = unit_column(table, count=count)
     for position, column in enumerate(rank_by):
         columns[column] = pa.array([er.entity_key[position][1] for er in kept], type=pa.string())
-    output_frame = frame_from_columns(columns, role_keys=rank_by)
+    output_frame = frame_keeping_role_types(columns, role_keys=rank_by, source=frame)
 
     return RankResult(
         frame=output_frame,

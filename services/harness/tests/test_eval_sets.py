@@ -33,9 +33,6 @@ if str(_AGENTS_DIR) not in sys.path:
 # The tools `workflow_outcome` scores a `tool_responses` expectation for --
 # imported rather than restated, so a tool the metric starts or stops scoring
 # changes this guard with it.
-# harness-planner-skills-v1's eval set is built from its cases: see
-# `test_the_skills_eval_set_is_the_one_its_cases_build`.
-from harness_planner_skills_v1.cases import eval_set as skills_eval_set  # noqa: E402
 from harness_translator_v1.outcome_metric import SCORED_TOOLS  # noqa: E402
 
 # Mirrored here so a rename/add/remove on either side fails CI, catching a
@@ -53,16 +50,6 @@ EXPECTED_CASE_IDS = {
         {
             "translates-before-inviting-approval",
             "takes-an-unmeetable-requirement-back-to-the-user",
-        }
-    ),
-    "harness-planner-skills-v1": frozenset(
-        {
-            "grant-equivalent-measure",
-            "oda-gni-target",
-            "gender-marker-share",
-            "crs-purpose-code-sector",
-            "grant-equivalent-and-purpose-codes",
-            "population-needs-no-skill",
         }
     ),
 }
@@ -310,13 +297,3 @@ def test_a_custom_metric_named_in_criteria_is_declared_under_custom_metrics(
     )
 
     assert undeclared == []
-
-
-def test_the_skills_eval_set_is_the_one_its_cases_build() -> None:
-    # harness-planner-skills-v1's user messages are the brief the planner seam
-    # renders for each case's envelope, so the JSON is built from
-    # `harness_planner_skills_v1.cases` rather than written by hand. A case
-    # edited on one side only, or a change to the seam's rendering, fails here.
-    assert _load("harness-planner-skills-v1") == skills_eval_set(), (
-        "rewrite it: PYTHONPATH=evals/agents uv run python -m harness_planner_skills_v1.cases"
-    )

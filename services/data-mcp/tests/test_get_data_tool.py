@@ -7,14 +7,21 @@ import functools
 import hashlib
 import io
 import json
-from collections.abc import Callable, Coroutine
+import logging
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from common.materialisation import FrameRef, InMemoryMaterialisationStore, MintRecord
+from common.materialisation import (
+    FrameRef,
+    InMemoryMaterialisationStore,
+    MintRecord,
+    frame_from_verified_parquet_bytes,
+    frame_to_parquet_bytes,
+)
 from common.materialisation import set_store as set_frame_store
 from data_mcp import client_holder, get_data_tool
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
@@ -26,7 +33,11 @@ from data_mcp.definition_store import (
     set_store,
     spec_id_for,
 )
-from data_mcp.frame_materialisation import MaterialisationOutcome, frame_ref_for
+from data_mcp.frame_materialisation import (
+    CANONICAL_FRAME_RENDERING,
+    MaterialisationOutcome,
+    frame_ref_for,
+)
 from data_mcp.get_data_tool import RootMint
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
 from data_mcp.operations import QueuedOperation, ResolvedOperation
@@ -38,6 +49,7 @@ from data_mcp.stat_var_list import (
     STAT_VARS_OMITTED_KEY,
     with_stat_var_list,
 )
+from dfo_frame_grammar import Frame, frame_sha256, mint_content_version
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
 from fastmcp.exceptions import ResourceError
@@ -249,8 +261,7 @@ def _manifest_response(
                 "media_type": "application/octet-stream",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
-                "url": "https://signed.example/should-not-leak",
-                "url_expires_at": "2026-08-11T00:15:00+00:00",
+                "url": "/links/should-not-leak",
             }
         ],
     }
@@ -265,7 +276,7 @@ def _manifest_response_with_two_artifacts(
     second = dict(response["artifacts"][0])
     second["artifact_digest"] = "sha256:" + "2" * 64
     second["rendering"] = {"bundle": False, "format": "csv"}
-    second["url"] = "https://signed.example/should-not-leak-either"
+    second["url"] = "/links/should-not-leak-either"
     response["artifacts"].append(second)
     return response
 
@@ -284,8 +295,7 @@ def _manifest_response_with_statistics(
             "media_type": "application/vnd.apache.parquet",
             "created_at": "2026-08-11T00:00:00+00:00",
             "tier": "working",
-            "url": "https://signed.example/should-not-leak-stats",
-            "url_expires_at": "2026-08-11T00:15:00+00:00",
+            "url": "/links/should-not-leak-stats",
         }
     )
     return response
@@ -2147,6 +2157,26 @@ async def test_successful_mint_carries_a_text_block_first_then_one_resource_link
     )
 
 
+@pytest.mark.parametrize(
+    ("rendering", "title"),
+    [
+        ({"format": "parquet", "layout": "frame"}, "parquet artifact"),
+        ({"statistics": "series"}, "series statistics artifact"),
+    ],
+)
+def test_a_resource_link_title_names_its_artifact_once(
+    rendering: dict[str, Any], title: str
+) -> None:
+    response = _manifest_response(spec_id="spec_" + "a" * 32)
+    response["artifacts"][0].update(rendering=rendering)
+
+    (link,) = get_data_tool._artifact_resource_links(Manifest.model_validate(response))
+
+    assert link.title == title
+    # The link resolves to the JSON document holding the download URL.
+    assert link.mime_type == "application/json"
+
+
 async def test_a_sibling_rendering_gets_no_resource_link_and_leaves_the_manifest() -> None:
     stored = _stored_definition()
 
@@ -2178,8 +2208,8 @@ async def test_no_resource_link_carries_a_signed_url() -> None:
     assert result.is_error is False
     for block in result.content:
         dumped = json.dumps(block.model_dump(mode="json"))
-        assert "https://signed.example/should-not-leak" not in dumped
-        assert "https://signed.example/should-not-leak-either" not in dumped
+        assert "/links/should-not-leak" not in dumped
+        assert "/links/should-not-leak-either" not in dumped
 
 
 async def test_a_refusal_result_carries_no_resource_links() -> None:
@@ -2208,11 +2238,9 @@ async def test_no_artifact_url_leaks_anywhere_in_the_result() -> None:
 
     assert result.is_error is False
     dumped_structured = json.dumps(result.structured_content)
-    assert "https://signed.example/should-not-leak" not in dumped_structured
+    assert "/links/should-not-leak" not in dumped_structured
     for block in result.content:
-        assert "https://signed.example/should-not-leak" not in json.dumps(
-            block.model_dump(mode="json")
-        )
+        assert "/links/should-not-leak" not in json.dumps(block.model_dump(mode="json"))
 
 
 # Unusable mint responses
@@ -2271,7 +2299,7 @@ async def test_malformed_artifact_refuses_without_leaking_its_signed_url() -> No
     """
     stored = _stored_definition()
     malformed_response = _manifest_response(spec_id=stored.spec_id)
-    malformed_response["artifacts"] = [{"url": "https://signed.example/should-not-leak"}]
+    malformed_response["artifacts"] = [{"url": "/links/should-not-leak"}]
 
     result = await _call_get_data(
         _mint_only_handler(200, malformed_response),
@@ -2282,8 +2310,8 @@ async def test_malformed_artifact_refuses_without_leaking_its_signed_url() -> No
     assert result.is_error is True
     assert result.structured_content is not None
     dumped_structured = json.dumps(result.structured_content)
-    assert "https://signed.example/should-not-leak" not in text_of(result)
-    assert "https://signed.example/should-not-leak" not in dumped_structured
+    assert "/links/should-not-leak" not in text_of(result)
+    assert "/links/should-not-leak" not in dumped_structured
 
 
 # Region resolved with no confirmed members
@@ -2532,17 +2560,29 @@ async def test_a_scoped_remint_stores_the_new_identity_alone() -> None:
 
 
 def _parquet_bytes() -> bytes:
-    table = pa.table(
-        {
-            "stat_var": pa.array(["dcid:Test"], type=pa.string()),
-            "observationAbout": pa.array(["country/KEN"], type=pa.string()),
-            "time_period": pa.array(["2020"], type=pa.string()),
-            "value": pa.array([1.5], type=pa.float64()),
-        }
-    )
-    buf = io.BytesIO()
-    pq.write_table(table, buf)
-    return buf.getvalue()
+    """A one-row frame in the canonical layout a version's canonical frame is in."""
+    return _frame_parquet(["dcid:Test"])
+
+
+def _content_version_of(data: bytes) -> str:
+    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
+
+
+def _digest(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _serve_canonical_frames(
+    monkeypatch: pytest.MonkeyPatch, bytes_by_cv: Mapping[str, bytes]
+) -> None:
+    """Answer the canonical-frame lookup of each `content_version` in `bytes_by_cv`
+    as the snapshot route would list those bytes."""
+
+    async def locate(ref: FrameRef, **_: Any) -> tuple[str, str]:
+        return _digest(bytes_by_cv[ref.content_version]), f"https://apis.test/{ref.content_version}"
+
+    monkeypatch.setattr("data_mcp.frame_materialisation._locate_canonical_frame", locate)
 
 
 async def test_successful_get_data_call_registers_a_frame_end_to_end(
@@ -2558,25 +2598,35 @@ async def test_successful_get_data_call_registers_a_frame_end_to_end(
     """
     monkeypatch.undo()  # remove this module's own autouse stub for this one test
     stored = _stored_definition()
-    content_version = "cv_" + "4" * 32
     data = _parquet_bytes()
-    artifact_digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    content_version = _content_version_of(data)
+    rendering_digest = "sha256:" + "4" * 64
+    fetched: list[tuple[str, str | None]] = []
 
-    async def fake_fetch(**_kwargs: Any) -> bytes:
+    async def fake_fetch(*, artifact_digest: str, link: str | None, **_kwargs: Any) -> bytes:
+        fetched.append((artifact_digest, link))
         return data
 
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fake_fetch)
+    minted = _manifest_response(
+        spec_id=stored.spec_id, content_version=content_version, artifact_digest=rendering_digest
+    )
+    # The snapshot of the version lists its canonical frame beside the rendering.
+    snapshot = json.loads(json.dumps(minted))
+    snapshot["artifacts"].append(
+        snapshot["artifacts"][0]
+        | {
+            "artifact_digest": _digest(data),
+            "rendering": dict(CANONICAL_FRAME_RENDERING),
+            "url": f"/api/datasets/{stored.spec_id}/{content_version}/files/canonical",
+        }
+    )
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/datasets":
-            return httpx2.Response(
-                200,
-                json=_manifest_response(
-                    spec_id=stored.spec_id,
-                    content_version=content_version,
-                    artifact_digest=artifact_digest,
-                ),
-            )
+            return httpx2.Response(200, json=minted)
+        if request.url.path == f"/api/datasets/{stored.spec_id}/{content_version}":
+            return httpx2.Response(200, json=snapshot)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     frame_store = InMemoryMaterialisationStore()
@@ -2596,19 +2646,23 @@ async def test_successful_get_data_call_registers_a_frame_end_to_end(
     assert stored_frame is not None
     frame, _trace = stored_frame
     assert len(frame.rows) == 1
+    assert [(digest, link and link.rsplit("/", 1)[-1]) for digest, link in fetched] == [
+        (_digest(data), "canonical")
+    ]
 
 
 async def test_a_frame_request_reads_the_frame_artifact_past_a_long_layout_one_listed_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The mint asks for `layout: "frame"`, and of a manifest listing the long-layout
-    file under the same pair first, the frame file is the one fetched, registered and
-    linked."""
+    file under the same pair first, the frame file is the one linked. The frame
+    registered is the version's canonical frame."""
     monkeypatch.undo()  # remove this module's own autouse stub for this one test
     stored = _stored_definition()
-    content_version = "cv_" + "5" * 32
     data = _parquet_bytes()
-    frame_digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+    content_version = _content_version_of(data)
+    frame_digest = "sha256:" + "5" * 64
+    _serve_canonical_frames(monkeypatch, {content_version: data})
     manifest = _manifest_response(
         spec_id=stored.spec_id, content_version=content_version, artifact_digest=frame_digest
     )
@@ -2641,7 +2695,7 @@ async def test_a_frame_request_reads_the_frame_artifact_past_a_long_layout_one_l
     assert [body["options"] for body in posted] == [
         {"format": "parquet", "bundle": False, "layout": "frame"}
     ]
-    assert fetched_digests == [frame_digest]
+    assert fetched_digests == [_digest(data)]
     resource_links = [b for b in result.content if isinstance(b, ResourceLink)]
     assert [str(link.uri) for link in resource_links] == [
         f"dfo://artifact/{stored.spec_id}/{content_version}/{frame_digest}"
@@ -3542,6 +3596,12 @@ async def test_a_summed_operation_dfo_apis_refuses_returns_rollup_not_summable()
 
 
 _SECTOR_BREAKDOWN = {"code_system": "crsPurpose", "level": 0}
+# The `options.groupby` `_SECTOR_BREAKDOWN` mints with.
+_SECTOR_BREAKDOWN_GROUPBY = {
+    "by": ["time_period", "crsPurpose"],
+    "op": "sum",
+    "levels": {"crsPurpose": 0},
+}
 
 
 def _breakdown_handler(
@@ -3636,18 +3696,21 @@ async def test_a_breakdown_the_deployment_cannot_serve_refuses_before_any_mint(
 
 
 def _frame_parquet(stat_vars: list[str]) -> bytes:
-    """One row per StatVar, so a frame's distinct `stat_var` values tell it apart."""
-    table = pa.table(
-        {
-            "stat_var": pa.array(stat_vars, type=pa.string()),
-            "observationAbout": pa.array(["country/KEN"] * len(stat_vars), type=pa.string()),
-            "time_period": pa.array(["2020"] * len(stat_vars), type=pa.string()),
-            "value": pa.array([1.5] * len(stat_vars), type=pa.float64()),
-        }
+    """One row per StatVar, so a frame's distinct `stat_var` values tell it apart, in
+    the canonical layout a version's canonical frame is in."""
+    frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": stat_var,
+                "observationAbout": "country/KEN",
+                "time_period": "2020",
+                "value": 1.5,
+            }
+            for stat_var in stat_vars
+        ],
     )
-    buf = io.BytesIO()
-    pq.write_table(table, buf)
-    return buf.getvalue()
+    return frame_to_parquet_bytes(frame)
 
 
 async def _call_get_data_in_one_process(
@@ -3667,10 +3730,8 @@ async def _call_get_data_in_one_process(
 class _RawAndSummedMint:
     """dfo-apis for one spec: the raw frame under one `content_version`, and the summed
     frame under its own unless a single StatVar contributed (`sole_contributor`), when
-    dfo-apis serves the raw frame's own manifest. Records every artifact fetch."""
-
-    raw_cv = "cv_" + "a" * 32
-    summed_cv = "cv_" + "b" * 32
+    dfo-apis serves the raw frame's own manifest. Each version's canonical frame is its
+    bytes. Records every artifact fetch."""
 
     def __init__(self, *, spec_id: str, sole_contributor: bool = False) -> None:
         self.spec_id = spec_id
@@ -3680,10 +3741,11 @@ class _RawAndSummedMint:
             if sole_contributor
             else ["dcid:Grants_Primary", "dcid:Grants_Secondary"]
         )
-        self.bytes_by_cv = {
-            self.raw_cv: _frame_parquet(raw),
-            self.summed_cv: _frame_parquet([f"dcid:{spec_id}"]),
-        }
+        raw_bytes = _frame_parquet(raw)
+        summed_bytes = _frame_parquet([f"dcid:{spec_id}"])
+        self.raw_cv = _content_version_of(raw_bytes)
+        self.summed_cv = _content_version_of(summed_bytes)
+        self.bytes_by_cv = {self.raw_cv: raw_bytes, self.summed_cv: summed_bytes}
         self.fetched: list[str] = []
 
     def _digest(self, content_version: str) -> str:
@@ -3702,14 +3764,14 @@ class _RawAndSummedMint:
                     contributing_member_count=2,
                 ),
             )
-        return httpx2.Response(
-            200,
-            json=_manifest_response(
-                spec_id=self.spec_id,
-                content_version=self.raw_cv,
-                artifact_digest=self._digest(self.raw_cv),
-            ),
+        response = _manifest_response(
+            spec_id=self.spec_id,
+            content_version=self.raw_cv,
+            artifact_digest=self._digest(self.raw_cv),
         )
+        # A sum one StatVar contributes to keeps the raw version, under its own rendering.
+        response["artifacts"][0]["rendering"] = json.loads(request.content)["options"]
+        return httpx2.Response(200, json=response)
 
     async def fetch(self, *, content_version: str, **_kwargs: Any) -> bytes:
         self.fetched.append(content_version)
@@ -3730,11 +3792,14 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
     monkeypatch: pytest.MonkeyPatch, order: tuple[str, str]
 ) -> None:
     """The frame store is insert-only and keyed on `{spec_id, content_version}`: the
-    summed frame reaches it under its own `content_version`, whichever call comes first."""
+    raw frame is the raw version's canonical frame under its pair, and the summed
+    frame, which dfo-apis minted as a version of its own, is held under the pair
+    naming its groupby, whichever call comes first."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
     upstream = _RawAndSummedMint(spec_id=stored.spec_id)
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    _serve_canonical_frames(monkeypatch, upstream.bytes_by_cv)
     frame_store = InMemoryMaterialisationStore()
     set_frame_store(frame_store)
 
@@ -3753,7 +3818,16 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
     assert cv_by_reading == {"separate": upstream.raw_cv, "sum": upstream.summed_cv}
     assert sorted(upstream.fetched) == sorted([upstream.raw_cv, upstream.summed_cv])
     raw_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
-    summed_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.summed_cv)
+    summed_ref = frame_ref_for(
+        spec_id=stored.spec_id, content_version=upstream.summed_cv, groupby=_SUM_GROUPBY
+    )
+    summed_content = results[order.index("sum")].structured_content
+    assert summed_content is not None
+    assert summed_content["frame_ref"] == summed_ref.model_dump(mode="json")
+    assert (
+        await frame_store.get(FrameRef(spec_id=stored.spec_id, content_version=upstream.summed_cv))
+        is None
+    )
     assert await _distinct_stat_vars(frame_store, raw_ref) == {
         "dcid:Grants_Primary",
         "dcid:Grants_Secondary",
@@ -3781,8 +3855,9 @@ def _breakdown_frame_parquet(*, spec_id: str, sectors: list[str]) -> bytes:
 async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_column(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A breakdown frame reaches the store under the `content_version` dfo-apis minted
-    for the roll-up, with `stat_var_crsPurpose` as a role column and one StatVar."""
+    """A breakdown frame reaches the store under the pair naming the roll-up's groupby
+    and the `content_version` dfo-apis minted for it, with `stat_var_crsPurpose` as a
+    role column and one StatVar."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
     raw = _RawAndSummedMint(spec_id=stored.spec_id)
@@ -3811,6 +3886,7 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
         return await raw.fetch(content_version=content_version)
 
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", fetch)
+    _serve_canonical_frames(monkeypatch, raw.bytes_by_cv)
     frame_store = InMemoryMaterialisationStore()
     set_frame_store(frame_store)
 
@@ -3827,10 +3903,14 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
     assert broken_down.is_error is False
     content = broken_down.structured_content
     assert content is not None
-    assert content["frame_ref"]["content_version"] == breakdown_cv
+    ref = frame_ref_for(
+        spec_id=stored.spec_id,
+        content_version=breakdown_cv,
+        groupby=_SECTOR_BREAKDOWN_GROUPBY,
+    )
+    assert content["frame_ref"] == ref.model_dump(mode="json")
     assert content["role_keys"] == ["observationAbout", "stat_var_crsPurpose"]
     assert content["stat_var_count"] == 1
-    ref = FrameRef(spec_id=stored.spec_id, content_version=breakdown_cv)
     assert await _distinct_stat_vars(frame_store, ref) == {f"dcid:{stored.spec_id}"}
 
 
@@ -3838,12 +3918,14 @@ async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_erro
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With one StatVar holding rows, dfo-apis answers a summed request with the raw
-    frame's own `content_version` and no `stat_vars_summed` warning; the held pair is
-    that same frame."""
+    frame's own `content_version` and no `stat_vars_summed` warning. The sum keeps the
+    raw version, so its rendering is held under the pair naming its groupby, apart
+    from the raw version's canonical frame."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
     upstream = _RawAndSummedMint(spec_id=stored.spec_id, sole_contributor=True)
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    _serve_canonical_frames(monkeypatch, upstream.bytes_by_cv)
     frame_store = InMemoryMaterialisationStore()
     set_frame_store(frame_store)
 
@@ -3858,9 +3940,15 @@ async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_erro
     assert summed.structured_content is not None
     assert summed.structured_content["content_version"] == upstream.raw_cv
     assert summed.structured_content["summed_stat_var_count"] is None
-    assert upstream.fetched == [upstream.raw_cv]
-    ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
-    assert await _distinct_stat_vars(frame_store, ref) == {"dcid:Grants_Primary"}
+    assert upstream.fetched == [upstream.raw_cv, upstream.raw_cv]
+    raw_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
+    summed_ref = frame_ref_for(
+        spec_id=stored.spec_id, content_version=upstream.raw_cv, groupby=_SUM_GROUPBY
+    )
+    assert summed.structured_content["frame_ref"] == summed_ref.model_dump(mode="json")
+    assert summed_ref != raw_ref
+    assert await _distinct_stat_vars(frame_store, raw_ref) == {"dcid:Grants_Primary"}
+    assert await _distinct_stat_vars(frame_store, summed_ref) == {"dcid:Grants_Primary"}
 
 
 # Place types: a spec that names no place asks for each place's types.
@@ -3914,6 +4002,116 @@ async def test_a_call_without_place_types_sends_no_columns() -> None:
     assert "columns" not in options[0]
 
 
+def _column_unknown(*, served: list[str], truncated: bool = False) -> httpx2.Response:
+    """dfo-apis' 422 for an `options.columns` token the table lacks, listing what it serves."""
+    return httpx2.Response(
+        422,
+        json={
+            "type": "/codes/column_unknown",
+            "title": "Column Unknown",
+            "status": 422,
+            "detail": "column 'financingRecipient_type' is not present on this table",
+            "code": "column_unknown",
+            "pointer": "/options/columns",
+            "alternatives": [{"ref": ref, "label": ref} for ref in served],
+            "truncated": truncated,
+            "retryable": False,
+        },
+    )
+
+
+async def test_place_types_a_table_without_the_place_column_mints_the_default_columns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="data_mcp.get_data_tool")
+    stored = _stored_definition(entities={"recipient": ["country/KEN"]})
+    options: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        options.append(json.loads(request.content)["options"])
+        if len(options) == 1:
+            return _column_unknown(served=["stat_var", "entity", "entity_type", "value"])
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [sent.get("columns") for sent in options] == [["observationAbout_type"], None]
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        ["stat_var", "financingProvider", "financingProvider_type", "value"],
+        ["stat_var", "observationAbout_type", "value"],
+    ],
+    ids=["party-types-only", "place-type-only"],
+)
+async def test_place_types_a_flow_table_serving_no_kind_is_refused(served: list[str]) -> None:
+    # A server without kinds answers `kind` with 422 `column_unknown`. A flow frame
+    # without kinds would let a sum count party totals beside their parties.
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    calls: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return _column_unknown(served=served)
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"entities": {"destination": ["country/KEN"]}, "open_roles": ["origin"]},
+        {"entities": {}, "open_roles": ["origin"]},
+    ],
+    ids=["named-and-open-axes", "dac1-open-donor-axis"],
+)
+async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
+    identity: dict[str, Any],
+) -> None:
+    # A bare `kind` covers every entity column the table has, including a side the
+    # identity leaves unnamed, and cannot name a side the table lacks.
+    stored = _stored_definition(**identity)
+    options: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        options.append(json.loads(request.content)["options"])
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [sent["columns"] for sent in options] == [["kind"]]
+
+
+async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_retry() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    calls: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return _column_unknown(served=["financingProvider_type"], truncated=True)
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert len(calls) == 1
+
+
 class _PlainAndTypedMint:
     """dfo-apis for one place-subject spec: the default columns, or the place-type
     column added when `options.columns` names it, both under one `content_version`
@@ -3921,8 +4119,6 @@ class _PlainAndTypedMint:
     both renderings, the one not requested first, as a done operation lists every
     rendering stored under its pair. Records every artifact fetch as
     `(content_version, artifact_digest)`."""
-
-    content_version = "cv_" + "c" * 32
 
     def __init__(self, *, spec_id: str) -> None:
         self.spec_id = spec_id
@@ -3946,6 +4142,23 @@ class _PlainAndTypedMint:
             digest = f"sha256:{hashlib.sha256(buf.getvalue()).hexdigest()}"
             self.bytes_by_digest[digest] = buf.getvalue()
             self.digest_by_rendering[is_typed] = digest
+        # The version's canonical frame: the plain rows in the canonical layout.
+        self.canonical = frame_to_parquet_bytes(
+            Frame.build(
+                role_keys=["observationAbout"],
+                rows=[
+                    {
+                        "stat_var": "dcid:Test",
+                        "observationAbout": place,
+                        "time_period": "2023",
+                        "value": value,
+                    }
+                    for place, value in zip(places, [105.0, 27.0, 3.9], strict=True)
+                ],
+            )
+        )
+        self.bytes_by_digest[_digest(self.canonical)] = self.canonical
+        self.content_version = _content_version_of(self.canonical)
         self.fetched: list[tuple[str, str]] = []
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
@@ -4018,6 +4231,7 @@ async def test_a_recorded_root_is_minted_again_with_its_options_and_scope(
         content_version=upstream.content_version,
         columns=("observationAbout_type",),
     )
+    assert minted.options == options
     assert minted.stat_var_count == 1
     assert await frame_store.get(minted.frame) is not None
     assert await frame_store.get_mint_record(minted.frame) == MintRecord(
@@ -4032,6 +4246,7 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
     stored = _stored_definition()
     upstream = _PlainAndTypedMint(spec_id=stored.spec_id)
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    _serve_canonical_frames(monkeypatch, {upstream.content_version: upstream.canonical})
     set_frame_store(InMemoryMaterialisationStore())
     submitted: list[bytes] = []
     answers = [
@@ -4070,6 +4285,57 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
     # The repeat is the same request, which dfo-apis answers from the operation it holds.
     assert submitted[0] == submitted[1]
     assert len(submitted) == 2
+
+
+@pytest.mark.parametrize(
+    ("entities", "recorded", "minted"),
+    [
+        (
+            {"origin": ["country/FRA"]},
+            {"format": "parquet", "columns": ["financingProvider_type", "financingRecipient_type"]},
+            {"format": "parquet", "columns": ["kind"]},
+        ),
+        (
+            {"origin": ["country/FRA"]},
+            {"format": "parquet"},
+            {"format": "parquet", "columns": ["kind"]},
+        ),
+        ({"recipient": ["country/KEN"]}, {"format": "parquet"}, {"format": "parquet"}),
+    ],
+    ids=["flow-party-types", "flow-no-columns", "place-no-columns"],
+)
+async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_them(
+    monkeypatch: pytest.MonkeyPatch,
+    entities: dict[str, list[str]],
+    recorded: dict[str, Any],
+    minted: dict[str, Any],
+) -> None:
+    # A flow root recorded before kinds were served holds no kinds, and a sum across its
+    # parties would refuse; the replay mints and registers it with `["kind"]`.
+    stored = _stored_definition(entities=entities)
+    registered: list[Mapping[str, Any]] = []
+
+    async def degraded(*, manifest: Manifest, options: Mapping[str, Any], **_: Any):
+        registered.append(options)
+        return MaterialisationOutcome(
+            status="degraded", attempts=1, degraded_reason="fetch", frame_ref=mint_pair(manifest)
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", degraded)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content)["options"])
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+
+    await _mint_recorded_root(
+        handler, stored, MintRecord(frame=root, dataset=root, options=recorded)
+    )
+
+    assert sent == [minted]
+    assert registered == [minted]
 
 
 async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
@@ -4115,6 +4381,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     stored = _stored_definition()
     upstream = _PlainAndTypedMint(spec_id=stored.spec_id)
     monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    _serve_canonical_frames(monkeypatch, {upstream.content_version: upstream.canonical})
     frame_store = InMemoryMaterialisationStore()
     set_frame_store(frame_store)
 
@@ -4141,7 +4408,10 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     assert content[False]["role_keys"] == ["observationAbout"]
     assert content[True]["role_keys"] == ["observationAbout", "observationAbout_type"]
     assert sorted(upstream.fetched) == sorted(
-        (upstream.content_version, digest) for digest in upstream.digest_by_rendering.values()
+        [
+            (upstream.content_version, _digest(upstream.canonical)),
+            (upstream.content_version, upstream.digest_by_rendering[True]),
+        ]
     )
     typed_text = text_of(results[order.index(True)])
     assert f"content_version={typed_ref.content_version}" in typed_text

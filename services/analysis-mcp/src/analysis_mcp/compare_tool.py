@@ -393,14 +393,12 @@ async def compare(
 
     # The left side's own upstream_trace is carried forward -- the same
     # "left is the reference" choice `run_compare`'s own output frame
-    # already makes for stat_var/unit/facets. Both sides' own lineage is
+    # already makes for stat_var/unit/facets. Both sides' own frames are
     # bound into `content_version` via `input_content_versions` above, and
     # carried onto the trace's own `input_content_versions` field verbatim.
     output_trace = Trace(
         upstream_trace=left_trace.upstream_trace,
-        frame_content_version=derive_frame_content_version(
-            frame=result.frame, upstream_trace=left_trace.upstream_trace
-        ),
+        frame_content_version=derive_frame_content_version(frame=result.frame),
         op_spec_hash=op_spec_hash,
         execution_record=ExecutionRecord(content=canonicalize_op_spec(op_spec).decode()),
         applied_policy=AppliedPolicy(

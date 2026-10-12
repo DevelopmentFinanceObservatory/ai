@@ -30,8 +30,8 @@ def extract_frame_ref(
     `get_data`'s result is a definition manifest with the frame's reference beside
     it as `frame_ref`. The manifest's own pair names dfo-apis' materialisation, and
     a frame minted with extra columns is held under a `content_version` of its own
-    (`data_mcp.frame_materialisation.frame_ref_for`), so the reference is read from
-    `frame_ref`.
+    (`data_mcp.frame_materialisation.frame_ref_for`), so the reference later steps
+    read is `frame_ref`. `manifest_frame_ref` reads the manifest's own pair.
 
     Raises:
         ArtifactError: If the content is missing, is not what the extractor
@@ -54,6 +54,27 @@ def extract_frame_ref(
     except ValidationError as exc:
         raise ArtifactError(f"the result does not carry a valid frame reference: {exc}") from exc
     raise ArtifactError(f"{extract.value!r} does not yield a frame reference")
+
+
+def manifest_frame_ref(structured_content: Mapping[str, object]) -> FrameRef:
+    """The manifest's own `{spec_id, content_version}` in `get_data`'s result.
+
+    dfo-apis serves the frame under this pair, so it is the pair a retrieval is
+    described and drawn by. A frame minted with extra columns is held by data-mcp
+    under a `content_version` of its own (`extract_frame_ref`), which dfo-apis
+    never minted and does not serve.
+
+    Raises:
+        ArtifactError: If the content is not a manifest, or its pair is not a
+            valid `FrameRef`.
+    """
+    manifest = parse_manifest(structured_content)
+    try:
+        return FrameRef(
+            spec_id=manifest.definition.spec_id, content_version=manifest.content_version
+        )
+    except ValidationError as exc:
+        raise ArtifactError(f"the manifest does not name a valid frame: {exc}") from exc
 
 
 def declared_shape(

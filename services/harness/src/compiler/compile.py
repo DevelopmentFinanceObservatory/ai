@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
 
-from common.place_type import PLACE_ROLE, type_column
+from common.place_type import FLOW_ROLE_COLUMNS, PLACE_ROLE, type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
@@ -99,9 +99,10 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_source,
+    named_members,
+    named_refs,
     read_source_unit,
     read_unit_dcid,
-    resolve_entity,
 )
 from compiler.frame_columns import ROLLING_PARAMETER
 from compiler.rolling import (
@@ -1950,14 +1951,14 @@ class _Build:
         requirement = self.requirements.get(operation.requirement_id)
         columns = {entity.role for entity in source.entities}
         columns.update(self._columns_of(operation.id) or ())
-        if args.get("place_types"):
+        if self._read_by_level_filter(operation.id):
             columns.add(type_column(PLACE_ROLE))
         named: dict[str, tuple[str, ...]] = {}
         if isinstance(requirement, DatasetRequirement):
             for entity in requirement.entities:
-                resolved = resolve_entity(entity, source.entities)
-                if resolved is not None:
-                    named[resolved.role] = (*named.get(resolved.role, ()), resolved.ref)
+                for member in named_members(entity, source):
+                    if member.ref not in named.get(member.role, ()):
+                        named[member.role] = (*named.get(member.role, ()), member.ref)
         return Root(spec_id=source.spec_id, columns=frozenset(columns), named=named)
 
     def _expected_role_keys(self, op_id: str) -> tuple[str, ...]:
@@ -2005,8 +2006,11 @@ class _Build:
 
         `place_types` is written for a retrieval a place-level filter reads
         (`_read_by_level_filter`): it adds the `observationAbout_type`
-        column that filter keeps one level by. Rendering only, so it re-mints
-        nothing either.
+        column that filter keeps one level by. It is written too for a flow
+        retrieval a sum, a rank, a share or a quotient reads
+        (`_pooled_across_parties`): it adds each flow party's kind, by which
+        `analysis-mcp` leaves out the parties that total others. Rendering
+        only, so it re-mints nothing either.
 
         No `scope` is written, even when the source resolves more entities
         than the requirement names. `get_data`'s contract is that any scope
@@ -2029,27 +2033,64 @@ class _Build:
                 "code_system": BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension],
                 "level": requirement.breakdown.level,
             }
-        if self._read_by_level_filter(operation.id):
+        if self._read_by_level_filter(operation.id) or self._pooled_across_parties(operation.id):
             args["place_types"] = True
         return args, {}
 
     def _read_by_level_filter(self, retrieve_id: str) -> bool:
         """Whether a filter keeping one level of place reads `retrieve_id`, directly or through other filters."""
-        for operation in self.operations.values():
-            if not isinstance(operation, FilterOperation) or not keeps_one_level(
-                operation.predicates
-            ):
-                continue
-            op_id, seen = operation.input, set[str]()
-            while (
-                isinstance(read := self.operations.get(op_id), FilterOperation)
-                and op_id not in seen
-            ):
-                seen.add(op_id)
-                op_id = read.input
-            if op_id == retrieve_id:
-                return True
+        return any(
+            isinstance(operation, FilterOperation)
+            and keeps_one_level(operation.predicates)
+            and self._through_filters(operation.input) == retrieve_id
+            for operation in self.operations.values()
+        )
+
+    def _pooled_across_parties(self, retrieve_id: str) -> bool:
+        """Whether `retrieve_id` reads a flow source, and an aggregate, a rank, a share or a quotient reads it, directly or through filters, growths and joins.
+
+        A flow frame carries every party of each side its table holds, the
+        sides its source leaves unnamed among them, so any such verb may sum
+        or rank across a side holding totals of other parties. A filter, a
+        growth and a join keep each party column they key by together with
+        its kind, so a verb reading their output pools the same parties. A
+        compare and a sum of two series keep no party column, so nothing
+        after them pools across a side.
+        """
+        source = self.sources.get(retrieve_id)
+        if source is None:
+            return False
+        axes = {entity.role for entity in source.entities}
+        axes.update(axis.column for axis in source.open_entity_axes or ())
+        if not axes & FLOW_ROLE_COLUMNS.keys():
+            return False
+        reached = {retrieve_id}
+        frontier = [retrieve_id]
+        while frontier:
+            read = frontier.pop()
+            for operation in self.operations.values():
+                if read not in _inputs_of(operation):
+                    continue
+                if isinstance(
+                    operation,
+                    AggregateOperation | RankOperation | ShareOfOperation | QuotientOfOperation,
+                ):
+                    return True
+                if (
+                    isinstance(operation, FilterOperation | GrowthOperation | JoinOperation)
+                    and operation.id not in reached
+                ):
+                    reached.add(operation.id)
+                    frontier.append(operation.id)
         return False
+
+    def _through_filters(self, op_id: str) -> str:
+        """The operation `op_id` reads through filters alone: `op_id` itself when it is no filter."""
+        seen = set[str]()
+        while isinstance(read := self.operations.get(op_id), FilterOperation) and op_id not in seen:
+            seen.add(op_id)
+            op_id = read.input
+        return op_id
 
     def _aggregate_arguments(self, operation: AggregateOperation) -> Arguments | None:
         resolved = self.shapes.get(operation.input)
@@ -2211,7 +2252,19 @@ class _Build:
         if isinstance(found, CompileIssue):
             self.issues.append(found)
             return None
-        return found
+        if found is None:
+            return None
+        if len(found) > 1:
+            self._issue(
+                CompileIssueCode.ENTITY_AMBIGUOUS,
+                f"operation {op_id!r} names {side.entity!r} on a side, a set whose members "
+                f"{[member.label for member in found]!r} are each a series of their own, and "
+                "a side reads one; filter the frame to the set and aggregate it by period "
+                "first",
+                operation_id=op_id,
+            )
+            return None
+        return found[0]
 
     def _rank_arguments(self, operation: RankOperation) -> Arguments | None:
         upstream = self.shapes.get(operation.input)
@@ -2303,12 +2356,14 @@ class _Build:
         refs: list[str] = []
         for name in predicate.names:
             found = self._frame_entity(operation.id, operation.input, name, role=predicate.role)
-            if not isinstance(found, ResolvedEntity):
+            if not isinstance(found, tuple):
                 # Unknown, ambiguous, unresolved or on no column of the
                 # frame -- already reported by `_check_filter`.
                 return None
-            columns.add(found.role)
-            refs.append(found.ref)
+            for member in found:
+                columns.add(member.role)
+                if member.ref not in refs:
+                    refs.append(member.ref)
         if len(columns) > 1:
             self._issue(
                 CompileIssueCode.ENTITY_AMBIGUOUS,
@@ -2322,12 +2377,13 @@ class _Build:
 
     def _frame_entity(
         self, op_id: str, input_id: str, name: str, *, role: str | None = None
-    ) -> ResolvedEntity | CompileIssue | None:
-        """Resolve `name` to the role column and ref it has on the frame at `input_id`.
+    ) -> tuple[ResolvedEntity, ...] | CompileIssue | None:
+        """Resolve `name` to the entities it names on the frame at `input_id`, one role column.
 
         Each requirement behind the frame's role columns that states `name`
         (`_named_behind`), under `role` when the operation gives one,
-        resolves it against its own source. So a name on a keyed `share_of`
+        resolves it against its own source (`_stated_entity`): one entity,
+        or a named set's members. So a name on a keyed `share_of`
         or `quotient_of` result resolves on that result's key column, through
         the requirement and source the column came from.
 
@@ -2342,13 +2398,13 @@ class _Build:
         requirements cannot be read.
         """
         resolved = self.shapes.get(input_id)
-        found: dict[tuple[str, str], ResolvedEntity] = {}
+        found: dict[tuple[tuple[str, str], ...], tuple[ResolvedEntity, ...]] = {}
         for source, requirement in self._named_behind(input_id) or ():
-            entity = self._stated_entity(op_id, name, role, source, requirement)
-            if isinstance(entity, CompileIssue):
-                return entity
-            if entity is not None:
-                found[entity.role, entity.ref] = entity
+            members = self._stated_entity(op_id, name, role, source, requirement)
+            if isinstance(members, CompileIssue):
+                return members
+            if members is not None:
+                found[tuple(sorted((one.role, one.ref) for one in members))] = members
         if resolved is None or not found:
             return None
         if len(found) > 1:
@@ -2358,18 +2414,19 @@ class _Build:
                 f"behind {input_id!r} resolve differently {sorted(found)!r}; say which",
                 operation_id=op_id,
             )
-        (entity,) = found.values()
-        carried = [column.column for column in resolved.columns]
-        if entity.role not in carried:
+        (members,) = found.values()
+        column = members[0].role
+        carried = [one.column for one in resolved.columns]
+        if column not in carried:
             return CompileIssue(
                 code=CompileIssueCode.ENTITY_NOT_ON_FRAME,
                 reason=f"operation {op_id!r} names entity {name!r}, which its source holds "
-                f"under column {entity.role!r}, and the frame it reads from {input_id!r} "
-                f"carries {carried!r}: that frame holds no series per {entity.role!r} to "
+                f"under column {column!r}, and the frame it reads from {input_id!r} "
+                f"carries {carried!r}: that frame holds no series per {column!r} to "
                 "pick one from",
                 operation_id=op_id,
             )
-        return entity
+        return members
 
     def _stated_entity(
         self,
@@ -2378,11 +2435,12 @@ class _Build:
         role: str | None,
         source: SelectedSource,
         requirement: DatasetRequirement,
-    ) -> ResolvedEntity | CompileIssue | None:
-        """`name` as `source` resolves the entity `requirement` states by it, for `_frame_entity`.
+    ) -> tuple[ResolvedEntity, ...] | CompileIssue | None:
+        """The entities of `source` that the entity `requirement` states as `name` names, for `_frame_entity`.
 
-        `None` when `requirement` states no such entity, under `role` when
-        one is given.
+        One entity, or a named set's members on its role column
+        (`compiler.evidence.named_members`). `None` when `requirement`
+        states no such entity, under `role` when one is given.
         """
         candidates = _entity_candidates(requirement, name, role)
         if not candidates:
@@ -2396,15 +2454,15 @@ class _Build:
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )
-        entity = resolve_entity(candidates[0], source.entities)
-        if entity is None:
+        members = named_members(candidates[0], source)
+        if not members:
             return CompileIssue(
                 code=CompileIssueCode.ENTITY_UNRESOLVED,
                 reason=f"operation {op_id!r} names entity {name!r}, which source "
                 f"{source.spec_id} does not resolve, so no entity argument can be written",
                 operation_id=op_id,
             )
-        return entity
+        return members
 
     def _check_bindings(
         self, operation: Operation, capability: ToolCapability, bindings: Mapping[str, Binding]
@@ -2843,41 +2901,25 @@ def _warning_key(warning: EvidenceIssue) -> tuple[str, str, str, str]:
     return warning.requirement_id, warning.code.value, warning.detail, warning.model_dump_json()
 
 
-def _distinct_labels(source: SelectedSource, requirement: DatasetRequirement) -> list[str]:
-    """The distinct entity labels `source` resolves under `requirement`'s own role columns.
-
-    Case-folded, in the source's order. Entities under the other role
-    columns -- the creditor alongside the debtor -- are left out, as
-    `_role_columns` leaves their columns out: pooling a debtor with its
-    creditor pools nothing the plan did not state, and naming the creditor
-    to narrow it would be `unknown_entity`.
-    """
-    columns = set(_role_columns(source, requirement))
-    labels: list[str] = []
-    seen: set[str] = set()
-    for entity in source.entities:
-        if entity.role in columns and entity.label.casefold() not in seen:
-            seen.add(entity.label.casefold())
-            labels.append(entity.label)
-    return labels
-
-
 def _names_on_column(
     requirement: DatasetRequirement, source: SelectedSource, column: str, kept: set[str]
 ) -> list[str]:
-    """The names `requirement` states that `source` resolves under `column` to a label in `kept`.
+    """The names `requirement` states that name a member under `column` with a label in `kept`.
 
     `kept` holds the case-folded labels still reaching the reader. One
     entity per role column, a donor and its recipient say, is one series,
     which a whole side reads as it is. Two on one column are two series a
-    whole side would pool.
+    whole side would pool. A set's name counts once
+    (`compiler.evidence.named_members`); its members still reaching the
+    reader are `_labels_on_column`'s to count.
     """
     return [
         entity.name
         for entity in requirement.entities
-        if (resolved := resolve_entity(entity, source.entities)) is not None
-        and resolved.role == column
-        and resolved.label.casefold() in kept
+        if any(
+            member.role == column and member.label.casefold() in kept
+            for member in named_members(entity, source)
+        )
     ]
 
 
@@ -2891,11 +2933,22 @@ def _labels_on_column(source: SelectedSource, column: str, kept: set[str]) -> li
 
 
 def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> list[str]:
-    """The labels `source` resolves under `requirement`'s role columns that it does not name."""
-    named = {entity.name.casefold() for entity in requirement.entities}
-    return [
-        label for label in _distinct_labels(source, requirement) if label.casefold() not in named
-    ]
+    """The labels of the entities `source` resolves under `requirement`'s role columns that it does not name.
+
+    Named is by ref (`compiler.evidence.named_refs`), so a set's members are
+    named by the set. Distinct case-folded, in the source's order. Entities
+    under the other role columns -- the creditor alongside the debtor -- are
+    left out, as `_role_columns` leaves their columns out: pooling a debtor
+    with its creditor pools nothing the plan did not state, and naming the
+    creditor to narrow it would be `unknown_entity`.
+    """
+    columns = set(_role_columns(source, requirement))
+    named = named_refs(requirement.entities, source)
+    labels: dict[str, str] = {}
+    for entity in source.entities:
+        if entity.role in columns and entity.ref not in named:
+            labels.setdefault(entity.label.casefold(), entity.label)
+    return list(labels.values())
 
 
 def _pooled_sides(operation: Operation) -> tuple[tuple[str, str | None], ...]:
@@ -2944,19 +2997,27 @@ def _narrowed_by_filter(
         if predicate.role is not None:
             if not roles_named((role,), predicate.role):
                 continue
-            named = {name.casefold() for name in predicate.names}
+            named = {name.casefold() for name in predicate.names} | _member_labels(
+                predicate.names, predicate.role, role, source
+            )
         else:
-            named = {
-                name.casefold()
-                for name in predicate.names
-                if (resolved := resolve_entity(Entity(name=name, role=None), source.entities))
-                is not None
-                and resolved.role == role.column
-            }
+            named = _member_labels(predicate.names, None, role, source)
             if not named:
                 continue
         retained = retained & named
     return retained
+
+
+def _member_labels(
+    names: Sequence[str], phrase: str | None, role: ResolvedRole, source: SelectedSource
+) -> set[str]:
+    """The case-folded labels of the members `names` name on `role`'s column (`named_members`)."""
+    return {
+        member.label.casefold()
+        for name in names
+        for member in named_members(Entity(name=name, role=phrase), source)
+        if member.role == role.column
+    }
 
 
 def _narrowed_by_side(
@@ -2965,10 +3026,8 @@ def _narrowed_by_side(
     """`retained`, narrowed to the entity `side` names when `source` resolves it onto `role`'s column."""
     if side.entity is None:
         return retained
-    resolved = resolve_entity(Entity(name=side.entity, role=None), source.entities)
-    if resolved is None or resolved.role != role.column:
-        return retained
-    return retained & {resolved.label.casefold()}
+    named = _member_labels((side.entity,), None, role, source)
+    return retained & named if named else retained
 
 
 def _axis_column(columns: Sequence[ResolvedRole], axis: str | None) -> ResolvedRole | None:
@@ -2988,12 +3047,12 @@ def _axis_column(columns: Sequence[ResolvedRole], axis: str | None) -> ResolvedR
 
 
 def _role_columns(source: SelectedSource, requirement: DatasetRequirement) -> list[str]:
-    """The role columns of `source` that `requirement`'s entities resolve under, in the source's order.
+    """The role columns of `source` that `requirement`'s entities name members on, in the source's order.
 
     `compiler.shapes.shapes_for` computes this same set once, into a fresh
     retrieval's own `ResolvedShape.columns`, for every argument an operation
     writes off its shape (`compile._columns_of`). This copy remains for
-    `_distinct_labels`/`_surplus_labels`, which `_check_source_width` reads
+    `_surplus_labels`, which `_check_source_width` reads
     off the root `(source, requirement)` pair directly.
 
     A source often resolves entities under roles the requirement never
@@ -3007,9 +3066,7 @@ def _role_columns(source: SelectedSource, requirement: DatasetRequirement) -> li
         if entity.role not in every:
             every.append(entity.role)
     wanted = {
-        resolved.role
-        for entity in requirement.entities
-        if (resolved := resolve_entity(entity, source.entities)) is not None
+        member.role for entity in requirement.entities for member in named_members(entity, source)
     }
     return [column for column in every if column in wanted] or every
 

@@ -29,7 +29,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from google.genai import types
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
+from harness.graph.state import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
 from harness.planner_seam import PlannerSeamError
 from harness.scripted_plan import scripted_plan
 from harness.studio_state import ConversationState, StudioStore, _next_manifest
@@ -43,7 +43,8 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
 )
-from harness.wire import CompositionActor, CompositionBlock, PlanAsk, StepProduced, StepStatus
+from harness.wire import CompositionActor, PlanAsk, StepStatus
+from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -67,19 +68,6 @@ def _translator() -> _Translator:
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService())),
     )
-
-
-async def _translator_with_store() -> tuple[_Translator, _RecordingExecutor, StudioStore]:
-    """A translator whose recorder is bound to the same conversation it
-    translates for -- what `land_component` needs (the (store, contextvar)
-    pair), as opposed to `_translator()`'s unbound recorder, which is fine
-    for the tests that drive `_component_frames` directly with an explicit
-    `action` and never call `land_component` at all."""
-    store = StudioStore(InMemorySessionService())
-    current_conversation_key.set(("alice", "c1"))
-    conversation = await store.create("alice", "c1")
-    recorder = _RecordingExecutor(_dummy_executor, store=store)
-    return _Translator(conversation=conversation, recorder=recorder), recorder, store
 
 
 def test_a_short_refusal_passes_through_unmodified() -> None:
@@ -164,10 +152,26 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
     assert frame.rationale == "broader coverage of the requested years"
 
 
-def test_a_clarify_ask_marks_no_option_recommended_and_carries_no_rationale() -> None:
-    # The graph's own `clarify` node raises a `RequestInput` whose `payload`
-    # carries `candidates` and nothing about a recommendation -- the shape
-    # `_request_input_call` hands over for `CLARIFY_INTERRUPT`.
+def test_a_combination_ask_offers_its_options_and_takes_no_free_text() -> None:
+    # The planner's ask whether to add two datasets carries the refusal's
+    # `options`; the user's pick of one comes back as its id.
+    args = {
+        "message": "ODA loans count in both aid and debt. Add them?",
+        "options": [dict(option) for option in COMBINATION_OPTIONS],
+    }
+
+    (frame,) = _translator()._interrupt_frames("call_1", args)
+
+    assert [(o.id, o.label) for o in frame.options] == [
+        (option["id"], option["label"]) for option in COMBINATION_OPTIONS
+    ]
+    assert frame.allow_free_text is False
+
+
+def test_an_agent_ask_marks_no_option_recommended_and_carries_no_rationale() -> None:
+    # The `ask` node raises a `RequestInput` whose `payload` carries the
+    # agent's options as `candidates` and nothing about a recommendation --
+    # the shape `_request_input_call` hands over for `CLARIFY_INTERRUPT`.
     args = {
         "message": "Which reading did you mean?",
         "payload": {
@@ -186,9 +190,8 @@ def test_a_clarify_ask_marks_no_option_recommended_and_carries_no_rationale() ->
 
 def _plan_payload(**extra: object) -> dict[str, object]:
     """The planner node's `"ok"`-routed payload shape (`harness.graph`'s
-    `planner` node), built from the same scripted plan the graph itself
-    drafts in scripted mode."""
-    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    `planner` node), built from `harness.scripted_plan.scripted_plan`."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
     return {
         **plan.model_dump(mode="json"),
         "summary": "Kenya life expectancy, 1960-2023.",
@@ -197,29 +200,16 @@ def _plan_payload(**extra: object) -> dict[str, object]:
     }
 
 
-def test_a_plan_proposed_ask_carries_the_depth_verdict_and_its_notice() -> None:
-    notice = "This asks for more than one thing, so I am proposing a plan before fetching anything."
-    args = {"payload": _plan_payload(depth="standard", depth_notice=notice)}
-
-    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, args)
-
-    assert frame.event == "plan.proposed"
-    assert frame.depth == "standard"
-    assert frame.depth_notice == notice
-
-
-def test_a_plan_proposed_ask_without_a_depth_leaves_it_unset() -> None:
+def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     args = {"payload": _plan_payload()}
 
     (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, args)
 
-    assert frame.depth is None
-    assert frame.depth_notice is None
     assert frame.asks is None
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:
-    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
     final = plan.evidence_requirements[-1]
     assert plan.translation is not None
     (step_id,) = [op.id for op in plan.translation.operations if op.requirement_id == final.id]
@@ -350,7 +340,7 @@ def test_out_of_order_surface_records_drain_in_the_plan_s_own_step_order() -> No
     step A even though the plan lists A first. `_drain_recorder` must still
     number them by the plan's own order: A as `s1`, B as `s2`."""
     current_conversation_id.set("c1")
-    plan = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
     assert plan.workflow is not None
     step_a, step_b = plan.workflow.steps
     payload = {
@@ -398,7 +388,7 @@ def test_out_of_order_surface_records_drain_in_the_plan_s_own_step_order() -> No
 
 
 def _progress_event(step_id: str, message: str) -> Event:
-    """What `harness.graph._step_progress_event` yields for one relayed report."""
+    """What `harness.graph.execute._step_progress_event` yields for one relayed report."""
     return Event(
         custom_metadata={
             STEP_PROGRESS_KEY: {"step_id": step_id, "tool": "get_data", "message": message}
@@ -564,7 +554,7 @@ def test_a_step_that_never_called_gets_a_failed_record_and_a_refused_one_keeps_i
     ]
 
 
-# --- the recorder's `revises`: swapping a card's block in place --------------
+# --- the recorder's components ------------------------------------------------
 
 
 def _written_component(
@@ -618,43 +608,13 @@ def _written_component(
 # --- `_component_frames`: the one place validation, landing and framing meet --
 
 
-def test_component_frames_lands_and_replaces_the_revise_target() -> None:
-    """`land=True` plus a `revises` id that is really on the canvas lands
-    the component in place of it -- validates, then calls
-    `harness.studio_state.land_component` itself, then streams
-    `component.created` plus `composition.updated` reading the manifest
-    that call just produced."""
-    current_conversation_id.set("c1")
-    translator = _translator()
-    translator._conversation.composition = _next_manifest(
-        None,
-        [
-            CompositionBlock(
-                component_id="cmp_two", revision=1, type="line_chart", title="x", pinned=False
-            )
-        ],
-        actor=CompositionActor.MODEL,
-    )
-
-    frames = translator._component_frames(
-        _written_component("cmp_two"), step_id="s1", land=True, revises="cmp_two"
-    )
-
-    events = [getattr(f, "event", None) for f in frames]
-    assert events == ["component.created", "composition.updated"]
-    assert translator._conversation.turn_components[-1]["action"] == "replaced"
-
-
-def test_component_frames_lands_and_appends_with_no_revise_target() -> None:
-    """`land=True`, `revises=None`: an append, which also streams both
-    frames."""
+def test_component_frames_lands_and_appends() -> None:
+    """`land=True`: an append, which also streams both frames."""
     current_conversation_id.set("c1")
     translator = _translator()
     translator._conversation.composition = _next_manifest(None, [], actor=CompositionActor.MODEL)
 
-    frames = translator._component_frames(
-        _written_component("cmp_two"), step_id="s1", land=True, revises=None
-    )
+    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=True)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created", "composition.updated"]
@@ -669,27 +629,21 @@ def test_component_frames_land_true_holds_when_auto_add_is_off() -> None:
     translator = _translator()
     translator._conversation.auto_add = False
 
-    frames = translator._component_frames(
-        _written_component("cmp_two"), step_id="s1", land=True, revises=None
-    )
+    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=True)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
 
 
 def test_component_frames_land_false_emits_only_component_created() -> None:
-    """`land=False` -- a write `harness.graph`'s `compose` judged unusable,
-    or a bare executor with no `land_component` capability at all --
-    skips `harness.studio_state.land_component` entirely: the component
-    streamed, but nothing landed a block for it, and the canvas is
-    untouched."""
+    """`land=False` marks a write `make_charts` did not stamp to land. It
+    skips `harness.studio_state.land_component` entirely. The component
+    streams, no block lands for it, and the canvas is untouched."""
     current_conversation_id.set("c1")
     translator = _translator()
     before = translator._conversation.composition
 
-    frames = translator._component_frames(
-        _written_component("cmp_two"), step_id="s1", land=False, revises="cmp_two"
-    )
+    frames = translator._component_frames(_written_component("cmp_two"), step_id="s1", land=False)
 
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created"]
@@ -700,12 +654,12 @@ def test_component_frames_land_false_emits_only_component_created() -> None:
 def test_component_frames_logs_error_for_a_stamped_component_that_fails_validation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`land=True` means `harness.graph`'s `compose` already ran
+    """`land=True` means `make_charts` already ran
     `harness.wire.usable_component` on this exact component and it passed,
     so a validation failure here means the wire check and this method's
-    own contract have diverged -- a real bug, worth an ERROR record.
-    Nothing streams and the canvas stays untouched, rather than raising
-    out of `translate` and failing the whole segment."""
+    own contract have diverged, which is a bug and earns an ERROR record.
+    Nothing streams and the canvas stays untouched. The method does not
+    raise out of `translate` and fail the whole segment."""
     current_conversation_id.set("c1")
     translator = _translator()
     before = translator._conversation.composition
@@ -713,7 +667,7 @@ def test_component_frames_logs_error_for_a_stamped_component_that_fails_validati
     del invalid["fact_summary"]
 
     with caplog.at_level(logging.ERROR, logger="harness.studio_translate"):
-        frames = translator._component_frames(invalid, step_id="s1", land=True, revises=None)
+        frames = translator._component_frames(invalid, step_id="s1", land=True)
 
     assert frames == []
     assert translator._conversation.composition is before
@@ -724,12 +678,11 @@ def test_component_frames_logs_error_for_a_stamped_component_that_fails_validati
 def test_component_frames_logs_nothing_for_an_unstamped_component_that_fails_validation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`land=False` means this write was never stamped usable in the first
-    place -- `harness.graph`'s `compose` already refused it
-    (`component_invalid`, in `refused_writes`) because this same component
-    failed `harness.wire.usable_component`. Failing validation here again
-    is the expected outcome of that refusal, not a divergence, so no
-    frames stream and nothing is logged at ERROR."""
+    """`land=False` means this write was never stamped usable.
+    `make_charts` already reported it as not drawn because this same
+    component failed `harness.wire.usable_component`. Failing validation
+    here again is the expected outcome of that refusal, so no frames
+    stream and nothing is logged at ERROR."""
     current_conversation_id.set("c1")
     translator = _translator()
     before = translator._conversation.composition
@@ -737,7 +690,7 @@ def test_component_frames_logs_nothing_for_an_unstamped_component_that_fails_val
     del invalid["fact_summary"]
 
     with caplog.at_level(logging.DEBUG, logger="harness.studio_translate"):
-        frames = translator._component_frames(invalid, step_id="s1", land=False, revises=None)
+        frames = translator._component_frames(invalid, step_id="s1", land=False)
 
     assert frames == []
     assert translator._conversation.composition is before
@@ -748,11 +701,11 @@ def test_component_frames_logs_nothing_for_an_unstamped_component_that_fails_val
 # --- `_RecordingExecutor.land_component`: stamps the record, decides nothing -
 
 
-def test_land_component_stamps_land_and_revises_on_the_matching_record() -> None:
+def test_land_component_stamps_land_on_the_matching_record() -> None:
     """`land_component` only stamps the record whose result carries this
     exact component object (found by identity) -- it never resolves a
     conversation and never mutates a canvas; `_component_frames`, draining
-    later, is what does the real work from these two fields."""
+    later, is what does the real work from what it stamps."""
     recorder = _RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService()))
     component = _written_component("cmp_two", labels=("Nigeria", "Guatemala"))
     recorder._records.append(
@@ -765,10 +718,9 @@ def test_land_component_stamps_land_and_revises_on_the_matching_record() -> None
         )
     )
 
-    recorder.land_component(component, land=True, revises="cmp_nigeria")
+    recorder.land_component(component)
 
     assert recorder._records[0].land is True
-    assert recorder._records[0].revises == "cmp_nigeria"
 
 
 def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
@@ -777,7 +729,7 @@ def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
     raises nothing."""
     recorder = _RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService()))
 
-    recorder.land_component(_written_component("cmp_two"), land=True, revises=None)
+    recorder.land_component(_written_component("cmp_two"))
 
 
 # --- `_RecordingExecutor.__call__`: write tokens --------------------------
@@ -855,98 +807,7 @@ async def test_the_record_of_a_revise_leaves_the_write_token_out() -> None:
     assert args["write_token"] == "cmw_secret"
 
 
-# --- `_RecordingExecutor.components_replaced`: reads the turn's own outcome -
-
-
-async def test_components_replaced_is_true_after_a_real_replace() -> None:
-    """Resolves the conversation through the (store, contextvar) pair
-    `harness.studio.StudioRunner` binds for the whole turn, and reads
-    `turn_components` for an actual `"replaced"` action -- the outcome
-    `harness.studio_state.land_component` recorded, at drain time, for
-    this turn."""
-    store = StudioStore(InMemorySessionService())
-    current_conversation_key.set(("alice", "c1"))
-    conversation = await store.create("alice", "c1")
-    conversation.turn_components.append(
-        {"component_id": "cmp_two", "type": "line_chart", "title": "x", "action": "replaced"}
-    )
-    recorder = _RecordingExecutor(_dummy_executor, store=store)
-
-    assert recorder.components_replaced() is True
-
-
-async def test_components_replaced_is_false_with_no_replaced_action() -> None:
-    """A turn whose only landed actions are `"created"` (or nothing at
-    all) reads as `False` -- narrate's fallback, and the same value a bare
-    executor with no capability implies."""
-    store = StudioStore(InMemorySessionService())
-    current_conversation_key.set(("alice", "c1"))
-    conversation = await store.create("alice", "c1")
-    conversation.turn_components.append(
-        {"component_id": "cmp_two", "type": "line_chart", "title": "x", "action": "created"}
-    )
-    recorder = _RecordingExecutor(_dummy_executor, store=store)
-
-    assert recorder.components_replaced() is False
-
-
-def test_components_replaced_raises_with_no_conversation_key_bound() -> None:
-    """A caller outside a studio turn -- `current_conversation_key` never
-    set -- gets a loud failure: `components_replaced` has no
-    store-independent fallback."""
-    current_conversation_key.set(None)
-    recorder = _RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService()))
-
-    with pytest.raises(RuntimeError):
-        recorder.components_replaced()
-
-
 # --- `_drain_recorder`: performs the landing `land_component` only stamped -
-
-
-async def test_drain_recorder_lands_a_component_stamped_for_replace() -> None:
-    """The real call sequence `harness.graph`'s `compose` node makes: write
-    through the recorder, then stamp synchronously (no `await` between,
-    deciding and mutating nothing yet), then drain, later, on the next ADK
-    event -- draining is what actually calls `harness.studio_state.
-    land_component` and produces both the frames and the turn record."""
-    component = _written_component("cmp_two", labels=("Nigeria", "Guatemala"))
-
-    async def _write(
-        *, tool: str, args: dict[str, object], on_progress: ProgressCallback | None = None
-    ) -> dict[str, object]:
-        del tool, args
-        return {"outcome": "ok", "component": component, "summary": "created"}
-
-    store = StudioStore(InMemorySessionService())
-    current_conversation_key.set(("alice", "c1"))
-    conversation = await store.create("alice", "c1")
-    conversation.composition = _next_manifest(
-        None,
-        [
-            CompositionBlock(
-                component_id="cmp_nigeria", revision=1, type="line_chart", title="x", pinned=False
-            )
-        ],
-        actor=CompositionActor.MODEL,
-    )
-    recorder = _RecordingExecutor(_write, store=store)
-    translator = _Translator(conversation=conversation, recorder=recorder)
-    current_conversation_id.set("c1")
-
-    written = await recorder(tool="write_component", args={"intent": {}})
-    recorder.land_component(written["component"], land=True, revises="cmp_nigeria")
-    # Stamping alone decides and mutates nothing: the canvas is untouched
-    # until the drain below actually lands it.
-    assert [b.component_id for b in conversation.composition.blocks] == ["cmp_nigeria"]
-
-    frames = translator._drain_recorder()
-
-    activity = [f for f in frames if f.event == "activity.step"]
-    assert activity[0].produced == StepProduced(component_id="cmp_two", revision=1)
-    assert any(getattr(f, "event", None) == "composition.updated" for f in frames)
-    assert [b.component_id for b in conversation.composition.blocks] == ["cmp_two"]
-    assert conversation.turn_components[-1]["action"] == "replaced"
 
 
 # --- a refused write never reaches `_component_frames` -----------------------
@@ -983,52 +844,6 @@ def test_a_refused_write_never_reaches_component_frames() -> None:
 # --- the recorded action survives into the conversation digest ---------------
 
 
-async def test_the_replaced_action_reaches_the_conversation_digest() -> None:
-    """`close_turn` folds `turn_components` into the turn record
-    `conversation_digest_state` later serves converse. A replace's
-    `action`, written by `harness.studio_state.land_component` when
-    `_drain_recorder` lands it, has to survive that trip, so a later
-    turn's digest can name the card as changed."""
-    translator, recorder, store = await _translator_with_store()
-    conversation = store.current("alice", "c1")
-    current_conversation_id.set("c1")
-
-    def _land(component: dict[str, Any], *, revises: str | None) -> None:
-        """The write, stamp, drain sequence `harness.graph`'s `compose`
-        node and the translator's own drain perform together for one
-        component."""
-        recorder._records.append(
-            _ExecutorRecord(
-                tool="write_component",
-                args={"intent": {}},
-                result={"outcome": "ok", "component": component},
-                duration_ms=1,
-                conversation="c1",
-            )
-        )
-        recorder.land_component(component, land=True, revises=revises)
-        translator._drain_recorder()
-
-    nigeria = _written_component("cmp_nigeria")
-    _land(nigeria, revises=None)
-    translator._conversation.close_turn(final_text="Here is Nigeria.")
-
-    translator._conversation.begin_turn()
-    two_series = _written_component("cmp_two", labels=("Nigeria", "Guatemala"))
-    _land(two_series, revises="cmp_nigeria")
-    translator._conversation.close_turn(final_text="Updated the chart.")
-
-    assert conversation.turns[-1]["cards"] == [
-        {
-            "component_id": "cmp_two",
-            "type": "line_chart",
-            "title": "Life expectancy in Nigeria",
-            "action": "replaced",
-            "window": "1960-2023",
-        }
-    ]
-
-
 def _node_event(
     node: str, *, route: str | None = None, output: Any = None, **metadata: Any
 ) -> Event:
@@ -1062,7 +877,7 @@ def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
     covers the translation. The completing frame's `detail` names the data of
     the plan the proposal recorded."""
     translator = _translator()
-    scripted = scripted_plan("kenya life expectancy", spec_id=None, parts=1)
+    scripted = scripted_plan("kenya life expectancy", spec_id=None)
     dataset = next(r for r in scripted.evidence_requirements if isinstance(r, DatasetRequirement))
     second = dataset.model_copy(update={"id": "second", "measure": "health spending"})
     plan = Plan(
@@ -1221,22 +1036,6 @@ def test_a_streamed_ask_pauses_only_on_its_final_event() -> None:
     ]
 
 
-def test_a_question_the_planner_asks_opens_with_the_drops_its_draft_started_with() -> None:
-    """The `planner` node starts a draft naming seeds the turn dropped and the user has
-    not been told of. The planner's question opens with them, once."""
-    translator = _translator()
-    drops = '"dataset 1 from Search" could not be retrieved: Search finds no data for it.'
-    translator.translate(
-        _node_event("planner", planner_started={"revising": False, "untold_drops": drops})
-    )
-
-    (*_, asked) = translator.translate(_planner_ask("Which donors?"))
-    (again,) = translator.translate(_planner_ask("Which years?"))
-
-    assert asked.question == f"{drops} Which donors?"
-    assert again.question == "Which years?"
-
-
 def test_a_question_after_a_draft_that_named_no_drop_is_asked_as_is() -> None:
     translator = _translator()
     translator.translate(_node_event("planner", planner_started={"revising": False}))
@@ -1276,7 +1075,7 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
 
     async def planner(ctx: Context, node_input: Any) -> Any:
         del node_input
-        return await seam(ctx=ctx, question="kenya debt", envelope={})
+        return await seam(ctx=ctx, question="kenya debt", readings=[])
 
     workflow = Workflow(
         name="status_test_wf", edges=[(START, node(planner, name="planner", rerun_on_resume=True))]

@@ -339,21 +339,6 @@ def test_a_plan_proposed_without_the_new_fields_still_validates() -> None:
     assert all(step.args is None for step in frame.steps)
 
 
-def test_a_plan_proposed_carries_depth_and_its_notice() -> None:
-    raw = _load("event-03-plan-proposed.json")
-    raw["depth"] = "standard"
-    raw["depth_notice"] = (
-        "This asks for more than one thing, so I am proposing a plan before fetching anything."
-    )
-
-    frame = STUDIO_FRAME_ADAPTER.validate_python(raw)
-
-    assert isinstance(frame, PlanProposed)
-    assert frame.depth == "standard"
-    assert frame.depth_notice == raw["depth_notice"]
-    assert frame.model_dump(mode="json", exclude_unset=True) == raw
-
-
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
     frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-03-plan-proposed.json"))
 
@@ -490,6 +475,10 @@ def _past_the_cap(seed: dict[str, Any]) -> None:
     seed["spec"]["trace"] = {"padding": "x" * MAX_SEED_SPEC_BYTES}
 
 
+def _spec_not_an_object(seed: dict[str, Any]) -> None:
+    seed["spec"] = "education aid to Kenya"
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
@@ -497,8 +486,15 @@ def _past_the_cap(seed: dict[str, Any]) -> None:
         (_unknown_verb, "verb"),
         (_unknown_member, "resolved_stat_var_dcids"),
         (_past_the_cap, r"past the 1,048,576-byte cap on one seed"),
+        (_spec_not_an_object, "valid dictionary"),
     ],
-    ids=["definition-names-another-spec", "unknown-verb", "unknown-member", "past-the-cap"],
+    ids=[
+        "definition-names-another-spec",
+        "unknown-verb",
+        "unknown-member",
+        "past-the-cap",
+        "spec-not-an-object",
+    ],
 )
 def test_a_seed_the_harness_cannot_use_is_refused_on_its_own_and_the_request_stands(
     change: Callable[[dict[str, Any]], None], reason: str

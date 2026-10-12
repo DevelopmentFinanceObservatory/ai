@@ -11,14 +11,15 @@ call that registers or finds the frame.
 A record holds:
 
 - `frame`: the pair the store holds the frame under. For a mint with
-  `options.columns` set this is the pair `data_mcp.frame_materialisation
-  .frame_ref_for` derives, whose `content_version` is a one-way hash of the
-  dfo-apis `content_version` and the columns.
+  `options.columns` or `options.groupby` set this is the pair
+  `data_mcp.frame_materialisation.frame_ref_for` derives, whose
+  `content_version` is a one-way hash of the dfo-apis `content_version`, the
+  columns and the groupby. For any other mint it is `dataset`, and the frame is
+  that version's canonical frame.
 - `dataset`: the pair dfo-apis names the materialisation by, which every
   rendering of it shares.
-- `options`: the mint request's `options` as `get_data` sent them. The frame's
-  bytes are the artifact whose `rendering` equals this mapping, so a mint sent
-  with it again selects the same rendering.
+- `options`: the mint request's `options` as `get_data` sent them. A mint sent
+  with them again registers the same rendering under the same derivation.
 - `scope`: the mint request's `scope` as `get_data` sent it. `dataset.spec_id`
   is the identity dfo-apis served after applying it, and each scope member
   replaces a whole member of the identity, so sending the same scope with
@@ -34,16 +35,18 @@ recording the same request write the same bytes. `frame`, `dataset`,
 `options.columns` and `stat_var_count` are functions of the pair the record is
 stored under, the count because a pair names one frame's bytes. Two
 requests can still reach one pair with different records: a scope sent with a
-base definition and no scope sent with the definition that scope produced, or a
-`groupby` sum and no `groupby` over a dataset one StatVar contributes to, which
-dfo-apis serves under one `content_version`. Either record mints the frame the
-pair names, and the store keeps the first.
+base definition and no scope sent with the definition that scope produced.
+Either record mints the frame the pair names, and the store keeps the first.
 
-That last case is why the count is kept. While one StatVar contributes, the
-summed and the unsummed frame are the same bytes, and the record says only which
-request reached the store first. Once a second StatVar contributes the two
-differ, so a later mint of a root recorded with a count of 1 cannot tell which
-one its frame was. `harness.recipe_replay` refuses such a root.
+A record written before `frame_ref_for` named a groupby may share its pair with
+another: a `groupby` sum and no `groupby` over a dataset one StatVar contributes
+to were both held under the version's own pair. That is why the count is kept.
+While one StatVar contributes, the summed and the unsummed frame are the same
+bytes, and the record says only which request reached the store first. Once a
+second StatVar contributes the two differ, so a later mint of a root recorded
+with a count of 1 cannot tell which one its frame was. `harness.recipe_replay`
+refuses such a root unless its frame is held under the pair that names its
+groupby.
 """
 
 from __future__ import annotations

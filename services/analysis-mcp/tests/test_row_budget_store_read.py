@@ -147,7 +147,7 @@ async def test_a_join_cancelled_mid_download_keeps_its_rows_claimed_until_the_do
 
 
 def _object_name(handle: dict[str, str]) -> str:
-    return f"frames/v3/{handle['spec_id']}/{handle['content_version']}.parquet"
+    return f"frames/v4/{handle['spec_id']}/{handle['content_version']}.parquet"
 
 
 async def _put_rows(rows: int) -> dict[str, str]:

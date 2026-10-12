@@ -47,7 +47,15 @@ too.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, MutableMapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -55,6 +63,7 @@ import httpx2
 import pytest
 from common import auth as mcp_auth
 from compiler.sources import member_digest
+from data_mcp import resolution
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
 from google.adk.models.base_llm import BaseLlm
@@ -92,6 +101,27 @@ SPEC_KENYA = "spec_" + "a" * 32
 def _no_shared_secret_from_the_developer_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test with `STUDIO_API_TOKEN` unset."""
     monkeypatch.setenv("STUDIO_API_TOKEN", "")
+
+
+@pytest.fixture(autouse=True)
+def _no_graph_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve no entity name through the graph unless a test says how.
+
+    The translator resolves names that match no label in process
+    (`translator.discovery.resolve_entity_refs`), which would otherwise reach
+    whatever upstream the process holds. A test that wants outcomes patches
+    `data_mcp.resolution.resolve_entities` itself.
+    """
+
+    async def resolve_nothing(
+        scope: Mapping[str, Sequence[str]],
+    ) -> dict[str, dict[str, resolution.ResolutionOutcome]]:
+        return {
+            role: {name: resolution.NotFound(near_matches=[]) for name in names}
+            for role, names in scope.items()
+        }
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve_nothing)
 
 
 @pytest.fixture(autouse=True)

@@ -19,7 +19,6 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, MutableMapping
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -1990,8 +1989,8 @@ _REFUSED_PATH = f"spec_{'6' * 32}/cv_refused/sha256:{'7' * 64}"
 
 
 def _snapshot(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis' snapshot route: `cv_served` lists the served artifact, signed,
-    and any other content version is not found."""
+    """dfo-apis' snapshot route: `cv_served` lists the served artifact
+    under its stable link, and any other content version is not found."""
     subject_id, content_version, digest = _SERVED_PATH.split("/")
     if not request.url.path.endswith(f"/{content_version}"):
         return httpx2.Response(
@@ -1999,7 +1998,6 @@ def _snapshot(request: httpx2.Request) -> httpx2.Response:
             json={"code": "snapshot_not_found", "title": "refused", "retryable": False},
             headers={"content-type": "application/problem+json"},
         )
-    expires_at = datetime.now(UTC) + timedelta(seconds=600)
     return httpx2.Response(
         200,
         json={
@@ -2018,8 +2016,7 @@ def _snapshot(request: httpx2.Request) -> httpx2.Response:
                     "media_type": "application/octet-stream",
                     "created_at": "2026-08-11T00:00:00+00:00",
                     "tier": "working",
-                    "url": "https://signed.example/fresh",
-                    "url_expires_at": expires_at.isoformat(),
+                    "url": f"/api/datasets/{subject_id}/{content_version}/files/{digest}",
                 }
             ],
         },

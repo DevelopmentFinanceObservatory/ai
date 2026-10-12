@@ -1,6 +1,6 @@
 """harness-studio-v1 runner: drives the studio surface and scores the cases.
 
-Two layers, one case file (`harness-studio-v1.cases.json`):
+Two layers, one case file (`harness-studio-orchestrator-v1.cases.json`):
 
 - CONTRACT (mechanical, always on): every frame validates against
   `harness.wire`, the stream invariants in `checks.py` hold, and each
@@ -11,19 +11,10 @@ Two layers, one case file (`harness-studio-v1.cases.json`):
   `GOOGLE_API_KEY`; see `test_config.json` for the judge settings.
 
 Modes:
-  --mode scripted    in-process app with the deterministic scripted seams
-                     (`harness.scripted`) — no server, no key, no network.
-  --mode live        against a running server (--url), real agent + data.
-  --mode orchestrator
-                     the orchestrator engine in-process, its models scripted
+  --mode scripted    the studio in-process, its models scripted
                      (`orchestrator_scripted`): every model request is recorded
                      and the case's `checks` read them. No server, key or network.
-  --mode orchestrator-live
-                     the orchestrator engine's cases against a running server
-                     started with STUDIO_ENGINE=orchestrator.
-
-The classic modes read `harness-studio-v1.cases.json`, the orchestrator modes
-`harness-studio-orchestrator-v1.cases.json`.
+  --mode live        against a running server (--url), real agent + data.
 
     uv run --package harness python evals/studio/run.py --mode scripted
     uv run --env-file .env --package harness python evals/studio/run.py \
@@ -52,12 +43,8 @@ import checks
 import httpx2
 
 _HERE = Path(__file__).resolve().parent
-_CASES_PATHS = {
-    "scripted": _HERE / "harness-studio-v1.cases.json",
-    "live": _HERE / "harness-studio-v1.cases.json",
-    "orchestrator": _HERE / "harness-studio-orchestrator-v1.cases.json",
-    "orchestrator-live": _HERE / "harness-studio-orchestrator-v1.cases.json",
-}
+_CASES_PATH = _HERE / "harness-studio-orchestrator-v1.cases.json"
+_MODES = ("scripted", "live")
 _CONFIG_PATH = _HERE / "test_config.json"
 _RESULTS_DIR = _HERE / ".results"
 
@@ -65,8 +52,8 @@ _MAX_RESUMES = 6
 
 
 def _bearer(token: str | None) -> dict[str, str]:
-    """The bearer header for a token, or the scripted server's accept-anything
-    placeholder when none is set."""
+    """The bearer header for a token, or a placeholder that a server without
+    STUDIO_API_TOKEN accepts."""
     return {"Authorization": "Bearer " + (token or "studio-eval")}
 
 
@@ -105,7 +92,7 @@ async def _stream_frames(
 
 async def _run_message_turn(
     client: httpx2.AsyncClient, conversation_id: str, turn: dict[str, Any], produced: list[dict]
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[str], dict[str, dict[str, Any]]]:
     """One turn.request plus every interrupt resume it needs, per the turn's
     scripted decisions. Returns the turn's frames across all segments, the
     contract violations only a live client can see (each SSE response must
@@ -113,7 +100,10 @@ async def _run_message_turn(
     transcript has lost these boundaries), and the expectation misses the
     resume protocol itself produces: once the turn's plan decisions are
     spent, a further plan card is a re-proposal the case did not ask for, so
-    the runner declines it and the turn ends there."""
+    the runner declines it and the turn ends there. The last member maps each
+    elicitation's `interrupt_id` to the `{decision, payload}` the runner sent
+    for it: the wire carries the question but not the reply, and the judge
+    needs both."""
     component_ref = None
     if "component_ref" in turn:
         from_turn = turn["component_ref"]["from_turn"]
@@ -151,6 +141,7 @@ async def _run_message_turn(
     # itself one execution-triggered replan); a second is declined.
     spare_approve = True
 
+    answers: dict[str, dict[str, Any]] = {}
     resumes = 0
     while frames and frames[-1]["event"] in ("plan.proposed", "elicitation.request"):
         pause = frames[-1]
@@ -182,6 +173,7 @@ async def _run_message_turn(
                         "elicitation_text to answer it with"
                     )
                     break
+            answers[pause["interrupt_id"]] = {"decision": decision, "payload": payload}
         resumes += 1
         segment = await _stream_frames(
             client,
@@ -196,7 +188,7 @@ async def _run_message_turn(
         )
         violations += checks.check_segment(segment, label=f"resume stream {resumes}")
         frames += segment
-    return frames, violations, missed
+    return frames, violations, missed, answers
 
 
 async def _run_mutate_turn(
@@ -250,6 +242,7 @@ async def run_case(
     contract: list[str] = []
     expectation: list[str] = []
     declined: list[int] = []  # turns the runner left paused by declining a re-proposal
+    answers: dict[str, dict[str, Any]] = {}  # elicitation interrupt_id -> the reply sent
 
     for index, turn in enumerate(case["turns"], start=1):
         if "operations" in turn:
@@ -258,9 +251,10 @@ async def run_case(
             continue
         if on_turn is not None:
             on_turn(index)
-        frames, segment_violations, protocol_misses = await _run_message_turn(
+        frames, segment_violations, protocol_misses, turn_answers = await _run_message_turn(
             client, conversation_id, turn, produced
         )
+        answers |= turn_answers
         contract += segment_violations
         expectation += [f"turn {index}: {miss}" for miss in protocol_misses]
         if protocol_misses:
@@ -282,6 +276,7 @@ async def run_case(
     return {
         "frames": all_frames,
         "turn_frames": turn_frames,
+        "answers": answers,
         "contract": contract,
         "expectation": expectation,
     }
@@ -434,9 +429,8 @@ def _check_turn_expectations(
             )
     if "activity_steps" in expect:
         # Steps that ran a data tool: a reply with no search makes none. The
-        # orchestrator engine's thought and status lines are steps too, but
-        # carry no `tool`, and its `explain_dfo` reads the same dfo-faq skill
-        # the graph's converse answers a question about DFO from; neither says
+        # agent's thought and status lines are steps too, but carry no
+        # `tool`, and its `explain_dfo` reads the dfo-faq skill; neither says
         # anything about the route.
         steps = {
             f["step_id"]
@@ -546,17 +540,57 @@ Rules:
   be skipped; the user's phrasing never waives a property.
 - Judge each property independently; one property failing does not excuse
   or fail another.
+- Within a turn, each message, plan, question (`elicitations`), step and component carries
+  `at`, its position in the turn's event stream. The lists are grouped by
+  kind, so compare `at` values to tell what happened first.
 """
 
 
-def _turn_digest(frames: list[dict[str, Any]]) -> dict[str, Any]:
-    """The judge's view of one turn: texts, plan, steps, facts, and the
-    canvas as it stood when the turn ended — no payloads. Without the canvas
-    the judge cannot tell a replaced card from a duplicated one: the stream
-    shows two component.created events either way; only the manifest shows
-    one block."""
-    digest: dict[str, Any] = {"messages": [], "plans": [], "steps": [], "components": []}
-    for frame in frames:
+def _elicitation_digest(frame: dict[str, Any], reply: dict[str, Any] | None) -> dict[str, Any]:
+    """A question the agent put to the user, its options by label, and what
+    the runner sent back (`None` when the turn ended unanswered). An option id
+    in the reply reads as that option's label; free text reads as itself."""
+    options = frame.get("options") or []
+    labels = {option["id"]: option["label"] for option in options}
+    if reply is None:
+        answer = None
+    elif reply["decision"] == "answer":
+        answer = labels.get(reply["payload"], reply["payload"])
+    else:
+        answer = reply["decision"]
+    return {
+        "question": frame["question"],
+        "options": [
+            {"label": option["label"], "description": option.get("description")}
+            for option in options
+        ],
+        "answer": answer,
+    }
+
+
+def _turn_digest(
+    frames: list[dict[str, Any]], answers: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """The judge's view of one turn: texts, plan, steps, facts, the questions
+    the agent asked with the replies sent, and the canvas as it stood when the
+    turn ended, with no payloads. Without the canvas the judge cannot tell a
+    replaced card from a duplicated one, since the stream shows two
+    component.created events either way and only the manifest shows one block.
+    Without the questions it cannot tell an agent that asked from one that did
+    not, since a pause leaves only the label "Asking you a question" in the
+    steps. Every message, plan, question, step and component entry carries
+    `at`, the frame's position in the turn's stream: the lists group entries
+    by kind, and `at` orders them across lists, so the judge can tell a
+    figure drawn before a question from one drawn after it."""
+    answers = answers or {}
+    digest: dict[str, Any] = {
+        "messages": [],
+        "plans": [],
+        "elicitations": [],
+        "steps": [],
+        "components": [],
+    }
+    for at, frame in enumerate(frames):
         event = frame["event"]
         manifest = frame.get("manifest") if event == "composition.updated" else None
         manifest = frame.get("composition") if event == "done" else manifest
@@ -570,10 +604,11 @@ def _turn_digest(frames: list[dict[str, Any]]) -> dict[str, Any]:
                 for block in manifest["blocks"]
             ]
         if event == "message.complete":
-            digest["messages"].append(frame["text"])
+            digest["messages"].append({"at": at, "text": frame["text"]})
         elif event == "plan.proposed":
             digest["plans"].append(
                 {
+                    "at": at,
                     "version": frame["version"],
                     "steps": [
                         {"label": s["label"], "description": s.get("description")}
@@ -585,13 +620,23 @@ def _turn_digest(frames: list[dict[str, Any]]) -> dict[str, Any]:
                     ],
                 }
             )
+        elif event == "elicitation.request":
+            digest["elicitations"].append(
+                {"at": at, **_elicitation_digest(frame, answers.get(frame["interrupt_id"]))}
+            )
         elif event == "activity.step":
             digest["steps"].append(
-                {"label": frame["label"], "status": frame["status"], "detail": frame.get("detail")}
+                {
+                    "at": at,
+                    "label": frame["label"],
+                    "status": frame["status"],
+                    "detail": frame.get("detail"),
+                }
             )
         elif event in ("component.created", "component.revised"):
             digest["components"].append(
                 {
+                    "at": at,
                     "event": event,
                     "type": frame.get("type"),
                     "fact_summary": frame["fact_summary"],
@@ -604,7 +649,11 @@ def _turn_digest(frames: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def judge_case(
-    case: dict[str, Any], turn_frames: list[list[dict[str, Any]]], config: dict[str, Any]
+    case: dict[str, Any],
+    turn_frames: list[list[dict[str, Any]]],
+    config: dict[str, Any],
+    *,
+    answers: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     # Lazy on purpose: judge-less runs (the whole contract layer) must not
     # pay the model SDK's import.
@@ -620,7 +669,7 @@ async def judge_case(
     message_turns = [turn for turn in case["turns"] if "message" in turn]
     evidence = {
         "turns": [
-            {"user": turn["message"], **_turn_digest(frames)}
+            {"user": turn["message"], **_turn_digest(frames, answers)}
             for turn, frames in zip(message_turns, turn_frames, strict=True)
         ]
     }
@@ -687,13 +736,8 @@ async def judge_case(
 # ---------------------------------------------------------------------------
 
 
-async def _run_case_fresh(case: dict[str, Any], *, conversation_id: str) -> dict[str, Any]:
-    async with _scripted_client() as client:
-        return await run_case(client, case, conversation_id=conversation_id)
-
-
-async def _run_orchestrator_case(case: dict[str, Any]) -> dict[str, Any]:
-    """One case on its own scripted orchestrator studio (its scripts are
+async def _run_scripted_case(case: dict[str, Any]) -> dict[str, Any]:
+    """One case on its own scripted studio (its scripts are
     consumed as it runs), then the case's `checks` over what the models were
     shown. A model script that ran dry is a contract failure, since the case
     drove less than it says."""
@@ -711,52 +755,6 @@ async def _run_orchestrator_case(case: dict[str, Any]) -> dict[str, Any]:
 
 
 @asynccontextmanager
-async def _scripted_client() -> AsyncIterator[httpx2.AsyncClient]:
-    """The scripted app, in-process: no server, no ports, no key.
-
-    The scripted studio never calls the mounted MCP apps, but their
-    lifespans still probe the platform at startup; DFO_APIS_URL is pointed
-    at a dead local port for the startup window so the probe refuses
-    instantly.
-    """
-    # presentation-mcp refuses to import without its public URL. No browser
-    # loads this in-process app's views, so any well-formed URL serves.
-    os.environ.setdefault("PRESENTATION_PUBLIC_URL", "http://studio-eval.local/mcp/presentation")
-    # The platform is unreachable by design here, so presentation-mcp must come
-    # up without its tools instead of failing startup.
-    os.environ["PRESENTATION_RELEASE_REQUIRED"] = "false"
-    # Lazy on purpose: live mode drives an external server and must not pay
-    # the harness server's (slow) import chain.
-    from harness.server import create_app  # noqa: PLC0415
-    from harness.settings import Settings  # noqa: PLC0415
-
-    previous = os.environ.get("DFO_APIS_URL")
-
-    def _restore() -> None:
-        if previous is None:
-            os.environ.pop("DFO_APIS_URL", None)
-        else:
-            os.environ["DFO_APIS_URL"] = previous
-
-    os.environ["DFO_APIS_URL"] = "http://localhost:9"
-    try:
-        settings = Settings(studio_scripted=True)
-        app = create_app(settings=settings)
-        async with app.router.lifespan_context(app):
-            _restore()
-            transport = httpx2.ASGITransport(app=app)
-            async with httpx2.AsyncClient(
-                transport=transport,
-                base_url="http://studio-eval.local",
-                timeout=30.0,
-                headers=_bearer(settings.studio_api_token),
-            ) as client:
-                yield client
-    finally:
-        _restore()
-
-
-@asynccontextmanager
 async def _live_client(url: str) -> AsyncIterator[httpx2.AsyncClient]:
     # A remote server; the `eval-studio` recipe loads `.env` into the
     # environment before this runs, so the same STUDIO_API_TOKEN the server
@@ -771,7 +769,7 @@ async def _live_client(url: str) -> AsyncIterator[httpx2.AsyncClient]:
 def load_cases(mode: str, only: list[str] | None = None) -> list[dict[str, Any]]:
     """The cases that run in `mode`. A case's `scenario` may name an entry of
     the file's `scenarios`, which is then resolved into the case."""
-    suite = json.loads(_CASES_PATHS[mode].read_text())
+    suite = json.loads(_CASES_PATH.read_text())
     scenarios = suite.get("scenarios", {})
     cases = [
         {**case, "scenario": scenarios[case["scenario"]]}
@@ -790,10 +788,8 @@ async def run_suite(
 ) -> tuple[list[dict[str, Any]], bool]:
     config = json.loads(_CONFIG_PATH.read_text())
     cases = load_cases(mode, only)
-    factory = _scripted_client if mode == "scripted" else lambda: _live_client(url)
-    # An orchestrator case builds its own studio, so it needs no shared client.
-    if mode == "orchestrator":
-        factory = nullcontext
+    # A scripted case builds its own studio, so it needs no shared client.
+    factory = nullcontext if mode == "scripted" else lambda: _live_client(url)
     results = []
     suite_passed = True
     async with factory() as client:
@@ -806,35 +802,21 @@ async def run_suite(
                 "expectation_violations": [],
             }
             try:
-                if case.get("repeat_identical") and mode == "scripted":
-                    # Determinism is a promise of scripted mode: identical
-                    # requests against a fresh server produce identical
-                    # streams (`duration_ms` excepted). Sequential wire ids
-                    # are process-global, so each run gets its own app and
-                    # the same conversation id, like the server's own test.
-                    outcome = await _run_case_fresh(case, conversation_id=f"conv_{case['id']}")
-                    second = await _run_case_fresh(case, conversation_id=f"conv_{case['id']}")
-                    record["contract_violations"] = (
-                        outcome["contract"]
-                        + second["contract"]
-                        + _compare_streams(outcome["frames"], second["frames"], case["id"])
-                    )
-                    record["expectation_violations"] = (
-                        outcome["expectation"] + second["expectation"]
-                    )
+                if mode == "scripted":
+                    outcome = await _run_scripted_case(case)
                 else:
-                    if mode == "orchestrator":
-                        outcome = await _run_orchestrator_case(case)
-                    else:
-                        assert client is not None  # only the orchestrator mode has none
-                        outcome = await run_case(client, case)
-                        outcome["expectation"] += _frame_checks(case, outcome)
-                    record["contract_violations"] = outcome["contract"]
-                    record["expectation_violations"] = outcome["expectation"]
+                    assert client is not None  # only the scripted mode has none
+                    outcome = await run_case(client, case)
+                    outcome["expectation"] += _frame_checks(case, outcome)
+                record["contract_violations"] = outcome["contract"]
+                record["expectation_violations"] = outcome["expectation"]
                 if judge and case.get("rubrics"):
                     try:
                         record["rubric_scores"] = await judge_case(
-                            case, outcome["turn_frames"], config
+                            case,
+                            outcome["turn_frames"],
+                            config,
+                            answers=outcome.get("answers"),
                         )
                     except JudgeError as error:
                         record["judge_error"] = str(error)
@@ -883,21 +865,6 @@ def _frame_checks(case: dict[str, Any], outcome: dict[str, Any]) -> list[str]:
     return checks.run_case_checks(wanted, evidence)
 
 
-_STABLE_EXCLUDED = {"duration_ms"}
-
-
-def _compare_streams(first: list[dict], second: list[dict], case_id: str) -> list[str]:
-    def stable(frames: list[dict]) -> str:
-        return json.dumps(
-            [{k: v for k, v in frame.items() if k not in _STABLE_EXCLUDED} for frame in frames],
-            sort_keys=True,
-        )
-
-    if stable(first) != stable(second):
-        return [f"{case_id}: two identical runs produced different streams (determinism broken)"]
-    return []
-
-
 def _print_record(record: dict[str, Any]) -> None:
     marker = {
         "PASS": "ok ",
@@ -923,13 +890,13 @@ def _print_record(record: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=list(_CASES_PATHS), required=True)
+    parser.add_argument("--mode", choices=_MODES, required=True)
     parser.add_argument("--url", default="http://localhost:8080")
     parser.add_argument("--judge", action="store_true", help="score rubrics with the judge model")
     parser.add_argument("--case", action="append", help="run only these case ids", default=None)
     args = parser.parse_args()
 
-    if args.mode in ("live", "orchestrator-live") and args.judge is False:
+    if args.mode == "live" and args.judge is False:
         print("note: live mode without --judge runs the contract layer only\n")
 
     results, passed = asyncio.run(

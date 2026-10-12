@@ -97,6 +97,7 @@ __all__ = [
     "RecipeRootUnrecoverableError",
     "RecipeTraceUnusableError",
     "RecoverMintRecord",
+    "StateRootOptions",
     "build_recipe",
     "normal_form",
     "normal_form_hash",
@@ -124,6 +125,10 @@ _OUTSIDE_REACH = "populations_outside_reach"
 # `MintRecordUnrecoverableError`. `data_mcp.mint_recovery.recover_mint_record` with its
 # dataset-versions reader bound is one.
 RecoverMintRecord = Callable[[FrameRef], Awaitable[MintRecord]]
+
+# The `options` a recipe states for a root, given the root's mint record.
+# `harness.recipe_replay` states a replayed root's stored options this way.
+StateRootOptions = Callable[[MintRecord], Mapping[str, Any]]
 
 
 class RecipeError(Exception):
@@ -522,6 +527,7 @@ async def build_recipe(
     store: MaterialisationStore,
     trace: StoredFrameTrace | None = None,
     recover: RecoverMintRecord | None = None,
+    root_options: StateRootOptions | None = None,
 ) -> dict[str, Any]:
     """The recipe of the derived frame held under `ref`. See the module docstring.
 
@@ -533,6 +539,8 @@ async def build_recipe(
         trace: `ref`'s own stored trace, when the caller has already read it.
         recover: Rebuilds the mint record of a root that has none. Without it such
             a root fails the build.
+        root_options: The `options` to state for each root, in place of its mint
+            record's. They enter the root's entry in `roots` and the normal form.
 
     Raises:
         RecipeAncestorMissingError: The store holds no trace for `ref` or for a derived
@@ -547,6 +555,9 @@ async def build_recipe(
     walk = _Walk(store=store, recover=recover)
     tree = await walk.node(ref, trace=trace)
     roots = [record.model_dump(mode="json") for record in walk.roots]
+    if root_options is not None:
+        for root, record in zip(roots, walk.roots, strict=True):
+            root["options"] = dict(root_options(record))
     hashed = normal_form_hash(normal_form(tree, roots))
     recipe: dict[str, Any] = {
         "schema_version": RECIPE_SCHEMA_VERSION,

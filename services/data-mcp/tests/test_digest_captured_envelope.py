@@ -16,8 +16,8 @@ from data_mcp.digest import render_digest
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _load_captured_envelope() -> dict[str, Any]:
-    return json.loads((_FIXTURES / "resolve_population_guatemala.json").read_text())
+def _load_captured_envelope(name: str = "resolve_population_guatemala.json") -> dict[str, Any]:
+    return json.loads((_FIXTURES / name).read_text())
 
 
 def test_captured_envelope_renders_to_the_pinned_digest() -> None:
@@ -69,4 +69,33 @@ def test_captured_envelope_renders_to_the_pinned_digest() -> None:
         "measurementMethod options for get_data: WorldBankSubnationalPopulationEstimate "
         "(World Bank Subnational Population Estimates.), WikidataPopulation "
         "(WikidataPopulation)."
+    )
+
+
+def test_captured_aid_envelope_names_the_elected_measure_and_its_sibling() -> None:
+    """`resolve_aid_france_kenya.json` is a real dev resolve response whose spec carries
+    `measure_label` and one `alternative_measures` entry (its `comment` says how it was
+    recorded). The digest names the elected measure and the sibling's own spec_id, so a
+    model can offer net disbursements and fetch it.
+    """
+    envelope = _load_captured_envelope("resolve_aid_france_kenya.json")
+
+    assert render_digest(envelope) == (
+        "\"France's gross disbursements to Kenya for official development assistance, "
+        '1978 to 2024. Current US dollars · OECD DAC2a."  '
+        "[spec_85bd3b844a3a080e524ee49dfd344bba]\n"
+        "confidence medium · 47 observations · has data\n"
+        "Measure: gross disbursements (official development assistance) · 1 StatVar.\n"
+        "Counted as gross disbursements; other counts: net disbursements "
+        "[spec_c67524ce5da3bfd4d94994a76c560b28].\n"
+        "destination Kenya (country/KEN) · origin France (country/FRA)\n"
+        "source OECD DAC2A (fallback) · unit US Dollar (fallback)\n"
+        "provenance options for get_data: provenance/OECDDAC2A (OECD DAC2A).\n"
+        "unit options for get_data: CurrencyUSD (US Dollar).\n\n"
+        "No aid type was named, so the answer covers official development assistance.\n\n"
+        "no time_text was given; the answer was resolved across every period with data.\n\n"
+        "Skills for these results; get_skill loads one by id:\n"
+        "- oda-dac2a: Context for working with the OECD DAC2A table, ODA disbursements by "
+        "donor and recipient country or region. Covers its measures, multilateral agencies "
+        "reporting…"
     )

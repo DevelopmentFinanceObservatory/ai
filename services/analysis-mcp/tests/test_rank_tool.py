@@ -827,10 +827,7 @@ async def test_replay_from_execution_record_content_is_bit_identical(seeded) -> 
     # Distinct from the recompute-from-parameters replay above. Proves the
     # *stored* frame_content_version was derived over the stored output
     # frame, not the input frame's bytes.
-    assert (
-        derive_frame_content_version(frame=stored_frame, upstream_trace=stored_trace.upstream_trace)
-        == stored_trace.frame_content_version
-    )
+    assert derive_frame_content_version(frame=stored_frame) == stored_trace.frame_content_version
 
     recomputed_content_version = recompute_toolkit_content_version(
         op_spec_hash=stored_trace.op_spec_hash,

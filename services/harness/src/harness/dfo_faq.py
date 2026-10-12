@@ -1,9 +1,8 @@
 """dfo-faq, the published skill a question about DFO itself is answered from.
 
-Converse's reply (`harness.generative.GeminiConverse`) and the orchestrator's
-`explain_dfo` (`harness.orchestrator_tools`) read it with data-mcp's
-`get_skill`, the tool and id the planner's instruction names
-(`planner.skills`), so all three answer from the one published text.
+The orchestrator's `explain_dfo` (`harness.orchestrator_tools`) reads it with
+data-mcp's `get_skill`, the tool and id the planner's instruction names
+(`planner.skills`), so both answer from the one published text.
 `read_dfo_faq` reads it once per question about DFO and holds no copy.
 """
 

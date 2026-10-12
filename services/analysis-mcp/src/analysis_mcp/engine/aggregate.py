@@ -62,7 +62,6 @@ from dfo_frame_grammar.grammar import (
 
 from analysis_mcp.engine.columnar import (
     distinct,
-    frame_from_columns,
     group_members,
     group_rows,
     repeated,
@@ -71,12 +70,15 @@ from analysis_mcp.engine.columnar import (
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    combine_exclusions,
     facet_columns,
+    frame_keeping_role_types,
     narrow_and_resolve,
     pooled_roles,
     require_one_place_level,
     role_columns,
     table_before_unitless_exclusion,
+    without_party_totals,
 )
 
 # The closed aggregation vocabulary. `AggregateOpSpec.aggregation` is
@@ -277,7 +279,9 @@ def run_aggregate(
 
     if not frame.num_rows:
         raise StatVarUnresolvedError(reason="the input frame carries no rows")
-    require_one_place_level(frame, pooled_roles(frame, group_by))
+    pooled = pooled_roles(frame, group_by)
+    require_one_place_level(frame, pooled)
+    frame, party_exclusions = without_party_totals(frame, pooled)
 
     distinct_stat_vars = distinct(frame.table, STAT_VAR_COLUMN)
     if len(distinct_stat_vars) > 1 and STAT_VAR_COLUMN not in group_by:
@@ -298,6 +302,7 @@ def run_aggregate(
     table, resolved, exclusions = narrow_and_resolve(
         frame, pinned_unit=pinned_unit, exclude_unitless=True
     )
+    exclusions = combine_exclusions(party_exclusions, exclusions)
     refuse_sum_over_composed_unit(aggregation, resolved.unit)
 
     # Every `group_by` column left after `_DISALLOWED_GROUP_BY_COLUMNS` is
@@ -363,7 +368,7 @@ def run_aggregate(
     # A grouped stat_var, time_period or role is the group's own key.
     for column in key_columns:
         columns[column] = groups.keys.column(column)
-    output_frame = frame_from_columns(columns, role_keys=role_in_group_by)
+    output_frame = frame_keeping_role_types(columns, role_keys=role_in_group_by, source=frame)
 
     # `expected_cell_count`'s own cartesian product is computed over the
     # rows before `exclude_unitless` drops any, not `table` above, which

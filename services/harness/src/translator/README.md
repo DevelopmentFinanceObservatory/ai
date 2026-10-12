@@ -75,7 +75,7 @@ compile: the readback renders what it renders without a definition.
 
 None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
-stays in the harness graph.
+is the harness workflow's `approve` node.
 
 Translation reads the tool surface through a `ToolSurface` (`compiler.surface`),
 the same object the compiler checks against, so what it discovers on and what a
@@ -111,9 +111,6 @@ workflow shows the words the source answered. An answer `search` reached by
 dropping a phrase it did not recognise (a `role_text_not_recognised` or
 `time_text_not_parsed` warning) is refused as `ask_not_understood`, pointing
 at a referral of the same kind; its record is never selectable, pinned or not.
-An answer that offers a dataset the turn dropped (a seed whose StatVars left
-its dataset, over any years) is refused as `seed_dropped` and referred the
-same way, since the user is told the plan leaves that dataset out.
 Other warnings are advisory and ride out with the answer.
 
 **A source is selected only from a definite answer, for its own requirement.**
@@ -126,29 +123,28 @@ included) is refused, whatever it looks like. A requirement whose
 what a `definite` or `candidates` answer recorded for it (pinning is how a
 user settles a `source_ambiguous` referral), and never from a `no_data`
 answer's nearest series; when the pin was never named, discovery says so with a
-`pinned_source_not_found` action. A pin naming a dataset the user handed over
-from Search, or its copy over the requirement's period, is honoured from the
-seeded source with no `search` call. A copy is another identity, so its
-source is Search's answer for it, read through data-mcp's
-`resolve_definition` on the surface the translator calls
-(`translator.discovery.resolve_definition`, `resolved_spec`): the sentence,
-coverage and StatVars are the ones Search states for the requirement's
-period, and data-mcp stores the copy's definition as it answers, so its
-retrieval finds it wherever data-mcp runs. A copy Search does not resolve to
-that one dataset is refused as `search_refused`, naming the dataset and the
-period, and referred back as `no_data` when Search finds no data for the
-period, with Search's reason code, or as `requirement_unmeetable` for any
-other answer. One Search could not be asked about is refused as
-`surface_unavailable` and referred back as `discovery_unavailable`.
-`run_translate` and `propose_operations` take a requirement's
-source through `translator.discovery.settled_sources`, which leaves out a
-source that is a dataset the turn dropped (`planner.plan.names_dropped_seed`),
-whenever its record was written. An unpinned requirement left without a source
-is searched again, and an answer naming the dropped dataset is refused as
-`seed_dropped`. A dataset the turn still holds as a seed is never read as
-dropped, so a second seed over the same dataset and other years stays
-usable. `propose_operations` answers with each dataset described once
-(`translator.discovery.described_sources`): a dataset several requirements
+`pinned_source_not_found` action. When discovery read the pin's own source
+and set it aside because it holds closed the side `across` asks for, a source
+the fresh search finds that drops that source's scope (a group or named
+members on a role it leaves open or binds in part) goes under the referral's
+`withheld`, never under `candidates`, so the planner cannot pin it. The
+referral's `repair` then names the change that keeps that scope, when the
+pinned source held the side to one group or one entity ("name 'Africa' as
+recipient in `entities` and drop `across`"). The pin's source is read for
+this check from the discovery log too, when a search the translator ran found
+it. A pin `propose_plan` moved to a copy over the requirement's period, or a
+pin whose identity a search in the conversation recorded over that period,
+is honoured from Search's answer for that identity with no `search` call,
+read through data-mcp's `resolve_definition` on the surface the translator
+calls (`translator.discovery.resolve_definition`, `resolved_spec`): the
+sentence, coverage and StatVars are the ones Search states for the
+requirement's period, and data-mcp stores the copy's definition as it
+answers, so its retrieval finds it wherever data-mcp runs. When Search does
+not answer that identity with that one dataset, the translator searches as
+for a pin with nothing on record. One Search could not be asked about is
+refused as `surface_unavailable` and referred back as
+`discovery_unavailable`. `propose_operations` answers with each dataset
+described once (`translator.discovery.described_sources`): a dataset several requirements
 retrieve, under one spec_id or under a copy over each period, lists its other
 retrievals as `also_retrieved_as`, each a spec_id, the phrase it was
 searched as, the coverage Search states for its period, and its `has_data`

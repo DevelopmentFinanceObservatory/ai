@@ -180,20 +180,24 @@ def _family_frame(
     provider_column: str = PROVIDER,
     unit: str = "usd",
     last_year: int = 2023,
+    kinds: bool = False,
 ) -> Frame:
     """A CRS family frame: each of `stat_vars` for each provider to Kenya, yearly from 2000
     through `last_year`.
 
     Two declared role columns and the four `stat_var_*` slot columns, whose
-    purpose slot tells the family's members apart.
+    purpose slot tells the family's members apart. With `kinds`, each role's kind
+    column too, every party of kind `party`, as `get_data(place_types=true)` serves it.
     """
+    kind_columns = [f"{provider_column}_kind", f"{RECIPIENT}_kind"] if kinds else []
     return Frame.build(
-        role_keys=[provider_column, RECIPIENT, *_SLOT_COLUMNS],
+        role_keys=[provider_column, RECIPIENT, *kind_columns, *_SLOT_COLUMNS],
         rows=[
             {
                 "stat_var": f"dcid:{stat_var}",
                 provider_column: provider.ref,
                 RECIPIENT: KENYA.ref,
+                **dict.fromkeys(kind_columns, "party"),
                 "stat_var_crsCooperationModality": "crsCooperationModality/Project",
                 "stat_var_crsPurpose": f"crsPurpose/{stat_var}",
                 "stat_var_crsTypeOfFinance": "crsTypeOfFinance/Standard",
@@ -740,7 +744,10 @@ async def test_a_rank_ranks_by_the_frames_provider_column(
     retrieved: Retrieved,
     surface_for: Callable[..., FrameSurface],
 ) -> None:
-    surface = surface_for(get_data=[ok(await retrieved(_source()))])
+    # A rank across donors needs their kinds, which the harness asks `get_data` for.
+    surface = surface_for(
+        get_data=[ok(await retrieved(_source(), frame=_family_frame(kinds=True)))]
+    )
 
     outcome = await _run(_rank_plan(plan_for, decision), surface)
 
@@ -792,7 +799,15 @@ async def test_a_rank_over_every_donor_the_source_leaves_open_ranks_the_frames_p
         discovered={"oda": source},
         decisions=[decision(slot="population", fixes=DecisionFixes(among=RankAmong.POPULATION))],
     )
-    surface = surface_for(get_data=[ok(await retrieved(source, providers=(GERMANY, FRANCE)))])
+    surface = surface_for(
+        get_data=[
+            ok(
+                await retrieved(
+                    source, providers=(GERMANY, FRANCE), frame=_family_frame(kinds=True)
+                )
+            )
+        ]
+    )
 
     outcome = await _run(plan, surface)
 
@@ -806,15 +821,24 @@ async def test_a_rank_over_every_donor_the_source_leaves_open_ranks_the_frames_p
 
 def _sector_frame(*, spec_id: str, totals: Mapping[tuple[ResolvedEntity, str], float]) -> Frame:
     """A frame as dfo-apis rolls a family up to sector groups: `stat_var` is the spec's own
-    ref on every row, the role columns are kept, and `stat_var_crsPurpose` names each
-    row's group. A group with no records for a donor has no row, never a zero."""
+    ref on every row, the role columns are kept with each party's kind, and
+    `stat_var_crsPurpose` names each row's group. A group with no records for a donor has
+    no row, never a zero."""
     return Frame.build(
-        role_keys=[PROVIDER, RECIPIENT, "stat_var_crsPurpose"],
+        role_keys=[
+            PROVIDER,
+            RECIPIENT,
+            f"{PROVIDER}_kind",
+            f"{RECIPIENT}_kind",
+            "stat_var_crsPurpose",
+        ],
         rows=[
             {
                 "stat_var": f"dcid:{spec_id}",
                 PROVIDER: provider.ref,
                 RECIPIENT: KENYA.ref,
+                f"{PROVIDER}_kind": "party",
+                f"{RECIPIENT}_kind": "party",
                 "stat_var_crsPurpose": sector,
                 "time_period": "2024",
                 "value": value,
@@ -1379,3 +1403,136 @@ async def test_a_join_of_one_stat_var_under_two_units_declares_one(
     assert isinstance(outcome, Accepted), outcome
     assert outcome.steps[-1].stat_var_count == 1
     assert outcome.steps[-1].row_count == 2 * 48
+
+
+# --- Party totals: a sum across a flow side leaves out the parties totalling others -----
+
+# DAC2A's donors to Kenya with the kind dfo-apis serves for each: countries, an
+# organisation and a residual add up; the DAC total and the G7 hold the countries' figures
+# again.
+_DONORS_TO_KENYA: dict[str, tuple[str, float]] = {
+    "country/DEU": ("party", 10.0),
+    "country/USA": ("party", 20.0),
+    "EuropeanUnionInstitutions": ("party", 5.0),
+    "DACOtherMultilaterals": ("residual", 3.0),
+    "DACCountriesTotal": ("total", 30.0),
+    "GroupOfSeven": ("total", 30.0),
+}
+_TYPED_CONTENT_VERSION = "cv_" + "7" * 32
+
+
+def _donors_frame(*, typed: bool) -> Frame:
+    """Every donor's yearly aid to Kenya since 2000, with each donor's kind when `typed`."""
+    provider_kind = f"{PROVIDER}_kind"
+    return Frame.build(
+        role_keys=[PROVIDER, RECIPIENT, *([provider_kind] if typed else [])],
+        rows=[
+            {
+                "stat_var": "dcid:Oda",
+                PROVIDER: donor,
+                RECIPIENT: KENYA.ref,
+                **({provider_kind: kind} if typed else {}),
+                "time_period": str(year),
+                "value": value,
+                "unit": "usd",
+            }
+            for donor, (kind, value) in _DONORS_TO_KENYA.items()
+            for year in range(2000, 2024)
+        ],
+    )
+
+
+class _TypedOnRequest(FrameSurface):
+    """Answers `get_data` with the typed frame when the call asks for place types."""
+
+    def __init__(self, *, answers: Mapping[bool, dict[str, Any]], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._answers = answers
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name != "get_data":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.calls.append((tool.name, dict(arguments)))
+        return ok(self._answers[bool(arguments.get("place_types"))])
+
+
+async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    frame_store: InMemoryMaterialisationStore,
+    _stats_by_manifest: dict[tuple[str, str], list[dict[str, Any]]],
+    real_schemas: list[ToolSchema],
+) -> None:
+    # "Total aid to Kenya each year": the source binds Kenya and leaves the donors open.
+    # The compiled retrieval asks for their types, and each year's total sums the
+    # countries, the organisation and the residual, 38, where every donor sums to 98.
+    source = _source(
+        entities=(KENYA,), open_entity_axes=(OpenEntityAxis(column="origin", member_count=6),)
+    )
+    plan = plan_for(
+        [
+            DatasetRequirement(
+                id="oda",
+                decision_ids=["measure"],
+                measure="bilateral ODA",
+                entities=[Entity(name="Kenya", role="recipient")],
+                across="donor",
+                period=Period(start=2000, end=2023),
+            ),
+            AggregateRequirement(
+                id="totals",
+                decision_ids=["measure"],
+                input_id="oda",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+        ],
+        [
+            _RETRIEVE,
+            AggregateOperation(
+                id="totals_op",
+                requirement_id="totals",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+        ],
+        terminal="totals_op",
+        discovered={"oda": source},
+    )
+    donors = tuple(ResolvedEntity(role="origin", ref=ref, label=ref) for ref in _DONORS_TO_KENYA)
+    plain = await retrieved(source, frame=_donors_frame(typed=False), providers=donors)
+    typed_frame = _donors_frame(typed=True)
+    typed_ref = FrameRef(spec_id=source.spec_id, content_version=_TYPED_CONTENT_VERSION)
+    plain_ref = FrameRef(spec_id=source.spec_id, content_version=CONTENT_VERSION)
+    _held, trace = await frame_store.get(plain_ref)
+    await frame_store.put(typed_ref, frame=typed_frame, trace=trace, writer="tests")
+    _stats_by_manifest[(source.spec_id, _TYPED_CONTENT_VERSION)] = _stats_by_manifest[
+        (source.spec_id, CONTENT_VERSION)
+    ]
+    typed = plain | {
+        "content_version": _TYPED_CONTENT_VERSION,
+        "frame_ref": typed_ref.model_dump(),
+        "role_keys": list(observed_shape(typed_frame)[0]),
+    }
+    engines = McpSurface(sources={"analysis-mcp": analysis_server.mcp})
+    surface = _TypedOnRequest(
+        answers={False: plain, True: typed}, schemas=real_schemas, responses={}, engines=engines
+    )
+
+    try:
+        outcome = await _run(plan, surface)
+    finally:
+        await engines.aclose()
+
+    assert isinstance(outcome, Accepted), outcome
+    total, _trace = await frame_store.get(outcome.results["totals_op"])
+    assert set(total.table.column("value").to_pylist()) == {38.0}
+    ((_, aggregated),) = [call for call in surface.calls if call[0] == "aggregate"]
+    assert aggregated["frame_ref"]["content_version"] == _TYPED_CONTENT_VERSION
