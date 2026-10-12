@@ -88,6 +88,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from analysis_mcp.engine.columnar import group_rows
 from analysis_mcp.engine.common import Units
 from analysis_mcp.engine.filter import (
+    FilterPlaceLevelUnknownError,
     FilterPredicateTypeMismatchError,
     FilterPredicateValueTypeMismatchError,
     FilterUnitConversionUnsupportedError,
@@ -211,7 +212,7 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
         for column, values in population.bindings.items()
     ]
     predicates += [
-        PlaceLevelPredicate(column=column, level=level)
+        PlaceLevelPredicate(column=column, level=level, strict=column in population.strict_levels)
         for column, level in population.levels.items()
     ]
     try:
@@ -220,6 +221,7 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
         FilterUnknownColumnError,
         FilterPredicateTypeMismatchError,
         FilterPredicateValueTypeMismatchError,
+        FilterPlaceLevelUnknownError,
         FilterUnitConversionUnsupportedError,
     ) as exc:
         return _unresolved(

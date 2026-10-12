@@ -94,6 +94,83 @@ def test_retrieved_stamps_every_role_with_the_requirement_and_leaves_it_unnarrow
     assert shape.roots == ("req_a",)
 
 
+def test_a_role_level_filter_leaves_another_roles_mixed_levels_in_place() -> None:
+    recipient = RoleDimension(
+        role="recipient", requirement_id="req_a", open=True, level_filterable=True
+    )
+    donor = RoleDimension(
+        role="donor",
+        requirement_id="req_a",
+        open=True,
+        mixed_levels=True,
+        level_filterable=True,
+    )
+    shape = FrameShape(
+        roles=(recipient, donor),
+        measures=1,
+        value=ValueKind.MEASURED,
+        time=TimeLabel.OBSERVATION,
+        period=_PERIOD,
+        one_row_per_entity=False,
+        cut_per_period=False,
+        limited=False,
+        roots=("req_a",),
+        mixed_levels=True,
+    )
+
+    kept = filtered(
+        shape,
+        narrowed_roles=(),
+        period=_PERIOD,
+        pins_one_year=False,
+        keeps_one_level=True,
+        levelled_role_keys=((recipient.requirement_id, recipient.role),),
+    )
+
+    assert kept.roles[0].levelled is True
+    assert kept.roles[1].mixed_levels is True
+    assert kept.roles[1].level_filterable is True
+    assert kept.mixed_levels is True
+
+
+def test_a_calculation_keeps_a_selected_levels_proof_but_not_its_type_capability() -> None:
+    recipient = RoleDimension(
+        role="recipient", requirement_id="req_a", open=True, levelled=True, level_filterable=True
+    )
+    shape = _shape(roles=(recipient,))
+
+    out = ranked(shape, axis="recipient", window=None, per_period=False, limit=None)
+
+    assert out.roles[0].levelled is True
+    assert out.roles[0].level_filterable is False
+
+
+def test_a_country_filtered_branch_does_not_rewrite_the_shared_broad_branch() -> None:
+    recipient = RoleDimension(
+        role="recipient",
+        requirement_id="req_a",
+        open=True,
+        place=True,
+        mixed_levels=True,
+        level_filterable=True,
+    )
+    broad = _shape(roles=(recipient,))
+    countries = filtered(
+        broad,
+        narrowed_roles=(),
+        period=_PERIOD,
+        pins_one_year=False,
+        keeps_one_level=True,
+        levelled_role_keys=((recipient.requirement_id, recipient.role),),
+    )
+
+    shared_broad = shared(broad, countries, axis="recipient", scope=DenominatorScope.POOLED)
+
+    assert broad.roles[0].mixed_levels is True
+    assert countries.roles[0].mixed_levels is False
+    assert shared_broad.mixed_levels is True
+
+
 # --- aggregated ----------------------------------------------------------
 
 
@@ -1696,7 +1773,7 @@ def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() ->
 def _every_place() -> FrameShape:
     return retrieved(
         requirement_id="req_a",
-        roles=(_role(role="country", open=True),),
+        roles=(RoleDimension(role="country", requirement_id="req_a", open=True, place=True),),
         period=_PERIOD,
         measures=1,
         place_typed=True,

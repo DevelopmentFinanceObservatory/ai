@@ -239,6 +239,7 @@ _PREDICATE_ITEM: dict[str, Any] = {
                 "kind": {"const": "place_level"},
                 "column": {"type": "string"},
                 "level": {"type": "string"},
+                "strict": {"type": "boolean", "default": False},
             },
             "required": ["column", "level"],
             "additionalProperties": False,

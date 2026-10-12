@@ -30,7 +30,7 @@ import httpx2
 import pyarrow as pa
 from common.caller import current_writer
 from common.materialisation import FrameRef, MintRecord
-from common.place_type import PLACE_ROLE, type_column
+from common.place_type import PARTY_ROLES, PLACE_ROLE, type_column
 from fastmcp import Context
 from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
@@ -55,6 +55,7 @@ from data_mcp.definition_store import (
 from data_mcp.errors import UpstreamAuthUnavailable, UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
+    FLOW_ENRICHMENT_COLUMNS,
     KIND_COLUMNS,
     WITHOUT_PARTY_TOTALS,
     materialise_and_register,
@@ -974,8 +975,8 @@ async def _finish_mint_response(
     manifest = _narrowed_to_rendering(manifest, options=options)
     if (
         asked_for_kinds
-        and place_type_columns_for(manifest.definition.identity) == KIND_COLUMNS
-        and tuple(options.get("columns") or ()) != KIND_COLUMNS
+        and place_type_columns_for(manifest.definition.identity) == FLOW_ENRICHMENT_COLUMNS
+        and not set(KIND_COLUMNS) <= set(options.get("columns") or ())
     ):
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
@@ -1219,8 +1220,9 @@ async def _attempt_mint(
     column from a table without one is sent once more with no columns
     (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
     flow frame without kinds would let a sum count party totals beside their parties.
-    `without_party_totals` on a flow spec asks for the kinds as `place_types` does, and
-    sends `options.without_party_totals`: apis leaves out the group totals of the
+    `without_party_totals` on a flow spec asks for the kinds alone (`KIND_COLUMNS`) when
+    `place_types` is not set, and sends `options.without_party_totals`: apis leaves out the group
+    totals of the
     party roles the identity it serves leaves open, and mints the frame that remains a
     version of its own, which the manifest's pair names and its trace lists the totals
     left out of (`party_totals_left_out`). On any other spec it changes nothing.
@@ -1245,9 +1247,13 @@ async def _attempt_mint(
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
-    drops_totals = without_party_totals and place_type_columns_for(identity) == KIND_COLUMNS
-    if place_types or drops_totals:
+    drops_totals = (
+        without_party_totals and place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    )
+    if place_types:
         options["columns"] = list(place_type_columns_for(identity))
+    elif drops_totals:
+        options["columns"] = list(KIND_COLUMNS)
     if drops_totals:
         options[WITHOUT_PARTY_TOTALS] = True
     request_body = {
@@ -1278,16 +1284,15 @@ async def _attempt_mint(
         )
 
     try:
-        try:
-            posted = await _post_mint(
-                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
-            )
-        except UpstreamError as exc:
-            if not _without_unserved_place_type(options, exc, spec_id=spec_id):
-                raise
-            posted = await _post_mint(
-                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
-            )
+        posted = await _post_mint_with_column_negotiation(
+            client,
+            request_body,
+            options=options,
+            removable=set(FLOW_ENRICHMENT_COLUMNS) if place_types else set(),
+            spec_id=spec_id,
+            settings=settings,
+            deadline=deadline,
+        )
     except UpstreamError as exc:
         if not sends_definition and exc.code == "spec_not_found":
             # The sidecar-free registry-fallback request above just missed
@@ -1355,6 +1360,77 @@ def _without_unserved_place_type(
     )
     del options["columns"]
     return True
+
+
+def _without_unserved_flow_types(
+    options: dict[str, Any], refused: UpstreamError, *, removable: set[str]
+) -> bool:
+    """Remove policy-added types for absent flow roles after a complete column listing."""
+    alternatives = refused.extensions.get("alternatives")
+    if (
+        refused.code != "column_unknown"
+        or refused.extensions.get("pointer") != "/options/columns"
+        or refused.extensions.get("truncated")
+        or not isinstance(alternatives, list)
+        or not all(
+            isinstance(item, dict) and isinstance(item.get("ref"), str) for item in alternatives
+        )
+    ):
+        return False
+    served = {item["ref"] for item in alternatives}
+    columns = options.get("columns")
+    if not isinstance(columns, list):
+        return False
+    requested_types = {token for token in removable & set(columns) if token.endswith("_type")}
+    if any(
+        any(ref.startswith(f"{token.removesuffix('_type')}_") for ref in served)
+        and token not in served
+        for token in requested_types
+    ):
+        return False
+    absent = {
+        token
+        for token in removable & set(columns)
+        if token.endswith("_type")
+        and not any(ref.startswith(f"{token.removesuffix('_type')}_") for ref in served)
+    }
+    remaining = [column for column in columns if column not in absent]
+    remaining_types = {token for token in remaining if token.endswith("_type")}
+    if not absent or not remaining_types:
+        return False
+    for role in PARTY_ROLES:
+        token = type_column(role)
+        if token in remaining and f"{token.removesuffix('_type')}_party_kind" not in served:
+            return False
+    options["columns"] = remaining
+    return True
+
+
+async def _post_mint_with_column_negotiation(
+    client: UpstreamClient,
+    request_body: dict[str, Any],
+    *,
+    options: dict[str, Any],
+    removable: set[str],
+    spec_id: str,
+    settings: Settings,
+    deadline: CallDeadline,
+) -> httpx2.Response | ToolRefusal:
+    """Post once, then retry once only when a complete column listing narrows policy metadata."""
+    try:
+        return await _post_mint(
+            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+        )
+    except UpstreamError as exc:
+        changed = _without_unserved_place_type(
+            options, exc, spec_id=spec_id
+        ) or _without_unserved_flow_types(options, exc, removable=removable)
+        if not changed:
+            raise
+        request_body["options"] = options
+        return await _post_mint(
+            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1480,7 +1556,14 @@ async def _post_recorded_mint(
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
         return identity
-    options = replayed_mint_options(record.options, identity=identity)
+    options = dict(replayed_mint_options(record.options, identity=identity))
+    recorded_columns = {str(column) for column in record.options.get("columns") or ()}
+    if "kind" in recorded_columns:
+        recorded_columns.remove("kind")
+        recorded_columns.add("party_kind")
+    removable: set[str] = {
+        str(column) for column in options.get("columns") or ()
+    } - recorded_columns
     mint_input: dict[str, Any] = {"kind": "spec_id", "spec_id": spec_id, "scope": record.scope}
     if identity is not None:
         mint_input["definition"] = {
@@ -1494,8 +1577,14 @@ async def _post_recorded_mint(
         "options": options,
     }
     try:
-        posted = await _post_mint(
-            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+        posted = await _post_mint_with_column_negotiation(
+            client,
+            request_body,
+            options=options,
+            removable=removable,
+            spec_id=spec_id,
+            settings=settings,
+            deadline=deadline,
         )
     except UpstreamError as exc:
         if identity is None and exc.code == "spec_not_found":
@@ -1609,10 +1698,11 @@ async def get_data(
                 "Add the Data Commons types of each place the frame names as an "
                 'observationAbout_type column. Values are comma-joined ("Country", '
                 '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
-                "with none. On a flow frame it adds each party's kind instead, as "
-                "financingProvider_party_kind and financingRecipient_party_kind: party, residual, "
-                'or total for a group total such as "Africa, Total", which sums and ranks leave '
-                'out, and "untyped" for a party with none. Set it for a spec that names no place: its '
+                "with none. On a flow frame it adds each party's type and kind: "
+                "financingProvider_type, financingRecipient_type, financingProvider_party_kind "
+                "and financingRecipient_party_kind. Kinds are party, residual or total for a group "
+                'total such as "Africa, Total", which sums and ranks leave out, and "untyped" for '
+                "a party with none. Set it for a spec that names no place: its "
                 "frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
@@ -1624,10 +1714,9 @@ async def get_data(
         Field(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
-                "Total or the G7) from each side the spec leaves open, and add the party kinds as "
-                "place_types does; a side the spec names, or one holding only totals, keeps every "
-                "row, and the digest names what was left out. On a spec with no flow side it "
-                "changes nothing."
+                "Total or the G7) from each side the spec leaves open, and add the party kinds; "
+                "a side the spec names, or one holding only totals, keeps every row, and the "
+                "digest names what was left out. On a spec with no flow side it changes nothing."
             )
         ),
     ] = False,
@@ -1692,8 +1781,9 @@ async def get_data(
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds the `observationAbout_type` column,
     so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's kind
-    (`financingProvider_party_kind`, `financingRecipient_party_kind`) instead.
+    beside the places inside it. On a flow frame it adds each party's type and
+    kind (`financingProvider_type`, `financingRecipient_type`,
+    `financingProvider_party_kind`, `financingRecipient_party_kind`).
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got
@@ -1710,10 +1800,10 @@ async def get_data(
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
         place_types: Whether to add the places' types (`observationAbout_type`), or
-            each party's kind on a flow frame, for a spec that names no place.
+            each party's type and kind on a flow frame, for a spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, and adds the party kinds as `place_types` does. On a spec
-            with no flow side it changes nothing.
+            the spec leaves open, and adds the party kinds. On a spec with no flow side it
+            changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 

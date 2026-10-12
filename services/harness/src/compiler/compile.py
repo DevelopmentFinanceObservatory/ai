@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
 
-from common.place_type import FLOW_ROLE_COLUMNS, PLACE_ROLE, type_column
+from common.place_type import FLOW_ROLE_COLUMNS, type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
@@ -101,8 +101,6 @@ from compiler.evidence import (
     evidence_from_source,
     named_members,
     named_refs,
-    open_axes_for,
-    opens_place_axis,
     read_source_unit,
     read_unit_dcid,
 )
@@ -353,7 +351,6 @@ class _Build:
         self._check_sources()
         self._check_requirements_meetable()
         self._build_shapes()
-        self._check_level_filters()
         self._check_operations()
         self._check_source_width()
         self._check_capabilities()
@@ -641,51 +638,6 @@ class _Build:
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
             self._issue(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, detail, operation_id=operation_id)
-
-    def _check_level_filters(self) -> None:
-        """Report `LEVEL_FILTER_ON_FLOW_AXIS` for a place-level filter whose places sit on a flow axis.
-
-        A requirement whose `across` names the place may keep one level with a
-        `PlaceLevel` filter, which reads `observationAbout_type`. Only a
-        source that leaves `observationAbout` open over several places mixes
-        levels (`compiler.evidence.opens_place_axis`). Where the place word
-        covers a flow axis instead (`compiler.evidence.open_axes_for`), as
-        IDS holds its debtors on `destination`, the axis holds parties, and a
-        flow retrieval serves them without their group totals
-        (`_retrieve_arguments`), so the filter has no level to keep and the
-        planner drops it.
-        """
-        for operation in self.operations.values():
-            if not isinstance(operation, FilterOperation) or not keeps_one_level(
-                operation.predicates
-            ):
-                continue
-            retrieve = self.operations.get(self._through_filters(operation.input))
-            source = self.sources.get(retrieve.id) if retrieve is not None else None
-            requirement = (
-                self.requirements.get(retrieve.requirement_id) if retrieve is not None else None
-            )
-            if (
-                source is None
-                or not isinstance(requirement, DatasetRequirement)
-                or opens_place_axis(source.open_entity_axes)
-            ):
-                continue
-            axes = open_axes_for(requirement.across, source.open_entity_axes)
-            if isinstance(axes, str):
-                continue
-            for word, axis in zip(requirement.across, axes, strict=True):
-                if across_party(word) != "place" or axis.column == PLACE_ROLE:
-                    continue
-                self._issue(
-                    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS,
-                    f"source {source.spec_id} holds every {word!r} on its flow axis "
-                    f"{axis.column!r}, whose parties have no place level to keep, and the "
-                    "retrieval already leaves the parties' group totals out; drop the "
-                    "place_level predicate",
-                    operation_id=operation.id,
-                    requirement_id=requirement.id,
-                )
 
     def _check_requirements_meetable(self) -> None:
         for requirement in self.requirements.values():
@@ -2033,7 +1985,7 @@ class _Build:
         columns = {entity.role for entity in source.entities}
         columns.update(self._columns_of(operation.id) or ())
         if self._read_by_level_filter(operation.id):
-            columns.add(type_column(PLACE_ROLE))
+            columns.update(type_column(column) for column in self._columns_of(operation.id) or ())
         named: dict[str, tuple[str, ...]] = {}
         if isinstance(requirement, DatasetRequirement):
             for entity in requirement.entities:
@@ -2086,9 +2038,10 @@ class _Build:
         carries one series per code under the family's own ref.
 
         `place_types` is written for a retrieval a place-level filter reads
-        (`_read_by_level_filter`): it adds the `observationAbout_type`
-        column that filter keeps one level by. Rendering only, so it
-        re-mints nothing either.
+        (`_read_by_level_filter`): it adds the type column for the role that
+        filter keeps at one level. A flow rendering includes both parties'
+        type columns and their kinds. Rendering only, so it re-mints nothing
+        either.
 
         `without_party_totals` is written for every flow retrieval (a source
         with a flow role column among its stated or open entity axes). A flow
@@ -2387,11 +2340,15 @@ class _Build:
                     threshold[ROLLING_PARAMETER] = rolling_ref(predicate.rolling)
                 predicates.append(threshold)
             elif isinstance(predicate, PlaceLevel):
+                column = self._place_level_column(operation, predicate)
+                if column is None:
+                    return None
                 predicates.append(
                     {
                         "kind": "place_level",
-                        "column": type_column(PLACE_ROLE),
+                        "column": type_column(column),
                         "level": predicate.level.value,
+                        **({"strict": True} if predicate.strict else {}),
                     }
                 )
             else:
@@ -2404,6 +2361,35 @@ class _Build:
             # The population every rolling step carries is written in `_build_steps`.
             args[ROLLING_PARAMETER] = {}
         return args, {"frame_ref": _frame_from(operation.input)}
+
+    def _place_level_column(self, operation: FilterOperation, predicate: PlaceLevel) -> str | None:
+        """The input role whose type column a place-level predicate reads."""
+        resolved = self.shapes.get(operation.input)
+        if resolved is None:
+            return None
+        candidates = (
+            roles_named(resolved.columns, predicate.role)
+            if predicate.role is not None
+            else self._unqualified_level_roles(resolved.columns)
+        )
+        if len(candidates) != 1:
+            named = predicate.role or "an omitted role"
+            self._issue(
+                CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
+                f"operation {operation.id!r} has a place_level filter for {named!r}, which "
+                f"resolves to {len(candidates)} role columns; state one role",
+                operation_id=operation.id,
+            )
+            return None
+        return candidates[0].column
+
+    @staticmethod
+    def _unqualified_level_roles(columns: Sequence[ResolvedRole]) -> tuple[ResolvedRole, ...]:
+        places = tuple(role for role in columns if role.place)
+        if places:
+            return places
+        open_roles = tuple(role for role in columns if role.open)
+        return open_roles if len(open_roles) == 1 else ()
 
     def _entity_in_argument(
         self, operation: FilterOperation, predicate: EntityIn

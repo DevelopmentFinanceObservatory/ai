@@ -52,6 +52,7 @@ from planner.records import (
     BreakdownDimension,
     EntityIn,
     Identifier,
+    PlaceLevel,
     Predicate,
     StatVarReading,
 )
@@ -62,6 +63,7 @@ from planner.shapes import (
     RoleDimension,
     ShapeVerb,
     place_role,
+    roles_named,
     year_filter,
 )
 from planner.shapes import aggregated as _aggregated
@@ -122,6 +124,9 @@ class ResolvedRole:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    mixed_levels: bool = False
+    levelled: bool = False
+    level_filterable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +239,7 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
         return (
             None
             if upstream is None
-            else _filter_resolved(operation, upstream, sources, retrieve_by_requirement)
+            else _filter_resolved(operation, upstream, operations, sources, retrieve_by_requirement)
         )
     if isinstance(operation, ShareOfOperation):
         numerator = _input_shape(operation.numerator.input, operations, shapes)
@@ -383,6 +388,11 @@ def _retrieve_resolved(
                 requirement_id=operation.requirement_id,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                # An open entity axis is the only retrieval role for which
+                # compilation can request the matching enrichment column.
+                # Breakdown codes are never entity types.
+                level_filterable=is_open,
             )
         )
         columns.append(
@@ -395,6 +405,8 @@ def _retrieve_resolved(
                 surplus=surplus,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                level_filterable=is_open,
             )
         )
     if requirement.breakdown is not None:
@@ -442,7 +454,15 @@ def _carry_columns(
     for dim in roles:
         prior = by_key.get((dim.role, dim.requirement_id))
         if prior is not None:
-            result.append(replace(prior, narrowed=dim.narrowed))
+            result.append(
+                replace(
+                    prior,
+                    narrowed=dim.narrowed,
+                    mixed_levels=dim.mixed_levels,
+                    levelled=dim.levelled,
+                    level_filterable=dim.level_filterable,
+                )
+            )
     return tuple(result)
 
 
@@ -553,14 +573,36 @@ def _resolved_narrowed_roles(
 def _filter_resolved(
     operation: FilterOperation,
     upstream: ResolvedShape,
+    operations: Mapping[str, Operation],
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
 ) -> ResolvedShape | str:
     place_level = keeps_one_level(operation.predicates)
+    levelled_role_keys: set[tuple[Identifier, str | None]] = set()
+    if place_level:
+        for predicate in operation.predicates:
+            if not isinstance(predicate, PlaceLevel):
+                continue
+            candidates = _place_level_roles(predicate, upstream.columns)
+            if len(candidates) > 1:
+                named = predicate.role or "an omitted role"
+                return (
+                    f"a place_level filter names {named!r}, which resolves to "
+                    f"{len(candidates)} roles on this input; state one role"
+                )
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                levelled_role_keys.add((candidate.requirement_id, candidate.role))
+    level_available = bool(levelled_role_keys) and all(
+        role.level_filterable
+        for role in upstream.columns
+        if (role.requirement_id, role.role) in levelled_role_keys
+    )
     reason = _rejects(
         ShapeVerb.FILTER,
         upstream.shape,
         place_level=place_level,
+        place_level_available=level_available,
         period_threshold=states_period_threshold(operation.predicates),
     )
     if reason is not None:
@@ -577,8 +619,22 @@ def _filter_resolved(
         period=years.period,
         pins_one_year=years.leaves_one_year,
         keeps_one_level=place_level,
+        levelled_role_keys=tuple(levelled_role_keys),
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
+
+
+def _place_level_roles(
+    predicate: PlaceLevel, roles: Sequence[ResolvedRole]
+) -> tuple[ResolvedRole, ...]:
+    """The one role a level predicate targets, including an unambiguous open flow side."""
+    if predicate.role is not None:
+        return roles_named(roles, predicate.role)
+    places = tuple(role for role in roles if role.place)
+    if places:
+        return places
+    open_roles = tuple(role for role in roles if role.open)
+    return open_roles if len(open_roles) == 1 else ()
 
 
 def _share_of_resolved(
