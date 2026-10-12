@@ -48,7 +48,7 @@ the framing behind would still read as a non-zero bucket.
 
 `harness.planner_seam.PlannerSeam._message` is the other text part on the
 planner path, and it buckets separately as `text(seam-brief)` on its own opening
-words. It is the seam's own input, a full brief carrying the resolve envelope,
+words. It is the seam's own input, a full brief carrying the search readings,
 the canvas and conversation digests, the plan being changed and the question.
 
 A session sends that full brief once. `_message` renders it under `fresh`,
@@ -145,15 +145,12 @@ RELAY_BUCKET = "text(fenced-relay)"
 RELAY_BUCKET_PREFIX = RELAY_BUCKET + ":"
 
 # The seam's own brief, bucketed on the opening words of `harness.planner_seam.
-# _ENVELOPE_CONTEXT` or, on the orchestrator engine, `_READINGS_CONTEXT`: the
-# one part of a planner request this seam assembles itself, not ADK relaying or
+# _READINGS_CONTEXT`: the one part of a planner request this seam assembles itself, not ADK relaying or
 # a tool answering. Spelled out, not imported from `planner_seam`, for the same
 # reason `RELAY_MARKER` is: importing it would hide the fact that the text
 # moved, which is the thing this bucket exists to measure. It is the one input
-# on the planner path that varies with the plan, the envelope or readings, and
-# the digests.
-SEAM_MARKER = "Context for this question. The search step has already run"
-READINGS_SEAM_MARKER = "Context for this question. These are the readings of the searches"
+# on the planner path that varies with the plan, the readings and the digests.
+SEAM_MARKER = "Context for this question. These are the readings of the searches"
 SEAM_BUCKET = "text(seam-brief)"
 
 
@@ -280,8 +277,7 @@ def _part_bucket(part: Any) -> tuple[str, str | None]:
         match = _RELAY_AUTHOR.match(text)
         author = match.group(1) if match else _UNTAGGED
         return f"{RELAY_BUCKET_PREFIX}{author}", author
-    seam = SEAM_MARKER in text or READINGS_SEAM_MARKER in text
-    return (SEAM_BUCKET, None) if seam else ("text", None)
+    return (SEAM_BUCKET, None) if SEAM_MARKER in text else ("text", None)
 
 
 def _part_chars(part: Any) -> int:

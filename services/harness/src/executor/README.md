@@ -19,11 +19,9 @@ Its tests live in `services/harness/tests/executor/`.
 
 `execute_approved_plan` is a library function for the harness to call once a
 plan is `APPROVED`; it moves the plan to `EXECUTING`, runs it, and returns the
-plan `COMPLETED` or `FAILED` beside the outcome. Its intended caller is the DFO
-Studio graph's execute node, once the studio is adapted to this workflow in a
-separate change; no production code calls it yet. The caller stores what comes
-back: the finished plan under `planner:plan` with `save_plan`, and the outcome
-under `executor:run` with `save_outcome`. Nothing wires the executor into the
+plan `COMPLETED` or `FAILED` beside the outcome. Its caller is the `execute`
+node of the studio workflow (`harness.graph`), which keeps the finished plan as
+the workflow's own record of it. Nothing wires the executor into the
 planner's turn: the planner and the executor never speak directly, and a run can
 take longer than a model turn should.
 
@@ -152,9 +150,9 @@ reference into the Arrow table `evidence_from_manifest` reads column by
 column, through `data_mcp.series_statistics.fetch_series_statistics_table`; at
 25,000 series that table holds about 8 MiB where one pydantic model a series
 held about 180 MiB. A caller whose tool surface allows no real
-upstream call, such as `harness.scripted`'s deterministic mode, injects its
-own. An error stops the run as `requirement_unmet` with every finding
-attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
+upstream call, such as the scripted studio eval
+(`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. An
+error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
 on the evidence instead of stopping it.
 
 **No in-place refresh: what a tool says can be retried is retried, and what
@@ -164,7 +162,7 @@ delay the refusal names or a doubling backoff, capped at thirty seconds -- a
 delay that is negative, not finite, or not a number at all is ignored rather
 than honoured. Each wait is drawn uniformly between that delay and twice it,
 still capped at thirty seconds, so calls refused together retry at different
-moments. The Studio graph's direct calls (`harness.mcp_client.McpExecutor`)
+moments. The studio's direct calls (`harness.mcp_client.McpExecutor`)
 retry a `retry_after_delay` refusal on the same policy. A queued mint that
 failed on a moved source revision arrives as one (`upstream_error` naming
 `upstream_version_changed` as its `upstream_code`), so it is retried in place.

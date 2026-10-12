@@ -2,10 +2,11 @@
 
 A seed is a Search result the user carries into a turn. This module reads each
 one as a `harness.wire.Seed` (`seeds_slot`, `take_seeds`), checks Search's
-current answer for its identity (`read_answer`, `resolve_seed`), and words the
-seeds a turn drops (`dropped_seeds_note`). Nothing here touches the ADK
-`Context` or routing; `harness.graph` calls it from its nodes and
-`harness.studio` calls `seeds_slot` before the session exists.
+current answer for its identity (`resolve_seed`, `answered_block`), and
+words the seeds a turn keeps and drops for the orchestrator's agent
+(`seeds_hand_back`). Nothing here touches the ADK `Context` or routing;
+`harness.graph` calls it from its nodes and `harness.studio` calls
+`seeds_slot` before the session exists.
 """
 
 from __future__ import annotations
@@ -19,32 +20,21 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
-from compiler.sources import source_from_spec_block
 from compiler.surface import ToolSurface
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
-from planner.plan import (
-    SeededSource,
-)
 from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartFault,
     PartNotResolvedError,
-    compact_source,
     resolve_definition,
     resolved_spec,
 )
 
-from harness.tool_contracts import (
-    graph_envelope,
-)
 from harness.wire import (
-    MAX_SEED_RECORD_CHARS,
-    MAX_SEED_SOURCE_CHARS,
     Seed,
-    SeedOperation,
     SpecBlock,
 )
 
@@ -71,11 +61,6 @@ SEED_STEP_PREFIX = "seed"
 SEED_DROPPED = "seed_dropped"
 
 
-# The code a seed's own step fails with on the `download` surface when an
-# earlier seed is the one the download retrieves.
-ONE_DATASET_PER_DOWNLOAD = "one_dataset_per_download"
-
-
 # The code a seed's own step fails with when an earlier usable seed names its spec_id.
 SEED_DUPLICATE = "seed_duplicate"
 
@@ -84,18 +69,6 @@ SEED_DUPLICATE = "seed_duplicate"
 # `{spec_id, content_version}` reference, the shape the member was reserved
 # with: it carries no Spec block to start from, so the turn uses the question.
 SEED_REFERENCE_UNUSED = "seed_reference_unused"
-
-
-# The code the `seed-<n>-operations` step fails with on the `download`
-# surface: the seed is retrieved and the operations Search left over for it
-# are not run.
-NO_OPERATIONS_ON_DOWNLOAD = "no_operations_on_download"
-
-
-def _seed_sentence(block: SpecBlock) -> str | None:
-    """A Spec block's reading in Search's own words."""
-    sentence = block.resolved.get("rendered_sentence")
-    return sentence if isinstance(sentence, str) and sentence else None
 
 
 def seed_step(
@@ -126,6 +99,28 @@ def refuse_seed(
         result={
             "outcome": "refusal",
             "refusal": {"code": code, "retry_mode": retry_mode, "fix": None, "message": detail},
+        },
+    )
+
+
+def refuse_seed_reference(record_step: Callable[..., None] | None) -> None:
+    """Record the `SEEDS_STEP_ID` step of a turn whose `seed_spec` is one reference, as unused."""
+    seed_step(
+        record_step,
+        step_id=SEEDS_STEP_ID,
+        args={"seeds": 0},
+        result={
+            "outcome": "refusal",
+            "refusal": {
+                "code": SEED_REFERENCE_UNUSED,
+                "retry_mode": "do_not_retry",
+                "fix": None,
+                "message": (
+                    "seed_spec holds one {spec_id, content_version} reference, which "
+                    "carries no Spec block to start from, so the turn uses the question; "
+                    "send a list of seeds to start from Search results"
+                ),
+            },
         },
     )
 
@@ -163,130 +158,6 @@ def seeds_received(
     seed_step(record_step, step_id=SEEDS_STEP_ID, args={"seeds": taken}, result=result)
 
 
-def _seen_year(block: SpecBlock) -> int | None:
-    """The year whose figures Search showed, when Search chose it and the question did not.
-
-    With no year named, Search resolves over every year with data
-    (`requested_window` kind `all`) and shows the latest year's figures
-    (`resolved.headline`, on a role-bearing answer). `None` when the question
-    named its years, or the block states no such headline.
-    """
-    headline = block.resolved.get("headline")
-    requested = block.definition.identity.get("requested_window")
-    if not isinstance(headline, dict) or headline.get("year_named") is not False:
-        return None
-    if not isinstance(requested, dict) or requested.get("kind") != "all":
-        return None
-    year = headline.get("year")
-    return year if isinstance(year, int) and not isinstance(year, bool) else None
-
-
-def _seen_rows(block: SpecBlock) -> int | None:
-    """How many observations Search's headline counted in the year it showed."""
-    headline = block.resolved.get("headline")
-    rows = headline.get("observations") if isinstance(headline, dict) else None
-    return rows if isinstance(rows, int) and not isinstance(rows, bool) else None
-
-
-def _window_text(identity: Mapping[str, Any] | None) -> str:
-    """The years an identity asks for, in words, for the planner."""
-    window = (identity or {}).get("requested_window") or {}
-    kind = window.get("kind")
-    if kind == "latest":
-        return "the latest observation"
-    start, end = window.get("start_year"), window.get("end_year")
-    if kind != "range" or (start is None and end is None):
-        return "every year with data"
-    if start == end:
-        return str(start)
-    if end is None:
-        return f"{start} onwards"
-    if start is None:
-        return f"up to {end}"
-    return f"{start} to {end}"
-
-
-def _coverage_text(block: SpecBlock) -> str | None:
-    """What a Spec block's coverage counts, in Search's own labels ("199 recipients, 1 sources")."""
-    coverage = block.resolved.get("coverage")
-    dimensions = coverage.get("dimensions") if isinstance(coverage, dict) else None
-    counts = [
-        f"{dimension['count']:,} {dimension['label']}"
-        for dimension in dimensions or []
-        if isinstance(dimension, dict)
-        and isinstance(dimension.get("count"), int)
-        and isinstance(dimension.get("label"), str)
-    ]
-    return ", ".join(counts) or None
-
-
-# The members of a `graph_envelope` reading that describe one identity: its
-# width, the facts that verdict rests on, and the entity axes it leaves open.
-# A seeded envelope states them on each seed and never at its top level, where
-# they would read as every seed's.
-_SEED_FACT_KEYS = (
-    "wide",
-    "stat_var_shape_kind",
-    "stat_var_item_count",
-    "stat_var_member_count_exact",
-    "entity_roles",
-    "stat_var_served_count",
-    "open_entity_axes",
-)
-
-
-def _envelope_seed(
-    block: SpecBlock, *, operations: Sequence[SeedOperation], reading: Mapping[str, Any]
-) -> dict[str, Any]:
-    """One seed as the planner reads it (`harness.planner_seam._render_seeds`).
-
-    `block` is Search's own answer for the seed's identity and `operations`
-    the seed's. `reading` is the block's `graph_envelope` reading, the source
-    of its `_SEED_FACT_KEYS` and of the `choice_points` and `warnings` the
-    envelope adds up (`seeded_envelope`). Its `open_entity_axes` name the
-    entity axes the dataset leaves open: an operation over a party runs over
-    one of them.
-    """
-    year, rows = _seen_year(block), _seen_rows(block)
-    showed = None
-    if year is not None:
-        showed = f"{year}" + (f", {rows:,} rows" if rows is not None else "")
-    return {
-        "spec_id": block.spec_id,
-        "sentence": _seed_sentence(block),
-        "window": _window_text(block.definition.identity),
-        "showed": showed,
-        "coverage": _coverage_text(block),
-        **{key: reading.get(key) for key in _SEED_FACT_KEYS},
-        "choice_points": int(reading.get("choice_points", 0)),
-        "warnings": list(reading.get("warnings") or []),
-        "operations": [
-            operation.model_dump(mode="json", exclude_none=True) for operation in operations
-        ],
-    }
-
-
-def seeded_envelope(seeds: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """The resolve envelope of a turn that starts from `seeds`, each as `_envelope_seed` reads it.
-
-    The top level holds what is true of the turn: `spec_id` is the first
-    seed's, the one `fetch` retrieves when no plan runs; `choice_points` and
-    `warnings` are every seed's together, and `wide` is whether any seed is,
-    which is how `choose_depth` reads them. What describes one identity
-    (`_SEED_FACT_KEYS`, and a reading's coverage `window`) is on its seed alone.
-    """
-    return {
-        "status": "definite",
-        "spec_id": seeds[0]["spec_id"],
-        "choice_points": sum(int(seed.get("choice_points", 0)) for seed in seeds),
-        "parts": len(seeds),
-        "wide": any(bool(seed.get("wide", False)) for seed in seeds),
-        "warnings": [warning for seed in seeds for warning in seed.get("warnings") or []],
-        "candidates": [],
-        "seeds": list(seeds),
-    }
-
-
 @dataclass(frozen=True, slots=True)
 class TakenSeed:
     """One seed as the turn takes it from the browser.
@@ -298,24 +169,6 @@ class TakenSeed:
 
     index: int
     seed: Seed
-
-
-@dataclass(frozen=True, slots=True)
-class ReadSeed:
-    """One seed `seed` can use, read once from Search's own answer for its identity.
-
-    `index` is the seed's position in the seeds slot, which names its own
-    step. `source` is the dataset a plan pins, with the StatVars Search
-    elected, which every `get_data` of the seed posts, `reading` what
-    `graph_envelope` reads of the answer as a definite one, and `planned` the
-    seed as the planner reads it (`_envelope_seed`). Nothing later reads the
-    answer itself.
-    """
-
-    index: int
-    source: SeededSource
-    reading: dict[str, Any]
-    planned: dict[str, Any]
 
 
 class StaleSeedError(Exception):
@@ -340,44 +193,19 @@ def stale_reason(error: PartNotResolvedError) -> str:
     return f"Search no longer resolves it to one dataset (it answers {status!r})"
 
 
-def read_answer(taken: TakenSeed, part: Mapping[str, Any]) -> ReadSeed:
-    """Read `part`, Search's answer for `taken`'s identity, into all `ReadSeed` holds.
+def answered_block(taken: TakenSeed, part: Mapping[str, Any]) -> SpecBlock:
+    """The Spec block of `part`, Search's answer for `taken`'s identity.
 
     Raises:
         StaleSeedError: If the part is not the dataset the seed names
             (`translator.discovery.resolved_spec`).
         ValidationError: If the spec does not parse as a `harness.wire.SpecBlock`.
-        ValueError: If what the seed puts into a tool result or into session
-            state is past `MAX_SEED_SOURCE_CHARS` or `MAX_SEED_RECORD_CHARS`,
-            or the block is not usable as a source
-            (`compiler.sources.source_from_spec_block`).
     """
     try:
         spec = resolved_spec(part, spec_id=taken.seed.spec.spec_id)
     except PartNotResolvedError as exc:
         raise StaleSeedError(stale_reason(exc)) from exc
-    block = SpecBlock.model_validate(spec)
-    served = block.model_dump(mode="json")
-    reading = graph_envelope({"parts": [{"status": "definite", "spec": served}]})
-    source = SeededSource(source=source_from_spec_block(served), seen_year=_seen_year(block))
-    described = len(json.dumps(compact_source(source.source)))
-    if described > MAX_SEED_SOURCE_CHARS:
-        raise ValueError(
-            f"its sentence and entities take {described:,} characters to "
-            f"describe, past the cap of {MAX_SEED_SOURCE_CHARS:,}"
-        )
-    # As `planner.plan.save_seeded_sources` writes it.
-    stored = len(json.dumps(source.model_dump(mode="json")))
-    if stored > MAX_SEED_RECORD_CHARS:
-        raise ValueError(
-            f"its record takes {stored:,} characters, past the cap of {MAX_SEED_RECORD_CHARS:,}"
-        )
-    return ReadSeed(
-        index=taken.index,
-        source=source,
-        reading=reading,
-        planned=_envelope_seed(block, operations=taken.seed.operations, reading=reading),
-    )
+    return SpecBlock.model_validate(spec)
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,8 +277,8 @@ def take_seeds(raw: object, *, record_step: Callable[..., None] | None) -> list[
     A seed that cannot be read fails its own `SEED_STEP_PREFIX-<n>` step
     with its `_SeedRefusal` and is left out; the others stand. A seed naming
     the spec_id of an earlier usable one fails as `SEED_DUPLICATE`, whatever
-    else it carries, so one spec_id is one seed for every reader that looks a
-    seed up by it (`planner.plan.seeded_source`).
+    else it carries, so one spec_id is one seed in the search state the turn
+    stores (`harness.graph.state.store_search`).
     """
     taken: list[TakenSeed] = []
     first_at: dict[str, int] = {}
@@ -484,7 +312,7 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
         spec_id=spec.spec_id,
         identity=spec.definition.identity,
         groups=tuple(
-            ResolvedGroup(role=role, label=group.label, ref=group.dcid)
+            ResolvedGroup(role=role, label=group.label, ref=group.dcid, total=group.total)
             for role, group in (spec.entity_groups or {}).items()
         ),
     )
@@ -493,61 +321,57 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
 class DroppedSeed(TypedDict):
     """A seed the turn dropped, as the user is told of it.
 
-    `name` is the seed as the user saw it named. `reason` is why it was
-    dropped as it was taken (`read_answer`, in Search's terms).
+    `name` is how the user is told of the seed. `reason` is why it was
+    dropped, in Search's terms when Search gave one (`stale_reason`).
     """
 
     name: str
     reason: str
 
 
-def seed_name(seed: Mapping[str, Any]) -> str:
-    """A seed of the resolve envelope's `seeds` as the user saw it named in Search."""
-    return seed.get("sentence") or seed["spec_id"]
+def seeds_hand_back(
+    parts: Sequence[Mapping[str, Any]],
+    drops: Sequence[DroppedSeed],
+    *,
+    budgets: Mapping[str, int],
+) -> str:
+    """What the orchestrator's agent reads of the seeds its turn starts from.
 
-
-def _quoted_list(names: Sequence[str]) -> str:
-    """`names`, each in quotes, as one English list."""
-    quoted = [f'"{name}"' for name in names]
-    if len(quoted) == 1:
-        return quoted[0]
-    return ", ".join(quoted[:-1]) + ("," if len(quoted) > 2 else "") + f" and {quoted[-1]}"
-
-
-def _drop_reasons(drops: Sequence[DroppedSeed]) -> list[tuple[list[str], str]]:
-    """`drops` as (names, why) pairs, each seed under its own reason."""
-    return [([drop["name"]], drop["reason"]) for drop in drops]
-
-
-def _again(drops: Sequence[DroppedSeed]) -> str:
-    return "it" if len(drops) == 1 else "each"
-
-
-def dropped_seeds_note(drops: Sequence[DroppedSeed]) -> str:
-    """The sentence telling the user which seeds a plan leaves out, and why."""
-    left_out = "; ".join(f"{_quoted_list(names)}: {why}" for names, why in _drop_reasons(drops))
-    return f"This plan leaves out {left_out}. Search for {_again(drops)} again to add it."
-
-
-def dropped_seeds_text(drops: Sequence[DroppedSeed]) -> str:
-    """The sentences telling the user, when no plan is drafted, which seeds were dropped and why."""
-    dropped = " ".join(
-        f"{_quoted_list(names)} could not be retrieved: {why}."
-        for names, why in _drop_reasons(drops)
-    )
-    return f"{dropped} Search for {_again(drops)} again."
-
-
-def unplanned_seeds_text(drops: Sequence[DroppedSeed], kept: Sequence[str], reason: str) -> str:
-    """The closing text of a turn that dropped seeds and then drafted no plan from the rest.
-
-    Names the dropped seeds and why they could not be retrieved, then says
-    that the `kept` ones were not planned, with the planner's own `reason`.
+    `parts` are the seeds kept, as `search` returns its parts, each with the
+    operations the user's question asked of it. `drops` are the seeds left
+    out, each with why. With no seed kept, the turn goes on from the question.
+    `budgets` are the turn's tool budgets (`harness.graph.state.turn_budgets`): the
+    hand-back names the tools the turn can still call with a seed, and how
+    many datasets it can fetch when that is fewer than the seeds kept.
     """
-    unplanned = (
-        f"No plan was drafted for {_quoted_list(kept)}, so nothing is shown for "
-        f"{'it' if len(kept) == 1 else 'them'}."
-        if kept
-        else "No plan was drafted for the rest of the question."
-    )
-    return " ".join(part for part in (dropped_seeds_text(drops), unplanned, reason) if part)
+    lines = []
+    if parts:
+        if budgets["plan"]:
+            lead = (
+                "The user brought these datasets from Search: fetch or plan each with its "
+                "spec_id. A part's operations are what the user's question asked of it; ask "
+                "for them with plan."
+            )
+        else:
+            lead = (
+                "The user brought these datasets from Search: fetch each with its spec_id. "
+                "A part's operations are what the user's question asked of it; they cannot "
+                "run here, so tell the user the data comes as served."
+            )
+        fetches = budgets["fetch"]
+        if fetches < len(parts):
+            lead += (
+                " fetch can run once this turn, so fetch the one dataset the question most needs."
+                if fetches == 1
+                else f" fetch can run {fetches} times this turn, so fetch the {fetches} datasets "
+                "the question most needs."
+            )
+        lines += [lead, json.dumps({"parts": list(parts)})]
+    lines += [
+        f'"{drop["name"]}" was left out: {drop["reason"]}. Tell the user, and say that '
+        "searching for it again may find it."
+        for drop in drops
+    ]
+    if not parts:
+        lines.append("No dataset from Search can be used, so answer from the question.")
+    return "\n".join(lines)

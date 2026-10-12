@@ -3,8 +3,8 @@
 ADK builds a function tool's declaration from its signature: pydantic's
 `model_json_schema()` of the arguments, with the whole docstring as the
 tool's description and no description on any argument. `PlanTool` keeps that
-schema and rewrites it with `compact_schema`, then gives each argument its
-own description, so the patch rules and limits a model writes a call from sit
+schema, gives each argument its own description, and rewrites the result with
+`compact_schema`, so the patch rules and limits a model writes a call from sit
 on the argument they govern.
 
 `compact_schema` removes what tells a model nothing its key does not, and
@@ -22,9 +22,15 @@ gets the same treatment:
 - the description of an enum named in `FIELD_DESCRIBED_ENUMS`, whose values
   the field using it describes.
 
-It then states two schemas once under `$defs` and refers to them everywhere
-else: an `Identifier`, which names every requirement and decision, and the
+It then states two schemas once under `$defs` and refers to them: an
+`Identifier`, which names every requirement and decision, and the
 `decision_ids` list every requirement kind carries.
+
+Gemini reads nothing beside a `$ref`, so no `$ref` in the result has sibling
+keys. Where a field's schema is a reference with a description or default of
+its own, the field holds a copy of the definition instead, with the field's
+keys on top: its `description` replaces the definition's own and its
+`default` stays. A definition nothing refers to any more is dropped.
 
 The validator is untouched: `propose_plan` still validates what the model
 sends against the models themselves, so an explicit `null` is accepted as
@@ -65,6 +71,9 @@ _NO_JSON_SCHEMA = (
 
 # Keys whose value maps names to schemas, so a name there is never a keyword.
 _NAMED_SCHEMAS = frozenset({"properties", "$defs"})
+
+# What every `$ref` in a pydantic schema starts with, before the definition's name.
+_DEFS_PREFIX = "#/$defs/"
 
 
 def _without_null_branch(schema: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +117,7 @@ def _shared_undescribed(name: str, schema: Any) -> Any:
 
 
 def _ref(name: str) -> dict[str, str]:
-    return {"$ref": f"#/$defs/{name}"}
+    return {"$ref": f"{_DEFS_PREFIX}{name}"}
 
 
 def _refer_identifiers(node: Any, found: list[Any]) -> Any:
@@ -166,9 +175,62 @@ def _factored(schema: dict[str, Any]) -> dict[str, Any]:
     return factored | {"$defs": defs}
 
 
+def _referred(node: Any) -> set[str]:
+    """The `$defs` names every `$ref` in `node` points at."""
+    if isinstance(node, list):
+        return {name for item in node for name in _referred(item)}
+    if not isinstance(node, dict):
+        return set()
+    names = {name for value in node.values() for name in _referred(value)}
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        names.add(ref.removeprefix(_DEFS_PREFIX))
+    return names
+
+
+def _inline_ref_siblings(schema: dict[str, Any]) -> dict[str, Any]:
+    """`schema` with every `$ref` that has sibling keys replaced by a copy of its target.
+
+    The siblings sit on top of the copy, so a sibling `description` replaces
+    the definition's own and a sibling `default` stays. A bare `$ref` stays a
+    reference, and a definition nothing reaches any more is dropped.
+    `schema` carries `$defs`, as `_factored` returns it.
+
+    Raises when a definition refers to itself with sibling keys, since its
+    copy would never end.
+    """
+    defs: dict[str, Any] = schema["$defs"]
+
+    def inline(node: Any, inlining: tuple[str, ...]) -> Any:
+        if isinstance(node, list):
+            return [inline(item, inlining) for item in node]
+        if not isinstance(node, dict):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and len(node) > 1:
+            name = ref.removeprefix(_DEFS_PREFIX)
+            if name in inlining:
+                raise ValueError(f"`{name}` refers to itself beside other keys")
+            siblings = {key: value for key, value in node.items() if key != "$ref"}
+            return inline(defs[name] | siblings, (*inlining, name))
+        return {key: inline(value, inlining) for key, value in node.items()}
+
+    inlined = {key: inline(value, ()) for key, value in schema.items() if key != "$defs"}
+    inlined_defs = {name: inline(definition, (name,)) for name, definition in defs.items()}
+    reached: set[str] = set()
+    pending = _referred(inlined)
+    while pending:
+        name = pending.pop()
+        reached.add(name)
+        pending |= _referred(inlined_defs[name]) - reached
+    kept = {name: definition for name, definition in inlined_defs.items() if name in reached}
+    return {"$defs": kept} | inlined
+
+
 def compact_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """`schema` compacted, with `Identifier` and `decision_ids` stated once under `$defs`."""
-    return _factored(_compact(dict(schema)))
+    """`schema` compacted, with `Identifier` and `decision_ids` stated once under `$defs`
+    and no `$ref` beside another key."""
+    return _inline_ref_siblings(_factored(_compact(dict(schema))))
 
 
 class PlanTool(FunctionTool):
@@ -195,14 +257,16 @@ class PlanTool(FunctionTool):
         declaration = super()._get_declaration()
         if declaration is None or declaration.parameters_json_schema is None:
             raise RuntimeError(_NO_JSON_SCHEMA.format(name=self.name))
-        schema = compact_schema(declaration.parameters_json_schema)
+        schema = declaration.parameters_json_schema
         properties: dict[str, Any] = schema["properties"]
         if set(properties) != set(self._arguments):
             raise ValueError(
                 f"{self.name} declares {sorted(properties)} and describes "
                 f"{sorted(self._arguments)}; describe each argument exactly once"
             )
-        for name, description in self._arguments.items():
-            properties[name] = {**properties[name], "description": description}
-        declaration.parameters_json_schema = schema
+        described = {
+            name: {**argument, "description": self._arguments[name]}
+            for name, argument in properties.items()
+        }
+        declaration.parameters_json_schema = compact_schema(schema | {"properties": described})
         return declaration

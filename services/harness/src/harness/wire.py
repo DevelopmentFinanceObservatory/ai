@@ -415,8 +415,8 @@ class ComponentRef(_WireModel):
 
 
 class Surface(StrEnum):
-    """Feeds the harness's depth policy: the download surface earns no
-    dialogue, studio earns some."""
+    """Where the turn is asked from. On the download surface the orchestrator
+    fetches once and plans nothing (`harness.graph.state.DOWNLOAD_BUDGETS`)."""
 
     STUDIO = "studio"
     DOWNLOAD = "download"
@@ -465,24 +465,6 @@ MAX_SEED_TEXT_CHARS = 256
 # coverage dimensions (3), its role facts (1), and an item's slot values (3)
 # and constraint properties (2).
 MAX_SEED_LIST_ITEMS = 64
-# What one seed may put into a tool result and into session state, in
-# characters of JSON, whatever mix of members fills it.
-# `harness.seeds.read_answer` drops a seed whose answer is past either.
-#
-# The description a model reads of a seeded source
-# (`translator.discovery.compact_source`: its sentence, measure label and
-# count, and entities), which the translation `propose_plan` runs returns
-# once for each seed. It
-# lists `resolved.entities`, the entities the question named; a region's
-# members sit in `resolved.scope` and are not listed. An entity with a
-# 40-character label takes about 78 characters, so a block has room for
-# about 800 named entities.
-MAX_SEED_SOURCE_CHARS = 65_536
-# The record session state keeps of a seed (`planner.plan.SeededSource`): the
-# description's members with their refs, and the identity, which data-mcp
-# holds to 65,536 bytes.
-MAX_SEED_RECORD_CHARS = 2 * 65_536
-
 # The roles an identity binds entities under: dfo-apis `search.models.identity`
 # caps the `entities` mapping at 16 keys.
 MAX_SEED_ROLES = 16
@@ -527,11 +509,11 @@ class SeedDefinition(_WireModel):
 
     @model_validator(mode="after")
     def _what_the_harness_reads_is_bounded(self) -> SeedDefinition:
-        """Hold the identity members the planner's envelope states to their bounds.
+        """Hold the identity members a search reading states to their bounds.
 
-        `harness.seeds`'s `_window_text` prints `requested_window`, and
-        `harness.tool_contracts` lists the `entities` roles and the `shape`
-        kind. The identity as a whole is bounded where it is stored
+        `harness.tool_contracts` reads `requested_window` and lists the
+        `entities` roles and the `shape` kind. The identity as a whole is
+        bounded where it is stored
         (`data_mcp.definition_writes.MAX_IDENTITY_BYTES`).
         """
         window = _seed_mapping(self.identity.get("requested_window"))
@@ -558,11 +540,11 @@ def check_resolved_bounds(resolved: dict[str, Any]) -> None:
     """Hold every member of a Spec block's `resolved` that the harness reads to its bound.
 
     The members are the ones `compiler.sources.source_from_spec_block`,
-    `harness.tool_contracts.graph_envelope` and `harness.graph`'s seed
-    readers take: the sentence, the entities, the unit and provenance, the
-    coverage, the member counts, the slots, the open entity axes and the
-    headline. A member of another type than Search serves is left to its
-    reader, which refuses or ignores it.
+    `harness.tool_contracts.graph_envelope` and the search readings
+    (`harness.turn_records.SearchReading`) take: the sentence, the entities,
+    the unit and provenance, the coverage, the member counts, the slots, the
+    open entity axes and the headline. A member of another type than Search
+    serves is left to its reader, which refuses or ignores it.
 
     Raises:
         ValueError: Naming the first member past its bound.
@@ -628,7 +610,8 @@ class SpecBlock(BaseModel):
     the Spec's other members.
 
     `harness.graph`'s `seed` node reads Search's own answer for each seed's
-    identity as one: the source a plan pins, and the planner's envelope.
+    identity as one and stores it as a definite search part
+    (`harness.graph.state.store_search`).
     Each member of `resolved` the harness reads is held to its own bound
     (`check_resolved_bounds`).
     """
@@ -655,12 +638,19 @@ MAX_SEED_GROUP_LABEL_CHARS = 120
 
 
 class SeedEntityGroup(BaseModel):
-    """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it."""
+    """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
+
+    `total` is the published total party the role bound for the set, absent
+    when it bound the members (`planner.workflow.ResolvedGroup.total`).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
     dcid: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+    total: str | None = Field(
+        default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
+    )
 
 
 class SeedSpec(BaseModel):
@@ -989,12 +979,6 @@ class MessageComplete(_WireModel):
     text: str
 
 
-class PlanDepth(StrEnum):
-    SHALLOW = "shallow"
-    STANDARD = "standard"
-    DEEP = "deep"
-
-
 class PlanStep(_WireModel):
     """A human label -- the executable tool calls stay server-side."""
 
@@ -1077,10 +1061,6 @@ class PlanProposed(_WireModel):
     title: str
     steps: list[PlanStep]
     actions: list[PlanAction]
-    depth: PlanDepth | None = None
-    # One plain sentence explaining why a plan is being proposed for this
-    # question (`harness.depth.DepthSignal.notice`).
-    depth_notice: str | None = None
     decisions: list[PlanDecision] | None = None
     # Delta 17 (v1.2): additive only -- `steps` and `version` keep their
     # existing shape. `revision` is the plan's approval key, a string
@@ -1177,14 +1157,12 @@ class ComponentCreated(_WireModel):
 def usable_component(component: dict[str, Any] | None) -> bool:
     """Whether `component` (a `write_component` result's own `component`
     member) would satisfy the `component.created` wire contract above:
-    the full model, not just a `fact_summary` presence check. `harness.
-    graph`'s `compose` node calls this to decide which writes are usable
-    (land, and may consume the turn's `revises` target); `harness.
-    studio_translate`'s `_component_frames` calls it again at drain time,
-    immediately before a write actually lands, so a write compose judged
-    usable is guaranteed to validate again when it lands.
+    the full model, not just a `fact_summary` presence check. `make_charts`
+    (`harness.orchestrator_tools`) calls this to decide which writes land;
+    `harness.studio_translate`'s `_component_frames` validates the same
+    contract again at drain time, immediately before a write actually lands.
 
-    `event`, `seq` and `created_from` are not `compose`'s to give: `event`
+    `event`, `seq` and `created_from` are not the writer's to give: `event`
     and `seq` are wire bookkeeping no caller of this function has a real
     value for yet, and the real `created_from` (the step that produced the
     component) is only known at drain time. Stand-ins fill the three
@@ -1255,11 +1233,9 @@ class ElicitationRequest(_WireModel):
     input: ElicitationInput
     options: list[ElicitationOption] | None = None
     # The "More Details Question" affordances: an open-ended answer
-    # alongside options, a Skip button, and an "N of M" question counter
-    # (the same shape activity.step already uses).
+    # alongside options, and a Skip button.
     allow_free_text: bool = False
     skippable: bool = False
-    progress: StepProgress | None = None
     # Why the `recommended` option (if any) is recommended, as the planner
     # wrote it for the person settling the choice. `None` when no option is
     # recommended.

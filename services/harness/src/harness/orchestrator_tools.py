@@ -1,4 +1,4 @@
-"""The orchestrator's tools, over the resolver, executor and tool surface the graph uses.
+"""The orchestrator's tools, over the resolver, executor and tool surface the workflow uses.
 
 `search` asks data-mcp's `search` once for every part of a question;
 `fetch` retrieves one dataset and describes its frames; `make_charts`
@@ -7,24 +7,27 @@ draws on the canvas through the graph's own presentation checks;
 reads on through it; `recall` returns an earlier turn's plan record,
 readings or a canvas component in full; `explain_dfo` reads dfo-faq, DFO's
 own description of itself (`harness.dfo_faq`). `ask_user` and `plan` record
-one pending action for the workflow (`harness.orchestrator_workflow`) to act
-on once the model's turn ends: a pause for the user's answer, or the graph's
-plan path.
+one pending action for the workflow's `route` node (`harness.graph`) to act
+on once the model's turn ends: a pause for the user's answer, or the plan
+path.
 
 The model sees digests only: part readings, frame views, one-line
 summaries and chart facts, never rows. Frames are named to it by short
-ids (`harness.graph.frame_id_for`) kept in session state, so `make_charts`
+ids (`harness.graph.state.frame_id_for`) kept in session state, so `make_charts`
 can only draw a frame `fetch` or an executed plan produced this turn, after
 `describe_frame` answered for it. `search` also stores every part it
 read, failed ones included, as a `harness.turn_records.SearchReading`
 holding more than the model sees, and `fetch` adds its outcome to the
-readings of its spec_id. A `fetch` that would retrieve what an earlier
+readings of its spec_id. A `fetch` of a spec_id with no stored block but a
+definition on record, such as another count a search result offers, first
+reads its own block from Search's answer for that definition
+(`_recorded_block`), the way a plan's pin is read. A `fetch` that would retrieve what an earlier
 `fetch` this turn retrieved returns that fetch's frames without a call
 (`_fetch_key`). A `fetch` of a spec_id that a fetch or a plan step was
 refused as `capability_unavailable` this turn is refused without a call. A
 `get_data` call that does not complete, through a transport failure or an MCP
 error, is a refusal the model may retry, as an unreachable skill read is.
-Each tool's calls per turn are capped (`BUDGETS`). The download surface
+Each tool's calls per turn are capped (`harness.graph.state.BUDGETS`). The download surface
 fetches one dataset and never plans.
 
 Every tool validates the model's arguments against its annotations before its
@@ -40,10 +43,10 @@ import inspect
 import json
 import logging
 import weakref
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Any, Literal, get_type_hints
+from typing import Any, Literal, Protocol, get_type_hints
 
 import httpx2
 from compiler.sources import (
@@ -53,20 +56,31 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import MAX_SOURCE_CHARS, SearchPart
+from data_mcp.search_tool import SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from google.adk.tools import ToolContext
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
-from planner.plan import MAX_ASK_CHARS, MAX_PLAN_ASKS, earlier_block
+from planner.parties import party_role
+from planner.plan import MAX_ASK_CHARS, MAX_PLAN_ASKS, earlier_block, recorded_identity
 from planner.skills import GET_SKILL, GET_SKILL_FILE
 from planner.workflow import ToolId
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from translator.discovery import (
+    DefinitionNotResolvedError,
+    PartNotResolvedError,
+    resolve_definition,
+    resolved_spec,
+)
 
-from harness.dfo_faq import DfoFaqUnavailable, read_dfo_faq
-from harness.graph import (
+from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     MAX_SERIES_PER_COMPONENT,
+    select_binding_ok,
+)
+from harness.dfo_faq import DfoFaqUnavailable, read_dfo_faq
+from harness.graph.seams import Executor
+from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
@@ -75,45 +89,23 @@ from harness.graph import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
-    Executor,
+    AskOption,
     PendingAsk,
     PendingPlan,
-    Resolver,
     pending_action,
     register_frames,
-    select_binding_ok,
+    store_search,
+    turn_budgets,
 )
 from harness.studio_state import RecallPart, RecallRefusedError
-from harness.tool_contracts import ResolverError, chosen_part, reading_facts
+from harness.tool_contracts import ResolverError, chosen_part, measure_choice
 from harness.turn_records import SearchReading
 from harness.wire import usable_component
 
 logger = logging.getLogger(__name__)
 
-# Calls one turn may make of each tool. `search` counts every resolver
-# call, `fetch` every dataset read; a plan is one per turn, and a plan
-# that failed gives it back (`harness.graph`'s `plan_done`) for a brief
-# that avoids the failure. `make_charts` counts the calls that drew at
-# least one chart, `make_charts_failed` the calls that drew none.
-# `invalid_arguments` counts the calls of any tool refused for malformed
-# arguments, which spend nothing of the tool's own budget.
-BUDGETS = {
-    "search": 4,
-    "fetch": 6,
-    "make_charts": 5,
-    "make_charts_failed": 3,
-    "ask_user": 2,
-    "plan": 1,
-    "get_skill": 2,
-    # A file a skill links, or the next page of a long one.
-    "get_skill_file": 4,
-    "recall": 3,
-    "invalid_arguments": 3,
-}
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
-# The download surface fetches one dataset and never plans.
-DOWNLOAD_BUDGETS = {**BUDGETS, "fetch": 1, "plan": 0}
 # The turn's completed fetches: `_fetch_key` -> the spec_id fetched, its
 # summary and the ids of its frames, every one described, or the refusal of a
 # fetch that served no observations.
@@ -144,6 +136,7 @@ TOOL_NAMES = (
     "get_skill_file",
     "explain_dfo",
     "recall",
+    "remove_cards",
 )
 
 
@@ -220,27 +213,11 @@ class FetchScope(GetDataScope):
     searched definition; a member left out stays as searched."""
 
 
-# data-mcp's own part has a `source` description that points at its
-# `get_data`. The orchestrator's retrieval tool is `fetch`.
-class OrchestratorSearchPart(SearchPart):
-    """One variable ask within the request, with its own entities, time, unit, and source."""
-
-    source: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=MAX_SOURCE_CHARS,
-        description=(
-            "who reported it, refused when no unit is given and ignored when one is, so "
-            "choose the source through fetch's facets instead"
-        ),
-    )
-
-
 _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do."
 
 
 def _budgets(tool_context: ToolContext) -> dict[str, int]:
-    return DOWNLOAD_BUDGETS if tool_context.state.get("surface") == "download" else BUDGETS
+    return turn_budgets(tool_context.state)
 
 
 def _used(tool_context: ToolContext, key: str) -> int:
@@ -283,38 +260,80 @@ def _adapter(annotation: Any) -> TypeAdapter[Any]:
     return TypeAdapter(annotation)
 
 
-def _argument_problems(name: str, exc: ValidationError) -> list[str]:
-    """Each of `exc`'s errors as `<name>.<loc>: <msg>`, without the input."""
-    return [
-        f"{'.'.join(str(step) for step in (name, *error['loc']))}: {error['msg']}"
-        for error in exc.errors(include_url=False)
-    ]
+# A correction for a known mistake, appended to the problem it names. Keyed by
+# the pydantic error type and the location with list indices as `*`.
+type ArgumentHints = Mapping[tuple[str, str], str]
+
+_SEARCH_ARGUMENT_HINTS: ArgumentHints = {
+    ("extra_forbidden", "parts.*.role"): (
+        'role goes on each entity in entities, e.g. {"text": "Kenya", "role": "to"}'
+    ),
+}
 
 
-def _validated_arguments(tool: FunctionType) -> Callable[..., Any]:
+def _argument_problems(
+    name: str, exc: ValidationError, hints: ArgumentHints
+) -> list[tuple[dict[str, str], str]]:
+    """Each of `exc`'s errors as its `{"loc", "type"}` entry and its line of
+    prose (`<loc>: <msg>`, then any hint), without the input."""
+    problems = []
+    for error in exc.errors(include_url=False):
+        steps = (name, *error["loc"])
+        loc = ".".join(str(step) for step in steps)
+        shape = ".".join("*" if isinstance(step, int) else str(step) for step in steps)
+        line = f"{loc}: {error['msg']}"
+        if hint := hints.get((error["type"], shape)):
+            line += f" ({hint})"
+        problems.append(({"loc": loc, "type": error["type"]}, line))
+    return problems
+
+
+def _invalid_arguments(
+    tool_context: ToolContext, name: str, problems: Sequence[tuple[dict[str, str], str]]
+) -> dict[str, Any]:
+    """Return argument problems, bounded by the turn's invalid-call budget."""
+    used = _used(tool_context, "invalid_arguments")
+    if used >= _budgets(tool_context)["invalid_arguments"]:
+        return {
+            "error": f"{name}: {used} call(s) this turn had invalid arguments, "
+            f"the limit. {_ANSWER_NOW}"
+        }
+    _count(tool_context, "invalid_arguments")
+    return {
+        "error": f"{name}: {'; '.join(line for _, line in problems)}. "
+        "Correct these arguments and call again.",
+        "invalid": [entry for entry, _ in problems],
+    }
+
+
+def _validated_arguments(
+    tool: FunctionType, *, hints: ArgumentHints | None = None
+) -> Callable[..., Any]:
     """`tool` wrapped to validate every argument but `tool_context` before it runs.
 
     ADK hands a function tool the model's arguments as parsed JSON, whatever
     the annotations say. The wrapper validates them with pydantic and calls
-    `tool` with the validated values. If any fail, it returns `{"error": ...}`
-    naming every problem and does not call `tool`. Rejected calls count
-    against `BUDGETS["invalid_arguments"]`. A tool with no model arguments is
+    `tool` with the validated values. If any fail, it returns the problems as
+    `{"error": <prose>, "invalid": [{"loc", "type"}, ...]}`, with `hints`
+    appended to the prose of the problems they match, and does not call
+    `tool`. Rejected calls count against `BUDGETS["invalid_arguments"]`; past
+    it the reply is `{"error": ...}` alone. A tool with no model arguments is
     returned as is.
     """
     signature = inspect.signature(tool)
-    hints = get_type_hints(tool)
+    annotations = get_type_hints(tool)
     adapters = {
-        name: _adapter(hints[name]) for name in signature.parameters if name != "tool_context"
+        name: _adapter(annotations[name]) for name in signature.parameters if name != "tool_context"
     }
     if not adapters:
         return tool
 
     def bind(
         args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> inspect.BoundArguments | dict[str, str]:
+    ) -> inspect.BoundArguments | dict[str, Any]:
         """The call's arguments, validated, or the error the model is given."""
         bound = signature.bind(*args, **kwargs)
-        problems: list[str] = []
+        problems: list[tuple[dict[str, str], str]] = []
         for name, value in bound.arguments.items():
             if name not in adapters:
                 continue
@@ -322,21 +341,10 @@ def _validated_arguments(tool: FunctionType) -> Callable[..., Any]:
                 bound.arguments[name] = adapters[name].validate_python(value)
             except ValidationError as exc:
                 logger.warning("orchestrator %s: invalid %s: %s", tool.__name__, name, exc)
-                problems += _argument_problems(name, exc)
+                problems += _argument_problems(name, exc, hints or {})
         if not problems:
             return bound
-        tool_context: ToolContext = bound.arguments["tool_context"]
-        used = _used(tool_context, "invalid_arguments")
-        if used >= _budgets(tool_context)["invalid_arguments"]:
-            return {
-                "error": f"{tool.__name__}: {used} call(s) this turn had invalid arguments, "
-                f"the limit. {_ANSWER_NOW}"
-            }
-        _count(tool_context, "invalid_arguments")
-        return {
-            "error": f"{tool.__name__}: {'; '.join(problems)}. "
-            "Correct these arguments and call again."
-        }
+        return _invalid_arguments(bound.arguments["tool_context"], tool.__name__, problems)
 
     if inspect.iscoroutinefunction(tool):
 
@@ -388,6 +396,43 @@ def _asks_refusal(asks: list[str]) -> dict[str, Any] | None:
     }
 
 
+def _named_spec_ids(tool_context: ToolContext) -> set[str]:
+    """Every spec_id this turn's search results named: each part's own and each
+    candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count a part's
+    result offers (`measure_choice`)."""
+    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
+    named = set(specs)
+    for block in specs.values():
+        named.update(
+            alternative["spec_id"]
+            for alternative in measure_choice(block or {}).get("alternatives") or ()
+        )
+    return named
+
+
+def _options_refusal(options: list[AskOption], named: set[str]) -> dict[str, Any] | None:
+    """The refusal of an `ask_user` call whose options carry a spec_id no search
+    result this turn named (`_named_spec_ids`), or one spec_id twice, or None."""
+    spec_ids = [option.spec_id for option in options if option.spec_id is not None]
+    problems = [
+        f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
+        for option in options
+        if option.spec_id is not None and option.spec_id not in named
+    ]
+    problems += [
+        f"{spec_id} is on more than one option"
+        for spec_id in sorted(set(spec_ids))
+        if spec_ids.count(spec_id) > 1
+    ]
+    if not problems:
+        return None
+    return {
+        "refusal": f"ask_user asked nothing: {'; '.join(problems)}.",
+        "code": ToolErrorCode.REQUEST_INVALID.value,
+        "legal": {"spec_ids": sorted(named)},
+    }
+
+
 def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[str, Any]:
     """Record `action` as the turn's pending action, unless one is pending."""
     pending = pending_action(tool_context.state)
@@ -412,6 +457,61 @@ def _spec_block(tool_context: ToolContext, spec_id: str) -> Mapping[str, Any] | 
     return block if block is not None else earlier_block(spec_id)
 
 
+async def _recorded_block(surface: ToolSurface | None, spec_id: str) -> Mapping[str, Any] | None:
+    """The spec block Search answers now for the definition on record for
+    `spec_id` (`planner.plan.recorded_identity`); `None` when none is on record.
+
+    The definition is resolved through data-mcp (`resolve_definition`),
+    which stores it for `get_data`, and the block is Search's own part's
+    (`resolved_spec`), as `translator.discovery._recorded_source` reads a pin.
+
+    Raises:
+        DefinitionNotResolvedError: If data-mcp or Search could not be
+            reached, Search refused the definition, or there is no surface
+            to ask it through.
+        PartNotResolvedError: If Search answers it with anything but that
+            one dataset.
+    """
+    recorded = recorded_identity(spec_id)
+    if recorded is None:
+        return None
+    if surface is None:
+        raise DefinitionNotResolvedError(
+            "this server has no data-mcp surface to resolve it through", retryable=False
+        )
+    part = await resolve_definition(
+        surface, spec_id=spec_id, identity=recorded.identity, groups=recorded.groups
+    )
+    block = resolved_spec(part, spec_id=spec_id)
+    mentions = getattr(recorded, "resolved_sources", ())
+    return (
+        {**block, "_resolved_sources": [mention.model_dump(mode="json") for mention in mentions]}
+        if mentions
+        else block
+    )
+
+
+def _unresolved_refusal(
+    spec_id: str, exc: DefinitionNotResolvedError | PartNotResolvedError
+) -> dict[str, Any]:
+    """The refusal of a `fetch` whose definition on record `_recorded_block`
+    could not read a block for."""
+    if isinstance(exc, DefinitionNotResolvedError) and exc.retryable:
+        return {
+            "spec_id": spec_id,
+            "refusal": f"Search could not be reached to read {spec_id} just now ({exc}). Fetch "
+            "it again, or answer without this data.",
+            "code": FETCH_UNAVAILABLE,
+        }
+    reason = str(exc) if isinstance(exc, DefinitionNotResolvedError) else exc.fault.value
+    return {
+        "spec_id": spec_id,
+        "refusal": f"Search no longer reads {spec_id} as one dataset ({reason}), so it cannot "
+        "be fetched. Fetch a spec_id this turn's search returned, or search again.",
+        "code": ToolErrorCode.DEFINITION_NOT_HELD.value,
+    }
+
+
 def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     """`data`, a `get_data` outcome that served no observations, as the refusal `fetch`
     gives for it, with dfo-apis' own `empty_result` warning when it sent one."""
@@ -428,9 +528,12 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     """Add a `fetch` result to every stored search reading of its spec_id.
 
     A spec_id that no reading holds as its own, but one offered as a
-    candidate, first gains a reading of its own, read from its block
-    (`chosen_part`) with the offering reading's text and skills and its
-    own warnings.
+    candidate or as another count (`SearchReading.alternatives`), first
+    gains a reading of its own, read from its block (`chosen_part`) with the
+    offering reading's text, skills and departures and asked parties and
+    its own warnings, else the offering reading's. A spec_id no reading
+    offers as a candidate is another count, and its reading names the
+    reading that offered it (`SearchReading.other_count_of`).
     """
     spec_id = result["spec_id"]
     state = tool_context.state
@@ -439,14 +542,30 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
         for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
     ]
     block = (state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(spec_id)
-    offered = next((r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None)
+    candidate_of = next(
+        (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
+    )
+    count_of = next(
+        (r for r in searches if any(a.spec_id == spec_id for a in r.alternatives)), None
+    )
+    offered = candidate_of or count_of
     if block and offered is not None and all(r.spec_id != spec_id for r in searches):
-        warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id) or []
+        warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
+        if warnings is None:
+            warnings = [w.model_dump() for w in offered.warnings]
+        chosen = SearchReading.from_part(
+            {**chosen_part(block, variable=offered.text), "warnings": warnings},
+            skills=offered.skills,
+            observed_at=datetime.now(UTC),
+        )
         searches.append(
-            SearchReading.from_part(
-                {**chosen_part(block, variable=offered.text), "warnings": warnings},
-                skills=offered.skills,
-                observed_at=datetime.now(UTC),
+            chosen.model_copy(
+                update={
+                    "separate": offered.separate,
+                    "departures": offered.departures,
+                    "asked_roles": offered.asked_roles,
+                    "other_count_of": None if candidate_of else offered.spec_id,
+                }
             )
         )
     state[ORCHESTRATOR_SEARCHES_KEY] = [
@@ -455,6 +574,17 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
         )
         for reading in searches
     ]
+
+
+def _asked_roles(part: SearchPart) -> list[str]:
+    """The flow parties `part` asks for, as `planner.parties.PARTY_ROLES` words.
+
+    Each entity's `role` and each of `open_roles` that names one party
+    (`planner.parties.party_role`): "to" and "recipients" give "recipient".
+    """
+    words = [entity.role for entity in part.entities or () if entity.role]
+    words += part.open_roles or []
+    return list(dict.fromkeys(role for word in words if (role := party_role(word))))
 
 
 def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
@@ -484,21 +614,38 @@ def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
     return json.dumps({**retrieved, "identity": standing}, sort_keys=True)
 
 
+class Resolver(Protocol):
+    """Stands in for data-mcp `search`: the question and its search parts ->
+    the search digest (`harness.tool_contracts.resolver_digest`)."""
+
+    async def __call__(
+        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+    ) -> dict[str, Any]: ...
+
+
 def build_orchestrator_tools(
     *,
     resolver: Resolver,
     executor: Executor,
     surface: ToolSurface | None = None,
     dfo_faq_surface: ToolSurface | None = None,
+    definition_surface: ToolSurface | None = None,
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
     `dfo_faq_surface` is the surface `explain_dfo` reads dfo-faq through: the
     bare one, off the Activity feed, since `explain_dfo`'s own call is the
     step the user sees. Left unset, `explain_dfo` says it cannot describe DFO.
+    `definition_surface` is the surface `fetch` resolves a definition on
+    record through (`_recorded_block`), the bare one, off the Activity feed,
+    as the graph's `seed` node stores definitions. Left unset, such a fetch
+    is refused.
     `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
-    unset, `recall` says there is nothing to recall from.
+    unset, `recall` says there is nothing to recall from. `remove_cards` is
+    `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
+    says it is not available.
     """
     # One lock per invocation, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
@@ -506,7 +653,10 @@ def build_orchestrator_tools(
     chart_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     async def search(
-        query: str, parts: list[OrchestratorSearchPart], tool_context: ToolContext
+        query: str,
+        tool_context: ToolContext,
+        parts: list[SearchPart] | None = None,
+        as_text: bool = False,
     ) -> dict[str, Any]:
         """Search DFO's data for every measured thing a question asks for.
 
@@ -514,15 +664,31 @@ def build_orchestrator_tools(
         on earlier turns ("the same for Ghana", "show those over time") is
         sent as one self-contained question naming the measure, places and
         period. `parts` is one entry per measured variable in it, each with
-        the entities, time, unit or source the question gives for that
-        variable, as spoken. An entity that names a set of places keeps
+        the entities, time, unit or sources the question gives for that
+        variable, as spoken. If Search reports an ambiguous source, ask the
+        user which candidate they mean, then set that source entry's `ref`
+        to the chosen candidate's reference, keeping its text and exclusion.
+        An entity that names a set of places keeps
         the set's name as its text, with `members: true` when the question
         asks for each member on its own: "African countries" is
         `{"text": "Africa", "members": true}`, and "Africa" alone is the
         region as one place. All parts go in one call. A flow measure such
         as aid, donors or recipients needs `role` on each entity in
         `entities`, as spoken. Use `to` for a recipient and `from` for a
-        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`.
+        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A
+        comparison of two categories of one measure ("health versus
+        education aid") is one part per category, each with `separate:
+        true`, and so is any other comparison sent as several parts;
+        search may otherwise merge parts that differ in one category or
+        place into one answer. A total over several categories ("health
+        and education aid") stays one part.
+
+        Set `as_text` to have Search read `query` itself, as written, with
+        the one part it asks about in `parts`, so the answer can be held
+        against what that part asked. Send one part's question at a time
+        this way: Search gives every part of the text the places and years
+        it reads, and the sources it names or excludes, so `query` keeps
+        the user's words for the part's sources.
 
         Returns the result's `kind`: a `resolution` reads each part
         separately; a `catalogue` means the question asked what data DFO
@@ -532,48 +698,48 @@ def build_orchestrator_tools(
         `parts`, one per part: its `status` (definite: a spec_id to fetch;
         candidates: readings to choose between, each with a spec_id and
         label; no_data or unsupported: with warnings and, for no_data, a
-        `reason` code saying why), what it resolved to in words, its
-        warnings, and the window it covers. And
+        `reason` code saying why; a part refused because search could not
+        apply a phrase of it adds those phrases as `unbound_qualifiers` and,
+        as `flagged_match`, the sentence of the match it found without
+        them, which answers a broader question), what
+        it resolved to in words, its
+        warnings, its `departures` from what was asked when search states
+        any, its `group_readings` when it reads a named group as the
+        group's published total, and the window it covers. A definite part
+        whose count search chose among others states it as `counted_as`,
+        with the others under `alternatives`, each with its spec_id and
+        label. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
         """
+        if as_text and parts and len(parts) > 1:
+            return _invalid_arguments(
+                tool_context,
+                "search",
+                [
+                    (
+                        {"loc": "parts", "type": "too_long"},
+                        "parts: with as_text, send at most one part; retry each part separately",
+                    )
+                ],
+            )
         spent = _spend(tool_context, "search")
         if spent:
             return {"error": spent}
-        wire_parts = [part.model_dump(exclude_none=True) for part in parts]
+        parts = parts or []
+        raw_text = as_text or not parts
+        wire_parts = [] if raw_text else [part.model_dump(exclude_none=True) for part in parts]
         try:
-            digest = await resolver(question=query, parts=wire_parts)
+            digest = await resolver(question=query, parts=wire_parts, raw_text=raw_text)
         except ResolverError as exc:
             return {"error": (exc.refusal or {}).get("message") or str(exc)}
-        state = tool_context.state
-        specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
-        spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
-        searches = list(state.get(ORCHESTRATOR_SEARCHES_KEY) or [])
-        skill_ids = [skill["id"] for skill in digest.get("skills") or []]
-        observed_at = datetime.now(UTC)
-        readings = []
-        for part in digest.get("part_digests") or []:
-            reading = {
-                key: value
-                for key, value in part.items()
-                if key not in ("spec_block", "candidate_blocks")
-            }
-            blocks = dict(part.get("candidate_blocks") or {})
-            facts: dict[str, Any] = {}
-            if part.get("spec_block") and part.get("spec_id"):
-                blocks[part["spec_id"]] = part["spec_block"]
-                facts = reading_facts(part["spec_block"])
-            specs.update(blocks)
-            spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
-            stored = SearchReading.from_part(
-                {**reading, **facts}, skills=skill_ids, observed_at=observed_at
-            )
-            searches.append(stored.model_dump(mode="json"))
-            readings.append(reading)
-        state[ORCHESTRATOR_SPECS_KEY] = specs
-        state[ORCHESTRATOR_SPEC_WARNINGS_KEY] = spec_warnings
-        state[ORCHESTRATOR_SEARCHES_KEY] = searches
+        # Search answers parts in the order asked, so a digest names the part
+        # at its own position when the counts agree. When they do not, no
+        # digest is tied to a part, and none records parties asked.
+        digests = digest.get("part_digests") or []
+        asked = [_asked_roles(part) for part in parts] if len(parts) == len(digests) else []
+        readings = store_search(tool_context.state, digest, asked=asked)
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
             found["status"] = digest.get("status")
@@ -587,7 +753,7 @@ def build_orchestrator_tools(
                 found["more_skills"] = len(skills) - _SKILLS_SHOWN
         return found
 
-    async def fetch(
+    async def fetch(  # noqa: PLR0911 -- one distinct refusal per way a fetch fails
         spec_id: str,
         tool_context: ToolContext,
         scope: FetchScope | None = None,
@@ -637,6 +803,17 @@ def build_orchestrator_tools(
             else (tool_context.state.get(ORCHESTRATOR_READINGS_KEY) or {}).get(spec_id)
         )
         block = _spec_block(tool_context, spec_id)
+        if block is None:
+            try:
+                block = await _recorded_block(definition_surface, spec_id)
+            except (DefinitionNotResolvedError, PartNotResolvedError) as exc:
+                logger.warning("fetch: no block for %s on record: %s", spec_id, exc)
+                return _unresolved_refusal(spec_id, exc)
+            if block is not None:
+                tool_context.state[ORCHESTRATOR_SPECS_KEY] = {
+                    **(tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+                    spec_id: block,
+                }
         source = None
         if block:
             try:
@@ -772,28 +949,46 @@ def build_orchestrator_tools(
                 }
                 if chart.latest_periods is not None:
                     intent["window"] = _latest_window(chart.latest_periods)
-                written = await executor(tool="write_component", args={"intent": intent})
-                component = written.get("component") if written.get("outcome") == "ok" else None
-                if component is None or not usable_component(component):
-                    refusal = written.get("refusal") or {}
-                    failed = {
-                        "title": chart.title,
-                        "error": refusal.get("message") or "the platform refused it",
-                    }
-                    # presentation-mcp's `fix`: the values the platform would
-                    # accept, as `label (ref)`, for the retry's select.
-                    if refusal.get("advice"):
-                        failed["advice"] = refusal["advice"]
-                    drawn.append(failed)
-                    continue
-                land = getattr(executor, "land_component", None)
-                if land is not None:
-                    land(component, land=True, revises=None)
+                try:
+                    written = await executor(tool="write_component", args={"intent": intent})
+                    component = written.get("component") if written.get("outcome") == "ok" else None
+                    if component is None or not usable_component(component):
+                        refusal = written.get("refusal") or {}
+                        failed = {
+                            "title": chart.title,
+                            "error": refusal.get("message") or "the platform refused it",
+                        }
+                        # presentation-mcp's `fix`: the values the platform would
+                        # accept, as `label (ref)`, for the retry's select.
+                        if refusal.get("advice"):
+                            failed["advice"] = refusal["advice"]
+                        drawn.append(failed)
+                        continue
+                    land = getattr(executor, "land_component", None)
+                    if land is not None:
+                        land(component)
+                except Exception as error:
+                    # Charts already drawn stay on the canvas and in the result.
+                    # A write that timed out may still have stored this chart,
+                    # so the model is told not to draw it again.
+                    logger.exception("make_charts: drawing %r failed", chart.title)
+                    drawn.append(
+                        {
+                            "title": chart.title,
+                            "error": (
+                                f"drawing it failed inside DFO ({type(error).__name__}), and "
+                                "the charts after it in this call were not drawn. Do not "
+                                "draw this chart again: it may be on the canvas already."
+                            ),
+                        }
+                    )
+                    break
                 landed = True
                 drawn.append({"title": chart.title, "facts": component["fact_summary"]})
         finally:
-            # After the awaits, so the counts are read afresh; in a `finally`,
-            # so a call the executor raised out of still counts.
+            # After the awaits, so the counts are read afresh. The `finally`
+            # covers cancellation and anything raised outside the per-chart
+            # `try`. A failed write is caught above.
             _count(tool_context, "make_charts" if landed else "make_charts_failed")
         return drawn
 
@@ -810,6 +1005,12 @@ def build_orchestrator_tools(
             spent = _charts_spent(tool_context)
             if spent:
                 return {"error": spent}
+            if not charts:
+                _count(tool_context, "make_charts_failed")
+                return {
+                    "error": "make_charts needs at least one chart. It only adds charts; it "
+                    "cannot remove or clear cards on the canvas. Nothing changed."
+                }
             drawn = await _draw(charts, tool_context)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
@@ -819,15 +1020,22 @@ def build_orchestrator_tools(
             )
         return result
 
-    def ask_user(question: str, options: list[str], tool_context: ToolContext) -> dict[str, Any]:
+    def ask_user(
+        question: str, options: list[AskOption], tool_context: ToolContext
+    ) -> dict[str, Any]:
         """Ask the user a question before going on, offering the likely answers.
 
         `options` are the answers to choose from, at least one; the user may
-        also write their own or skip. End your turn after calling it; the
+        also write their own or skip. An option for a way of counting that a
+        search result names carries that count's spec_id, and the answer
+        names it when the user picks it. End your turn after calling it; the
         answer comes back as the next message.
         """
         if not options:
             return {"error": "ask_user needs at least one option to offer."}
+        refused = _options_refusal(options, _named_spec_ids(tool_context))
+        if refused:
+            return refused
         spent = _spend(tool_context, "ask_user")
         if spent:
             return {"error": spent}
@@ -930,17 +1138,20 @@ def build_orchestrator_tools(
         component_id: str | None = None,
     ) -> dict[str, Any]:
         """Read back, in full, what an earlier turn of this conversation did:
-        every source and decision of a plan, what a search read, or a canvas
-        component's stored entry.
+        every source and decision of a plan, what a search read, or the
+        user's canvas.
 
         `part`: "plan" for the plan records of a turn, "readings" for the
-        search readings of a turn, "canvas" for the stored entry of the
-        component `component_id`. `turn` is the turn's number as the
+        search readings of a turn, "canvas" for every card of the conversation,
+        listed as on_canvas or hidden, each with its id, title, type, facts
+        and pinned state, or, with `component_id`, that one card's stored
+        entry. For a plan or readings, `turn` is the turn's number as the
         conversation digest counts them; leave it out for the newest turn
         that has the part. A target that does not exist is refused with the
         values that do.
         """
-        spent = _spend(tool_context, "recall")
+        listing = part == "canvas" and component_id is None
+        spent = _spend(tool_context, "recall_canvas" if listing else "recall")
         if spent:
             return {"error": spent}
         if recall_part is None:
@@ -954,20 +1165,58 @@ def build_orchestrator_tools(
                 "legal": exc.legal,
             }
 
-    return [
-        _validated_arguments(tool)
-        for tool in (
-            search,
-            fetch,
-            make_charts,
-            ask_user,
-            plan,
-            get_skill,
-            get_skill_file,
-            explain_dfo,
-            recall,
+    async def remove_cards_tool(
+        tool_context: ToolContext,
+        component_ids: list[str] | None = None,
+        all_cards: bool = False,
+    ) -> dict[str, Any]:
+        """Take cards off the user's canvas.
+
+        `component_ids` names the cards to take off, by the component ids the
+        canvas lists; set `all_cards` to take off every card instead. Returns
+        the ids taken off; a named card already off the canvas needs nothing,
+        and an id this conversation never held is named back.
+        """
+        spent = _spend(tool_context, "remove_cards")
+        if spent:
+            return {"error": spent}
+        if remove_cards is None:
+            return {"error": "removing cards is not available on this server"}
+        if not component_ids and not all_cards:
+            return {"error": "Name the cards to take off, or set all_cards. Nothing changed."}
+        removed, missing = await remove_cards(
+            component_ids=component_ids or [], all_cards=all_cards
         )
+        if not removed and missing and len(missing) == len(component_ids or []):
+            return {"error": "No card of this conversation has those ids. Nothing changed."}
+        if not removed:
+            note = (
+                "The canvas was already empty."
+                if all_cards
+                else "Those cards were already off the canvas."
+            )
+            return {"removed": [], "note": note}
+        return {"removed": removed} | ({"not_in_conversation": missing} if missing else {})
+
+    remove_cards_tool.__name__ = "remove_cards"
+
+    return [
+        _validated_arguments(search, hints=_SEARCH_ARGUMENT_HINTS),
+        *(
+            _validated_arguments(tool)
+            for tool in (
+                fetch,
+                make_charts,
+                ask_user,
+                plan,
+                get_skill,
+                get_skill_file,
+                explain_dfo,
+                recall,
+                remove_cards_tool,
+            )
+        ),
     ]
 
 
-__all__ = ["BUDGETS", "DOWNLOAD_BUDGETS", "TOOL_NAMES", "Chart", "build_orchestrator_tools"]
+__all__ = ["TOOL_NAMES", "Chart", "Resolver", "build_orchestrator_tools"]

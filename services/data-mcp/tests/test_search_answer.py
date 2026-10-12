@@ -17,12 +17,25 @@ from .digest_corpus import CASES
 from .test_digest import _envelope, _part, _skill, _spec, _with_skills
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-_CAPTURED = ("resolve_population_guatemala", "resolve_gdp_per_capita_guatemala")
+_CAPTURED = (
+    "resolve_population_guatemala",
+    "resolve_gdp_per_capita_guatemala",
+    "resolve_aid_france_kenya",
+)
 _CAPTURED_BROAD = "resolve_health_spending_broad"
 
-_ANSWER_KEYS = {"status", "parts", "skills", "warnings"}
+_ANSWER_KEYS = {"kind", "status", "parts", "skills", "warnings"}
 _PART_KEYS = {"label", "status", "specs", "warnings"}
-_SPEC_KEYS = {"spec_id", "label", "measure", "member_count", "member_count_exact", "varies_by"}
+_SPEC_KEYS = {
+    "spec_id",
+    "label",
+    "measure",
+    "member_count",
+    "member_count_exact",
+    "varies_by",
+    "counted_as",
+    "alternatives",
+}
 
 # The answer for a single-part recorded envelope stays well under one kilobyte,
 # a size a model's context takes comfortably.
@@ -155,6 +168,19 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     }
 
 
+def test_a_recorded_definite_spec_states_its_elected_measure_and_sibling() -> None:
+    spec = render_answer(_captured("resolve_aid_france_kenya"))["parts"][0]["specs"][0]
+
+    assert spec["counted_as"] == "gross disbursements"
+    assert spec["alternatives"] == [
+        {
+            "spec_id": "spec_c67524ce5da3bfd4d94994a76c560b28",
+            "label": "net disbursements",
+            "axis": "what",
+        }
+    ]
+
+
 def test_a_spec_with_no_elected_stat_vars_states_no_count() -> None:
     spec = render_answer(_envelope("definite", spec=_spec()))["parts"][0]["specs"][0]
 
@@ -230,6 +256,9 @@ def test_the_answer_states_only_what_the_digest_states(name: str, envelope: dict
             assert not spec["label"] or spec["label"] in digest
             assert "measure" not in spec or spec["measure"] in digest
             assert "member_count" not in spec or f"{spec['member_count']:,} StatVar" in digest
+            assert "counted_as" not in spec or f"Counted as {spec['counted_as']}" in digest
+            for alternative in spec.get("alternatives", []):
+                assert f"{alternative['label']} [{alternative['spec_id']}]" in digest
         for warning in part.get("warnings", []):
             assert warning["message"] in digest
     for skill_id in answer.get("skills", []):

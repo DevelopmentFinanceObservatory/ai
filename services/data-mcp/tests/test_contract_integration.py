@@ -12,15 +12,13 @@ error, e.g.:
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 
 import httpx2
 import jsonschema
 import pytest
-from data_mcp.artifact_resource import _MAX_ADVERTISED_TTL_S
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.node_lookup import EntityNode, SourceNode, StatVarNode, _outcome_from_response
-from data_mcp.search_tool import SearchPart, to_wire_request
+from data_mcp.search_tool import SearchPart, SearchSource, to_wire_request
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DFO_APIS_URL"),
@@ -57,7 +55,15 @@ async def test_wire_request_validates_against_the_published_request_schema() -> 
     response.raise_for_status()
     request_schema = response.json()["request"]
 
-    wire = to_wire_request([SearchPart(variable="malaria grants")], raw_query=None)
+    part = SearchPart(
+        variable="debt service",
+        sources=[
+            SearchSource(
+                text="IDS", ref="provenance/WorldBankInternationalDebtStatistics", exclude=True
+            )
+        ],
+    )
+    wire = to_wire_request([part], raw_query=None)
 
     jsonschema.validate(instance=wire, schema=request_schema)
 
@@ -146,12 +152,12 @@ async def test_live_node_door_source_reports_licence_and_freshness_presence() ->
     )
 
 
-async def test_snapshot_route_carries_a_url_and_expiry_within_the_advertised_ttl() -> None:
-    """The only place the fifteen-minute claim is checked against a running deployment
+async def test_snapshot_route_carries_a_stable_link_that_redirects() -> None:
+    """The only place the stable-link wire is checked against a running deployment
     rather than against a fixture this suite wrote itself. Mints a real manifest, then
     reads the snapshot route for the returned spec_id/content_version and checks every
-    artifact's `url`/`url_expires_at` -- `url_expires_at` no more than
-    `_MAX_ADVERTISED_TTL_S` seconds out.
+    artifact's `url` is the root-relative link, carries no `url_expires_at`, and
+    answers 302.
 
     Skips cleanly when the Datasets surface itself is unmounted
     (`DFO_DATASETS_SURFACE` off -> 404 on `/api/datasets/capabilities`), matching this
@@ -199,7 +205,12 @@ async def test_snapshot_route_carries_a_url_and_expiry_within_the_advertised_ttl
     snapshot = snapshot_response.json()
 
     assert snapshot["artifacts"], "expected at least one still-servable artifact"
-    now = datetime.now(UTC)
-    for artifact in snapshot["artifacts"]:
-        expires_at = datetime.fromisoformat(artifact["url_expires_at"])
-        assert 0 <= (expires_at - now).total_seconds() <= _MAX_ADVERTISED_TTL_S
+    async with httpx2.AsyncClient(base_url=base_url, timeout=30.0) as client:
+        for artifact in snapshot["artifacts"]:
+            assert "url_expires_at" not in artifact
+            assert artifact["url"] == (
+                f"/api/datasets/{manifest['definition']['spec_id']}/"
+                f"{manifest['content_version']}/files/{artifact['artifact_digest']}"
+            )
+            link_response = await client.get(artifact["url"])
+            assert link_response.status_code == 302

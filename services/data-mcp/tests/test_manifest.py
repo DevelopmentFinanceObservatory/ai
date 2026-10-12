@@ -3,9 +3,9 @@ policy, and the shapes `strip_manifest` accepts.
 
 `_DEFINITION_MANIFEST` was captured by driving dfo-apis' own offline `TestClient`
 (`tests/datasets_api/conftest.py::make_client`) through `POST /api/datasets`, the
-same way `tests/datasets_api/test_mint_spec_id.py` does it, against a
-`FakeArtifactStore` whose `signed_get_url` returns `fake://artifact/<tier>/<digest>`
--- pasted as JSON so a real production shape backs every assertion here, including
+same way `tests/datasets_api/test_mint_spec_id.py` does it, then rewriting each
+artifact's `url` to the stable link `/api/datasets/{id}/{cv}/files/{digest}` --
+pasted as JSON so a real production shape backs every assertion here, including
 ones a hand-built fixture would happily satisfy while describing something
 production never emits. The capture's inline `statistics` array is edited by hand,
 replaced by `series_count` plus a `rendering: {"statistics": "series"}` artifact
@@ -37,8 +37,7 @@ _DEFINITION_MANIFEST = json.loads("""
       "media_type": "text/csv",
       "rendering": {"bundle": false, "format": "csv"},
       "tier": "working",
-      "url": "fake://artifact/working/sha256:8d82b3452a2f7ac2c03c9d611548ee8d63cb90f37a8e98978d325372547822a7",
-      "url_expires_at": "2026-08-11T20:15:17.015350+00:00"
+      "url": "/api/datasets/spec_2dffbc390c1c97d9992ee162ce690b19/cv_6b2c86ce87fdd1f7ab7b7bbca9cbf066/files/sha256:8d82b3452a2f7ac2c03c9d611548ee8d63cb90f37a8e98978d325372547822a7"
     },
     {
       "artifact_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
@@ -47,8 +46,7 @@ _DEFINITION_MANIFEST = json.loads("""
       "media_type": "application/vnd.apache.parquet",
       "rendering": {"statistics": "series"},
       "tier": "working",
-      "url": "fake://artifact/working/sha256:9999999999999999999999999999999999999999999999999999999999999999",
-      "url_expires_at": "2026-08-11T20:15:17.015350+00:00"
+      "url": "/api/datasets/spec_2dffbc390c1c97d9992ee162ce690b19/cv_6b2c86ce87fdd1f7ab7b7bbca9cbf066/files/sha256:9999999999999999999999999999999999999999999999999999999999999999"
     }
   ],
   "citation": {
@@ -107,14 +105,14 @@ _DEFINITION_MANIFEST = json.loads("""
 """)
 
 
-def _signed_urls(payload: dict) -> set[str]:
-    """Every `url`/`url_expires_at` string anywhere in `payload`'s artifact entries."""
+def _artifact_links(payload: dict) -> set[str]:
+    """Every `url` string anywhere in `payload`'s artifact entries."""
     urls: set[str] = set()
 
     def _walk(node: object) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                if key in ("url", "url_expires_at") and isinstance(value, str):
+                if key == "url" and isinstance(value, str):
                     urls.add(value)
                 _walk(value)
         elif isinstance(node, list):
@@ -125,18 +123,19 @@ def _signed_urls(payload: dict) -> set[str]:
     return urls
 
 
-# no signed URL survives anywhere in the output
+# no artifact link survives anywhere in the output
 
 
-def test_no_signed_url_survives_stripping_a_definition_manifest() -> None:
-    original_urls = _signed_urls(_DEFINITION_MANIFEST)
-    assert original_urls, "fixture must actually carry signed URLs for this test to mean anything"
+def test_no_artifact_link_survives_stripping_a_definition_manifest() -> None:
+    original_urls = _artifact_links(_DEFINITION_MANIFEST)
+    assert original_urls, (
+        "fixture must actually carry artifact links for this test to mean anything"
+    )
 
     stripped = strip_manifest(_DEFINITION_MANIFEST)
     dumped = json.dumps(stripped.model_dump(mode="json"))
 
     assert '"url"' not in dumped
-    assert '"url_expires_at"' not in dumped
     for url in original_urls:
         assert url not in dumped
 
@@ -244,7 +243,7 @@ def test_strip_manifest_returns_a_manifest_instance() -> None:
     assert isinstance(strip_manifest(_DEFINITION_MANIFEST), Manifest)
 
 
-# resource_uri: derivation, no signed URL, and overwrite-on-input
+# resource_uri: derivation, no artifact link, and overwrite-on-input
 
 
 def test_resource_uri_derived_from_definition_spec_id_content_version_and_digest() -> None:
@@ -258,15 +257,14 @@ def test_resource_uri_derived_from_definition_spec_id_content_version_and_digest
     )
 
 
-def test_resource_uri_is_never_a_signed_url() -> None:
+def test_resource_uri_is_never_an_artifact_link() -> None:
     payload = copy.deepcopy(_DEFINITION_MANIFEST)
-    payload["artifacts"][0]["url"] = "https://signed.example/should-not-leak-into-resource-uri"
-    payload["artifacts"][0]["url_expires_at"] = "2026-08-11T20:15:17.015350+00:00"
+    payload["artifacts"][0]["url"] = "/links/should-not-leak-into-resource-uri"
 
     stripped = strip_manifest(payload)
     dumped = json.dumps(stripped.model_dump(mode="json"))
 
-    assert "https://signed.example/should-not-leak-into-resource-uri" not in dumped
+    assert "/links/should-not-leak-into-resource-uri" not in dumped
     for artifact in stripped.artifacts:
         assert artifact.resource_uri is not None
         assert artifact.resource_uri.startswith("dfo://artifact/")
@@ -302,14 +300,14 @@ def test_artifact_uri_template_constant_is_the_dfo_artifact_grammar() -> None:
 
 
 def test_render_validation_errors_suppresses_the_raw_input_value() -> None:
-    malformed = {"url": "https://signed.example/should-not-leak-into-a-refusal-message"}
+    malformed = {"url": "/links/should-not-leak-into-a-refusal-message"}
 
     with pytest.raises(ValidationError) as exc_info:
         strip_manifest({**copy.deepcopy(_DEFINITION_MANIFEST), "artifacts": [malformed]})
 
     rendered = render_validation_errors(exc_info.value)
 
-    assert "https://signed.example/should-not-leak-into-a-refusal-message" not in rendered
+    assert "/links/should-not-leak-into-a-refusal-message" not in rendered
     assert "artifact_digest" in rendered
 
 

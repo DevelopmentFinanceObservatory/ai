@@ -20,7 +20,7 @@ silent, or stale. The deltas are marked where they apply; every unmarked
 shape is the drafts' shape.
 
 The contract is frozen at `schema_version: 1`. Agent internals (planning,
-depth policy, tool selection, models) will keep moving underneath it; a
+tool selection, models) will keep moving underneath it; a
 breaking structural change bumps the version and ships a migration note.
 
 ## Endpoints
@@ -102,8 +102,9 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
 - **`turn.request`** starts or continues a turn. `message` is the user's
   prose. `surface` ∈ `studio | download | embed` and is **optional with
   default `"studio"`** (delta 6: doc 1 required it, doc 2's fixtures omit
-  it; resolved in favour of the lenient parse). It feeds the harness's
-  depth policy per turn (`download` earns no dialogue, and a per-head figure no series holds refuses there, where `studio` computes it from two sources). `component_ref` scopes the turn to one card ("Ask follow
+  it; resolved in favour of the lenient parse). It sets what a turn may
+  do: on `download` the agent fetches one dataset and plans nothing.
+  `component_ref` scopes the turn to one card ("Ask follow
   up" / agent-driven "Edit Card"). `seed_spec` is the Search handoff
   (delta 18, see "Seeds from Search" below). `auto_add`
   (optional, default `true`; delta 11): when `false`, components the turn
@@ -270,15 +271,16 @@ Three turn shapes beyond the plain data question:
   conversation's canvas digest without any data search (message frames,
   `suggestions`, `done`). An empty canvas answers "nothing yet".
 
-Cross-turn context: each turn seeds two digests into the opening and
-planning model calls, the canvas digest (block titles, types, fact
+Cross-turn context: every model call of the turn's agent opens with
+two digests, the canvas digest (block titles, types, fact
 summaries, never rows; bounded to the newest 16 blocks), which is what
 lets "now do the same for Uganda" resolve, and the conversation digest
 (the newest 10 turn records: user message, assistant close, resulting
 cards; byte-capped), which is what lets "the country I mentioned" resolve
 when the earlier turn made no card. Context past either bound is served
-on demand by a bounded server-side recall step (one round per turn,
-mechanical store lookup: digests and fact summaries, never rows).
+on demand by the agent's `recall` tool (three calls per turn, a
+mechanical store lookup: turn records, readings and fact summaries, never
+rows).
 Nothing about this appears on the wire: no new frames, no new request
 fields.
 
@@ -346,55 +348,40 @@ A seed is browser input, so every member the harness keeps is bounded
 comes from). The harness reads nothing else of it. Every label,
 sentence, coverage count, headline, slot and summability flag a seeded
 turn uses comes from the Search API's own answer for the seed's
-identity, which is held to the same bounds (`SpecBlock`), as is what one
-seed puts into a tool result (`MAX_SEED_SOURCE_CHARS`) and into session
-state (`MAX_SEED_RECORD_CHARS`). A seed or an answer past a bound is
-refused whole.
+identity, which is held to the same bounds (`SpecBlock`). A seed or an
+answer past a bound is refused whole.
 
 The wire holds the items unparsed, and the route refuses a body past
 `MAX_TURN_REQUEST_BYTES` before parsing it. A seeded request cannot
-carry an `edit` `component_ref`. The graph's `seed` node reads each item
-once as a `Seed` (`harness.seeds.take_seeds`), so one the harness
-cannot use fails its own `seed-<n>` step (`seed_invalid`,
-`identity_mismatch`, or `seed_duplicate` for a `spec_id` an earlier
-usable seed names) and the others go on.
+carry an `edit` `component_ref`. The workflow's `seed` node, the first of
+every turn, reads each item once as a `Seed` (`harness.seeds.take_seeds`),
+so one the harness cannot use fails its own `seed-<n>` step
+(`seed_invalid`, `identity_mismatch`, or `seed_duplicate` for a `spec_id`
+an earlier usable seed names) and the others go on.
 
 The node then resolves every usable seed's identity again, all at once:
 one `resolve_definition` call per seed to the data-mcp at
 `DATA_MCP_URL`, which posts the identity alone to the Search API's
 `dataset_resubmit` door and stores the definition Search answers with,
 so the `get_data` that retrieves the seed reads it wherever data-mcp
-runs. The turn waits for the
-slowest answer. A seed data-mcp or Search could not be reached for
-fails its step (`service_unavailable`); when that leaves no seed, the
-receive step fails too. A seed whose identity Search refuses, no longer
-resolves to a definite part, or resolves to another `spec_id`, or whose
-answer the harness cannot read, is dropped: its step fails as
-`seed_dropped`, with the reason and a request to search for it again,
-and the turn plans from the others. No plan in the turn retrieves that
-dataset, pinned or through a search
-(`planner.plan.names_dropped_seed`), and the turn's next words name it,
-as `dataset <n> from Search` with Search's reason, in a `message.delta`
-before the plan card, in the `question` of an `elicitation.request`, or
-in the closing text when no plan is drafted. A planner that drafts no
-plan from the kept seeds closes the turn with text naming the dropped
-seed and the seeds left unplanned. The node retrieves nothing.
-It plans from the kept seeds in place of `probe`, and a turn with no
-kept seed falls back to the question alone, whose search `probe` reads
-without any reading of a dropped dataset: a `definite` reading of one,
-or candidates naming only such datasets, close the turn with text
-naming the drop. The receive step is recorded on every turn that posts a
-list of seeds, counting the seeds kept, none included.
+runs. The turn waits for the slowest answer. A seed data-mcp or Search
+could not be reached for fails its step (`service_unavailable`); when
+that leaves no seed, the `seeds` step fails too. A seed whose identity
+Search refuses, no longer resolves to a definite part, or resolves to
+another `spec_id`, or whose answer the harness cannot read, is dropped:
+its step fails as `seed_dropped`, with the reason and a request to
+search for it again. The `seeds` step is recorded on every turn that
+posts a list of seeds, counting the seeds kept, none included.
 
-A plan pins each seed over the years it retrieves. A fetch with no plan
-retrieves the year Search showed when the question named none. A
-`get_data` of a seed posts its spec_id and identity alone; the mint
-resolves the family's members from the graph.
-
-On the `download` surface the first kept seed is retrieved, every
-other kept seed fails its step as `one_dataset_per_download`, and the
-retrieved seed's operations are reported by a failed
-`seed-<n>-operations` step, `no_operations_on_download`.
+The seeds kept become definite parts of one search, read from Search's
+answer, so the turn's agent holds them as it holds any search result,
+and the planner reads them as search readings in this turn and later ones.
+The agent's first message of
+the turn lists them with the operations the user asked of each, and
+names each dropped seed as `dataset <n> from Search` with Search's
+reason, for the agent to tell the user. The agent fetches or plans with a
+kept seed's `spec_id` with no `search` call. With no seed kept, the turn
+goes on from the question alone. The node retrieves nothing.
 
 Fixture: `request-11-turn-seeded.json`.
 
@@ -447,7 +434,7 @@ retrieves those places and shows no level step. `schema_version` stays 1.
 ## Requested outputs on the plan card (delta 20, v1.5)
 
 `plan.proposed` gains an optional `asks`: each output the user asked for,
-in the order the orchestrator engine listed them when it called the
+in the order the agent listed them when it called the
 planner, as `{ask, answered_by, declined?, not_computed?}`. `answered_by`
 holds the `PlanStep` ids whose results answer the ask; `declined` says in
 words why the plan does not compute it. A declined ask has an empty
@@ -455,8 +442,7 @@ words why the plan does not compute it. A declined ask has an empty
 both, and `not_computed` names the part the plan does not compute, in the
 user's words. `not_computed` is optional and appears only on an ask
 answered in part. Every ask is answered, declined, or answered in part
-exactly once. A plan given no asks, and every plan on the classic engine,
-omits the field. `schema_version` stays 1.
+exactly once. A plan given no asks omits the field. `schema_version` stays 1.
 
 ## Corrections to the drafts (delta 10)
 
@@ -475,11 +461,10 @@ Fixture values that are samples, corrected here:
 
 - **`fact_summary.indicators` may be empty**: the platform serves no
   indicator definition text. `attribution` counts still reflect the data.
-- **Some questions refuse at resolve** with `capability_unavailable`
-  ("identity does not reproduce spec_id"), an upstream/spec-kit identity
-  gap on specific spec ids (not arity-dependent), reported to ONE. The
-  stream fails safe: a stream-fatal `error` frame carrying that code and
-  the refusal's own detail.
+- **Some searches refuse** with `capability_unavailable` ("identity does
+  not reproduce spec_id"), an upstream/spec-kit identity gap on specific
+  spec ids (not arity-dependent), reported to ONE. The search step fails
+  with the refusal's own detail and the agent answers without that data.
 
 ## Reference implementation and fixtures
 
@@ -489,15 +474,6 @@ Fixture values that are samples, corrected here:
   `POST /api/studio/*` on the harness app
 - Static fixtures (one per frame/request):
   `services/harness/tests/wire_fixtures/studio/`
-- Recorded LIVE transcripts (real model, real platform, real WDI data):
-  `docs/transcripts/`: four recorded live streams, every frame
-  contract-validated: `studio_transcript.jsonl` (direct-fetch turn),
-  `studio_transcript_plan.jsonl` (plan → approve → component),
-  `studio_transcript_followup.jsonl` (three turns on one conversation:
-  fetch, a digest-resolved follow-up, a canvas question), and
-  `studio_transcript_edit.jsonl` (two Edit Card turns: a title revise →
-  `component.revised`, then a type change → replacement
-  `component.created`), recorded from a scripted SSE client
 - To run a conversation yourself:
   `uv run --env-file .env harness-server` then
   a local (untracked) `test_scripts/studio_client.py` on the dev machine;
@@ -528,12 +504,12 @@ Fixture values that are samples, corrected here:
    `add` op, and `composition_id` becomes optional: omitted targets the
    current composition, and an all-`add` mutate on an empty canvas
    bootstraps one.
-1. Elicitations may set `allow_free_text`, `skippable`, and a `progress`
-   counter (`{completed, total}`, the `StepProgress` shape);
-   `decision: "skip"` proceeds on the default reading;
+1. Elicitations may set `allow_free_text` and `skippable`;
+   `decision: "skip"` declines to choose;
    an `answer` payload may be free text when `allow_free_text`. v1 sets
-   `allow_free_text` on every elicitation, so a payload outside the option
-   ids is taken as free text and refines the resolve.
+   `allow_free_text` on every elicitation that offers no fixed choice, so
+   a payload outside the option ids is taken as free text and reaches the
+   agent or the planner in the user's words.
 1. `CompositionBlock.meta` (`set_card_meta` op) carries presentation-only
    card fields (subtitle/description/axis labels/style) the platform
    intent cannot hold; harness-owned, never sent to the platform.

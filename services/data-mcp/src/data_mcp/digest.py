@@ -2,8 +2,9 @@
 
 The envelope carries one part per variable asked, in query order. Each part
 is shaped by its own status (`definite`/`candidates`/`no_data`/`unsupported`),
-rendered as its own block. A part's own warnings render inside its block, an
-`unsupported` part limited to warnings about the caller's own input. Beneath
+rendered as its own block. A part's own warnings render inside its block, a
+refused part (`unsupported`, or `no_data` that never resolved the ask) limited
+to warnings about the caller's own input. Beneath
 every block come the skills the envelope attaches to its specs, then the
 envelope's diagnostics warnings as a shared trailer. `render_digest(envelope)`
 is the public seam: the digest corpus imports it to exercise rendering with no
@@ -51,13 +52,14 @@ _SKILL_DESCRIPTION_CAP = 160
 # field behind an unsupported refusal.
 _AXIS_DISPLAY_NAMES: dict[str, str] = {"provenance": "source"}
 
-# An `unsupported` part's own warnings render only these codes. Each
-# describes something about the caller's own input (a phrase the lexicon
-# didn't recognise, a facet it can't bind, a default it fell back to), so it
-# bears on why this part refused. Every other warning on the same part
-# belongs to an earlier step of the same request's pipeline and has no
-# bearing on this part's own refusal. Every other status keeps every warning
-# it carries.
+# The own warnings of a part that refused (`unsupported`, or `no_data` in the
+# `unresolved` category) render only these codes. Each describes something
+# about the caller's own input (a phrase the lexicon didn't recognise, a facet
+# it can't bind, a default it fell back to), so it bears on why this part
+# refused. Every other warning on the same part belongs to an earlier step of
+# the same request's pipeline, or describes an answer the part never reached
+# (a defaulted time window), and has no bearing on the refusal. Every other
+# status keeps every warning it carries.
 _CALLER_INPUT_WARNING_CODES: frozenset[str] = frozenset(
     {
         "role_text_not_recognised",
@@ -66,6 +68,10 @@ _CALLER_INPUT_WARNING_CODES: frozenset[str] = frozenset(
         "default_not_declared",
     }
 )
+
+# A sibling measure's `axis` and the words that introduce it on a definite
+# block's measure choice line, in the order the line names them.
+_CHOICE_AXIS_LEADS: dict[str, str] = {"what": "other counts", "unit": "other prices"}
 
 _BASIS_DISPLAY: dict[str, str] = {
     "declared_default": "(default)",
@@ -86,10 +92,13 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     StatVar. A part with an unrecognised status renders too, naming itself,
     rather than discarding it behind a refusal. A single-part envelope renders that one
     block bare; an envelope of two or more parts labels each block by its
-    `variable_text`.
+    `variable_text`. A definite block also names the measure Search elected
+    and each sibling measure's own spec_id (`_measure_choice_line`).
     `envelope["status"] == "mixed"` (the parts disagree) is stated as a
-    leading line. Each part's own warnings render inside its block, though an
-    `unsupported` part limits its warnings to those about the caller's own
+    leading line. A part whose ask named sources ends its block with one line
+    saying which it asked for and which it excluded (`_sources_line`). Each
+    part's own warnings render inside its block, though a refused part
+    (`_is_refusal`) limits its warnings to those about the caller's own
     input. The skills the envelope's specs name render next, each with its
     id and description, most specific first and capped at `_SKILL_CAP`, so a
     model can load one with `get_skill`. The envelope's diagnostics warnings
@@ -128,7 +137,8 @@ def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:
     `status`, the ids of the skills the digest lists (under its cap), and
     its diagnostics warnings sit beside `parts`. A spec is its
     `spec_id`, its rendered sentence as `label`, and the facts the digest's
-    measure line states (`_measure`). A `no_data` part's flagged
+    measure line states (`_measure`); a definite part's spec adds the
+    elected measure and its siblings (`_measure_choice`). A `no_data` part's flagged
     match is left out, since the digest names it as a reason for the refusal
     and it is no spec to retrieve.
     """
@@ -163,7 +173,10 @@ def _answer_part(part: Mapping[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "label": part.get("variable_text"),
         "status": part.get("status"),
-        "specs": [_answer_spec(spec) for spec in _answer_specs(part)],
+        "specs": [
+            _answer_spec(spec, definite=part.get("status") == "definite")
+            for spec in _answer_specs(part)
+        ],
     }
     warnings = _part_warnings(part)
     if warnings:
@@ -184,12 +197,13 @@ def _answer_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return []
 
 
-def _answer_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+def _answer_spec(spec: Mapping[str, Any], *, definite: bool) -> dict[str, Any]:
+    entry = {
         "spec_id": spec.get("spec_id"),
         "label": (spec.get("resolved") or {}).get("rendered_sentence"),
         **_measure(spec),
     }
+    return {**entry, **_measure_choice(spec)} if definite else entry
 
 
 def _answer_warning(warning: Mapping[str, Any]) -> dict[str, Any]:
@@ -203,10 +217,58 @@ def _render_part(index: int, part: Mapping[str, Any], *, multi: bool) -> str:
     status = part.get("status")
     renderer = _PART_RENDERERS.get(status)
     body = renderer(part) if renderer is not None else _render_unknown_part(status)
+    if sources := _sources_line(part):
+        body = f"{body}\n{sources}"
     if multi:
         body = f"{_part_label(index, part)}\n{body}"
     warnings = [_warning_line(warning) for warning in _part_warnings(part)]
     return "\n\n".join([body, *warnings]) if warnings else body
+
+
+def _sources_line(part: Mapping[str, Any]) -> str | None:
+    """One line saying which sources the part's ask named or excluded, as Search read them.
+
+    Read from the part's `restatement.sources`, so only sources the caller
+    asked about appear. Each reads as the caller's wording, whether it was
+    asked for or excluded, and what Search resolved it to: the ref, with the
+    label when the part's spec names one. A wording Search could not resolve
+    carries no ref, and renders as the wording alone. For example `Sources:
+    asked for "IDS", read as World Bank International Debt Statistics (IDS)
+    (provenance/WorldBankInternationalDebtStatistics) · excluded "CRS", read
+    as provenance/OECDCreditorReportingSystem.` No line when the part named
+    no source.
+    """
+    sources = (part.get("restatement") or {}).get("sources") or []
+    if not sources:
+        return None
+    labels = _spec_ref_labels(part.get("spec") or {})
+    pieces = [_source_piece(source, labels) for source in sources]
+    return f"Sources: {' · '.join(pieces)}."
+
+
+def _source_piece(source: Mapping[str, Any], labels: Mapping[str, str]) -> str:
+    verb = "excluded" if source.get("polarity") == "exclude" else "asked for"
+    piece = f'{verb} "{source.get("text")}"'
+    ref = source.get("ref")
+    if not ref:
+        return piece
+    label = labels.get(ref)
+    return f"{piece}, read as {label} ({ref})" if label else f"{piece}, read as {ref}"
+
+
+def _spec_ref_labels(spec: Mapping[str, Any]) -> dict[str, str]:
+    """The label of each ref the spec's facets and facet options name."""
+    resolved = spec.get("resolved") or {}
+    labels: dict[str, str] = {}
+    for facet in (resolved.get("facets") or {}).values():
+        if facet.get("ref") and facet.get("label"):
+            labels[facet["ref"]] = facet["label"]
+    for axis_options in resolved.get("facet_options") or []:
+        for option in axis_options.get("options") or []:
+            ref = (option.get("value") or {}).get("ref") or {}
+            if ref.get("dcid") and ref.get("label"):
+                labels[ref["dcid"]] = ref["label"]
+    return labels
 
 
 def _part_label(index: int, part: Mapping[str, Any]) -> str:
@@ -240,13 +302,17 @@ def _render_candidates_part(part: Mapping[str, Any]) -> str:
 def _render_no_data_part(part: Mapping[str, Any]) -> str:
     no_data = part.get("no_data") or {}
     reason = no_data.get("reason")
+    unbound_qualifiers = no_data.get("unbound_qualifiers") or []
     if no_data.get("category") == "unresolved":
         header = f"The ask could not be resolved (reason: {reason})."
+    elif reason == "qualifier_not_bound" and no_data.get("flagged_match"):
+        header = _unapplied_phrase_header(unbound_qualifiers)
     else:
         header = f"Resolved, but no data is available (reason: {reason})."
     sections = [header]
     if message := no_data.get("message"):
         sections.append(message)
+    sections.extend(_ambiguous_source_lines(no_data.get("ambiguous_sources") or []))
     checked = _checked_count(no_data)
     if checked:
         sections.append(f"Checked {checked:,} StatVar{'' if checked == 1 else 's'}.")
@@ -257,8 +323,52 @@ def _render_no_data_part(part: Mapping[str, Any]) -> str:
         gate = no_data.get("gate")
         sections.append(_flagged_match_line(flagged_match, reason=reason, gate=gate))
         if reason == "qualifier_not_bound":
-            sections.extend(_unbound_qualifier_lines(no_data.get("unbound_qualifiers") or []))
+            sections.extend(_unbound_qualifier_lines(unbound_qualifiers))
     return "\n\n".join(sections)
+
+
+def _unapplied_phrase_header(unbound_qualifiers: Sequence[Mapping[str, Any]]) -> str:
+    """The heading of a `qualifier_not_bound` part that flagged a same-variable match.
+
+    The data exists without the phrase, so the heading states a refusal to
+    apply it: the quoted phrases in query order without repeats, or "every
+    phrase" when no entry carries text.
+    """
+    texts = list(dict.fromkeys(str(q["text"]) for q in unbound_qualifiers if q.get("text")))
+    quoted = [f'"{text}"' for text in texts]
+    if not quoted:
+        named = "every phrase of this ask"
+    elif len(quoted) == 1:
+        named = quoted[0]
+    elif len(quoted) == 2:
+        named = f"{quoted[0]} and {quoted[1]}"
+    else:
+        named = f"{', '.join(quoted[:-1])}, and {quoted[-1]}"
+    return (
+        f"Search found matching data but could not apply {named} to it, so this part has "
+        "no answer (reason: qualifier_not_bound)."
+    )
+
+
+def _ambiguous_source_lines(groups: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per ambiguous source wording, naming each source it could mean.
+
+    Each candidate reads as its label, then its ref and kind (`provenance`,
+    `dataset` or `source`), so a model can ask the user which one is meant.
+    Candidates are capped at `_CANDIDATE_CAP`, with a trailing count of the rest.
+    """
+    lines = []
+    for group in groups:
+        candidates = group.get("candidates") or []
+        shown = [_source_candidate(candidate) for candidate in candidates[:_CANDIDATE_CAP]]
+        remaining = len(candidates) - len(shown)
+        tail = f", and {remaining} more" if remaining > 0 else ""
+        lines.append(f'"{group.get("text")}" could mean: {"; ".join(shown)}{tail}.')
+    return lines
+
+
+def _source_candidate(candidate: Mapping[str, Any]) -> str:
+    return f"{candidate.get('label')} ({candidate.get('ref')}, {candidate.get('kind')})"
 
 
 def _render_unsupported_part(part: Mapping[str, Any]) -> str:
@@ -334,12 +444,15 @@ def _spec_lines(spec: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _spec_block(spec: Mapping[str, Any]) -> str:
-    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, entities, facets, facet options."""
+    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, entities, facets, facet options."""
     headline, confidence_line = _spec_lines(spec)
     lines = [headline, confidence_line]
     measure = _measure_line(spec)
     if measure:
         lines.append(measure)
+    choice = _measure_choice_line(spec)
+    if choice:
+        lines.append(choice)
     resolved = spec.get("resolved") or {}
     entities = resolved.get("entities") or []
     if entities:
@@ -426,6 +539,53 @@ def _measure_line(spec: Mapping[str, Any]) -> str | None:
     if not pieces:
         return None
     return f"{' · '.join(pieces)}."
+
+
+def _measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The measure Search elected for `spec` and the sibling measures it could answer with, as data.
+
+    `counted_as` is `resolved.measure_label`. `alternatives` holds each
+    `resolved.alternative_measures` entry as `{spec_id, label, axis}`, in wire
+    order: axis "what" counts the flow another way ("net disbursements"),
+    axis "unit" switches its prices ("constant prices"). An entry missing its
+    spec_id or label, or on another axis, is left out. Empty when no
+    alternative remains, since the measure line already says what `spec`
+    measures.
+    """
+    resolved = spec.get("resolved") or {}
+    label = resolved.get("measure_label")
+    alternatives: list[dict[str, Any]] = []
+    for alternative in resolved.get("alternative_measures") or []:
+        spec_id = (alternative.get("definition") or {}).get("spec_id")
+        alternative_label = alternative.get("label")
+        axis = alternative.get("axis")
+        if spec_id and alternative_label and axis in _CHOICE_AXIS_LEADS:
+            alternatives.append({"spec_id": spec_id, "label": alternative_label, "axis": axis})
+    if not isinstance(label, str) or not label or not alternatives:
+        return {}
+    return {"counted_as": label, "alternatives": alternatives}
+
+
+def _measure_choice_line(spec: Mapping[str, Any]) -> str | None:
+    """One line naming the elected measure, then each sibling by its own spec_id (`_measure_choice`).
+
+    For example "Counted as gross disbursements; other counts: net
+    disbursements [spec_b]; other prices: constant prices [spec_c]." No line
+    when Search names no alternative.
+    """
+    choice = _measure_choice(spec)
+    if not choice:
+        return None
+    pieces = [f"Counted as {choice['counted_as']}"]
+    for axis, lead in _CHOICE_AXIS_LEADS.items():
+        named = [
+            f"{alternative['label']} [{alternative['spec_id']}]"
+            for alternative in choice["alternatives"]
+            if alternative["axis"] == axis
+        ]
+        if named:
+            pieces.append(f"{lead}: {', '.join(named)}")
+    return f"{'; '.join(pieces)}."
 
 
 def _entities_line(entities: Sequence[Mapping[str, Any]]) -> str:
@@ -574,7 +734,9 @@ def _flagged_match_line(spec: Mapping[str, Any], *, reason: Any, gate: Any) -> s
     if reason == "role_incompatible":
         return f"{prefix} but its declared roles cannot support this request."
     if reason == "qualifier_not_bound":
-        return f"{prefix} but does not satisfy every requested qualifier."
+        line = f"{prefix} but does not satisfy every requested qualifier."
+        sentence = (spec.get("resolved") or {}).get("rendered_sentence")
+        return f'{line} It shows: "{sentence}"' if sentence else line
     if gate:
         return f"{prefix} but failed quality gate {gate}."
     return f"{prefix}."
@@ -670,7 +832,7 @@ def _diagnostics_warnings(envelope: Mapping[str, Any]) -> list[Mapping[str, Any]
 
 def _part_warnings(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     warnings = list(part.get("warnings") or [])
-    if part.get("status") == "unsupported":
+    if _is_refusal(part):
         # A caller-input warning explains the refusal beside it; anything
         # else is a note from an earlier step of the same request's
         # pipeline and does not belong to this part's own refusal.
@@ -678,6 +840,14 @@ def _part_warnings(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
             warning for warning in warnings if warning.get("code") in _CALLER_INPUT_WARNING_CODES
         ]
     return warnings
+
+
+def _is_refusal(part: Mapping[str, Any]) -> bool:
+    """Whether `part` refused the ask: `unsupported`, or `no_data` that never resolved it."""
+    status = part.get("status")
+    if status == "unsupported":
+        return True
+    return status == "no_data" and (part.get("no_data") or {}).get("category") == "unresolved"
 
 
 def _warning_line(warning: Mapping[str, Any]) -> str:

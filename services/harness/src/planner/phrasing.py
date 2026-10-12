@@ -92,12 +92,15 @@ def entities_phrase(
     party reads `EVERY_PLACE`, since such a retrieval holds every level of
     place, or "every {level}" when a filter downstream of it keeps `level`
     (`kept_level`): "every country". A `DatasetRequirement` always names an
-    entity or states `across`, so one of the two is set.
+    entity or states `across`, so one of the two is set. An entity with
+    `members` set reads "each member of {name}", so a card tells the set's
+    members from the set's own figure.
     """
     parts: list[str] = []
     for entity in entities:
-        if entity.name not in parts:
-            parts.append(entity.name)
+        name = f"each member of {entity.name}" if entity.members else entity.name
+        if name not in parts:
+            parts.append(name)
     if across is not None and across_party(across) == "place":
         parts.append(EVERY_PLACE if level is None else f"every {level_noun(level)}")
     elif across is not None:

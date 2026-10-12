@@ -14,8 +14,8 @@ capture each call as it happens and the translator drains them whenever the
 next ADK event arrives. A result carrying a `"component"` member becomes a
 `component.created` frame and a composition update.
 
-While a call runs, `execute` and `fetch` relay each progress report the
-call sends as its own event (`harness.graph.STEP_PROGRESS_KEY` on
+While a plan step runs, `execute` relays each progress report the call
+sends as its own event (`harness.graph.state.STEP_PROGRESS_KEY` on
 `custom_metadata`), which becomes a `running` `activity.step` whose
 `detail` is the report's message. A plan step keeps one wire `step_id`
 from its first report to its final `complete` or `failed` frame, so the
@@ -69,15 +69,14 @@ from pydantic import ValidationError
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph import (
+from harness.graph.seams import Executor
+from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
     ORCHESTRATOR_STATUS_KEY,
     PLANNER_STARTED_KEY,
-    SEED_STEP_TOOL,
     STEP_PROGRESS_KEY,
-    Executor,
 )
 from harness.orchestrator_tools import HANDED_OFF
 from harness.planner_seam import PlannerSeamError
@@ -85,8 +84,8 @@ from harness.provenance import (
     ProvenanceStore,
     SidePart,
     manifest_with_stat_vars,
-    retrieval_frame_ref,
 )
+from harness.seeds import SEED_STEP_TOOL
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -96,6 +95,7 @@ from harness.studio_state import (
 from harness.studio_state import (
     land_component as state_land_component,
 )
+from harness.turn_records import loose_match_notes
 from harness.wire import (
     ActivityStep,
     ComponentCreated,
@@ -111,7 +111,6 @@ from harness.wire import (
     PlanAction,
     PlanAsk,
     PlanDecision,
-    PlanDepth,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -119,7 +118,6 @@ from harness.wire import (
     PlanVersioned,
     RetryMode,
     StepProduced,
-    StepProgress,
     StepStatus,
     Suggestions,
     ToolError,
@@ -331,24 +329,20 @@ class _ExecutorRecord:
     # one conversation's translator drain another's records.
     conversation: str
     # The step this record is for, read off `executor.run.current_step_id`
-    # at call time: a plan step's id, `harness.graph.FETCH_STEP_ID` for the
-    # `fetch` node's call, and `None` for compose's presentation calls,
-    # which are no step at all. Lets `_RecordingSurface.mark_step_failed`
+    # at call time: a plan step's id, or `None` for a call outside a plan,
+    # such as an orchestrator tool's. Lets `_RecordingSurface.mark_step_failed`
     # find and amend the one record a step's post-call validation refused,
     # by identity rather than by position, and lets the translator give a
     # step's final frame the wire id its progress frames already used.
     step_id: str | None = None
     # Stamped by `_RecordingExecutor.land_component` right after the write
-    # it belongs to returns (`harness.graph`'s `compose` node): `land=True`
-    # for a component that passed `harness.wire.usable_component`,
-    # `revises` for the turn's revise target, carried only on the first
-    # usable write. Neither field is a decision; the replace-or-append
-    # call happens later, at drain time, when `_component_frames` reads
-    # them. `land` stays `False` (its default) for every record that never
-    # became a `land_component` call: a plan-step surface record, or a
-    # write whose component failed validation.
+    # it belongs to returns (`make_charts`, `harness.orchestrator_tools`), for
+    # a component that passed `harness.wire.usable_component`. Not a
+    # decision; the landing happens later, at drain time, when
+    # `_component_frames` reads it. `False` (its default) for every record
+    # that never became a `land_component` call: a plan-step surface record,
+    # or a write whose component failed validation.
     land: bool = False
-    revises: str | None = None
 
 
 def _raised_refusal(exc: BaseException) -> dict[str, Any]:
@@ -380,15 +374,7 @@ class _RecordingExecutor:
     conversation the lock serialises turns and the graph runs nodes
     sequentially.
 
-    `store` also backs `components_replaced`: an optional capability
-    `harness.graph`'s `narrate` node probes for with `getattr` (the same
-    pattern `aclose` below uses), never a required part of the `Executor`
-    protocol -- a bare unit-test executor built without this wrapper simply
-    has none, and `narrate` then reads `components_replaced` as always
-    False. Required here, not optional, because every real caller
-    (`harness.studio.StudioRunner`) has a store to bind, and a wrapper
-    built without one could never resolve the conversation
-    `components_replaced` needs.
+    `store` is where `_keep_write_token` finds the current conversation.
     """
 
     def __init__(self, executor: Executor, *, store: StudioStore) -> None:
@@ -396,48 +382,19 @@ class _RecordingExecutor:
         self._store = store
         self._records: list[_ExecutorRecord] = []
 
-    def land_component(self, component: dict[str, Any], *, land: bool, revises: str | None) -> None:
-        """The synchronous stamping capability `compose` calls right after
-        `write_component` returns, with no `await` in between. Stamps
-        `land` and `revises` onto this call's own recorded write (matched
-        by identity: the record whose result carries this exact `component`
-        object) so `_component_frames` can decide and perform the real
-        landing later, at drain time, from these two fields alone. Never
-        decides anything and never touches the conversation itself; a
-        component with no matching record (this capability called
-        directly, not through `__call__` first) leaves nothing to stamp
-        and is silently a no-op."""
+    def land_component(self, component: dict[str, Any]) -> None:
+        """The synchronous stamping capability `make_charts` calls right after
+        `write_component` returns, with no `await` in between. Stamps `land`
+        onto this call's own recorded write (matched by identity: the record
+        whose result carries this exact `component` object) so
+        `_component_frames` can perform the landing later, at drain time.
+        Never touches the conversation itself; a component with no matching
+        record (this capability called directly, not through `__call__`
+        first) leaves nothing to stamp and is silently a no-op."""
         for record in reversed(self._records):
             if record.result.get("component") is component:
-                record.land = land
-                record.revises = revises
+                record.land = True
                 break
-
-    def components_replaced(self) -> bool:
-        """Whether a component landed by the current turn actually replaced
-        an existing block, read by `harness.graph`'s `narrate` node,
-        after `compose` has finished and every write it attempted has
-        already been drained (`_component_frames`, which is what actually
-        calls `harness.studio_state.land_component` and records the
-        outcome on `conversation.turn_components`). Resolves the current
-        turn's conversation off the (store, contextvar) pair the same way
-        `harness.studio.StudioRunner` binds it for the whole turn, through
-        this instance's already-loaded live state (`StudioStore.current`).
-        The route that owns this turn has already loaded or created the
-        conversation before the graph ever runs."""
-        key = current_conversation_key.get()
-        if key is None:
-            raise RuntimeError(
-                "components_replaced needs a current conversation key; the caller must run "
-                "within a studio turn"
-            )
-        conversation = self._store.current(*key)
-        if conversation is None:
-            raise RuntimeError(
-                "components_replaced needs a conversation already loaded onto this store; "
-                "the caller must run within a studio turn"
-            )
-        return any(card.get("action") == "replaced" for card in conversation.turn_components)
 
     async def __call__(
         self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
@@ -465,9 +422,9 @@ class _RecordingExecutor:
         """Record step `step_id`, work the caller did without calling the executor, with `result`.
 
         An optional capability `harness.graph`'s `seed` node probes for with
-        `getattr`, as `compose` probes for `land_component`: the node stores
-        the seeds through data-mcp, off the executor, and refuses the ones it
-        cannot use, and each of those still shows as a step.
+        `getattr`, as `make_charts` probes for `land_component`: the node
+        resolves the seeds through data-mcp, off the executor, and refuses the
+        ones it cannot use, and each of those still shows as a step.
         """
         self._record(tool, args, result, started=time.monotonic(), step_id=step_id)
 
@@ -534,11 +491,11 @@ class _RecordingExecutor:
     async def aclose(self) -> None:
         """Release the wrapped executor's resources, if it holds any.
 
-        `Executor` (`harness.graph.Executor`) is a bare-call protocol with
+        `Executor` (`harness.graph.seams.Executor`) is a bare-call protocol with
         no `aclose` of its own; `McpExecutor` adds one to release its
         long-lived per-conversation presentation-mcp clients
         (`harness.mcp_client.McpExecutor.aclose`), while the scripted
-        stand-ins used in tests and `STUDIO_SCRIPTED` mode hold nothing to
+        stand-ins used in tests and the scripted eval hold nothing to
         release and define no such method. A narrow `hasattr` check here,
         rather than an `isinstance` ladder naming every executor kind, is
         what lets a future executor opt in just by defining the method.
@@ -695,18 +652,14 @@ class _RecordingSurface:
     def _remember_manifest(self, result: ToolCallResult) -> None:
         """Write a successful `get_data` step's manifest into `provenance`.
 
-        Keyed by `retrieval_frame_ref`, as `harness.mcp_client.McpExecutor._get_data`
-        keys it, so the two writers agree on where a manifest lives regardless of
-        which path retrieved it.
+        Through `ProvenanceStore.put_retrieval`, as `harness.mcp_client.McpExecutor
+        ._get_data` writes it, so the two writers agree on where a manifest lives
+        regardless of which path retrieved it.
         """
-        manifest: dict[str, Any] = dict(result.structured_content or {})
-        ref = retrieval_frame_ref(manifest)
         assert self._provenance is not None  # guarded by the caller
-        self._provenance.put(
+        self._provenance.put_retrieval(
             conversation=current_conversation_id.get(),
-            spec_id=ref["spec_id"],
-            content_version=ref["content_version"],
-            manifest=manifest,
+            manifest=dict(result.structured_content or {}),
         )
 
     def mark_step_failed(self, *, step_id: str, tool: str, code: str, detail: str) -> None:
@@ -726,7 +679,7 @@ class _RecordingSurface:
         its last record already reads "refusal".
 
         `code` is the caller's own diagnosis of what refused the step
-        (`harness.graph._failed_step`'s `code`: a tool's own code when one
+        (`harness.graph.execute._failed_step`'s `code`: a tool's own code when one
         called it, the specific `EvidenceIssueCode` when `check_evidence`
         raised it, `outcome.refusal.value` otherwise) -- never a fixed
         string, so the Activity feed names the actual check that fired
@@ -802,7 +755,7 @@ class _RecordingSurface:
         retrievals under that verb's sides. `own_stat_vars` maps each such ref to the verb's tool name
         and the parts of its first and second side (a retrieval frame, or
         an earlier verb's own ref), which the card names that ref by. Called once per terminal frame from
-        `harness.graph._link_evidence_to_terminal_frames`.
+        `harness.graph.answer.link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
         retrieval's manifest was never recorded (its tool was not `get_data`,
@@ -977,42 +930,25 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
 
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
-    node itself validates a model-drafted plan (`graph.py`'s `planner` node
+    node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
     raises on a draft the seam could not validate), so this only ever sees
     a plan already known good.
 
     `refusal_note` is the one field a `"pending_refusal"`-routed payload,
-    an `"ok"` draft that leaves out a seed `seed` dropped, or an `"ok"`
-    draft made over a plan the node could not read, carries beside a
-    normal `"ok"` one's own `summary`/`revision` (`graph.py`'s `planner`
-    node): the payload
-    still needs to say why the user is seeing a plan again, and `Plan`'s
-    schema has no field for that. `depth` and `depth_notice` are
-    the depth verdict `graph.py`'s `choose_depth` node reached earlier in
-    the same turn, carried on both routes for `_interrupt_frames` to read;
-    `Plan`'s own schema has no field for either. `restarted` marks an
-    `"ok"` draft made over a plan the node could not read, whose version
+    or an `"ok"` draft made over a plan the node could not read, carries
+    beside a normal `"ok"` one's own `summary`/`revision` (`harness.graph.planning`'s
+    `planner` node): the payload still needs to say why the user is seeing
+    a plan again, and `Plan`'s schema has no field for that. `restarted`
+    marks an `"ok"` draft made over a plan the node could not read, whose version
     counts from 1 again; `_interrupt_frames` reads it to start a new line of
     plan version ids.
     """
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "restarted", "depth", "depth_notice")
+        if key not in ("summary", "revision", "refusal_note", "restarted")
     }
     return PlannerPlan.model_validate(fields)
-
-
-def _plan_depth(payload: dict[str, Any]) -> PlanDepth | None:
-    """The planner node's `depth` value, as the wire enum -- `None` for a
-    value the enum doesn't carry, `depth="none"` included. That verdict
-    routes a turn to `fetch` when it resolves, so no plan card carries it.
-    A payload without a recognised depth still renders a card rather than
-    raising."""
-    try:
-        return PlanDepth(payload.get("depth"))
-    except ValueError:
-        return None
 
 
 def _refusal_detail(refusal: dict[str, Any]) -> str:
@@ -1041,6 +977,40 @@ class _Translator:
     Stateful over the segment: `paused` is set when a pausing frame
     (plan.proposed / elicitation.request) is emitted, which tells the route
     the stream must end without `done` (contract delta 1).
+
+    The agent's tool calls run through the recording executor and surface,
+    so their steps and cards arrive through `_drain_recorder`; the plan
+    path's events (the planner's status lines, the executor's step
+    progress, the approval and clarify interrupts) go to
+    `_plan_path_frames`. On top of those, the agent's own events stream as
+    they happen:
+
+    - one running status line (an `activity.step` with no `tool`) whenever
+      the agent works and no tool step runs. After a batch of tool results
+      it names what the model reads ("Reading what the search found",
+      "Looking at <measure>, <years>", "Going over the charts", "Reading
+      the earlier turn", "Going over the notes on DFO"), with the limits those
+      results state as `detail`, and "Working out the next step" after a
+      refused hand-off; a batch that mixes tools is named by its latest
+      stage. A successful plan hand-off opens "Working on a plan", a
+      successful ask hands over to the question, and neither opens a
+      reading line. The line completes, with `duration_ms`, when anything else
+      happens: a tool call, answer text, a hand-off, the segment's end. A skill
+      read keeps it running. Thought text never shows;
+    - each tool call, as an `activity.step` labelled from its arguments the
+      moment the model makes it, completed when the tool returns. A
+      hand-off to the planner and a skill read show only when they fail:
+      the planner's own lines follow a hand-off, and a skill read is
+      background, not progress;
+    - answer text, as `message.delta` chunks, the last model call's text
+      being the turn's `message.complete`: text before a tool call is
+      interim, and text after a hand-off to the user or the planner would
+      sit above the question or the plan card, so neither is the answer;
+    - an orchestrator node's own status line ("Reading your question") as a
+      running step until the next thing happens; a plan hand-back shows a
+      failed step and then "Reading the planner's answer" when the planner
+      made no plan, and "Reading the plan's results" when the plan ran,
+      opened at the execute node's result so it covers `plan_done` too.
     """
 
     def __init__(
@@ -1060,11 +1030,17 @@ class _Translator:
         self.paused = False
         # The running status line, as (wire id, label, monotonic start).
         self._status: tuple[str, str, float] | None = None
-        # The dropped seeds the running draft's `PLANNER_STARTED_KEY` names,
-        # which a question the planner asks opens with.
-        self._untold_drops: str | None = None
+        self._streamed_text = False
+        # Each open call's wire step id, label and arguments, by call id.
+        self._open_calls: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        # Calls that show only if they fail, by call id: the tool's name.
+        self._quiet_calls: dict[str, str] = {}
+        # The kind of hand-off ("plan", "ask") the agent's tools recorded.
+        self._handed_off: str | None = None
 
-    def translate(self, event: Event) -> list[Any]:
+    def _plan_path_frames(self, event: Event) -> list[Any]:
+        """Frames for an event of the plan path: the planner's status lines,
+        a plan step's progress, the approval and clarify interrupts."""
         step_progress = (
             event.custom_metadata.get(STEP_PROGRESS_KEY) if event.custom_metadata else None
         )
@@ -1098,105 +1074,14 @@ class _Translator:
         if node == "planner" and isinstance(started, dict):
             label = "Revising the plan" if started.get("revising") else _WORKING_ON_PLAN
             frames.extend(self._open_status(label))
-            self._untold_drops = started.get("untold_drops")
         output = event.output if isinstance(event.output, dict) else None
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
-            self._untold_drops = None
             frames.extend(self._close_status())
-        if node == "probe":
-            frames.append(self._resolve_step(output))
-        elif node in ("converse", "reply", "narrate", "deadend", "canvas_answer") and isinstance(
-            output.get("text"), str
-        ):
-            frames.append(
-                MessageDelta(
-                    event="message.delta",
-                    seq=self._conversation.next_seq(),
-                    text=output["text"],
-                )
-            )
-            if node in ("reply", "narrate", "deadend", "canvas_answer"):
-                self._final_text = output["text"]
-                self._conversation.turn_final_text = output["text"]
-                frames.append(
-                    MessageComplete(
-                        event="message.complete",
-                        seq=self._conversation.next_seq(),
-                        text=output["text"],
-                    )
-                )
         return frames
-
-    def finish(self) -> list[Any]:
-        """Frames that close a segment that ran to the end of its events."""
-        frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
-        if self.paused:
-            return frames
-        self._conversation.close_turn(final_text=self._final_text)
-        frames.append(Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=[]))
-        frames.append(
-            Done(
-                event="done",
-                seq=self._conversation.next_seq(),
-                trace_id=self._conversation.trace_id,
-                composition=self._conversation.composition,
-            )
-        )
-        return frames
-
-    def _resolve_step(self, envelope: dict[str, Any]) -> ActivityStep:
-        status = str(envelope.get("status", ""))
-        # Resolver diagnostics belong on this frame (the Activity panel),
-        # away from the user-facing chat close. Carrying them on a fact
-        # frame lets a plain-language refusal echo one of their numbers
-        # without tripping the grounding check.
-        diagnostics = "; ".join(
-            str(warning.get("message", ""))
-            for warning in envelope.get("warnings", [])
-            if warning.get("message")
-        )
-        detail = f"resolved: {status}" if status else None
-        parts = envelope.get("part_digests") or []
-        if detail and len(parts) > 1:
-            listed = "; ".join(f"{part.get('variable')}: {part.get('status')}" for part in parts)
-            detail = f"{detail} — {len(parts)} parts: {listed}"
-        split = envelope.get("denominator_split")
-        if detail and isinstance(split, dict):
-            # The searches `harness.graph`'s `probe` made after the first: of
-            # a part with its unit moved into its variable, and of a part
-            # refused for its denominator as its measure and its denominator,
-            # a denominator several parts share searched once. A kept split's
-            # parts are the ones listed above; one that was not kept names
-            # its own.
-            if probed := split.get("probed"):
-                moved = ", ".join(f'"{variable}"' for variable in probed)
-                detail = f"{detail} — searched again with the unit in the measure: {moved}"
-            if replaced := split.get("replaced"):
-                asked = ", ".join(f'"{variable}"' for variable in replaced)
-                detail = (
-                    f"{detail} — searched again as {split.get('searched_as')} parts "
-                    f"in place of {asked}"
-                )
-                if not split.get("kept") and (again := split.get("parts")):
-                    listed = "; ".join(
-                        f"{part.get('variable')}: {part.get('status')}" for part in again
-                    )
-                    detail = f"{detail}: {listed}"
-        if detail and diagnostics:
-            detail = f"{detail} — {diagnostics[:500]}"
-        return ActivityStep(
-            event="activity.step",
-            seq=self._conversation.next_seq(),
-            step_id="resolve",
-            label="Resolve the question against the data graph",
-            status=StepStatus.COMPLETE,
-            tool="search",
-            detail=detail,
-        )
 
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
@@ -1288,7 +1173,7 @@ class _Translator:
         return wire_id
 
     def _running_step(self, progress: dict[str, Any]) -> ActivityStep:
-        """A step's progress report (`harness.graph._step_progress_event`) as a
+        """A step's progress report (`harness.graph.execute._step_progress_event`) as a
         `running` frame on the step's own wire id, with the report's message
         as `detail`. The label matches the one the step's final frame
         carries (`_drain_recorder`), since the Activity feed names a line
@@ -1320,8 +1205,8 @@ class _Translator:
         conversation = current_conversation_id.get()
         records = list(self._recorder.drain(conversation))
         if self._surface_recorder is not None:
-            # Plan steps (the surface) precede compose's presentation calls
-            # (the executor) within any one segment, so this ordering matches
+            # Plan steps (the surface) precede the executor's own calls
+            # within any one segment, so this ordering matches
             # what actually ran; the two never both hold records at once in
             # practice, since draining happens between every ADK event. A
             # wave's steps finish, and get recorded, in whatever order the
@@ -1377,45 +1262,28 @@ class _Translator:
                 )
             )
             if isinstance(component, dict):
-                frames.extend(
-                    self._component_frames(
-                        component, step_id=step_id, land=record.land, revises=record.revises
-                    )
-                )
+                frames.extend(self._component_frames(component, step_id=step_id, land=record.land))
         return frames
 
-    def _unshown(self, record: _ExecutorRecord) -> bool:
-        """Whether `record` stays out of the Activity feed. Every record
-        shows here; an engine whose own steps already stand for some calls
-        hides those."""
-        return False
-
     def _component_frames(
-        self, component: dict[str, Any], *, step_id: str, land: bool, revises: str | None
+        self, component: dict[str, Any], *, step_id: str, land: bool
     ) -> list[Any]:
         """Validate `component` against the `component.created` wire
         contract, then, only for a component stamped `land=True`
-        (`_RecordingExecutor.land_component`, called by `harness.graph`'s
-        `compose` node right after the write returned), land it: the
-        replace-or-append decision and the canvas mutation itself
-        (`harness.studio_state.land_component`, appended, or swapped in
-        place for the block `revises` named, the same op the Edit Card
-        route's recreate uses, `_replace_block`, called directly by
-        `harness.studio_edit`). This is the one place that decision is
-        made and carried out. A component that fails validation here
-        never lands and produces no frame at all. For an unstamped record
-        (`land=False`) this is the expected outcome: `harness.graph`'s
-        `compose` already refused this write (`component_invalid`, in
-        `refused_writes`) because the same component failed
-        `harness.wire.usable_component`, so no frame is the right result
-        and this is not logged. For a record stamped `land=True`, `compose`
-        already ran `usable_component` on this exact component and it
-        passed, so a validation failure here means the wire check and this
-        method's own contract have diverged: a real bug, logged at
-        ERROR. `land=False` (a write compose never judged usable, or a
-        bare executor with no `land_component` capability at all) means no
-        block exists to report: only `component.created` goes out, for
-        whichever component made it this far. `land=True` against an
+        (`_RecordingExecutor.land_component`, called by `make_charts` right
+        after the write returned), land it: append its block to the canvas
+        (`harness.studio_state.land_component`). A component that fails
+        validation here never lands and produces no frame at all. For an
+        unstamped record (`land=False`) this is the expected outcome:
+        `make_charts` already refused this write because the same component
+        failed `harness.wire.usable_component`, so no frame is the right
+        result and this is not logged. For a record stamped `land=True`,
+        `make_charts` already ran `usable_component` on this exact component
+        and it passed, so a validation failure here means the wire check and
+        this method's own contract have diverged: a real bug, logged at
+        ERROR. `land=False` with a valid component (a bare executor with no
+        `land_component` capability at all) means no block exists to report:
+        only `component.created` goes out. `land=True` against an
         `auto_add=False` conversation resolves to `"held"` inside
         `harness.studio_state.land_component` itself, also only
         `component.created`."""
@@ -1431,15 +1299,14 @@ class _Translator:
         except ValidationError:
             if land:
                 logger.error(
-                    "a component stamped land=True (compose's usable_component check "
+                    "a component stamped land=True (make_charts' usable_component check "
                     "passed) failed component.created validation at drain time; "
-                    "compose's wire check and this validation have diverged"
+                    "make_charts' wire check and this validation have diverged"
                 )
             return []
         if not land:
             return [created]
-        action = state_land_component(self._conversation, component, revises=revises)
-        if action not in ("replaced", "created"):
+        if state_land_component(self._conversation, component) != "created":
             return [created]
         return [
             created,
@@ -1467,20 +1334,16 @@ class _Translator:
             frames: list[Any] = []
             note = payload.get("refusal_note")
             if isinstance(note, str) and note:
-                # `graph.py`'s `planner` node sets this in three cases. Its
+                # `harness.graph.planning`'s `planner` node sets this in two cases. Its
                 # `"pending_refusal"` route (BUDGET_EXHAUSTED or
                 # QUESTION_FIXED), a refused amendment that still has a
                 # `PENDING_APPROVAL` plan on record re-offered unmodified,
                 # carries the refusal's sentence: the plan card below says
                 # what is still approvable, and this says why the user is
                 # seeing it again rather than the change they just asked
-                # for. An `"ok"` draft made when `seed` dropped seeds the
-                # user has not been told of names each seed left out and
-                # why (`dropped_seeds_note`). An `"ok"` draft made over a
-                # plan the node could not read says so
-                # (`UNREADABLE_PLAN_NOTE`), ahead of any dropped-seed note.
-                # Any other `"ok"` draft carries no `refusal_note` and
-                # gets no message here.
+                # for. An `"ok"` draft made over a plan the node could not
+                # read says so (`UNREADABLE_PLAN_NOTE`). Any other `"ok"`
+                # draft carries no `refusal_note` and gets no message here.
                 frames.append(
                     MessageDelta(event="message.delta", seq=conversation.next_seq(), text=note)
                 )
@@ -1493,7 +1356,7 @@ class _Translator:
             latest = conversation.latest_plan_version
             restarted_from: str | None = None
             if payload.get("restarted"):
-                # `graph.py`'s `planner` node drafted this plan from the
+                # `harness.graph.planning`'s `planner` node drafted this plan from the
                 # start, over a plan it could not read, so its version
                 # counts from 1 on a line of its own. The ids given out so
                 # far name versions of the plan it replaces: they are
@@ -1597,8 +1460,6 @@ class _Translator:
                     version=version,
                     title="Research plan",
                     steps=steps,
-                    depth=_plan_depth(payload),
-                    depth_notice=cast("str | None", payload.get("depth_notice")),
                     decisions=[
                         PlanDecision(
                             id=decision.get("slot", f"d{index + 1}"),
@@ -1633,13 +1494,16 @@ class _Translator:
                 step_labels=step_labels,
             )
             return frames
-        # The graph's own `clarify` node (`APPROVE_INTERRUPT`'s sibling
-        # route) raises a `RequestInput` whose `payload` carries
-        # `candidates`; the planner's `adk_request_input` tool call
-        # (`planner.agent`'s `ask_user`) has no `payload` wrapper at all --
-        # `candidates`, `recommended_spec_id` and `rationale` are its own
-        # call args directly. Either shape lands here.
+        # The workflow's own `ask` node raises a `RequestInput` whose
+        # `payload` carries `candidates`. The planner's `adk_request_input`
+        # tool call (`planner.agent`'s `ask_user`) has no `payload` wrapper:
+        # `candidates`, `options`, `recommended_spec_id` and `rationale` are
+        # its own call args directly. Either shape lands here. `options` are
+        # fixed choices that are no source, such as whether to add two
+        # datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
+        # only a pick of one, so they take no free text.
         candidates = payload.get("candidates") or args.get("candidates") or []
+        fixed = args.get("options") or []
         recommended_spec_id = args.get("recommended_spec_id")
         options = [
             ElicitationOption(
@@ -1649,18 +1513,10 @@ class _Translator:
                 and str(candidate.get("spec_id", "")) == recommended_spec_id,
             )
             for candidate in candidates
+        ] + [
+            ElicitationOption(id=str(option["id"]), label=str(option["label"])) for option in fixed
         ]
-        progress = (
-            StepProgress(completed=int(payload["round"]), total=int(payload["max_rounds"]))
-            if payload.get("round") and payload.get("max_rounds")
-            else None
-        )
         question = str(args.get("message", "Which reading did you mean?"))
-        if self._untold_drops:
-            # A planner-side ask: the `planner` node has marked the drops it
-            # names as told. `clarify` opens its own message with them.
-            question = f"{self._untold_drops} {question}"
-            self._untold_drops = None
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
@@ -1668,9 +1524,8 @@ class _Translator:
             question=question,
             input=ElicitationInput.SINGLE_SELECT,
             options=options,
-            allow_free_text=True,
+            allow_free_text=not fixed,
             skippable=True,
-            progress=progress,
             rationale=(
                 str(args["rationale"])
                 if args.get("rationale") and any(option.recommended for option in options)
@@ -1683,60 +1538,6 @@ class _Translator:
             option_ids=frozenset(option.id for option in options),
         )
         return [frame]
-
-
-# ---------------------------------------------------------------------------
-# SSE plumbing
-# ---------------------------------------------------------------------------
-
-
-class _OrchestratorTranslator(_Translator):
-    """Turns the orchestrator engine's events into wire frames.
-
-    The agent's tool calls run through the recording executor, so their
-    steps and cards arrive through `_drain_recorder` exactly as the graph's
-    do; the plan path's events (the planner's status lines, the executor's
-    step progress, the approval and clarify interrupts) are the graph's own
-    and go to `_Translator.translate`. On top of those, the agent's own
-    events stream as they happen:
-
-    - one running status line (an `activity.step` with no `tool`) whenever
-      the agent works and no tool step runs. After a batch of tool results
-      it names what the model reads ("Reading what the search found",
-      "Looking at <measure>, <years>", "Going over the charts", "Reading
-      the earlier turn", "Going over the notes on DFO"), with the limits those
-      results state as `detail`, and "Working out the next step" after a
-      refused hand-off; a batch that mixes tools is named by its latest
-      stage. A successful plan hand-off opens "Working on a plan", a
-      successful ask hands over to the question, and neither opens a
-      reading line. The line completes, with `duration_ms`, when anything else
-      happens: a tool call, answer text, a hand-off, the segment's end. A skill
-      read keeps it running. Thought text never shows;
-    - each tool call, as an `activity.step` labelled from its arguments the
-      moment the model makes it, completed when the tool returns. A
-      hand-off to the planner and a skill read show only when they fail:
-      the planner's own lines follow a hand-off, and a skill read is
-      background, not progress;
-    - answer text, as `message.delta` chunks, the last model call's text
-      being the turn's `message.complete`: text before a tool call is
-      interim, and text after a hand-off to the user or the planner would
-      sit above the question or the plan card, so neither is the answer;
-    - an orchestrator node's own status line ("Reading your question") as a
-      running step until the next thing happens; a plan hand-back shows a
-      failed step and then "Reading the planner's answer" when the planner
-      made no plan, and "Reading the plan's results" when the plan ran,
-      opened at the execute node's result so it covers `plan_done` too.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._streamed_text = False
-        # Each open call's wire step id, label and arguments, by call id.
-        self._open_calls: dict[str, tuple[str, str, dict[str, Any]]] = {}
-        # Calls that show only if they fail, by call id: the tool's name.
-        self._quiet_calls: dict[str, str] = {}
-        # The kind of hand-off ("plan", "ask") the agent's tools recorded.
-        self._handed_off: str | None = None
 
     def _step(
         self, step_id: str | None, label: str, status: StepStatus, **extra: Any
@@ -1787,7 +1588,7 @@ class _OrchestratorTranslator(_Translator):
                 frames.extend(self._open_status(status))
             return frames
         if event.author != ORCHESTRATOR_AGENT_NAME:
-            frames = super().translate(event)
+            frames = self._plan_path_frames(event)
             if (
                 _node_name(event) == "execute"
                 and event.output is not None
@@ -1875,6 +1676,16 @@ class _OrchestratorTranslator(_Translator):
             else:
                 status, detail = self._outcome(response.name or "", args, answer)
             frames.append(self._step(step_id, label, status, tool=response.name, detail=detail))
+            if response.name == "remove_cards" and answer.get("removed"):
+                # The tool already took the blocks off; the client re-renders
+                # from the manifest (`harness.studio_state.remove_cards`).
+                frames.append(
+                    CompositionUpdated(
+                        event="composition.updated",
+                        seq=self._conversation.next_seq(),
+                        manifest=self._conversation.composition,
+                    )
+                )
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -1917,6 +1728,8 @@ class _OrchestratorTranslator(_Translator):
             label = _READING_LABELS[stage]
             limits = (_search_limits(answer) for _, answer, failed in results if not failed)
             detail = "; ".join(limit for limit in limits if limit)
+        elif stage == "recall" and all(_is_canvas_listing(stage, args) for args, *_ in results):
+            label, detail = _READING_CANVAS, None
         else:
             label, detail = _READING_LABELS[stage], None
         return self._open_status(label, detail=detail[:_STEP_DETAIL_CAP] if detail else None)
@@ -1999,9 +1812,29 @@ class _OrchestratorTranslator(_Translator):
         return None
 
     def finish(self) -> list[Any]:
-        frames: list[Any] = list(self._drain_recorder())
-        if self._final_text and not self.paused:
-            frames.extend(self._close_status())
+        """Frames that close a segment that ran to the end of its events. A
+        segment that did not pause closes the turn on the agent's answer,
+        followed by one sentence for each loose match the turn used
+        (`harness.turn_records.loose_match_notes`), sent as a last
+        `message.delta` so the deltas still add up to the `message.complete`
+        text."""
+        frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        if self.paused:
+            return frames
+        if self._final_text:
+            notes = loose_match_notes(
+                self._conversation.turn_readings,
+                specs=self._conversation.turn_specs,
+                plans=self._conversation.turn_plans,
+            )
+            if notes:
+                coverage = "\n\n" + " ".join(notes)
+                self._final_text += coverage
+                frames.append(
+                    MessageDelta(
+                        event="message.delta", seq=self._conversation.next_seq(), text=coverage
+                    )
+                )
             self._conversation.turn_final_text = self._final_text
             frames.append(
                 MessageComplete(
@@ -2010,7 +1843,17 @@ class _OrchestratorTranslator(_Translator):
                     text=self._final_text,
                 )
             )
-        return frames + super().finish()
+        self._conversation.close_turn(final_text=self._final_text)
+        frames.append(Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=[]))
+        frames.append(
+            Done(
+                event="done",
+                seq=self._conversation.next_seq(),
+                trace_id=self._conversation.trace_id,
+                composition=self._conversation.composition,
+            )
+        )
+        return frames
 
 
 # The step a plan hand-back with no plan shows: the closing message says
@@ -2028,6 +1871,7 @@ _READING_LABELS = {
     "recall": "Reading the earlier turn",
 }
 _LOOKING_AT_DATA = "Looking at the data"
+_READING_CANVAS = "Going over your canvas"
 _READING_ABOUT_DFO = "Going over the notes on DFO"
 _WORKING_OUT_NEXT_STEP = "Working out the next step"
 # Recorded calls an agent tool makes on its own behalf (`fetch` retrieves
@@ -2042,6 +1886,7 @@ _ORCHESTRATOR_TOOL_LABELS = {
     "plan": "Handing the question to the planner",
     "explain_dfo": "Reading about DFO",
     "recall": "Looking back at an earlier turn",
+    "remove_cards": "Removing cards from the canvas",
     "get_skill": "Reading background notes",
     "get_skill_file": "Reading background notes",
 }
@@ -2056,7 +1901,14 @@ def _tool_call_label(name: str, args: dict[str, Any], measure: str | None = None
     if name == "make_charts":
         count = len(args.get("charts") or [])
         return f"Making {count} chart{'s' if count != 1 else ''}"
+    if _is_canvas_listing(name, args):
+        return "Looking at your canvas"
     return _ORCHESTRATOR_TOOL_LABELS.get(name) or _step_label(name)
+
+
+def _is_canvas_listing(name: str, args: dict[str, Any]) -> bool:
+    """A `recall` of the whole canvas, not of an earlier turn or one card."""
+    return name == "recall" and args.get("part") == "canvas" and not args.get("component_id")
 
 
 def _search_detail(query: Any, answer: dict[str, Any]) -> str | None:

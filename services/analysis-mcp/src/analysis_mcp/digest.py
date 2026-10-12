@@ -168,6 +168,7 @@ _EXCLUSION_REASON_TEXT: dict[str, str] = {
     "predicate": "removed by the predicate",
     "unmatched_key": "had no matching key on the other side",
     "beyond_limit": "ranked beyond the limit",
+    "party_total": "totals of other parties, left out so no figure counts twice",
 }
 
 # `entity_not_selected` and `period_unmatched` are excluded here: a

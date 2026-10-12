@@ -9,7 +9,13 @@ expectancy (`LifeExpectancy_Person_Female`, 1,885) have data at.
 from __future__ import annotations
 
 import pytest
-from common.place_type import UNTYPED, at_one_level, levels_of
+from common.place_type import (
+    UNTYPED,
+    at_one_level,
+    enrichment_columns,
+    enrichment_role,
+    levels_of,
+)
 
 # Territories each sovereign state's own figures leave out: countries.
 _TERRITORIES = {
@@ -82,3 +88,21 @@ def test_one_place_sits_at_one_level_and_several_sharing_no_place_level_do_not(c
 def test_places_of_a_type_whose_places_nest_do_not_sit_at_one_level() -> None:
     # Data Commons types both Sub-Saharan Africa and the Eastern Africa it contains UNGeoRegion.
     assert not at_one_level(["UNGeoRegion"], place_count=lambda: 2)
+
+
+@pytest.mark.parametrize(
+    ("column", "role"),
+    [
+        ("observationAbout_type", "observationAbout"),
+        ("financingRecipient_kind", "financingRecipient"),
+        ("financingProvider_type", "financingProvider"),
+        ("financingRecipient", None),
+        ("flow_kind", None),
+        ("financingRecipient_label", None),
+    ],
+)
+def test_an_enrichment_column_names_the_role_it_describes(column: str, role: str | None) -> None:
+    roles = ("observationAbout", "financingProvider", "financingRecipient")
+    assert enrichment_role(column, roles=roles) == role
+    if role is not None:
+        assert column in enrichment_columns(role)

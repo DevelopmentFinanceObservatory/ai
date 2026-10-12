@@ -20,9 +20,7 @@ from common.materialisation.content_version import (
 )
 from common.materialisation.factory import build_store, install_store_if_unset
 from common.materialisation.frame_codec import (
-    frame_from_parquet_bytes,
     frame_from_verified_parquet_bytes,
-    frame_from_verified_two_member_parquet_bytes,
     frame_to_parquet_bytes,
 )
 from common.materialisation.frame_ref import FrameRef
@@ -81,9 +79,7 @@ __all__ = [
     "encode_anchor_record",
     "encode_mint_record",
     "encode_trace",
-    "frame_from_parquet_bytes",
     "frame_from_verified_parquet_bytes",
-    "frame_from_verified_two_member_parquet_bytes",
     "frame_to_parquet_bytes",
     "get_content_version_deriver",
     "get_store",

@@ -2,8 +2,8 @@
 frames of non-round values (resolve, engine, identity, trace, store), and the
 output frame's `frame_content_version` must equal the pinned string.
 
-The `cv_` is minted from the output frame's `frame_sha256` and its upstream
-lineage, so it moves when any output bit moves. The result's own
+The `cv_` is minted from the output frame's `frame_sha256` alone, so it moves
+when any output bit moves. The result's own
 `content_version` (`ocv_`) is left unpinned: it hashes the op-spec, the
 input `cv_`s and the `ExecutionIdentity`, none of which an engine rewrite
 touches.
@@ -30,13 +30,13 @@ from differential.cases import DONORS, SV_A, SV_B, YEARS, frame_from_spec, grid
 from fastmcp.tools import ToolResult
 
 PINNED_FRAME_CONTENT_VERSIONS = {
-    "aggregate": "cv_776d29cfdeb5d40b1996b4437315c667",
-    "compare": "cv_277147898697c7632697ccf368bf76e2",
-    "growth": "cv_0550c3c0da0da583a6dbca59b1b00403",
-    "rank": "cv_1c5967c054a6ca4a9f46d9a18d36af3b",
-    "share_of": "cv_0089a5ef716630e1e6c6b04a3f7795f6",
-    "join": "cv_bbd7943e659ae2af4fd9f19bb6a974f7",
-    "filter": "cv_87c6e5ebbe4bb63cf6faf99bdbd38971",
+    "aggregate": "cv_be5edeb0270097c62f272a8ff1e18996",
+    "compare": "cv_2a4a3d3492aa710ce332b50a4b293330",
+    "growth": "cv_efdffe291ba60fbc9c971a845a362aec",
+    "rank": "cv_0b10a81e235a65529ef030eb8d43716e",
+    "share_of": "cv_8cd749dd9481a54c5f8ac37607b2df83",
+    "join": "cv_b4842efedf2cb9c80cb241fc75ca9a22",
+    "filter": "cv_27bbde40bac36ae5e332a842eea3f420",
 }
 
 _WINDOW = (YEARS[2], YEARS[6])

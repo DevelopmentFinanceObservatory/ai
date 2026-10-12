@@ -15,9 +15,5 @@
     }
   ],
   "allow_free_text": true,
-  "skippable": true,
-  "progress": {
-    "completed": 1,
-    "total": 2
-  }
+  "skippable": true
 }

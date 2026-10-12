@@ -7,9 +7,9 @@ by hand. The stream ending on a pause frame is the contract, not a hang.
 
     uv run --package harness python scripts/ask.py "how has Ethiopia's health aid changed since 2020?"
 
-`STUDIO_API_TOKEN` supplies the bearer token; a scripted or live server
-started with it unset accepts any non-empty token. `--url` points at a
-different harness (default http://localhost:8080).
+`STUDIO_API_TOKEN` supplies the bearer token; a server started with it
+unset accepts any non-empty token. `--url` points at a different harness
+(default http://localhost:8080).
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ from pydantic import ValidationError
 
 _DEFAULT_URL = "http://localhost:8080"
 # Any non-empty value works against a server started with STUDIO_API_TOKEN
-# unset (scripted and live dev servers both run that way); it only has to
-# match when the server enforces a real token.
+# unset (dev servers run that way); it only has to match when the server
+# enforces a real token.
 _DEFAULT_TOKEN = "ask-cli"
 
 # A dev server on localhost/127.0.0.1/::1 legitimately runs without TLS; any
@@ -752,7 +752,7 @@ async def _main(argv: list[str] | None = None) -> int:
     except httpx2.ConnectError:
         console.line(
             console.paint(
-                f"could not reach {args.url} -- is the harness running? (just studio-scripted / just studio-live)",
+                f"could not reach {args.url} -- is the harness running? (just dev / just studio-live)",
                 "1;31",
             )
         )

@@ -152,7 +152,10 @@ grammar's own `ordered_threshold` or `category_match` shape, resolving an
 source, the same way a comparison's side does. A `PlaceLevel` becomes a
 `place_level` predicate on `observationAbout_type`, and the retrieval that filter
 reads, directly or through other filters, asks `get_data` for that column with
-`place_types: true` (`_read_by_level_filter`). Every kind gets `mismatches`'s
+`place_types: true` (`_read_by_level_filter`). A flow retrieval an aggregate, a rank,
+a share or a quotient reads asks for `place_types: true` too
+(`_pooled_across_parties`), so `analysis-mcp` can leave out the donors and recipients
+that total other parties. Every kind gets `mismatches`'s
 proof and its own operation-level checks (`entity_unresolved`,
 `entity_ambiguous`, `entity_not_on_frame` for a name the frame it is read from
 carries no column for, `keys_disjoint` for two keyed sides holding no entity in

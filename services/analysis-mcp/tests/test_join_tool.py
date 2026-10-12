@@ -78,11 +78,7 @@ async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) 
     # `test_two_pairs_resolving_to_the_same_input_cv_still_succeeds` below
     # exercises.
     trace = base_trace.model_copy(
-        update={
-            "frame_content_version": derive_frame_content_version(
-                frame=frame, upstream_trace=base_trace.upstream_trace
-            )
-        }
+        update={"frame_content_version": derive_frame_content_version(frame=frame)}
     )
     await store.put(ref, frame=frame, trace=trace, writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -243,10 +239,7 @@ async def test_replay_from_execution_record_content_is_bit_identical(seeded) -> 
     # Distinct from the recompute-from-parameters replay above. Proves the
     # *stored* frame_content_version was derived over the stored output
     # frame, not the input frame's bytes.
-    assert (
-        derive_frame_content_version(frame=stored_frame, upstream_trace=stored_trace.upstream_trace)
-        == stored_trace.frame_content_version
-    )
+    assert derive_frame_content_version(frame=stored_frame) == stored_trace.frame_content_version
 
     recomputed_content_version = recompute_toolkit_content_version(
         op_spec_hash=stored_trace.op_spec_hash,
@@ -280,9 +273,9 @@ async def test_execution_identity_perturbation_moves_the_content_version(seeded)
 
 
 async def test_two_pairs_resolving_to_the_same_input_cv_still_succeeds(seeded) -> None:
-    """`left_cv`/`right_cv` are content-addressed (`frame_sha256` plus
-    `upstream_trace`'s own lineage) -- two genuinely distinct pairs can
-    still resolve to the identical `cv_`, unlike `join_output_collision`
+    """`left_cv`/`right_cv` are content-addressed (`frame_sha256` alone)
+    -- two genuinely distinct pairs holding byte-identical frames resolve
+    to the identical `cv_`, unlike `join_output_collision`
     (raised by `run_join` itself only when a matched key's own stat_var,
     unit, and facets all agree), which this test's own two sides avoid by
     pinning to different units of the identical underlying frame.
@@ -435,11 +428,7 @@ async def test_result_over_the_store_row_ceiling_refuses_rather_than_minting_an_
         left_ref,
         frame=left,
         trace=base_trace.model_copy(
-            update={
-                "frame_content_version": derive_frame_content_version(
-                    frame=left, upstream_trace=base_trace.upstream_trace
-                )
-            }
+            update={"frame_content_version": derive_frame_content_version(frame=left)}
         ),
         writer="test",
     )
@@ -447,11 +436,7 @@ async def test_result_over_the_store_row_ceiling_refuses_rather_than_minting_an_
         right_ref,
         frame=right,
         trace=base_trace.model_copy(
-            update={
-                "frame_content_version": derive_frame_content_version(
-                    frame=right, upstream_trace=base_trace.upstream_trace
-                )
-            }
+            update={"frame_content_version": derive_frame_content_version(frame=right)}
         ),
         writer="test",
     )

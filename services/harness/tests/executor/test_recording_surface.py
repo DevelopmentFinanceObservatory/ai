@@ -40,9 +40,10 @@ from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
-from harness import graph
 from harness.conversation import current_conversation_id
-from harness.graph import _failed_step, _link_evidence_to_terminal_frames, _mark_masked_step_failed
+from harness.graph import answer as answer_module
+from harness.graph.answer import link_evidence_to_terminal_frames
+from harness.graph.execute import _failed_step, _mark_masked_step_failed
 from harness.mcp_client import McpExecutor, _wire_provenance
 from harness.provenance import ProvenanceInput, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC
@@ -120,7 +121,7 @@ async def test_a_component_from_a_planned_run_carries_its_retrievals_real_proven
     # What `harness.graph`'s `execute` node does on an `Accepted` run,
     # before routing on to `compose` -- see this module's docstring for why
     # it is needed here too.
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["totals"]
 
     # A second, independent `McpExecutor`, standing in for the one
@@ -172,7 +173,7 @@ async def test_a_retrieval_held_under_its_own_content_version_still_carries_its_
     _finished, outcome = await execute_approved_plan(plan, surface=surface)
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     component = await _assemble(store, outcome.results["totals"].model_dump())
 
     assert scripted.calls[1][1]["frame_ref"] == typed
@@ -221,24 +222,21 @@ async def test_a_retrieval_whose_result_left_out_its_stat_var_list_is_recorded_w
     assert reads == [f"/api/datasets/{SPEC_KENYA}/{CONTENT_VERSION}"]
 
 
-@pytest.mark.parametrize("engine", ["graph", "orchestrator"])
-def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder(
-    engine: str,
-) -> None:
+def test_create_app_shares_one_provenance_store_between_executor_and_surface_recorder() -> None:
     """`harness.server.create_app` must build ONE `ProvenanceStore` and hand
     it to both `McpExecutor` and `_RecordingSurface` -- two independent
     stores would leave a planned run's manifests unreadable to component
     assembly even with both writers wired."""
     from harness.server import create_app  # noqa: PLC0415 -- isolate this suite's own import cost
 
-    app = create_app(settings=Settings(studio_engine=engine))
+    app = create_app(settings=Settings())
 
     executor = app.state.studio.recorder._executor
     assert isinstance(executor, McpExecutor)
     surface_recorder = app.state.studio.surface_recorder
     assert isinstance(surface_recorder, _RecordingSurface)
     assert surface_recorder._provenance is executor._provenance
-    # On either engine every card is written by this executor, which replays a
+    # Every card is written by this executor, which replays a
     # card's frame with the refresh's clients and budget.
     assert executor._rolling_cards._replay == app.state.live_refresh.replay
 
@@ -258,7 +256,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     """Attribution is per frame. `two_source_plan` runs two independent
     retrieve-then-aggregate branches, one dataset behind each, so the run
     holds two `EvidenceRecord`s while each terminal frame is fed by exactly
-    one retrieval of its own. `_link_evidence_to_terminal_frames` links each
+    one retrieval of its own. `link_evidence_to_terminal_frames` links each
     terminal frame to its own retrieval, and `McpExecutor._assemble_component`
     builds each card from that retrieval's real source and date.
     """
@@ -325,7 +323,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
     # The exact shape of the bug: more than one retrieval in the run.
     assert len(outcome.evidence) == 2
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
 
     executor = McpExecutor(settings=Settings(), provenance=store)
     debt_ref = outcome.results["totals"].model_dump()
@@ -392,7 +390,7 @@ async def test_a_stopped_run_links_the_terminal_frame_it_finished_to_its_source(
     assert isinstance(outcome, Refused), outcome
     assert outcome.step_id == "population_totals_op"
     assert [record.step_id for record in outcome.evidence] == ["debt", "pop"]
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     (debt,) = (record for record in outcome.completed if record.step_id == "totals")
     component = await _assemble(store, debt.frame_ref.model_dump())
     assert component is not None
@@ -445,7 +443,7 @@ async def test_a_single_source_chain_states_exactly_its_one_retrievals_provenanc
     _finished, outcome = await execute_approved_plan(plan, surface=surface)
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["totals"].model_dump()
 
     component = await _assemble(store, frame_ref)
@@ -498,7 +496,7 @@ async def test_a_card_counts_the_stat_vars_of_the_frame_it_draws_from(
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
     assert [record.stat_var_count for record in outcome.steps] == [1, 1]
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
 
     over_aggregate = await _assemble(store, outcome.results["totals"].model_dump())
     over_retrieval = await _assemble(store, outcome.evidence[0].frame_ref.model_dump())
@@ -535,7 +533,7 @@ async def test_a_single_retrieval_with_no_creation_time_reads_as_refreshed_today
     _finished, outcome = await execute_approved_plan(plan, surface=surface)
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["totals"].model_dump()
 
     component = await _assemble(store, frame_ref)
@@ -637,7 +635,7 @@ class _TwoInputRun:
         return self.outcome.results["combined"].model_dump()
 
     def link(self) -> None:
-        _link_evidence_to_terminal_frames(self.surface, self.outcome, workflow=self.workflow)
+        link_evidence_to_terminal_frames(self.surface, self.outcome, workflow=self.workflow)
 
 
 async def _run_two_input_plan(
@@ -917,8 +915,8 @@ async def test_a_frame_whose_retrieval_has_no_evidence_record_is_not_linked(
         update={"evidence": tuple(r for r in run.outcome.evidence if r.step_id != "gdp")}
     )
 
-    with caplog.at_level(logging.WARNING, logger="harness.graph"):
-        _link_evidence_to_terminal_frames(run.surface, partial, workflow=run.workflow)
+    with caplog.at_level(logging.WARNING, logger="harness.graph.answer"):
+        link_evidence_to_terminal_frames(run.surface, partial, workflow=run.workflow)
 
     assert await _assemble(run.store, run.terminal_frame) is None
     assert "without an evidence record" in caplog.text
@@ -976,13 +974,13 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
     run = await _run_two_input_plan(
         join_plan(retrieval_ids=("z_debt", "a_gdp")), schemas=real_schemas, debt=debt, gdp=gdp
     )
-    original = graph._upstream_retrievals
+    original = answer_module._upstream_retrievals
 
     def _forced_order(*args: Any, **kwargs: Any) -> frozenset[str]:
         found = original(*args, **kwargs)
         return ordered_set(found)
 
-    monkeypatch.setattr(graph, "_upstream_retrievals", _forced_order)
+    monkeypatch.setattr(answer_module, "_upstream_retrievals", _forced_order)
     calls: list[dict[str, Any]] = []
 
     class _Spy:
@@ -990,7 +988,7 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             calls.append(kwargs)
 
     spy: Any = _Spy()
-    _link_evidence_to_terminal_frames(spy, run.outcome, workflow=run.workflow)
+    link_evidence_to_terminal_frames(spy, run.outcome, workflow=run.workflow)
 
     assert calls == [
         {
@@ -1222,7 +1220,7 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
         True,
         True,
     ]
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     terminal = outcome.results["combined"].model_dump()
     component = await _assemble(store, terminal)
 

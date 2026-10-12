@@ -1,4 +1,4 @@
-"""`frame_to_parquet_bytes`/`frame_from_parquet_bytes` preserve
+"""`frame_to_parquet_bytes`/`frame_from_verified_parquet_bytes` preserve
 `derive_frame_content_version`'s own output, not just a frame's canonical
 bytes -- the identity a durable store's read path must hand back
 unchanged to the next hop that resolves this frame as its own input.
@@ -7,10 +7,11 @@ unchanged to the next hop that resolves this frame as its own input.
 from __future__ import annotations
 
 from analysis_mcp.frame_ref_resolution import derive_frame_content_version
-from common.materialisation.frame_codec import frame_from_parquet_bytes, frame_to_parquet_bytes
+from common.materialisation.frame_codec import (
+    frame_from_verified_parquet_bytes,
+    frame_to_parquet_bytes,
+)
 from dfo_frame_grammar import Frame
-
-_UPSTREAM_TRACE = {"graph_revision": "rev1", "source_revisions": [], "facets": []}
 
 
 def _mixed_unit_frame() -> Frame:
@@ -49,11 +50,9 @@ def _mixed_unit_frame() -> Frame:
 
 def test_derive_frame_content_version_matches_after_a_parquet_round_trip() -> None:
     frame = _mixed_unit_frame()
-    round_tripped = frame_from_parquet_bytes(frame_to_parquet_bytes(frame))
+    round_tripped = frame_from_verified_parquet_bytes(frame_to_parquet_bytes(frame))
 
-    original = derive_frame_content_version(frame=frame, upstream_trace=_UPSTREAM_TRACE)
-    after_round_trip = derive_frame_content_version(
-        frame=round_tripped, upstream_trace=_UPSTREAM_TRACE
-    )
+    original = derive_frame_content_version(frame=frame)
+    after_round_trip = derive_frame_content_version(frame=round_tripped)
 
     assert after_round_trip == original

@@ -43,6 +43,7 @@ from enum import Enum, auto
 from functools import partial
 from typing import Any
 
+from common.place_type import enrichment_columns
 from common.rolling import canonical_populations
 from dfo_frame_grammar.grammar import STAT_VAR_COLUMN, normalize_role_keys
 from planner.workflow import ToolId
@@ -335,8 +336,11 @@ def bound_role_keys(
     `input_role_keys`, the keys the step that produced its input declared.
     Every other verb's output role columns are the ones its arguments name,
     which the compiler predicted as `expected` in its own spelling; each is
-    spelled the way `frame` spells it. With neither known, `expected` stands
-    as compiled.
+    spelled the way `frame` spells it. A verb keeps each of those roles'
+    `{role}_type` and `{role}_kind` columns that its input carries
+    (`analysis_mcp.engine.common.frame_keeping_role_types`), so the keys
+    take them too when `input_role_keys` holds them. With neither known,
+    `expected` stands as compiled.
 
     Args:
         tool: The step's tool.
@@ -350,9 +354,9 @@ def bound_role_keys(
     """
     if tool in _KEEPS_INPUT_ROLES and input_role_keys is not None:
         return normalize_role_keys(input_role_keys)
-    if frame is None:
-        return tuple(expected)
-    return normalize_role_keys(frame.column(name) for name in expected)
+    keys = list(expected) if frame is None else [frame.column(name) for name in expected]
+    described = {column for key in keys for column in enrichment_columns(key)}
+    return normalize_role_keys((*keys, *(described & set(input_role_keys or ()))))
 
 
 def _one_stat_var(arguments: Mapping[str, JsonValue], input_count: int | None) -> int | None:

@@ -26,12 +26,13 @@ it to the user.
 None of the translator's work is confirmation-gated, because none retrieves
 observations or computes anything: discovery reads metadata, and compiling
 writes a workflow that nothing runs before the user approves it. The
-approval gate stays where it is, in the harness graph.
+approval gate is the harness workflow's `approve` node.
 
-An unreadable surface comes back as a typed problem rather than an exception:
-these run inside ADK tool calls, where raising ends the turn.
-`DuplicateToolNameError` is the exception, and propagates, since a tool name
-served twice is a misconfiguration retrying cannot resolve.
+An unreadable surface comes back as a typed problem the planner can act on.
+These run inside ADK tool calls, where a raise ends the planner entry on a
+final `planner_tool_failed` refusal, set in `harness.planner_seam`.
+`DuplicateToolNameError` propagates, since a tool name served twice is a
+misconfiguration retrying cannot resolve.
 """
 
 from __future__ import annotations
@@ -72,8 +73,10 @@ from translator.discovery import (
     discovery_lock,
     fetch_definitions,
     load_log,
+    name_pinned_groups,
     requirement_revision,
-    settled_sources,
+    resolve_entity_refs,
+    resolving_once,
 )
 from translator.mechanical import TranslatorCore, run_translate
 from translator.referral import (
@@ -81,6 +84,7 @@ from translator.referral import (
     Referral,
     ReferralKind,
     StalePin,
+    WithheldSource,
     load_referral,
     save_referral,
 )
@@ -96,7 +100,8 @@ def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tup
     """Every dataset requirement of `plan` but `requirement_id` whose pin discovery did not find.
 
     Read off `log` (`DiscoveryLog.stale_pin_sources`), each with the sources
-    found in its place, in the plan's order.
+    found in its place, in the plan's order, less those withheld for
+    dropping its pinned source's scope (`DiscoveryLog.scope_kept`).
     """
     stale: list[StalePin] = []
     for requirement in plan.evidence_requirements:
@@ -110,7 +115,15 @@ def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tup
             requirement_revision(requirement), requirement.id, requirement.source_spec_id
         )
         if found is not None:
-            stale.append(StalePin(requirement_id=requirement.id, candidates=found))
+            scope = log.scope_kept(requirement, found)
+            stale.append(
+                StalePin(
+                    requirement_id=requirement.id,
+                    candidates=scope.offered,
+                    withheld=scope.withheld,
+                    repair=scope.repair,
+                )
+            )
     return tuple(stale)
 
 
@@ -122,13 +135,19 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
     source the planner may pin without a fresh search: rendered without
     `spec_id` so the only way one reaches a pinnable choice is a real
     `source_ambiguous` or `pinned_source_not_found` referral. `budget_spent`
-    appears only when set, the one case the planner seam ends the entry on,
-    and `source_mismatch` likewise.
+    and `not_issued` appear only when set, the cases the planner seam ends
+    the entry on, and `source_mismatch` likewise. `withheld` appears only when a source is
+    withheld, each rendered without its `spec_id` beside the scope it drops,
+    since no pin may name it, and `repair` only when one is stated.
     """
     selectable = referral.kind is not ReferralKind.NO_DATA
-    excluded = {"candidates", "stale_pins"}
+    excluded = {"candidates", "stale_pins", "withheld"}
+    if referral.repair is None:
+        excluded.add("repair")
     if not referral.budget_spent:
         excluded.add("budget_spent")
+    if not referral.not_issued:
+        excluded.add("not_issued")
     if not referral.source_mismatch:
         excluded.add("source_mismatch")
     payload = referral.model_dump(mode="json", exclude=excluded) | {
@@ -137,6 +156,8 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
             compact_source(source, selectable=selectable) for source in referral.candidates
         ],
     }
+    if referral.withheld:
+        payload["withheld"] = _withheld_payload(referral.withheld)
     if referral.stale_pins:
         payload["stale_pins"] = [
             {
@@ -144,10 +165,20 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
                 "candidates": [
                     compact_source(source, selectable=True) for source in pin.candidates
                 ],
+                **({"withheld": _withheld_payload(pin.withheld)} if pin.withheld else {}),
+                **({"repair": pin.repair} if pin.repair else {}),
             }
             for pin in referral.stale_pins
         ]
     return payload
+
+
+def _withheld_payload(withheld: Sequence[WithheldSource]) -> list[dict[str, object]]:
+    """Each withheld source as the planner reads it: described without its `spec_id`, beside the scope it drops."""
+    return [
+        compact_source(one.source, selectable=False) | {"dropped": list(one.dropped)}
+        for one in withheld
+    ]
 
 
 class IssueResolution(StrEnum):
@@ -509,10 +540,8 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         requirement_keys, pinned, across = dataset_keys(plan)
 
         def settled(log: DiscoveryLog) -> dict[str, SelectedSource]:
-            """The sources `log` settles for this plan, less any the turn dropped."""
-            return settled_sources(
-                tool_context.state,
-                log,
+            """The sources `log` settles for this plan."""
+            return log.selectable(
                 requirement_keys=requirement_keys,
                 pinned=pinned,
                 across=across,
@@ -540,6 +569,18 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
                 sources=definite_sources,
             )
             log = await apply_definitions(tool_context.state, pairs)
+            discovered = settled(log)
+        resolved = await resolve_entity_refs(
+            log,
+            revision=plan_revision(plan),
+            requirements=[
+                r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
+            ],
+            requirement_keys=requirement_keys,
+            sources=discovered,
+        )
+        if resolved:
+            log = await apply_definitions(tool_context.state, resolved)
             discovered = settled(log)
         result = compile_plan(
             plan=plan,
@@ -594,6 +635,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         reference: str | None = None,
         repeated: bool = False,
         budget_spent: bool = False,
+        not_issued: bool = False,
         source_mismatch: bool = False,
     ) -> dict[str, object]:
         """Save a referral of the draft back to the planner and answer with it.
@@ -636,6 +678,8 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
             requirement = found if isinstance(found, DatasetRequirement) else None
         candidates: tuple[SelectedSource, ...] = ()
         stale_pins: tuple[StalePin, ...] = ()
+        withheld: tuple[WithheldSource, ...] = ()
+        scope_repair: str | None = None
         no_data_reason: str | None = None
         if kind in MAY_CARRY_CANDIDATES and requirement_id is not None and requirement is not None:
             key = requirement_revision(requirement)
@@ -644,7 +688,9 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
                 candidates = log.nearest_for(key, requirement_id)
                 no_data_reason = log.no_data_reason(key, requirement_id)
             elif kind is ReferralKind.PINNED_SOURCE_NOT_FOUND:
-                candidates = log.pinnable_for(key, requirement_id)
+                candidates, withheld, scope_repair = log.scope_kept(
+                    requirement, log.pinnable_for(key, requirement_id)
+                )
                 stale_pins = _other_stale_pins(plan, log, requirement_id)
             elif kind is ReferralKind.REQUIREMENT_UNMEETABLE:
                 # One of the sources found can meet a stated source they do not
@@ -666,15 +712,26 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
             # none: the latest search found no source a pin may be taken
             # from, or the nearest-series relaxation found nothing, and a
             # referral naming no candidates there reports exactly that.
+        ambiguous_sources = ()
+        if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS and requirement is not None:
+            key = requirement_revision(requirement)
+            log = load_log(tool_context.state)
+            matching = [
+                record
+                for record in log.records
+                if record.requirement_id == requirement.id and record.requirement_key == key
+            ]
+            ambiguous_sources = matching[-1].ambiguous_sources if matching else ()
         try:
             referral = Referral(
                 kind=kind,
                 reason=reason,
                 requirement_id=requirement_id,
                 candidates=candidates,
+                ambiguous_sources=ambiguous_sources,
                 no_data_reason=no_data_reason,
                 constraint=constraint,
-                repair=repair,
+                repair=repair or scope_repair,
                 reference=(
                     reference or _logged_reference(reason)
                     if kind is ReferralKind.INTERNAL_FAILURE
@@ -682,8 +739,10 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
                 ),
                 repeated=repeated,
                 budget_spent=budget_spent,
+                not_issued=not_issued,
                 source_mismatch=source_mismatch,
                 stale_pins=stale_pins,
+                withheld=withheld,
             )
         except ValidationError as exc:
             return problem(
@@ -730,15 +789,37 @@ def build_translate(*, surface: ToolSurface) -> Translate:
     async def translate(tool_context: ToolContext) -> dict[str, object]:
         """Find the data the recorded plan needs and compile the workflow the user approves.
 
+        First names, on the recorded draft, each group a pin holds a
+        requirement's `across` side to, in place of that `across`
+        (`translator.discovery.name_pinned_groups`). Each identity is
+        resolved at most once in the whole translation
+        (`translator.discovery.resolving_once`).
+
         Returns:
             `{"outcome": "ok"}` once the plan compiled, or the referral the
-            plan goes back on, whose `outcome` says what it asks of the planner.
+            plan goes back on, whose `outcome` says what it asks of the
+            planner. Either carries `named_in_place_of_across` when a group
+            was named, each entry the requirement, the entity named and the
+            `across` dropped.
         """
-        answer = _planner_answer(await run_translate(tool_context, core=core))
+        with resolving_once():
+            named = await name_pinned_groups(tool_context, surface=surface)
+            answer = _planner_answer(await run_translate(tool_context, core=core))
         if answer.get("outcome") == Outcome.UNSUPPORTED.value:
             # Every kind `OUTCOME_OF` maps to `unsupported` is an
             # `UnsupportedOperation`, so the plan has to decline it.
             record_unsupported(tool_context.state, UnsupportedOperation(answer["kind"]))
+        if named:
+            answer = answer | {
+                "named_in_place_of_across": [
+                    {
+                        "requirement_id": group.requirement_id,
+                        "entity": group.entity.model_dump(mode="json"),
+                        "across": group.across,
+                    }
+                    for group in named
+                ]
+            }
         return answer
 
     return translate

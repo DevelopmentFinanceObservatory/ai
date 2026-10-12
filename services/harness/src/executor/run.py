@@ -165,7 +165,7 @@ from common.materialisation import FrameRef
 from common.refusal import internal_error_message
 from common.telemetry import current_trace_id
 from compiler.arguments import literal_argument_errors
-from compiler.capabilities import CAPABILITIES, ToolCapability
+from compiler.capabilities import CAPABILITIES, Extract, ToolCapability
 from compiler.evidence import (
     EvidenceIssue,
     Severity,
@@ -226,6 +226,7 @@ from executor.artifacts import (
     declared_dropped_key_count,
     declared_shape,
     extract_frame_ref,
+    manifest_frame_ref,
     parse_manifest,
     retrieved_frame_columns,
 )
@@ -341,8 +342,7 @@ def step_budget_s(call_timeout_s: float, *, evidence: bool) -> float:
 # (`harness.studio_translate._RecordingSurface`) reads it to tag its own
 # per-call records, the same way it reads `harness.conversation.
 # current_conversation_id`, without this module importing anything from the
-# harness layer. `harness.graph`'s `fetch` node sets it too, for the one
-# call it makes outside any plan.
+# harness layer.
 current_step_id: ContextVar[str | None] = ContextVar("executor_current_step_id", default=None)
 
 # What remains of the running step's own budget, set for the whole of
@@ -684,12 +684,14 @@ class _Run:
         self.evidence_bindings: dict[str, EvidenceBinding] = {
             b.step_id: b for b in workflow.evidence_bindings
         }
-        # The source each evidence-bearing step is checked against: bound by
-        # `EvidenceBinding.spec_id`, the source the step was compiled to
-        # retrieve -- never looked up by whatever `spec_id` the tool answers
-        # with, which is what `evidence.spec_id` could be instead.
+        # The source each evidence-bearing step is checked against: the one
+        # the step was compiled from (`Workflow.source_of`), so two
+        # retrievals of one `spec_id` each keep their own requirement's
+        # reading of it. The `spec_id` the tool answers with
+        # (`evidence.spec_id`) plays no part in the lookup.
         self.approved_source: dict[str, SelectedSource] = {
-            b.step_id: self.sources[b.spec_id] for b in workflow.evidence_bindings
+            b.step_id: workflow.source_of(b.step_id) or self.sources[b.spec_id]
+            for b in workflow.evidence_bindings
         }
         self.steps_by_id: dict[str, WorkflowStep] = {s.id: s for s in workflow.steps}
         self.frames: dict[str, FrameRef] = {}
@@ -1196,7 +1198,7 @@ class _Run:
                         current_step_id.reset(token)
                     if result.is_error:
                         raise self._stopped_by_refusal(step, result)
-                    frame = self._frame(step, result)
+                    frame, manifest_ref = self._frame(step, result)
                     self._learn_columns(step, result)
                     self._check_declared_shape(step, result, arguments, expected_role_keys)
                     self.frames[step.id] = frame
@@ -1205,6 +1207,7 @@ class _Run:
                         tool=step.tool,
                         attempts=attempts,
                         frame_ref=frame,
+                        manifest_ref=manifest_ref,
                         digest=result.text,
                         row_count=self.row_counts[step.id],
                         role_keys=self.role_keys[step.id],
@@ -1575,7 +1578,11 @@ class _Run:
             payload=failure,
         )
 
-    def _frame(self, step: WorkflowStep, result: ToolCallResult) -> FrameRef:
+    def _frame(
+        self, step: WorkflowStep, result: ToolCallResult
+    ) -> tuple[FrameRef, FrameRef | None]:
+        """The frame `step` produced, and the manifest's own pair when the frame
+        is a retrieval held under another (`StepRecord.manifest_ref`)."""
         capability = self.capabilities.get(step.tool)
         output = (
             next((o for o in capability.outputs if o.artifact is ArtifactKind.FRAME_REF), None)
@@ -1589,11 +1596,15 @@ class _Run:
                 step_id=step.id,
             )
         try:
-            return extract_frame_ref(output.extract, result.structured_content)
+            frame = extract_frame_ref(output.extract, result.structured_content)
+            if output.extract is not Extract.FRAME_REF_FROM_MANIFEST:
+                return frame, None
+            manifest_ref = manifest_frame_ref(result.structured_content or {})
         except ArtifactError as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE, str(exc), step_id=step.id
             ) from exc
+        return frame, manifest_ref if manifest_ref != frame else None
 
     async def _check_evidence(self, step: WorkflowStep, result: ToolCallResult) -> EvidenceRecord:
         requirement = self.requirements[self.evidence_bindings[step.id].requirement_id]

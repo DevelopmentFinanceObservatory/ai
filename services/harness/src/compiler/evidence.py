@@ -87,15 +87,16 @@ from planner.records import (
     EvidenceIssue,
     EvidenceIssueCode,
     Period,
+    ResolvedSourceMention,
     Severity,
     SpecId,
     StrictModel,
 )
-from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource
-from pydantic import ConfigDict, JsonValue, ValidationError
+from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
+from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from compiler.frame_columns import columns_on_axes
-from compiler.sources import pinned_stat_var
+from compiler.sources import pinned_stat_var, source_constraint_matches
 
 
 class SeriesEvidence(StrictModel):
@@ -145,6 +146,12 @@ class RetrievalEvidence(StrictModel):
     read, which is the state of every manifest and of a source recorded
     without them.
 
+    `groups` are the named sets the source binds (`SelectedSource.groups`),
+    and `entity_refs` the refs the graph resolved the requirement's
+    unmatched names to (`SelectedSource.entity_refs`), both discovery's
+    alone: at run time the approved source's are read instead, as its open
+    axes are.
+
     `axis_by_column` is the manifest's alone: each coverage dimension's label
     and the flow axis dfo-apis states for it. A source names a flow
     dataset's role columns by flow axis (`origin`), and the series
@@ -170,12 +177,15 @@ class RetrievalEvidence(StrictModel):
     family_member_count: int | None = None
     entities: tuple[ResolvedEntity, ...] = ()
     open_entity_axes: tuple[OpenEntityAxis, ...] | None = None
+    groups: tuple[ResolvedGroup, ...] = ()
+    entity_refs: dict[str, str] = Field(default_factory=dict)
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
     stated_unit: Unit | None = None
     provenance_ref: str | None = None
     provenance_label: str | None = None
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
     window: Period | None = None
     rows: int | None = None
     series: pa.Table | None = None
@@ -190,10 +200,13 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         has_data=source.has_data,
         entities=source.entities,
         open_entity_axes=source.open_entity_axes,
+        groups=source.groups,
+        entity_refs=source.entity_refs,
         unit_ref=source.unit_ref,
         unit_label=source.unit_label,
         provenance_ref=source.provenance_ref,
         provenance_label=source.provenance_label,
+        resolved_sources=source.resolved_sources,
         window=source.coverage_window,
         identity=source.identity,
     )
@@ -314,7 +327,7 @@ def check_evidence(
     issues.extend(_period_issues(requirement, evidence))
     issues.extend(_scope_issues(requirement, evidence))
     issues.extend(_unit_issues(requirement, evidence))
-    issues.extend(_source_issues(requirement, evidence))
+    issues.extend(_source_issues(requirement, evidence, approved))
     return issues
 
 
@@ -344,15 +357,79 @@ def resolve_entity(entity: Entity, resolved: Sequence[ResolvedEntity]) -> Resolv
     """
     wanted = entity.name.casefold()
     matches = [one for one in resolved if one.label.casefold() == wanted]
-    if entity.role is not None and len(matches) > 1:
-        role = entity.role.casefold()
-        side = flow_side(role)
-        matches = [
-            one
-            for one in matches
-            if one.role.casefold() == role or (side is not None and flow_side(one.role) == side)
-        ]
+    if len(matches) > 1:
+        matches = [one for one in matches if _role_fits(entity.role, one.role)]
     return matches[0] if len(matches) == 1 else None
+
+
+def resolve_name(
+    entity: Entity, source: SelectedSource | RetrievalEvidence
+) -> ResolvedEntity | None:
+    """Return the one entity of `source` that `entity` names, by label or else by ref.
+
+    A name no label matches (`resolve_entity`) is looked up in the refs the
+    graph resolved the requirement's names to (`SelectedSource.entity_refs`),
+    so "United States" names the entity labelled "United States of
+    America". A stated role tells apart a ref resolved under several role
+    columns, as it does a label.
+    """
+    resolved = resolve_entity(entity, source.entities)
+    if resolved is not None or (ref := source.entity_refs.get(entity.name.casefold())) is None:
+        return resolved
+    matches = [one for one in source.entities if one.ref == ref]
+    if len(matches) > 1:
+        matches = [one for one in matches if _role_fits(entity.role, one.role)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_group(entity: Entity, groups: Sequence[ResolvedGroup]) -> ResolvedGroup | None:
+    """Return the one named set in `groups` that `entity` names, or `None` when none or several do.
+
+    Matches `Entity.name` against the set's `label`, case-folded. A stated
+    role has to name the set's role column or sit on its side of the flow
+    (`donor` and `origin`), so "G7" asked for as a recipient is not the G7
+    whose members give.
+    """
+    wanted = entity.name.casefold()
+    matches = [
+        group
+        for group in groups
+        if group.label.casefold() == wanted and _role_fits(entity.role, group.role)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def named_members(
+    entity: Entity, source: SelectedSource | RetrievalEvidence
+) -> tuple[ResolvedEntity, ...]:
+    """The entities of `source` that `entity` names, empty when it names none.
+
+    A name matching one of the source's named sets (`resolve_group`) names
+    every entity the source resolves on that set's role column, which is the
+    set's members or the one party that is its published total
+    (`ResolvedGroup.total`). Any other name names the one entity
+    `resolve_name` finds, by label or by the ref the graph resolved the
+    name to. Callers compare the result by `ref`, so a member is named
+    whatever label it carries.
+    """
+    group = resolve_group(entity, source.groups)
+    if group is not None:
+        return tuple(one for one in source.entities if one.role == group.role)
+    resolved = resolve_name(entity, source)
+    return () if resolved is None else (resolved,)
+
+
+def named_refs(entities: Sequence[Entity], source: SelectedSource | RetrievalEvidence) -> set[str]:
+    """The refs of every entity of `source` that one of `entities` names (`named_members`)."""
+    return {one.ref for entity in entities for one in named_members(entity, source)}
+
+
+def _role_fits(role: str | None, column: str) -> bool:
+    """Whether the requirement's `role` phrase, `None` when unstated, allows the role `column`."""
+    if role is None or role.casefold() == column.casefold():
+        return True
+    side = flow_side(role)
+    return side is not None and flow_side(column) == side
 
 
 def _coverage_severity(requirement: DatasetRequirement) -> Severity:
@@ -502,18 +579,78 @@ def _off_party_reason(across: str, party: Party, open_entity_axes: Sequence[Open
     )
 
 
-def _present_by_ref(
+def _resolved_by_ref(
+    entity: Entity, evidence: RetrievalEvidence, approved: SelectedSource | None
+) -> ResolvedEntity | None:
+    """The entity `entity` names by ref when no label of `evidence` matches it, or `None`.
+
+    At discovery the source's own refs answer (`resolve_name`). A
+    manifest names only refs, so at run time `entity` is resolved through
+    the approved source, by label or by ref, and the retrieval has to hold
+    that ref.
+    """
+    if evidence.origin == "discovery":
+        return resolve_name(entity, evidence)
+    resolved = resolve_name(entity, approved) if approved is not None else None
+    if resolved is None or all(one.ref != resolved.ref for one in evidence.entities):
+        return None
+    return resolved
+
+
+def _named_group(
+    entity: Entity, evidence: RetrievalEvidence, approved: SelectedSource | None
+) -> ResolvedGroup | None:
+    """The named set `entity` names (`resolve_group`), or `None`.
+
+    At discovery the source's own `groups` answer. A manifest states none,
+    so at run time the set is the approved source's.
+    """
+    if evidence.origin == "discovery":
+        return resolve_group(entity, evidence.groups)
+    return resolve_group(entity, approved.groups) if approved is not None else None
+
+
+def _group_present(
     entity: Entity, evidence: RetrievalEvidence, approved: SelectedSource | None
 ) -> bool:
-    """Whether a manifest names `entity` by the ref the approved source resolved it to.
+    """Whether the retrieval holds the set `entity` names (`_named_group`), as its members or its published total.
 
-    A manifest names only refs, so an entity the labels do not match is
-    resolved through the approved source first, then looked for by ref.
+    Called once `_named_group` found the set. At discovery naming one of the
+    source's sets is enough. A manifest names only refs, so at run time the
+    retrieval has to hold at least one of the entities the approved source
+    resolved on the set's column (`named_members`).
     """
-    if approved is None:
-        return False
-    resolved = resolve_entity(entity, approved.entities)
-    return resolved is not None and any(one.ref == resolved.ref for one in evidence.entities)
+    if evidence.origin == "discovery":
+        return True
+    assert approved is not None  # `_named_group` finds no set without it at run time
+    members = {one.ref for one in named_members(entity, approved)}
+    return any(one.ref in members for one in evidence.entities)
+
+
+def _group_reading_issues(
+    requirement: DatasetRequirement, entity: Entity, group: ResolvedGroup
+) -> list[EvidenceIssue]:
+    """The issues, if any, with how the source binds `group`, the set `entity` names, against what it asks for.
+
+    An entity with `members` set asks for each member, so a set the source
+    binds as its published total does not answer it. One without accepts
+    either reading.
+    """
+    if not entity.members or group.total is None:
+        return []
+    return [
+        EvidenceIssue(
+            code=EvidenceIssueCode.GROUP_READ_AS_TOTAL,
+            severity=Severity.ERROR,
+            requirement_id=requirement.id,
+            detail=(
+                f"{entity.name!r} is asked for member by member, but the source binds the "
+                f"set's published total, {group.total!r}, and no member"
+            ),
+            found=group.total,
+            required=entity.name,
+        )
+    ]
 
 
 def _entity_issues(
@@ -646,6 +783,14 @@ def _named_entity_issues(
     evidence: RetrievalEvidence,
     approved: SelectedSource | None,
 ) -> list[EvidenceIssue]:
+    """Whether the source resolves each entity `requirement` names, under the role it asks for.
+
+    A name is met by a named set the source binds (`_group_present`), as
+    its members or, unless the entity asks for its members, as its
+    published total (`_group_reading_issues`); by a resolved entity's
+    label; or by the ref the graph resolved the name to, or at run time the
+    ref the approved source resolved it to (`_resolved_by_ref`).
+    """
     if not evidence.entities:
         return [
             EvidenceIssue(
@@ -659,9 +804,15 @@ def _named_entity_issues(
     labels = [entity.label for entity in evidence.entities]
     issues: list[EvidenceIssue] = []
     for entity in requirement.entities:
+        group = _named_group(entity, evidence, approved)
+        if group is not None and _group_present(entity, evidence, approved):
+            issues.extend(_group_reading_issues(requirement, entity, group))
+            continue
         matches = entity_matches(entity, evidence.entities)
         if not matches:
-            if _present_by_ref(entity, evidence, approved):
+            if (by_ref := _resolved_by_ref(entity, evidence, approved)) is not None:
+                if evidence.origin == "discovery":
+                    issues.extend(_role_issues(requirement, entity, by_ref))
                 continue
             issues.append(
                 EvidenceIssue(
@@ -806,7 +957,8 @@ def _scope_issues(
     issues: list[EvidenceIssue] = []
     bound = _identity_refs(evidence.identity.get("entities"))
     if bound is not None:
-        issues.extend(_scope_entity_issues(requirement, evidence, bound))
+        named = named_refs(requirement.entities, evidence)
+        issues.extend(_scope_entity_issues(requirement, named, bound))
     requested = evidence.identity.get("requested_window")
     if isinstance(requested, dict):
         issues.extend(_scope_window_issues(requirement, requested))
@@ -831,16 +983,11 @@ def _identity_refs(entities: JsonValue) -> set[str] | None:
 
 
 def _scope_entity_issues(
-    requirement: DatasetRequirement, evidence: RetrievalEvidence, bound: set[str]
+    requirement: DatasetRequirement, wanted: set[str], bound: set[str]
 ) -> list[EvidenceIssue]:
-    # A required entity is known by name; the ref it binds to is the one it
-    # resolved to. One not resolved at all is already reported as missing or
-    # ambiguous, and has no ref to compare.
-    wanted = {
-        resolved.ref
-        for entity in requirement.entities
-        if (resolved := resolve_entity(entity, evidence.entities)) is not None
-    }
+    # A required entity is known by name; the refs it binds to are the ones
+    # it names (`named_members`), a set's members included. One naming none
+    # is already reported as missing or ambiguous, and has no ref to compare.
     if not wanted:
         return []
     issues: list[EvidenceIssue] = []
@@ -1019,6 +1166,18 @@ def read_unit_dcid(ref: str | None) -> UnitReading:
     if match := _SDG_PRICE_BASIS_ID.fullmatch(dcid):
         return _sdg_unit_reading(match)
     return UnitReading(currency=_NAMED_CURRENCY_DCIDS.get(dcid))
+
+
+def read_unit_currency(ref: str | None, label: str | None) -> str | None:
+    """The currency a unit names, `None` when it names none.
+
+    Read the way `check_evidence` reads a source's currency: by the unit id's
+    structure (`read_unit_dcid`), then `PPP` when `label` says purchasing
+    power parity, then the first known ISO-4217 code in the id or `label`.
+    """
+    return read_unit_dcid(ref).currency or (
+        _PPP if label and _PPP_TEXT.search(label) else _detect_currency(ref, label)
+    )
 
 
 def _sdg_unit_reading(match: re.Match[str]) -> UnitReading:
@@ -1353,8 +1512,15 @@ def _mentions(field: str | None, wanted: str) -> bool:
     return _contains_run(left, right) or _contains_run(right, left)
 
 
+def source_requirement_matches(*, requirement: DatasetRequirement, source: SelectedSource) -> bool:
+    """Whether this source already confirms the requirement's source constraint."""
+    return not _source_issues(requirement, evidence_from_source(source))
+
+
 def _source_issues(
-    requirement: DatasetRequirement, evidence: RetrievalEvidence
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None = None,
 ) -> list[EvidenceIssue]:
     """`SOURCE_PIN_MISMATCH` when the evidence is not the definition the requirement pins.
 
@@ -1376,6 +1542,30 @@ def _source_issues(
             )
         )
     if requirement.source is not None:
+        mentions = evidence.resolved_sources
+        if approved is not None and evidence.spec_id == approved.spec_id:
+            mentions = approved.resolved_sources
+        # Search resolves aliases and collection names against its catalogue.
+        # Only the constraints attached to this answer can confirm the ask.
+        confirmed = source_constraint_matches(
+            mentions,
+            text=requirement.source,
+            ref=requirement.source_ref,
+            exclude=requirement.source_exclude,
+        )
+        if confirmed:
+            return issues
+        if requirement.source_exclude or requirement.source_ref is not None:
+            return [
+                *issues,
+                EvidenceIssue(
+                    code=EvidenceIssueCode.SOURCE_UNVERIFIED,
+                    severity=Severity.ERROR,
+                    requirement_id=requirement.id,
+                    detail="Search has not confirmed the requirement's source constraint",
+                    required=requirement.source,
+                ),
+            ]
         known = evidence.provenance_ref is not None or evidence.provenance_label is not None
         if not known:
             issues.append(

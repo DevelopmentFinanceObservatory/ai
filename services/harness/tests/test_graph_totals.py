@@ -4,10 +4,9 @@
 carries, which the card counts its indicators from, and `_own_stat_vars`
 the retrievals under each side of a sum or a quotient, which the card names
 its StatVar by. `_stat_var_totals`
-writes the sentence `narrate` states for each summed family an answer frame
-carries, `_dropped_key_sentences` the one for each step under an answer
-frame that left keys out, and `_with_totals` appends either when a draft
-leaves it out.
+writes the sentence `plan_done` hands the agent for each summed family an
+answer frame carries, and `_dropped_key_sentences` the one for each step
+under an answer frame that left keys out.
 
 The plans are compiled by `compile_plan` against the real tool schemas, over
 the spec blocks recorded from dev dfo-apis in
@@ -34,14 +33,14 @@ from compiler.surface import McpSurface, ToolSchema, ToolSurface
 from data_mcp.server import mcp as data_mcp
 from executor.outcomes import Accepted, EvidenceRecord, StepRecord
 from harness.conversation import current_conversation_id
-from harness.graph import (
-    _answer_notes,
+from harness.graph.answer import (
     _carried_retrievals,
     _dropped_key_sentences,
-    _link_evidence_to_terminal_frames,
+    _group_column,
     _own_stat_vars,
     _stat_var_totals,
-    _with_totals,
+    answer_notes,
+    link_evidence_to_terminal_frames,
 )
 from harness.provenance import ProvenanceStore
 from harness.studio_translate import _RecordingSurface
@@ -84,6 +83,7 @@ from planner.workflow import (
     EvidenceBinding,
     OpenAxis,
     ResolvedEntity,
+    ResolvedGroup,
     SelectedSource,
     ToolId,
     Workflow,
@@ -169,19 +169,21 @@ def _kenya(requirement_id: str, measure: str) -> DatasetRequirement:
     )
 
 
-def _yearly_total(input_id: str, operation_input: str) -> tuple[AggregateRequirement, Operation]:
+def _yearly_total(
+    input_id: str, operation_input: str, *, reduction: Reduction = Reduction.SUM
+) -> tuple[AggregateRequirement, Operation]:
     requirement = AggregateRequirement(
         id="yearly_total",
         decision_ids=["measure"],
         input_id=input_id,
-        reduction=Reduction.SUM,
+        reduction=reduction,
         group_by=(GroupBy.PERIOD,),
     )
     operation = AggregateOperation(
         id="yearly_total",
         requirement_id="yearly_total",
         input=operation_input,
-        reduction=Reduction.SUM,
+        reduction=reduction,
         group_by=(GroupBy.PERIOD,),
     )
     return requirement, operation
@@ -232,7 +234,7 @@ def _manifest(
     role_keys: Sequence[str] = CRS_ROLE_KEYS,
     dimensions: Sequence[Mapping[str, Any]] = CRS_DIMENSIONS,
 ) -> dict[str, Any]:
-    """A `get_data` result as data-mcp returns it, cut to the fields narration reads."""
+    """A `get_data` result as data-mcp returns it, cut to the fields the totals sentences read."""
     return {
         "schema_version": 1,
         "definition": {"schema_version": 1, "spec_id": frame.spec_id, "identity": {}},
@@ -325,12 +327,16 @@ def _run(
 
 
 def _germany_bilateral_oda(
-    schemas: Mapping[str, ToolSchema], *, then: str = "aggregate", **dataset_fields: Any
+    schemas: Mapping[str, ToolSchema],
+    *,
+    then: str = "aggregate",
+    reduction: Reduction = Reduction.SUM,
+    **dataset_fields: Any,
 ) -> Plan:
     """ "Chart Germany's bilateral ODA since 2000" over the recorded source,
     which resolves Germany alone, so the compiler predicts the retrieval's
     role keys as `("origin",)`. `then` is the step the answer reads: the
-    yearly total across recipients, or a filter keeping each recipient."""
+    yearly `reduction` across recipients, or a filter keeping each recipient."""
     source = _recorded("germany_bilateral_oda")
     decisions = dataset_fields.pop("decisions", (_WHAT,))
     oda = _dataset(
@@ -341,7 +347,7 @@ def _germany_bilateral_oda(
     )
     retrieve = RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id)
     if then == "aggregate":
-        total, total_op = _yearly_total("oda", "oda_op")
+        total, total_op = _yearly_total("oda", "oda_op", reduction=reduction)
         return _compiled(
             schemas,
             [oda, total],
@@ -379,10 +385,22 @@ def _by_default(count: str, name: str = CRS) -> str:
     return f'By default, the figures for "{name}" sum the family\'s {count} indicators.'
 
 
+@pytest.mark.parametrize(
+    ("reduction", "regional"),
+    [
+        (Reduction.SUM, REGIONAL),
+        (
+            Reduction.MEAN,
+            " They are computed from regional and unallocated flows as well as flows to "
+            "individual countries.",
+        ),
+    ],
+    ids=["summed", "averaged"],
+)
 async def test_germany_s_bilateral_oda_totalled_each_year_includes_regional_flows(
-    schemas: dict[str, ToolSchema],
+    schemas: dict[str, ToolSchema], reduction: Reduction, regional: str
 ) -> None:
-    plan = _germany_bilateral_oda(schemas)
+    plan = _germany_bilateral_oda(schemas, reduction=reduction)
     assert plan.workflow is not None
     (retrieval,) = (step for step in plan.workflow.steps if step.id == "oda_op")
     # The compiler predicts only the role Germany resolves under; the frame
@@ -392,7 +410,7 @@ async def test_germany_s_bilateral_oda_totalled_each_year_includes_regional_flow
 
     surface, outcome = _run(plan, summed={"oda_op": 1554}, role_keys={"yearly_total": ()})
 
-    assert _stat_var_totals(surface, outcome, plan=plan) == [_by_default("1,554") + REGIONAL]
+    assert _stat_var_totals(surface, outcome, plan=plan) == [_by_default("1,554") + regional]
 
 
 async def test_a_filter_keeping_each_recipient_states_the_family_count_alone(
@@ -520,7 +538,7 @@ async def test_a_summed_family_that_only_supplies_values_gets_no_sentence(
     schemas: dict[str, ToolSchema],
 ) -> None:
     """A `compare`'s right side is summed, but the answer frame carries none
-    of its StatVars, so narration states no total for it."""
+    of its StatVars, so no total is stated for it."""
     plan = _two_sided(schemas, "compare", _single("a", "Grants"), _family("b", "Loans"))
     assert plan.workflow is not None
     assert plan.workflow.source_of("right_op").stat_var_reading is StatVarReading.SUM
@@ -605,6 +623,117 @@ async def test_a_retrieval_that_summed_nothing_states_nothing(
 
     assert _stat_var_totals(surface, outcome, plan=plan) == []
     assert _stat_var_totals(None, outcome, plan=plan) == []
+
+
+_G7_MEMBERS = (("country/FRA", "France"), ("country/JPN", "Japan"))
+
+
+@pytest.mark.parametrize(
+    ("donors", "total", "answer_role_keys", "notes", "reduction"),
+    [
+        (
+            (("GroupOfSeven", "G7 countries, Total"),),
+            "GroupOfSeven",
+            (),
+            [
+                "The figures for G7 are the total the source publishes for the group as a whole "
+                "(G7 countries, Total), not its members' figures added up."
+            ],
+            Reduction.SUM,
+        ),
+        (
+            _G7_MEMBERS,
+            None,
+            (),
+            [
+                "The figure for G7 adds up its members' figures and leaves out amounts the data "
+                "allocates to no single country."
+            ],
+            Reduction.SUM,
+        ),
+        (
+            _G7_MEMBERS,
+            None,
+            (),
+            [
+                "The figure for G7 is computed from its members' figures and leaves out amounts "
+                "the data allocates to no single country."
+            ],
+            Reduction.MEAN,
+        ),
+        (
+            _G7_MEMBERS,
+            None,
+            ("financingProvider",),
+            ["The figures for G7 are its members' figures, each on its own."],
+            Reduction.SUM,
+        ),
+        (
+            _G7_MEMBERS,
+            None,
+            None,
+            [
+                "The figures for G7 are its members' figures, not a total the source publishes "
+                "for the group."
+            ],
+            Reduction.SUM,
+        ),
+    ],
+    ids=["total", "members-summed", "members-averaged", "members-each", "members-unknown-answer"],
+)
+async def test_a_retrieval_of_a_named_group_states_how_it_reads_the_group(
+    schemas: dict[str, ToolSchema],
+    donors: tuple[tuple[str, str], ...],
+    total: str | None,
+    answer_role_keys: tuple[str, ...] | None,
+    notes: list[str],
+    reduction: Reduction,
+) -> None:
+    source = _single("c", "Oda").model_copy(
+        update={
+            "entities": (
+                *(ResolvedEntity(role="origin", ref=ref, label=label) for ref, label in donors),
+                ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+            ),
+            "groups": (ResolvedGroup(role="origin", label="G7", total=total),),
+        }
+    )
+    oda = _dataset(
+        "oda",
+        [Entity(name="G7", role="donor"), Entity(name="Kenya", role="recipient")],
+        Period(start=2015, end=2024),
+    )
+    retrieve = RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id)
+    yearly, yearly_op = _yearly_total("oda", "oda_op", reduction=reduction)
+    plan = _compiled(
+        schemas,
+        [oda, yearly],
+        [retrieve, yearly_op],
+        terminal=["yearly_total"],
+        discovered={"oda": source},
+    )
+    surface, outcome = _run(plan, summed={}, role_keys={"yearly_total": answer_role_keys})
+
+    assert answer_notes(surface, outcome, plan=plan) == notes
+
+
+@pytest.mark.parametrize(
+    ("role", "role_keys", "column"),
+    [
+        ("origin", CRS_ROLE_KEYS, "financingProvider"),
+        ("origin", ("financingRecipient",), None),
+        ("place", ("observationAbout", "observationAbout_type"), "observationAbout"),
+        ("place", ("observationAbout", "sector"), None),
+        ("place", None, None),
+    ],
+    ids=["flow-side", "flow-side-absent", "lone-place", "two-columns", "unknown"],
+)
+def test_a_group_sits_on_its_flow_side_or_the_frames_one_role_column(
+    role: str, role_keys: tuple[str, ...] | None, column: str | None
+) -> None:
+    group = ResolvedGroup(role=role, label="Africa")
+
+    assert _group_column(group, role_keys) == column
 
 
 _EAST_AFRICA = ("Kenya", "Uganda", "Tanzania")
@@ -744,20 +873,19 @@ async def test_a_rank_over_a_quotient_that_left_keys_out_still_says_so(
     schemas: dict[str, ToolSchema],
 ) -> None:
     """The rank's frame is the answer and the quotient under it lost two of
-    its keys: the sentence travels with the family totals, reaches a draft
-    that leaves it out, and is confined to the terminals it sits under."""
+    its keys: the sentence travels with the family totals and is confined to
+    the terminals it sits under."""
     plan = _aid_per_head(schemas, ranked=True)
     surface, outcome = _run(plan, summed={"aid_op": 3}, role_keys={})
     outcome = _with_dropped_keys(outcome, per_head=2)
 
-    notes = _answer_notes(surface, outcome, plan=plan)
+    notes = answer_notes(surface, outcome, plan=plan)
 
     assert len(notes) == 2
     assert notes[:-1] == _stat_var_totals(surface, outcome, plan=plan)
     assert "2 recipient entries" in notes[-1]
-    assert notes[-1] in _with_totals("Kenya received the most aid per head.", notes)
-    assert _answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
-    assert _answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+    assert answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
+    assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
 
 
 def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = None) -> WorkflowStep:
@@ -1032,7 +1160,7 @@ def test_a_card_over_a_sum_counts_the_distinct_stat_vars_under_both_sides(
         terminal_steps=[terminal],
     )
 
-    _link_evidence_to_terminal_frames(
+    link_evidence_to_terminal_frames(
         _RecordingSurface(cast("ToolSurface", None), provenance=store), outcome, workflow=workflow
     )
 
@@ -1069,11 +1197,3 @@ def test_a_retrieval_s_source_is_the_one_at_its_binding_s_position() -> None:
     assert paired.source_of("two") is separate
     assert shared.source_of("two") is summed
     assert paired.source_of("absent") is None
-
-
-def test_a_draft_that_leaves_the_total_out_gets_it_appended_once() -> None:
-    total = _by_default("74")
-    assert _with_totals("Aid rose.", [total]) == f"Aid rose. {total}"
-    stated = f"Aid rose. {total}"
-    assert _with_totals(stated, [total]) == stated
-    assert _with_totals("", [total]) == total

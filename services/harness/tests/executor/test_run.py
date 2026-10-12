@@ -117,7 +117,7 @@ async def test_a_run_binds_the_retrieved_frame_into_the_verb_and_is_accepted(
     (get_data_call, aggregate_call) = surface.calls
     assert get_data_call == (
         "get_data",
-        {"spec_id": SPEC_KENYA},
+        {"spec_id": SPEC_KENYA, "place_types": True},
     )
     # The binding resolved to the frame get_data's manifest named.
     assert aggregate_call[1]["frame_ref"] == {

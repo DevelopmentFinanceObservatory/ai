@@ -34,7 +34,13 @@ from opentelemetry import trace
 
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
-from presentation_mcp.platform_contract import Caller, Refusal, RetryMode, WriteReply
+from presentation_mcp.platform_contract import (
+    Caller,
+    NormalFormConflict,
+    Refusal,
+    RetryMode,
+    WriteReply,
+)
 from presentation_mcp.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -77,9 +83,10 @@ _PUBLISH_GZIP_LEVEL = 1
 # this replay key. dfo-apis records the frame before it compares recipes, so the
 # pair is published either way and keeps the recipe dfo-apis already holds for it,
 # if any (`_publish_pair`).
+_NORMAL_FORM_CONFLICT = "recipe_requires_matching_normal_form_hash"
 _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
     {
-        "recipe_requires_matching_normal_form_hash",
+        _NORMAL_FORM_CONFLICT,
         "recipe_requires_matching_replay_key",
         "replay_key_requires_one_frame",
     }
@@ -751,7 +758,7 @@ class PlatformAssembler:
 
     async def publish_frame(
         self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any]
-    ) -> bool | Refusal:
+    ) -> bool | Refusal | NormalFormConflict:
         """Publish the derived frame `{spec_id, content_version}` to dfo-apis
         with `recipe`, for a caller that writes no component.
 
@@ -764,8 +771,10 @@ class PlatformAssembler:
 
         Returns:
             `True` when dfo-apis recorded the version with this call, and `False`
-            when it already held it, including when it kept another recipe for
-            the pair (`_RECIPE_CONFLICT_CONSTRAINTS`). A `Refusal` when nothing
+            when it already held it, including when it kept another recipe of the
+            same normal form for the pair. A `NormalFormConflict` when it kept a
+            recipe of another normal form, so no card of `recipe` is drawn on the
+            frame. A `Refusal` when nothing
             was published: no principal is configured, the store holds no frame
             under the pair, the body cannot be built or is over a ceiling, or
             dfo-apis refused it.
@@ -790,7 +799,7 @@ class PlatformAssembler:
 
     async def _publish_pair(
         self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any] | None = None
-    ) -> bool | Refusal | None:
+    ) -> bool | Refusal | NormalFormConflict | None:
         """Build and post the publish-door body for `(spec_id, content_version)`,
         called under the pair's publish lock once a principal is known to be
         configured. `_ensure_published_pair` and `publish_frame` are its callers;
@@ -804,11 +813,12 @@ class PlatformAssembler:
 
         Returns:
             Whether dfo-apis recorded the version with this call (`published
-            .created` of its answer, and `False` on a recipe conflict), `None`
-            when the store holds nothing to publish under the pair, or the
+            .created` of its answer, and `False` on a recipe conflict), a
+            `NormalFormConflict` when the recipe it kept has another normal form,
+            `None` when the store holds nothing to publish under the pair, or the
             `Refusal` of a publish that failed.
         """
-        created = False
+        created: bool | NormalFormConflict = False
         async with contextlib.AsyncExitStack() as stack:
             try:
                 published = await stack.enter_async_context(
@@ -874,6 +884,8 @@ class PlatformAssembler:
                     content_version,
                     exc.constraint_id,
                 )
+                if exc.constraint_id == _NORMAL_FORM_CONFLICT:
+                    created = NormalFormConflict(detail=exc.detail or exc.constraint_id)
         self._published.add((spec_id, content_version))
         return created
 

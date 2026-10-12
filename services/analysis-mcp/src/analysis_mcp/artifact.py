@@ -12,9 +12,10 @@ year (`endpoint_missing`), with a zero or sign-crossing base under a relative
 change (`zero_or_sign_crossing_base`), or overflowing to a non-finite value
 (`non_finite`), `filter`'s predicate loop (`predicate`), `join`'s
 unmatched-key sets (`unmatched_key`), `compare`'s unintersected periods
-(`period_unmatched`), `rank`'s limit (`beyond_limit`), and `quotient_of`'s
-matched cells whose denominator sums to zero (`zero_denominator`). A
-heterogeneous facet always refuses
+(`period_unmatched`), `rank`'s limit (`beyond_limit`), `quotient_of`'s
+matched cells whose denominator sums to zero (`zero_denominator`), and the
+flow parties a sum or a rank leaves out because they total other parties
+(`party_total`). A heterogeneous facet always refuses
 (`analysis_mcp.engine.common.FacetHeterogeneousError`); this set carries no
 facet reason.
 

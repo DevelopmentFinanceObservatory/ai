@@ -17,38 +17,50 @@ from typing import Any
 
 import httpx2
 import pytest
+from compiler.evidence import EvidenceIssueCode, check_evidence, evidence_from_source
+from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
+from data_mcp.search_tool import MAX_PARTS
 from data_mcp.tool_errors import ToolErrorCode
 from google.adk.sessions.state import State
 from google.adk.tools import FunctionTool
-from harness import orchestrator_tools
-from harness.dfo_faq import CANNOT_DESCRIBE_DFO
-from harness.graph import (
-    LINE_CHART_MAX_VALUES,
-    MAX_SERIES_PER_COMPONENT,
+from harness import orchestrator_tools, planner_seam
+from harness.chart_binding import LINE_CHART_MAX_VALUES, MAX_SERIES_PER_COMPONENT
+from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
+from harness.graph.state import (
+    BUDGETS,
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_PENDING_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PendingAsk,
     PendingPlan,
     frame_id_for,
     pending_action,
+    store_search,
 )
 from harness.orchestrator_tools import (
-    BUDGETS,
     HANDED_OFF,
     Chart,
-    OrchestratorSearchPart,
     build_orchestrator_tools,
 )
-from harness.studio_state import ConversationState
+from harness.studio_state import ConversationState, land_component, remove_cards
 from harness.tool_contracts import ResolverError, graph_envelope, resolver_digest
-from harness.turn_records import SearchReading
+from harness.turn_records import SearchReading, loose_match_notes, render_readings
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
-from planner.plan import MAX_ASK_CHARS, MAX_PLAN_ASKS, current_earlier_block
+from planner import agent as planner_agent
+from planner.plan import (
+    MAX_ASK_CHARS,
+    MAX_PLAN_ASKS,
+    DatasetRequirement,
+    current_earlier_block,
+    current_recorded_identity,
+)
+from planner.records import Period
 
+from .search_results import search_result_parts
 from .test_turn_records import _top_donors
 
 SPEC_AID = "spec_" + "a" * 32
@@ -110,7 +122,7 @@ class FakeExecutor:
         component = {"component_id": "cmp_1", "fact_summary": {"series": [{"first": 37.2}]}}
         return {"outcome": "ok", "component": component}
 
-    def land_component(self, component: dict[str, Any], *, land: bool, revises: str | None) -> None:
+    def land_component(self, component: dict[str, Any]) -> None:
         self.landed.append(component)
 
 
@@ -137,6 +149,7 @@ def _tools(
     surface_name: str = "studio",
     dfo_faq_surface=None,
     recall_part=None,
+    remove_cards=None,
 ):
     tools = build_orchestrator_tools(
         resolver=resolver or _resolver(_digest()),
@@ -144,6 +157,7 @@ def _tools(
         surface=surface,
         dfo_faq_surface=dfo_faq_surface,
         recall_part=recall_part,
+        remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
     return by_name, SimpleNamespace(state={"surface": surface_name}, invocation_id="inv_1")
@@ -258,7 +272,21 @@ _NGA = json.dumps({"observationAbout": "country/NGA"})
 
 async def _search_role_on_the_part(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
     part = {"variable": "aid", "role": "to", "entities": [{"text": "Kenya"}]}
-    return await tools["search"]("aid to Kenya", [part], ctx)
+    return await tools["search"]("aid to Kenya", ctx, [part])
+
+
+async def _search_string_parts(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    return await tools["search"]("France's aid share", ctx, ["France's total gross ODA"])
+
+
+async def _search_too_many_entities(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    part = {"variable": "population", "entities": [{"text": f"place {i}"} for i in range(17)]}
+    return await tools["search"]("population", ctx, [part])
+
+
+async def _search_entity_text_too_long(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    part = {"variable": "population", "entities": [{"text": "k" * 129}]}
+    return await tools["search"]("population", ctx, [part])
 
 
 async def _fetch_unknown_scope_key(tools: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -280,17 +308,32 @@ async def _recall_unknown_part(tools: dict[str, Any], ctx: Any) -> dict[str, Any
 
 
 @pytest.mark.parametrize(
-    ("call", "tool", "budget", "named"),
+    ("call", "tool", "budget", "loc", "error_type"),
     [
-        (_search_role_on_the_part, "search", "search", "parts.0.role: Extra inputs"),
-        (_fetch_unknown_scope_key, "fetch", "fetch", "scope.places: Extra inputs"),
-        (_charts_one_malformed, "make_charts", "make_charts_failed", "charts.1.type: Input"),
-        (_plan_non_text_ask, "plan", "plan", "asks.1: Input should be a valid string"),
-        (_recall_unknown_part, "recall", "recall", "part: Input should be 'plan'"),
+        (_search_role_on_the_part, "search", "search", "parts.0.role", "extra_forbidden"),
+        (_search_string_parts, "search", "search", "parts.0", "model_type"),
+        (_search_too_many_entities, "search", "search", "parts.0.entities", "too_long"),
+        (
+            _search_entity_text_too_long,
+            "search",
+            "search",
+            "parts.0.entities.0.text",
+            "string_too_long",
+        ),
+        (_fetch_unknown_scope_key, "fetch", "fetch", "scope.places", "extra_forbidden"),
+        (
+            _charts_one_malformed,
+            "make_charts",
+            "make_charts_failed",
+            "charts.1.type",
+            "literal_error",
+        ),
+        (_plan_non_text_ask, "plan", "plan", "asks.1", "string_type"),
+        (_recall_unknown_part, "recall", "recall", "part", "literal_error"),
     ],
 )
 async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
-    call, tool: str, budget: str, named: str, caplog: pytest.LogCaptureFixture
+    call, tool: str, budget: str, loc: str, error_type: str, caplog: pytest.LogCaptureFixture
 ):
     resolver, executor = _resolver(_digest()), FakeExecutor()
     recalled: list[dict[str, Any]] = []
@@ -303,9 +346,13 @@ async def test_a_malformed_argument_is_an_error_for_the_model_and_runs_nothing(
 
     found = await call(tools, ctx)
 
-    assert set(found) == {"error"}
+    assert set(found) == {"error", "invalid"}
     assert found["error"].startswith(f"{tool}: ")
-    assert named in found["error"]
+    assert found["invalid"] == [{"loc": loc, "type": error_type}]
+    # Only a role on the part carries the hint to move it onto an entity.
+    assert ('{"text": "Kenya", "role": "to"}' in found["error"]) == (
+        call is _search_role_on_the_part
+    )
     assert "input_value" not in found["error"]
     assert not resolver.calls
     assert [name for name, _ in executor.calls if name != "describe_frame"] in ([], ["get_data"])
@@ -322,10 +369,10 @@ async def test_calls_with_invalid_arguments_stop_at_their_budget():
 
     for _ in range(BUDGETS["invalid_arguments"]):
         rejected = await _search_role_on_the_part(tools, ctx)
-        assert "Correct these arguments" in rejected["error"]
+        assert "invalid" in rejected
     spent = await _search_role_on_the_part(tools, ctx)
 
-    assert spent["error"].endswith(orchestrator_tools._ANSWER_NOW)
+    assert set(spent) == {"error"}
     assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": BUDGETS["invalid_arguments"]}
 
 
@@ -338,8 +385,8 @@ async def test_adk_function_tool_returns_the_argument_error_for_a_part_level_rol
         args={"query": "aid to Kenya", "parts": [part]}, tool_context=ctx
     )
 
-    assert set(found) == {"error"}
-    assert "parts.0.role" in found["error"]
+    assert found["invalid"] == [{"loc": "parts.0.role", "type": "extra_forbidden"}]
+    assert '{"text": "Kenya", "role": "to"}' in found["error"]
     assert not resolver.calls
     assert ctx.state[ORCHESTRATOR_CALLS_KEY] == {"invalid_arguments": 1}
 
@@ -373,11 +420,11 @@ async def test_search_sends_every_part_in_one_call_and_returns_every_reading():
 
     found = await tools["search"](
         "life expectancy and GDP in Nigeria",
+        ctx,
         [
             {"variable": "life expectancy", "entities": [{"text": "Nigeria"}]},
             {"variable": "GDP", "entities": [{"text": "Africa", "members": True}]},
         ],
-        ctx,
     )
 
     assert len(resolver.calls) == 1
@@ -396,12 +443,106 @@ async def test_search_sends_every_part_in_one_call_and_returns_every_reading():
     assert ctx.state["orchestrator:specs"] == {SPEC_LIFE: SINGLE_BLOCK}
 
 
+async def test_search_without_parts_asks_search_to_read_the_query():
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+
+    await tools["search"]("aid to Kenya from all official donors", ctx)
+
+    assert resolver.calls == [
+        {"question": "aid to Kenya from all official donors", "parts": [], "raw_text": True}
+    ]
+
+
+@pytest.mark.parametrize("parts", [None, []])
+async def test_as_text_without_parts_reads_the_query_without_attaching_asked_roles(parts):
+    resolver = _resolver(_digest({"variable": "aid", "status": "no_data"}))
+    tools, ctx = _tools(resolver)
+
+    found = await tools["search"]("aid to Kenya", ctx, parts, as_text=True)
+
+    assert "error" not in found
+    assert resolver.calls == [{"question": "aid to Kenya", "parts": [], "raw_text": True}]
+    assert not ctx.state["orchestrator:searches"][0]["asked_roles"]
+
+
+async def test_as_text_refuses_multiple_parts_without_searching_or_storing_readings():
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    parts = [
+        {"variable": "aid", "entities": [{"text": "Kenya", "role": "to"}], "time": "2020"},
+        {"variable": "aid", "entities": [{"text": "France", "role": "from"}], "time": "2024"},
+    ]
+
+    for _ in range(BUDGETS["invalid_arguments"]):
+        refused = await tools["search"]("aid to Kenya and from France", ctx, parts, as_text=True)
+        assert refused["invalid"] == [{"loc": "parts", "type": "too_long"}]
+        assert "retry each part separately" in refused["error"]
+    spent = await tools["search"]("aid to Kenya and from France", ctx, parts, as_text=True)
+
+    assert "limit" in spent["error"]
+    assert not resolver.calls
+    assert ctx.state == {
+        "surface": "studio",
+        ORCHESTRATOR_CALLS_KEY: {"invalid_arguments": BUDGETS["invalid_arguments"]},
+    }
+
+
+async def test_a_raw_text_search_keeps_its_reading_and_relays_its_warnings():
+    warning = {
+        "code": "role_scope_defaulted",
+        "severity": "warn",
+        "message": "no provider was named; the answer was resolved across every provider with data.",
+    }
+    resolver = _resolver(
+        _digest(
+            {
+                "variable": "ODA",
+                "status": "definite",
+                "spec_id": SPEC_LIFE,
+                "spec_block": SINGLE_BLOCK,
+                "warnings": [warning],
+            },
+            kind="resolution",
+        )
+    )
+    tools, ctx = _tools(resolver)
+
+    found = await tools["search"]("How much ODA did Kenya receive in 2024?", ctx)
+
+    assert resolver.calls[0]["raw_text"] is True
+    assert found["parts"][0]["status"] == "definite"
+    assert found["parts"][0]["warnings"] == [warning]
+    assert ctx.state["orchestrator:specs"] == {SPEC_LIFE: SINGLE_BLOCK}
+
+
+async def test_a_search_as_text_keeps_the_parties_its_part_asked_for():
+    resolver = _resolver(
+        _digest(
+            {"variable": "climate finance", "status": "definite", "spec_id": SPEC_LIFE},
+            kind="resolution",
+        )
+    )
+    tools, ctx = _tools(resolver)
+    part = {
+        "variable": "climate finance",
+        "entities": [{"text": "France", "role": "from"}, {"text": "Kenya", "role": "to"}],
+    }
+
+    await tools["search"]("France's climate finance to Kenya", ctx, [part], as_text=True)
+
+    assert resolver.calls == [
+        {"question": "France's climate finance to Kenya", "parts": [], "raw_text": True}
+    ]
+    assert ctx.state["orchestrator:searches"][0]["asked_roles"] == ["donor", "recipient"]
+
+
 async def test_search_reports_a_result_with_no_parts_by_its_status():
     tools, ctx = _tools(
         _resolver(_digest(status="unsupported", warnings=[{"message": "no measure"}]))
     )
 
-    found = await tools["search"]("what data do you have?", [{"variable": "anything"}], ctx)
+    found = await tools["search"]("what data do you have?", ctx, [{"variable": "anything"}])
 
     assert found == {
         "kind": "resolution",
@@ -411,30 +552,74 @@ async def test_search_reports_a_result_with_no_parts_by_its_status():
     }
 
 
-def test_search_tells_the_model_when_to_set_a_role_and_to_choose_a_source_through_fetch():
+def test_search_tells_the_model_when_to_set_a_role():
     tools, _ = _tools()
-    schema = OrchestratorSearchPart.model_json_schema()
 
     doc = " ".join(tools["search"].__doc__.split())
 
     assert "`role` on each entity in `entities`" in doc
     assert '{"text": "Kenya", "role": "to"}' in doc
-    assert "get_data" not in schema["properties"]["source"]["description"]
-    assert "fetch" in schema["properties"]["source"]["description"]
+
+
+@pytest.mark.parametrize("ref", [None, "provenance/WorldBankInternationalDebtStatistics"])
+async def test_search_sends_each_source_a_part_names_and_offers_no_dataset_list(ref):
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    named_source = {"text": "IDS", "exclude": True}
+    if ref is not None:
+        named_source["ref"] = ref
+    part = {"variable": "debt service", "sources": [named_source]}
+
+    await tools["search"]("Ghana's debt service, not from IDS", ctx, [part])
+
+    assert resolver.calls[0]["parts"] == [part]
+    declared = json.loads(_declarations()["search"])["parameters_json_schema"]["$defs"]
+    assert set(declared["SearchPart"]["properties"]) >= {"sources"}
+    assert not {"dataset", "source"} & set(declared["SearchPart"]["properties"])
+    assert set(declared["SearchSource"]["properties"]) == {"text", "exclude", "ref"}
 
 
 async def test_search_returns_a_refusal_as_an_error_and_stops_at_its_budget():
     refused = ResolverError("search refused", refusal={"message": "search is down"})
     tools, ctx = _tools(_resolver(refused))
 
-    first = await tools["search"]("q", [{"variable": "x"}], ctx)
+    first = await tools["search"]("q", ctx, [{"variable": "x"}])
     assert first == {"error": "search is down"}
 
     for _ in range(BUDGETS["search"] - 1):
-        await tools["search"]("q", [{"variable": "x"}], ctx)
-    spent = await tools["search"]("q", [{"variable": "x"}], ctx)
+        await tools["search"]("q", ctx, [{"variable": "x"}])
+    spent = await tools["search"]("q", ctx, [{"variable": "x"}])
 
     assert "limit" in spent["error"]
+
+
+@pytest.mark.parametrize("surface_name", ["studio", "download"])
+async def test_every_part_can_retry_as_text_after_a_corrected_place(surface_name):
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver, surface_name=surface_name)
+    parts = [
+        {"variable": f"measure {index}", "entities": [{"text": "Keyna"}]}
+        for index in range(MAX_PARTS)
+    ]
+
+    results = [await tools["search"]("measures in Keyna", ctx, parts)]
+    corrected = [{**part, "entities": [{"text": "Kenya"}]} for part in parts]
+    results.append(await tools["search"]("measures in Kenya", ctx, corrected))
+    results.extend(
+        [
+            await tools["search"](f"{part['variable']} in Keyna", ctx, [part], as_text=True)
+            for part in parts
+        ]
+    )
+
+    assert all("error" not in result for result in results)
+    assert len(resolver.calls) == MAX_PARTS + 2
+    assert all(call["raw_text"] for call in resolver.calls[2:])
+    assert all(not call["parts"] for call in resolver.calls[2:])
+
+    spent = await tools["search"]("another retry", ctx, [parts[0]], as_text=True)
+    assert "limit" in spent["error"]
+    assert len(resolver.calls) == MAX_PARTS + 2
 
 
 # A recorded definite part: education aid to Kenya, 2015 to 2023, every donor open.
@@ -443,6 +628,7 @@ ROLE_OPEN_SPEC = json.loads(
 )["spec"]
 ROLE_OPEN_ID = ROLE_OPEN_SPEC["spec_id"]
 GUESSED = {"code": "time_text_not_parsed", "severity": "degraded", "message": "time guessed"}
+CLOSEST = {"code": "closest_match", "text": "These readings are the closest measures."}
 
 
 def _recorded_envelope() -> dict[str, Any]:
@@ -465,6 +651,7 @@ def _recorded_envelope() -> dict[str, Any]:
                 "status": "candidates",
                 "variable_text": "health spending",
                 "warnings": [GUESSED],
+                "departures": [CLOSEST],
                 "candidates": {"specs": [SINGLE_BLOCK]},
             },
         ],
@@ -475,7 +662,7 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
     envelope = _recorded_envelope()
     tools, ctx = _tools(_resolver(resolver_digest(envelope)))
 
-    found = await tools["search"]("education aid to Kenya", [{"variable": "education aid"}], ctx)
+    found = await tools["search"]("education aid to Kenya", ctx, [{"variable": "education aid"}])
 
     # The model sees the part summaries, which carry none of the stored facts.
     assert found["parts"] == graph_envelope(envelope)["part_digests"]
@@ -502,11 +689,64 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
     assert set(ctx.state["orchestrator:specs"]) == {ROLE_OPEN_ID, SPEC_LIFE}
 
 
+def test_comparison_intent_reaches_the_stored_search_ledger() -> None:
+    state: dict[str, Any] = {}
+    envelope = {
+        "parts": [
+            {"status": "no_data", "variable_text": "health aid", "separate": True},
+            {"status": "no_data", "variable_text": "education aid"},
+        ]
+    }
+
+    store_search(state, graph_envelope(envelope))
+    readings = [SearchReading.model_validate(row) for row in state["orchestrator:searches"]]
+
+    assert [reading.separate for reading in readings] == [True, False]
+    assert state["orchestrator:searches"][0]["separate"] is True
+    assert "separate" not in state["orchestrator:searches"][1]
+
+
+def test_a_qualifier_refusal_reaches_the_stored_ledger_without_offering_a_source() -> None:
+    envelope = {
+        "parts": [
+            {
+                "status": "no_data",
+                "variable_text": "aid to Kenya for HIV",
+                "no_data": {
+                    "category": "absent",
+                    "reason": "qualifier_not_bound",
+                    "unbound_qualifiers": [{"text": "HIV"}],
+                    "flagged_match": {
+                        "spec_id": "spec_health",
+                        "resolved": {
+                            "rendered_sentence": "Gross ODA disbursements to Kenya for health."
+                        },
+                    },
+                },
+            }
+        ]
+    }
+    state: dict[str, Any] = {}
+
+    parts = store_search(state, graph_envelope(envelope))
+    (stored,) = (SearchReading.model_validate(row) for row in state["orchestrator:searches"])
+
+    assert parts[0]["unbound_qualifiers"] == ["HIV"]
+    assert stored.unbound_qualifiers == ("HIV",)
+    assert stored.flagged_match == "Gross ODA disbursements to Kenya for health."
+    assert "spec_health" not in state.get("orchestrator:specs", {})
+    assert "spec_health" not in stored.model_dump_json()
+    rendered = render_readings([stored], budget=10_000)
+    assert "refused phrases: HIV" in rendered.text
+    assert "broader unused match: Gross ODA disbursements to Kenya for health." in rendered.text
+    assert rendered.spec_ids == ()
+
+
 async def test_search_keeps_the_readings_of_earlier_searches_in_the_turn():
     tools, ctx = _tools(_resolver(_digest({"variable": "x", "status": "no_data"})))
 
-    await tools["search"]("q", [{"variable": "x"}], ctx)
-    await tools["search"]("q", [{"variable": "x"}], ctx)
+    await tools["search"]("q", ctx, [{"variable": "x"}])
+    await tools["search"]("q", ctx, [{"variable": "x"}])
 
     assert len(ctx.state["orchestrator:searches"]) == 2
 
@@ -533,8 +773,10 @@ async def test_fetch_adds_its_summary_or_refusal_to_the_reading_of_its_spec_id()
 
 
 async def test_fetch_of_a_chosen_candidate_adds_a_reading_for_it():
-    tools, ctx = _tools(_resolver(resolver_digest(_recorded_envelope())))
-    await tools["search"]("education aid to Kenya", [{"variable": "education aid"}], ctx)
+    envelope = _recorded_envelope()
+    envelope["parts"][2]["separate"] = True
+    tools, ctx = _tools(_resolver(resolver_digest(envelope)))
+    await tools["search"]("education aid to Kenya", ctx, [{"variable": "education aid"}])
 
     await tools["fetch"](SPEC_LIFE, ctx)
     await tools["fetch"](ROLE_OPEN_ID, ctx)
@@ -551,8 +793,58 @@ async def test_fetch_of_a_chosen_candidate_adds_a_reading_for_it():
     assert chosen.text == "health spending"
     assert chosen.sentence == "Life expectancy in Nigeria"
     assert [w.code for w in chosen.warnings] == [GUESSED["code"]]
+    assert [d.model_dump() for d in chosen.departures] == [CLOSEST]
+    assert chosen.separate is True
+    assert ctx.state["orchestrator:searches"][-1]["separate"] is True
     assert chosen.fetch is not None and chosen.fetch.summary == "64 observations"
     assert readings[0].fetch is not None
+
+
+# A recorded search for "climate finance": three SDG worldwide series, offered
+# as candidates under `retrieval_score_weak`.
+CLIMATE_ENVELOPE = json.loads(
+    (Path(__file__).parent / "fixtures" / "search_climate_finance_weak.json").read_text()
+)
+CLIMATE_TOTAL = "spec_8380f22015251b410d800a2774893073"
+
+
+@pytest.mark.parametrize(
+    ("query", "part", "lacks"),
+    [
+        pytest.param(
+            "Do you have any climate finance data",
+            {"variable": "climate finance"},
+            "a worldwide total with no breakdown by country",
+            id="no-party-asked",
+        ),
+        pytest.param(
+            "France's climate finance to Kenya",
+            {
+                "variable": "climate finance",
+                "entities": [{"text": "France", "role": "from"}, {"text": "Kenya", "role": "to"}],
+            },
+            "a worldwide total with no breakdown by country and no donor or recipient detail",
+            id="a-donor-and-a-recipient-asked",
+        ),
+    ],
+)
+async def test_a_fetched_weak_candidate_is_noted_with_what_it_covers_and_lacks(
+    query: str, part: dict[str, Any], lacks: str
+):
+    tools, ctx = _tools(_resolver(resolver_digest(CLIMATE_ENVELOPE)))
+    await tools["search"](query, ctx, [part])
+    specs = ctx.state["orchestrator:specs"]
+    searched = loose_match_notes(ctx.state["orchestrator:searches"], specs=specs, plans=[])
+
+    await tools["fetch"](CLIMATE_TOTAL, ctx)
+
+    # Nothing is noted until the turn uses the series.
+    assert searched == []
+    assert loose_match_notes(ctx.state["orchestrator:searches"], specs=specs, plans=[]) == [
+        'The closest series to "climate finance" is a loose match: Total climate-specific '
+        f"financial support provided worldwide, 2011 to 2022 (US dollars, SDG Global "
+        f"Database), {lacks}."
+    ]
 
 
 @pytest.mark.parametrize(
@@ -833,6 +1125,20 @@ async def test_make_charts_draws_several_charts_in_one_call():
     assert all("facts" in chart for chart in drawn["charts"])
 
 
+async def test_make_charts_refuses_an_empty_list_and_says_it_cannot_clear_the_canvas():
+    """An empty call drew nothing and removed nothing; a bare `{"charts": []}`
+    read as success, and the model told the user the canvas was cleared."""
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+
+    refused = await tools["make_charts"]([], ctx)
+
+    assert set(refused) == {"error"}
+    assert "cannot remove or clear" in refused["error"]
+    assert executor.calls == []
+    assert ctx.state["orchestrator:calls"] == {"make_charts_failed": 1}
+
+
 async def test_make_charts_refuses_a_frame_nothing_returned_and_a_select_the_platform_would_refuse():
     executor = FakeExecutor()
     tools, ctx = _tools(executor=executor)
@@ -879,8 +1185,15 @@ class RefusingExecutor(FakeExecutor):
 
 
 class RaisingExecutor(FakeExecutor):
+    """Raises on write number `fails_on` (1-based), as a dropped stream does."""
+
+    def __init__(self, fails_on: int = 1) -> None:
+        super().__init__()
+        self.fails_on = fails_on
+
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
-        if tool == "write_component":
+        if tool == "write_component" and _writes(self) + 1 == self.fails_on:
+            self.calls.append((tool, args))
             raise RuntimeError("presentation-mcp is down")
         return await super().__call__(tool=tool, args=args, on_progress=on_progress)
 
@@ -930,14 +1243,24 @@ async def test_make_charts_stops_after_its_cap_of_calls_that_drew_nothing():
     assert _writes(executor) == writes
 
 
-async def test_make_charts_counts_a_call_the_executor_raised_out_of():
-    tools, ctx = _tools(executor=RaisingExecutor())
+@pytest.mark.parametrize(
+    ("fails_on", "results", "counted"),
+    [(1, ["error"], "make_charts_failed"), (2, ["facts", "error"], "make_charts")],
+)
+async def test_make_charts_reports_a_write_that_raised_and_draws_nothing_after_it(
+    fails_on, results, counted
+):
+    executor = RaisingExecutor(fails_on=fails_on)
+    tools, ctx = _tools(executor=executor)
     await tools["fetch"](SPEC_LIFE, ctx)
 
-    with pytest.raises(RuntimeError):
-        await tools["make_charts"](_one_chart(frame_id_for(REF)), ctx)
+    drawn = await tools["make_charts"](_one_chart(frame_id_for(REF)) * 3, ctx)
 
-    assert ctx.state["orchestrator:calls"]["make_charts_failed"] == 1
+    assert [next(iter(set(chart) - {"title"})) for chart in drawn["charts"]] == results
+    assert "RuntimeError" in drawn["charts"][-1]["error"]
+    assert _writes(executor) == fails_on
+    assert len(executor.landed) == fails_on - 1
+    assert ctx.state["orchestrator:calls"] == {"fetch": 1, counted: 1}
 
 
 class YieldingExecutor(FakeExecutor):
@@ -997,16 +1320,233 @@ async def test_make_charts_relays_the_values_a_platform_refusal_would_accept():
 def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     tools, ctx = _tools()
 
+    options = [{"label": "Republic of the Congo"}, {"label": "DR Congo"}]
+
     assert "error" in tools["ask_user"]("Which Congo?", [], ctx)
-    asked = tools["ask_user"]("Which Congo?", ["Republic of the Congo", "DR Congo"], ctx)
+    asked = tools["ask_user"]("Which Congo?", options, ctx)
     second = tools["plan"]("Congo's GDP", [], ctx)
 
     assert asked[HANDED_OFF] == "ask"
     assert HANDED_OFF not in second
-    assert pending_action(ctx.state) == PendingAsk(
-        question="Which Congo?", options=["Republic of the Congo", "DR Congo"]
-    )
+    assert pending_action(ctx.state) == PendingAsk(question="Which Congo?", options=options)
     assert "already waiting on ask" in second["error"]
+
+
+async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
+    # Search's answer to "Bilateral plus imputed multilateral aid from France to Kenya".
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp"
+            / "tests"
+            / "fixtures"
+            / "resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    tools, ctx = _tools(resolver=_resolver(resolver_digest(envelope)))
+
+    found = await tools["search"]("aid from France to Kenya", ctx, [{"variable": "aid"}])
+
+    (part,) = found["parts"]
+    assert part["counted_as"] == "gross disbursements"
+    assert part["alternatives"] == [
+        {"spec_id": "spec_c67524ce5da3bfd4d94994a76c560b28", "label": "net disbursements"}
+    ]
+
+
+SPEC_NET = "spec_" + "c" * 32
+# `FAMILY_BLOCK` counted as gross disbursements, offering net disbursements
+# under its own spec_id, as search's `resolved.alternative_measures` states it.
+COUNTED_BLOCK = {
+    **FAMILY_BLOCK,
+    "resolved": {
+        **FAMILY_BLOCK["resolved"],
+        "measure_label": "gross disbursements",
+        "alternative_measures": [
+            {"label": "net disbursements", "axis": "what", "definition": {"spec_id": SPEC_NET}}
+        ],
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("net", "refused"),
+    [
+        (SPEC_NET, None),
+        ("spec_" + "d" * 32, "which no search result named this turn"),
+        (SPEC_AID, "is on more than one option"),
+    ],
+    ids=["offered", "unnamed", "repeated"],
+)
+async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(
+    net: str, refused: str | None
+):
+    part = {"variable": "aid", "status": "definite", "spec_id": SPEC_AID}
+    tools, ctx = _tools(resolver=_resolver(_digest({**part, "spec_block": COUNTED_BLOCK})))
+    await tools["search"]("aid to Kenya", ctx, [{"variable": "aid"}])
+    options = [
+        {"label": "gross disbursements", "spec_id": SPEC_AID},
+        {"label": "net disbursements", "spec_id": net},
+    ]
+
+    asked = tools["ask_user"]("How should aid be counted?", options, ctx)
+
+    if refused is None:
+        assert asked[HANDED_OFF] == "ask"
+        assert pending_action(ctx.state).options[1].spec_id == SPEC_NET
+    else:
+        assert refused in asked["refusal"]
+        assert asked["code"] == ToolErrorCode.REQUEST_INVALID.value
+        assert ctx.state.get(ORCHESTRATOR_PENDING_KEY) is None
+
+
+# Search's answer to "Bilateral plus imputed multilateral aid from France to
+# Kenya": gross disbursements, one indicator, offering net disbursements.
+FRANCE_KENYA = json.loads(
+    (
+        Path(__file__).parents[2]
+        / "data-mcp"
+        / "tests"
+        / "fixtures"
+        / "resolve_aid_france_kenya.json"
+    ).read_text()
+)
+FRANCE_KENYA_NET = "spec_c67524ce5da3bfd4d94994a76c560b28"
+
+
+def _net_family_envelope() -> dict[str, Any]:
+    """Search's answer for the net count's definition: a family of two
+    indicators summable over the type of finance, unlike the elected gross
+    count's one, offering the gross count back."""
+    spec = copy.deepcopy(FRANCE_KENYA["parts"][0]["spec"])
+    (net,) = spec["resolved"]["alternative_measures"]
+    spec["resolved"]["alternative_measures"] = [
+        {**net, "definition": spec["definition"], "label": "gross disbursements"}
+    ]
+    spec["spec_id"] = FRANCE_KENYA_NET
+    spec["definition"] = net["definition"]
+    spec["resolved"]["measure_label"] = "net disbursements"
+    spec["resolved"]["stat_vars"].update(member_count=2, served_count=2)
+    spec["resolved"]["inapplicable_slots"] = []
+    for slot in spec["resolved"]["slots"]:
+        if slot["binding"]["kind"] == "unbound":
+            slot["summable"] = True
+    return {
+        "status": "resolved",
+        "parts": [{"status": "definite", "variable_text": "aid", "spec": spec}],
+    }
+
+
+async def _searched_france_kenya(definition_surface) -> tuple[dict[str, Any], Any, FakeExecutor]:
+    """The tools after one search for aid from France to Kenya, with the
+    conversation's identities on record as `harness.studio` keeps them."""
+    executor = FakeExecutor()
+    tools = build_orchestrator_tools(
+        resolver=_resolver(resolver_digest(FRANCE_KENYA)),
+        executor=executor,
+        definition_surface=definition_surface,
+    )
+    by_name = {fn.__name__: fn for fn in tools}
+    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    conversation = ConversationState(conversation_id="c1")
+    current_recorded_identity.set(conversation.recorded_identity)
+    await by_name["search"]("aid from France to Kenya", ctx, [{"variable": "aid"}])
+    conversation.turn_specs = dict(ctx.state["orchestrator:specs"])
+    return by_name, ctx, executor
+
+
+async def test_a_fetch_of_another_count_reads_its_own_block_and_gains_a_reading():
+    surface = FakeSurface(
+        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
+    )
+    tools, ctx, executor = await _searched_france_kenya(surface)
+
+    found = await tools["fetch"](FRANCE_KENYA_NET, ctx)
+
+    ((tool, arguments),) = surface.calls
+    assert (tool.name, arguments["spec_id"]) == ("resolve_definition", FRANCE_KENYA_NET)
+    assert [args for tool, args in executor.calls if tool == "get_data"] == [
+        {"spec_id": FRANCE_KENYA_NET, "stat_vars": "sum"}
+    ]
+    assert found["summary"] == "64 observations"
+    assert ctx.state["orchestrator:specs"][FRANCE_KENYA_NET]["spec_id"] == FRANCE_KENYA_NET
+    elected, chosen = (SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"])
+    assert (chosen.status, chosen.spec_id, chosen.text) == (
+        "chosen",
+        FRANCE_KENYA_NET,
+        elected.text,
+    )
+    assert chosen.fetch is not None and chosen.fetch.summary == "64 observations"
+    assert elected.fetch is None
+    assert (elected.other_count_of, chosen.other_count_of) == (None, elected.spec_id)
+
+
+@pytest.mark.parametrize("gross_first", [True, False], ids=["gross-first", "net-first"])
+async def test_a_fetched_other_count_states_the_measure_search_elected(gross_first: bool):
+    """The net count's own block names net as its measure and offers gross
+    back; a plan pinning net after a fetch of it still says search elected
+    gross, whichever source the planner is shown first."""
+    surface = FakeSurface(
+        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
+    )
+    tools, ctx, _ = await _searched_france_kenya(surface)
+    await tools["fetch"](FRANCE_KENYA_NET, ctx)
+    gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
+    shown = [gross, FRANCE_KENYA_NET] if gross_first else [FRANCE_KENYA_NET, gross]
+
+    pins = planner_seam._reading_pin_sources(
+        ctx.state["orchestrator:searches"],
+        shown,
+        blocks=ctx.state["orchestrator:specs"],
+        earlier=(),
+        warnings={},
+    )
+    choice = planner_agent._measure_choices(pins)[FRANCE_KENYA_NET]
+    decision = planner_agent._measure_decision("counted_as", FRANCE_KENYA_NET, choice, user=False)
+
+    assert pins[FRANCE_KENYA_NET].other_count_of == gross
+    assert (decision.options, decision.chosen, decision.rationale) == (
+        ("gross disbursements", "net disbursements"),
+        "net disbursements",
+        "Chosen in place of gross disbursements, the measure search elected.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "code"),
+    [
+        (
+            ToolCallResult(is_error=True, structured_content={"code": "spec_not_resolvable"}),
+            ToolErrorCode.DEFINITION_NOT_HELD.value,
+        ),
+        (
+            ToolCallResult(is_error=False, **search_result_parts(FRANCE_KENYA)),
+            ToolErrorCode.DEFINITION_NOT_HELD.value,
+        ),
+        (
+            ToolCallResult(
+                is_error=True,
+                structured_content={
+                    "code": "service_unavailable",
+                    "retry_mode": "retry_after_delay",
+                },
+            ),
+            orchestrator_tools.FETCH_UNAVAILABLE,
+        ),
+    ],
+    ids=["refused", "another-dataset", "unreachable"],
+)
+async def test_a_fetch_of_another_count_search_cannot_read_is_refused_without_get_data(
+    answer: ToolCallResult, code: str
+):
+    tools, ctx, executor = await _searched_france_kenya(FakeSurface(answer))
+
+    refused = await tools["fetch"](FRANCE_KENYA_NET, ctx)
+
+    assert refused["code"] == code
+    assert FRANCE_KENYA_NET in refused["refusal"]
+    assert not [call for call in executor.calls if call[0] == "get_data"]
+    assert FRANCE_KENYA_NET not in ctx.state["orchestrator:specs"]
 
 
 def test_plan_records_the_brief_once_per_turn():
@@ -1154,11 +1694,36 @@ async def test_explain_dfo_reads_dfo_faq_off_the_activity_feed():
     assert explained == {"explainer": "# The DFO\nBuilt by ONE Data."}
 
 
-async def test_explain_dfo_says_plainly_when_the_deployment_has_no_skills_api():
-    refused = ToolCallResult(is_error=True, structured_content={"code": "capability_unavailable"})
-    tools, _ = _tools(dfo_faq_surface=FakeSurface(refused))
+@pytest.mark.parametrize(
+    ("surface", "said"),
+    [
+        (
+            FakeSurface(
+                ToolCallResult(is_error=True, structured_content={"code": "capability_unavailable"})
+            ),
+            CANNOT_DESCRIBE_DFO,
+        ),
+        (
+            FakeSurface(
+                ToolCallResult(is_error=True, structured_content={"code": "skill_not_found"})
+            ),
+            CANNOT_DESCRIBE_DFO,
+        ),
+        (
+            FakeSurface(
+                ToolCallResult(is_error=True, structured_content={"code": "service_unavailable"})
+            ),
+            DFO_FAQ_NOT_READ,
+        ),
+        (UnreachableSurface(ToolCallResult(is_error=False, text="")), DFO_FAQ_NOT_READ),
+    ],
+)
+async def test_explain_dfo_says_plainly_when_dfo_faq_cannot_be_read(
+    surface: FakeSurface, said: str
+):
+    tools, _ = _tools(dfo_faq_surface=surface)
 
-    assert await tools["explain_dfo"]() == {"error": CANNOT_DESCRIBE_DFO}
+    assert await tools["explain_dfo"]() == {"error": said}
 
 
 # --- recall -----------------------------------------------------------------
@@ -1169,6 +1734,71 @@ def _recall_seam(state: ConversationState):
         return state.recall_part(**target)
 
     return recall_part
+
+
+# --- remove_cards -------------------------------------------------------------
+
+
+def _remove_seam(state: ConversationState):
+    async def remove(*, component_ids: list[str], all_cards: bool) -> tuple[list[str], list[str]]:
+        return remove_cards(state, component_ids, all_cards=all_cards)
+
+    return remove
+
+
+def _two_card_canvas() -> ConversationState:
+    state = ConversationState(conversation_id="c1")
+    for cid in ("cmp_01", "cmp_02"):
+        land_component(
+            state,
+            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+        )
+    return state
+
+
+async def test_remove_cards_takes_named_cards_off_and_says_which_it_never_held():
+    state = _two_card_canvas()
+    tools, ctx = _tools(remove_cards=_remove_seam(state))
+
+    answer = await tools["remove_cards"](ctx, ["cmp_01", "cmp_99"])
+
+    assert answer == {"removed": ["cmp_01"], "not_in_conversation": ["cmp_99"]}
+    assert state.composition is not None
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_02"]
+
+
+async def test_remove_cards_clears_the_canvas_and_refuses_a_call_that_names_nothing():
+    state = _two_card_canvas()
+    tools, ctx = _tools(remove_cards=_remove_seam(state))
+
+    nothing = await tools["remove_cards"](ctx)
+    cleared = await tools["remove_cards"](ctx, all_cards=True)
+    again = await tools["remove_cards"](ctx, all_cards=True)
+
+    assert set(nothing) == {"error"}
+    assert cleared == {"removed": ["cmp_01", "cmp_02"]}
+    assert again == {"removed": [], "note": "The canvas was already empty."}
+
+
+async def test_removing_a_card_already_off_the_canvas_is_done_not_refused():
+    """A hidden or removed card is already where the user asked; refusing it
+    showed raw ids in Activity (UAT A6)."""
+    state = _two_card_canvas()
+    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    await tools["remove_cards"](ctx, ["cmp_01"])
+
+    again = await tools["remove_cards"](ctx, ["cmp_01"])
+    unknown = await tools["remove_cards"](ctx, ["cmp_99"])
+
+    assert again == {"removed": [], "note": "Those cards were already off the canvas."}
+    assert set(unknown) == {"error"}
+    assert "cmp_99" not in unknown["error"]
+
+
+async def test_remove_cards_is_unavailable_without_a_conversation_seam():
+    tools, ctx = _tools()
+
+    assert set(await tools["remove_cards"](ctx, ["cmp_01"])) == {"error"}
 
 
 async def test_recall_returns_an_earlier_turns_plan_record_and_refuses_a_turn_without_one():
@@ -1187,6 +1817,26 @@ async def test_recall_returns_an_earlier_turns_plan_record_and_refuses_a_turn_wi
     assert found["text"] == [plan.render(budget=4_000)]
     assert refused["code"] == "request_invalid"
     assert refused["legal"] == {"turns": [1]}
+
+
+async def test_a_canvas_listing_does_not_spend_the_detail_reads():
+    """Looking at the canvas has its own small allowance, so a listing
+    followed by three card reads all go through."""
+    state = ConversationState(conversation_id="c1")
+    land_component(
+        state,
+        {"component_id": "cmp_01", "revision": 1, "type": "line_chart", "title": "Aid"},
+    )
+    tools, ctx = _tools(recall_part=_recall_seam(state))
+
+    listing = await tools["recall"]("canvas", ctx)
+    reads = [await tools["recall"]("canvas", ctx, component_id="cmp_01") for _ in range(3)]
+
+    assert [card["component_id"] for card in listing["on_canvas"]] == ["cmp_01"]
+    assert all("error" not in read for read in reads)
+    for _ in range(BUDGETS["recall_canvas"] - 1):
+        await tools["recall"]("canvas", ctx)
+    assert "limit" in (await tools["recall"]("canvas", ctx))["error"]
 
 
 async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation_seam():
@@ -1300,3 +1950,125 @@ async def test_fetch_refusal_carries_the_platforms_details_and_retry_mode():
     assert result["code"] == "default_facet_undefined"
     assert result["retry_mode"] == "correct_and_retry"
     assert result["fix"]["issues"][0]["alternatives"] == [{"ref": "USDollar", "label": "USDollar"}]
+
+
+async def test_remove_cards_stops_at_its_turn_budget():
+    state = _two_card_canvas()
+    tools, ctx = _tools(remove_cards=_remove_seam(state))
+    for _ in range(BUDGETS["remove_cards"]):
+        await tools["remove_cards"](ctx, all_cards=True)
+    land_component(state, {"component_id": "cmp_new", "revision": 1, "type": "table"})
+
+    refused = await tools["remove_cards"](ctx, all_cards=True)
+
+    assert "error" in refused
+    assert [b.component_id for b in state.composition.blocks] == ["cmp_new"]
+
+
+async def test_source_name_choices_reach_the_agent_and_saved_ledger():
+
+    groups = [
+        {
+            "text": "shared",
+            "candidates": [
+                {"ref": "provenance/a", "label": "Publisher A", "kind": "provenance"},
+                {"ref": "provenance/b", "label": "Publisher B", "kind": "provenance"},
+            ],
+        }
+    ]
+    envelope = {
+        "status": "no_data",
+        "parts": [
+            {
+                "status": "no_data",
+                "variable_text": "aid",
+                "no_data": {
+                    "category": "unresolved",
+                    "reason": "source_ambiguous",
+                    "ambiguous_sources": groups,
+                },
+            }
+        ],
+    }
+    tools, ctx = _tools(_resolver(resolver_digest(envelope)))
+    found = await tools["search"](
+        "aid from shared", ctx, [{"variable": "aid", "sources": [{"text": "shared"}]}]
+    )
+    assert found["parts"][0]["ambiguous_sources"] == groups
+    reading = SearchReading.model_validate(ctx.state["orchestrator:searches"][0])
+    rendered = render_readings([reading], budget=10000).text
+    assert "Publisher A [provenance/a]" in rendered
+    assert "Publisher B [provenance/b]" in rendered
+
+
+async def test_source_alias_confirmation_survives_an_orchestrator_pin():
+
+    envelope = {
+        "status": "definite",
+        "parts": [
+            {
+                "status": "definite",
+                "variable_text": "aid",
+                "restatement": {"sources": [{"text": "DAC", "polarity": "include", "ref": None}]},
+                "spec": {
+                    **SINGLE_BLOCK,
+                    "resolved": {
+                        **SINGLE_BLOCK["resolved"],
+                        "facets": {
+                            "provenance": {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2a"}
+                        },
+                    },
+                },
+            }
+        ],
+    }
+    tools, ctx = _tools(_resolver(resolver_digest(envelope)))
+    await tools["search"]("aid from DAC", ctx, [{"variable": "aid", "sources": [{"text": "DAC"}]}])
+    source = source_from_spec_block(ctx.state["orchestrator:specs"][SPEC_LIFE])
+    requirement = DatasetRequirement(
+        id="aid",
+        measure="aid",
+        across="recipient",
+        period=Period(start=2020, end=2023),
+        source="DAC",
+    )
+    assert EvidenceIssueCode.SOURCE_MISMATCH not in [
+        f.code for f in check_evidence(requirement, evidence_from_source(source))
+    ]
+
+
+async def test_fetching_an_alternative_preserves_recorded_source_confirmation():
+    envelope = copy.deepcopy(FRANCE_KENYA)
+    mention = {"text": "DAC", "ref": None, "polarity": "include"}
+    envelope["parts"][0]["restatement"] = {"sources": [mention]}
+    surface = FakeSurface(
+        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
+    )
+    tools = build_orchestrator_tools(
+        resolver=_resolver(resolver_digest(envelope)),
+        executor=FakeExecutor(),
+        definition_surface=surface,
+    )
+    by_name = {fn.__name__: fn for fn in tools}
+    ctx = SimpleNamespace(state={"surface": "studio"}, invocation_id="inv_1")
+    conversation = ConversationState(conversation_id="c1")
+    token = current_recorded_identity.set(conversation.recorded_identity)
+    try:
+        await by_name["search"](
+            "aid from DAC", ctx, [{"variable": "aid", "sources": [{"text": "DAC"}]}]
+        )
+        conversation.turn_specs = dict(ctx.state["orchestrator:specs"])
+        before = conversation.recorded_identity(FRANCE_KENYA_NET)
+        assert before is not None
+        assert [m.model_dump() for m in before.resolved_sources] == [mention]
+
+        await by_name["fetch"](FRANCE_KENYA_NET, ctx)
+
+        block = ctx.state["orchestrator:specs"][FRANCE_KENYA_NET]
+        assert [m.model_dump() for m in source_from_spec_block(block).resolved_sources] == [mention]
+        conversation.turn_specs = dict(ctx.state["orchestrator:specs"])
+        after = conversation.recorded_identity(FRANCE_KENYA_NET)
+        assert after is not None
+        assert after.resolved_sources == before.resolved_sources
+    finally:
+        current_recorded_identity.reset(token)

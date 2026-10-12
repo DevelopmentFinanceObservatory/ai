@@ -4,7 +4,7 @@ A question that asks to see a series for named entities is answered by the
 retrieved frame, so the plan states one dataset requirement and the
 mechanical translation names the retrieval as its terminal. The retrieval's
 frame is therefore the key `harness.studio_translate._RecordingSurface`
-wrote its manifest under, and `harness.graph._link_evidence_to_terminal_frames`
+wrote its manifest under, and `harness.graph.answer.link_evidence_to_terminal_frames`
 links that frame to itself. `_upstream_retrievals` returns a retrieval
 step as its own source. The card built from the run's own terminal frame
 carries the retrieval's real citation, as it does for a transform's `ops_`
@@ -23,7 +23,7 @@ from compiler.surface import ToolSchema
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
 from harness.conversation import current_conversation_id
-from harness.graph import _link_evidence_to_terminal_frames
+from harness.graph.answer import link_evidence_to_terminal_frames
 from harness.mcp_client import McpExecutor
 from harness.provenance import ProvenanceStore
 from harness.settings import Settings
@@ -94,7 +94,7 @@ async def test_a_retrieval_terminal_plan_links_its_own_frame(
 
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["annual_debt_service"]
     assert frame_ref == FrameRef(spec_id=SPEC_KENYA, content_version=CONTENT_VERSION)
     assert (
@@ -131,7 +131,7 @@ async def test_a_retrieval_terminal_plan_assembles_a_card_from_its_own_source(
     _finished, outcome = await execute_approved_plan(plan, surface=surface)
     assert isinstance(outcome, Accepted), outcome
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)
@@ -176,7 +176,7 @@ async def test_a_retrieval_terminal_card_counts_the_stat_vars_its_frame_holds(
     assert isinstance(outcome, Accepted), outcome
     assert [record.stat_var_count for record in outcome.steps] == [2]
     assert plan.workflow is not None
-    _link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     frame_ref = outcome.results["annual_debt_service"].model_dump()
 
     executor = McpExecutor(settings=Settings(), provenance=store)

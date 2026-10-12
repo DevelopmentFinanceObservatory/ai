@@ -1,8 +1,8 @@
-"""The studio endpoints: the v1 wire contract served over the workflow graph.
+"""The studio endpoints: the v1 wire contract served over the orchestrator workflow.
 
 Three routes (`docs/studio-contract-v1.md`):
 
-* `POST /api/studio/turn`: runs one graph turn and streams v1 frames as SSE.
+* `POST /api/studio/turn`: runs one turn and streams v1 frames as SSE.
 * `POST /api/studio/interrupt`: resumes a paused turn; the response is a
   NEW SSE stream continuing it (contract delta 1).
 * `POST /api/studio/composition`: applies canvas mutations and returns the
@@ -11,7 +11,7 @@ Three routes (`docs/studio-contract-v1.md`):
 The translator from ADK events to frames is `harness.studio_translate`;
 per-conversation state and the composition rules are `harness.studio_state`;
 the Edit Card route is `harness.studio_edit`. This module owns the routes,
-the `StudioRunner` that drives a graph turn, and the SSE transport.
+the `StudioRunner` that drives a turn, and the SSE transport.
 
 Conversation identity (contract delta 5): the client mints
 `conversation_id`; the bearer token resolves to a principal
@@ -23,7 +23,7 @@ manifest and the turn records persist across turns in the store. Cross-turn
 context reaches the models as DIGESTS seeded into each turn's session
 state: the canvas digest (block titles + fact summaries) and the
 conversation digest (the newest turn records); anything past their bounds
-is served on demand by the recall seam (`make_recall`). Interrupts resume
+is served on demand by the recall seam (`make_recall_part`). Interrupts resume
 the current turn's session.
 """
 
@@ -44,7 +44,7 @@ from compiler.surface import ToolSurface
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
-from google.adk.agents.run_config import RunConfig
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.apps import App
 from google.adk.errors import StaleSessionError
 from google.adk.errors.already_exists_error import AlreadyExistsError
@@ -59,13 +59,13 @@ from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorde
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph import (
+from harness.graph.seams import Executor
+from harness.graph.state import (
     AGENT_NAME,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
-    Executor,
 )
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
@@ -521,14 +521,8 @@ class StudioRunner:
         app_name: str | None = None,
         edit_model: Any | None = None,
         provenance: ProvenanceStore | None = None,
-        settings: Settings | None = None,
-        translator: type[_Translator] = _Translator,
-        run_config: RunConfig | None = None,
     ) -> None:
         self.edit_model = edit_model
-        self.translator = translator
-        self.orchestrated = settings is not None and settings.studio_engine == "orchestrator"
-        self.run_config = run_config
         # Resolved before the workflow exists (`AGENT_NAME` is the fixed
         # name every `create_root_workflow` call gives its `Workflow`, so
         # this matches `workflow.name` in every real caller) because the
@@ -537,10 +531,9 @@ class StudioRunner:
         # itself becomes available.
         resolved_app_name = app_name or AGENT_NAME
         # Built before the recorder: `_RecordingExecutor` binds it too, to
-        # serve `narrate`'s optional `components_replaced` capability
-        # (`harness.studio_translate`) against the same conversations the
-        # rest of this runner reads and writes. A caller giving its own
-        # `store` (`harness.server`, so `make_recall` can bind it before
+        # keep a create's write token (`harness.studio_translate`) on the
+        # same conversations the rest of this runner reads and writes. A
+        # caller giving its own `store` (`harness.server`, so `make_recall_part` can bind it before
         # this constructor runs) is responsible for building it over the
         # same `session_service`.
         self.store = store or StudioStore(session_service, app_name=resolved_app_name)
@@ -560,11 +553,11 @@ class StudioRunner:
     async def aclose(self) -> None:
         """Release the injected executor's resources, through the recorder
         wrapping it. Called once, from `harness.server._lifespan`'s
-        shutdown. The executor built for a real (non-scripted) server is
-        `McpExecutor`, which opens one long-lived presentation-mcp client
-        per conversation (`harness.mcp_client.McpExecutor._presentation_client`)
-        and needs exactly this call to give them back; nothing else on the
-        served path closes it."""
+        shutdown. The server's executor is `McpExecutor`, which opens one
+        long-lived presentation-mcp client per conversation
+        (`harness.mcp_client.McpExecutor._presentation_client`) and needs
+        exactly this call to give them back; nothing else on the served path
+        closes it."""
         await self.recorder.aclose()
 
     async def _ensure_session(
@@ -597,7 +590,7 @@ class StudioRunner:
         become an HTTP status. The exception is logged with the trace id;
         it is not re-raised into the transport.
         """
-        translator = self.translator(
+        translator = _Translator(
             conversation=conversation,
             recorder=self.recorder,
             surface_recorder=self.surface_recorder,
@@ -608,7 +601,8 @@ class StudioRunner:
                     user_id=principal,
                     session_id=conversation.session_id,
                     new_message=message,
-                    run_config=self.run_config,
+                    # The agent's text and thoughts stream as they are generated.
+                    run_config=RunConfig(streaming_mode=StreamingMode.SSE),
                 )
             ) as events:
                 async for event in events:
@@ -1007,31 +1001,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 and body.component_ref.intent is ComponentRefIntent.FOLLOW_UP
                 else None
             )
-            digest = conversation.canvas_digest_state(focus=focus)
+            # The agent reads the canvas through `recall` and starts from counts.
+            digest = conversation.canvas_summary_state(focus=focus)
             state: dict[str, Any] = {"surface": body.surface.value}
             if digest:
                 state["canvas_digest"] = json.dumps(digest)
-            anaphor_window = conversation.anaphor_window(focus)
-            if anaphor_window:
-                state["anaphor_window"] = anaphor_window
-            # `auto_add` and the actual composed block ids, distinct from
-            # `canvas_digest` above, which a card-scoped follow-up also
-            # loads with its focus card even when that card was never
-            # composed. `graph._validated_revises` checks these, not the
-            # digest, so a `revises` target only survives converse when the
-            # recorder really can swap it in.
-            state["auto_add"] = conversation.auto_add
-            state["composed_ids"] = json.dumps(
-                [block.component_id for block in conversation.composition.blocks]
-                if conversation.composition is not None
-                else []
-            )
             history = conversation.conversation_digest_state()
             if history:
                 state["conversation_digest"] = json.dumps(history)
             # The orchestrator's planner renders the earlier turns' readings;
             # their blocks stay in the conversation (`current_earlier_block`).
-            ledger = conversation.prior_ledger_state() if studio.orchestrated else None
+            ledger = conversation.prior_ledger_state()
             if ledger:
                 state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
             if isinstance(body.seed_spec, list):

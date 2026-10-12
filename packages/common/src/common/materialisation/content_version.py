@@ -14,12 +14,12 @@ frame-grammar available to derive from, so the seam only needs to answer
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dfo_frame_grammar import Frame
 
-ContentVersionDeriver = Callable[["Frame", dict[str, Any]], str]
+ContentVersionDeriver = Callable[["Frame"], str]
 
 _deriver: ContentVersionDeriver | None = None
 
