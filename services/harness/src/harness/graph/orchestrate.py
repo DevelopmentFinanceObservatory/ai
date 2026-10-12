@@ -352,9 +352,9 @@ def measure_pair_reply(
 
 
 def _axis_values(reading: Mapping[str, Any]) -> dict[str, Any]:
-    """What `reading` measures, as each `measure_axis_values` axis's dcid."""
+    """What `reading` measures, as each `measure_axis_values` axis's ref."""
     return {
-        value["axis"]: (value.get("value") or {}).get("dcid")
+        value["axis"]: (value.get("value") or {}).get("ref")
         for value in reading.get("measure_axis_values") or ()
         if isinstance(value, Mapping) and value.get("axis")
     }

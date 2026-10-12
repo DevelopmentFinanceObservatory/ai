@@ -348,7 +348,7 @@ def _priced(alternative: dict[str, Any], qualifier: str) -> dict[str, Any]:
     priced["definition"]["identity"]["shape"]["measurement_qualifier"] = qualifier
     for value in priced["measure_axis_values"]:
         if value["axis"] == "measurementQualifier":
-            value["value"] = {"dcid": qualifier, "label": qualifier}
+            value["value"] = {"ref": qualifier, "label": qualifier}
     return priced
 
 
