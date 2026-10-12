@@ -284,7 +284,8 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "calculation takes"
     ),
     CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
-        "drop the filter's place_level predicate, or the filter when it states no other"
+        "use bare across for the open flow axis, then bind a Country place_level filter to the "
+        "donor, creditor, recipient or debtor role"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (

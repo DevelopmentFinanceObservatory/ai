@@ -715,6 +715,54 @@ async def test_a_level_holds_the_population_to_the_places_the_filter_keeps(store
     assert over_kept.structured_content["left_out"] == countries.structured_content["left_out"]
 
 
+async def test_a_strict_recipient_country_population_uses_the_countrys_latest_year(store) -> None:
+    frame = Frame.build(
+        role_keys=["financingRecipient", "financingRecipient_type"],
+        rows=[
+            {
+                "stat_var": _STAT_VAR,
+                "financingRecipient": recipient,
+                "financingRecipient_type": kind,
+                "time_period": str(year),
+                "value": 1.0,
+                "unit": "dcid:USD",
+            }
+            for recipient, kind, latest in (
+                ("country/KEN", "Country", 2023),
+                ("country/GHA", "Country", 2023),
+                ("org/A", "Organization", 2024),
+                ("org/B", "Organization", 2024),
+                ("org/C", "Organization", 2024),
+            )
+            for year in range(2022, latest + 1)
+        ],
+    )
+    root = await _register(store, _ref("1"), frame)
+    countries = [
+        {
+            "spec_id": _AID,
+            "levels": {"financingRecipient_type": "Country"},
+            "strict_levels": ["financingRecipient_type"],
+        }
+    ]
+
+    broad = await resolve_anchor(populations=[{"spec_id": _AID}], roots=[root])
+    narrowed = await resolve_anchor(populations=countries, roots=[root])
+
+    assert broad.structured_content["period"] == "2024"
+    assert narrowed.structured_content["period"] == "2023"
+    record = await store.get_anchor_record(narrowed.structured_content["anchor_key"])
+    assert record is not None
+    assert record.model_dump(mode="json")["populations"] == [
+        {
+            "spec_id": _AID,
+            "bindings": {},
+            "levels": {"financingRecipient_type": "Country"},
+            "strict_levels": ["financingRecipient_type"],
+        }
+    ]
+
+
 async def test_a_level_on_a_root_without_the_type_column_refuses(store) -> None:
     root = await _register(store, _ref("1"), _frame({"dcid:AUS": [2022]}))
 

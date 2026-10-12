@@ -164,6 +164,17 @@ class FilterPredicateValueTypeMismatchError(Exception):
         )
 
 
+class FilterPlaceLevelUnknownError(Exception):
+    """A strict place-level predicate found entities with unknown typing."""
+
+    def __init__(self, *, column: str) -> None:
+        self.column = column
+        super().__init__(
+            f"strict place-level predicate on {column!r} cannot classify every entity; "
+            "request or retain its type enrichment"
+        )
+
+
 class FilterUnitConversionUnsupportedError(Exception):
     """A `category_match` predicate targets `unit`, and this particular
     frame's own `unit` cells carry a `grammar.UnitRequest` or
@@ -377,21 +388,21 @@ def _predicate_mask(table: pa.Table, predicate: Predicate) -> pa.Array:
             _THRESHOLD_KERNELS[predicate.op], column, pa.scalar(predicate.value, type=column.type)
         )
     if predicate.kind == "place_level":
-        return _level_mask(column, predicate.level)
+        return _level_mask(column, predicate.column, predicate.level, strict=predicate.strict)
     if predicate.column == UNIT_COLUMN:
         column = array_kernel("struct_field", column, "ref")
     return array_kernel("is_in", column, value_set=pa.array(predicate.values, type=pa.string()))
 
 
-def _level_mask(column: pa.Array, level: str) -> pa.Array:
+def _level_mask(column: pa.Array, name: str, level: str, *, strict: bool) -> pa.Array:
     """Whether each place-type cell of `column` describes a place at `level`
     (`common.place_type.levels_of`), decided once per distinct cell."""
     encoded = array_kernel("dictionary_encode", column)
     assert isinstance(encoded, pa.DictionaryArray)
-    matches = pa.array(
-        [level in levels_of(cell) for cell in cast("list[str]", encoded.dictionary.to_pylist())],
-        type=pa.bool_(),
-    )
+    cells = cast("list[str]", encoded.dictionary.to_pylist())
+    if strict and any(not levels_of(cell) for cell in cells):
+        raise FilterPlaceLevelUnknownError(column=name)
+    matches = pa.array([level in levels_of(cell) for cell in cells], type=pa.bool_())
     return array_kernel("take", matches, encoded.indices)
 
 
