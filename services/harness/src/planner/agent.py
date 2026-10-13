@@ -1187,8 +1187,9 @@ def _first_year_unreadable(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"The first year {detail['spec_id']} holds could not be read: {exc}. The plan is "
-        "sound and nothing was recorded; propose it again, or state the start as a fixed "
-        "year and roll only the end.",
+        "sound and nothing was recorded; propose it again, or, where the window covers "
+        "several years, state the start as a fixed year and roll only the end; a window of "
+        "one year cannot, so drop `rolling` and `period_end_open` there for fixed years.",
         outcome=Outcome.REFUSED,
         detail=detail,
     )

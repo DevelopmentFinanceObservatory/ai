@@ -2188,6 +2188,40 @@ def _rank_reduction_reason(
     return None
 
 
+def _check_unreduced_rank_stays_one_year(
+    requirement: RankRequirement,
+    shapes_by_id: Mapping[str, FrameShape],
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject a rank with no reduction over years that are, or newer data makes, more than one.
+
+    `_rank_reduction_reason` reads the years off the stated periods. The
+    years the rank holds when it runs (`_years_held`) are several too when
+    its dataset is retrieved from its first year, or when only the end of
+    its window follows the newest data: 2024 alone today is 2024 and 2025
+    once 2025 arrives, and no entity then has a single value to rank on. A
+    window stays one year with both ends fixed on it, or both following the
+    newest data at one offset.
+    """
+    input_shape = shapes_by_id[requirement.input_id]
+    if (
+        requirement.reduction is not None
+        or requirement.per_period
+        or input_shape.one_row_per_entity
+    ):
+        return
+    held = _years_held(requirement, shapes_by_id, requirements_by_id)
+    if held is None or not held.several:
+        return
+    raise ValueError(
+        f"{requirement.id!r} ranks entities over {held.phrase()} with no reduction, so no "
+        "entity keeps a single value to rank on; to rank one year state window_start and "
+        "window_end on that year, with `rolling` unset for a fixed year or naming both at "
+        "one offset for a year that follows the newest data, or, only for an ask marked "
+        "(across years), state a reduction to combine the years"
+    )
+
+
 def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> FrameShape:
     place_level = keeps_one_level(requirement.predicates)
     reason = shape_rejects(
@@ -2401,7 +2435,9 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     if isinstance(requirement, GrowthRequirement):
         return _growth_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, RankRequirement):
-        return _rank_shape(requirement, shapes_by_id[requirement.input_id])
+        shape = _rank_shape(requirement, shapes_by_id[requirement.input_id])
+        _check_unreduced_rank_stays_one_year(requirement, shapes_by_id, requirements_by_id)
+        return shape
     if isinstance(requirement, FilterRequirement):
         return _filter_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, ShareOfRequirement):
@@ -3242,9 +3278,8 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
 class PeriodReductionGap(NamedTuple):
     """A step that turns several years into one figure for a result no ask across years asks for.
 
-    `step_id` is the reducing step and `years` the years it reduces. With
-    `follows_newest` set they reach every later year newer data brings, up
-    to `until` when a fixed last year stops them (`_years_reduced`).
+    `step_id` is the reducing step and `held` the years it reduces
+    (`YearsHeld`).
     `output_id` is the first answering result computed from it
     (`answering_results`) that answers an ask `plan.asks_across_years` does
     not number, or answers no ask, and `asks` the numbers of those asks,
@@ -3257,11 +3292,14 @@ class PeriodReductionGap(NamedTuple):
     step_id: str
     output_id: str
     asks: tuple[int, ...]
-    years: Period
-    follows_newest: bool
-    until: int | None
+    held: YearsHeld
     asked_across: bool
     dataset_id: str
+
+    @property
+    def years(self) -> Period:
+        """The years the step reduces today (`YearsHeld.years`)."""
+        return self.held.years
 
 
 def unstated_period_reductions(
@@ -3344,9 +3382,7 @@ def unstated_period_reductions(
                     step_id=step.id,
                     output_id=offending[0],
                     asks=offending[1],
-                    years=reduced.years,
-                    follows_newest=reduced.follows_newest,
-                    until=reduced.until,
+                    held=reduced,
                     asked_across=asked_across,
                     dataset_id=shapes[step.id].roots[0],
                 )
@@ -3395,59 +3431,100 @@ def _licence_carried(
     )
 
 
-class _YearsReduced(NamedTuple):
-    """The years a step turns into one figure per entity (`_years_reduced`).
+class YearsHeld(NamedTuple):
+    """The years a step reads from its input, one row per entity for each (`_years_held`).
 
-    `years` are the years it reduces today. `follows_newest` says newer
-    data adds later years to them, and `until` the last year a fixed bound
-    lets them reach, `None` when nothing stops them.
+    `years` are the years it holds today. `from_first_year` says they start
+    at the first year `dataset_id` holds, whatever `years.start` states: the
+    dataset is retrieved from there, and nothing above it sets a later
+    start. `follows_newest` says newer data adds later years, and `until`
+    the last year a fixed bound lets them reach, `None` when nothing stops
+    them.
     """
 
     years: Period
+    from_first_year: bool
     follows_newest: bool
     until: int | None
+    dataset_id: str
+
+    @property
+    def several(self) -> bool:
+        """Whether they are, or newer data makes them, more than one year."""
+        return self.years.end > self.years.start or self.from_first_year or self.follows_newest
+
+    def phrase(self) -> str:
+        """The years as a refusal names them."""
+        start, end = self.years.start, self.years.end
+        stops = "" if self.until is None else f", as far as {self.until},"
+        if self.from_first_year:
+            newer = f" and each newer one{stops}" if self.follows_newest else ""
+            return f"every year {self.dataset_id!r} holds up to {end}{newer}"
+        if self.follows_newest:
+            return f"the years from {start} to the newest{stops}"
+        return f"{start}-{end}"
 
 
 def _years_reduced(
     requirement: EvidenceRequirement,
     shapes_by_id: Mapping[str, FrameShape],
     requirements_by_id: Mapping[str, EvidenceRequirement],
-) -> _YearsReduced | None:
+) -> YearsHeld | None:
     """The years `requirement` turns into one figure per entity; `None` when it reduces none.
 
     An `aggregate` that groups by `period`, and a `rank` that is
-    `per_period` or states no `reduction`, keep the years. The input holds
-    years per entity when its rows are labelled with the years they were
-    observed in (`TimeLabel.OBSERVATION`). Every `planner.shapes`
-    transform keeps that reading: a step that collapses the years labels its
-    rows a `SPAN`, one that picks a year per entity labels them `PICKED`,
-    each two-sided verb takes the narrower label of its sides and the years
-    both cover, and a filter or a window that leaves one year narrows
-    `period` to it. `FrameShape.one_row_per_entity` answers whether a rank
-    needs a reduction, and is set on a `sum_of` holding a series of years.
-
-    The years are the input's `period` once the rank's own window is
-    applied (`shapes.windowed_years`), from an earlier first year when a
-    start that follows the newest data reaches back before the dataset's
-    stated period (`_year_ends`). The step reduces several years when they
-    cover more than one, or when it rests on a dataset retrieved with no
-    end year and newer data can add years after the one they end in today:
-    one year then becomes several once newer data exists. They stay one
-    year when the last year is fixed there, or when the first year follows
-    the newest data with it, which a window does with both ends at one
-    offset.
+    `per_period` or states no `reduction`, keep the years. Any other
+    aggregate or rank reduces the years its input holds (`_years_held`)
+    when they are several (`YearsHeld.several`).
     """
-    window: Period | None = None
     if isinstance(requirement, AggregateRequirement):
         if GroupBy.PERIOD in requirement.group_by:
             return None
     elif isinstance(requirement, RankRequirement):
         if requirement.reduction is None or requirement.per_period:
             return None
-        if requirement.window_start is not None and requirement.window_end is not None:
-            window = Period(start=requirement.window_start, end=requirement.window_end)
     else:
         return None
+    held = _years_held(requirement, shapes_by_id, requirements_by_id)
+    return held if held is not None and held.several else None
+
+
+def _years_held(
+    requirement: AggregateRequirement | RankRequirement,
+    shapes_by_id: Mapping[str, FrameShape],
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> YearsHeld | None:
+    """The years `requirement` reads per entity from its input; `None` when its input holds no series of years.
+
+    The input holds years per entity when its rows are labelled with the
+    years they were observed in (`TimeLabel.OBSERVATION`). Every
+    `planner.shapes` transform keeps that reading: a step that collapses the
+    years labels its rows a `SPAN`, one that picks a year per entity labels
+    them `PICKED`, each two-sided verb takes the narrower label of its sides
+    and the years both cover, and a filter or a window that leaves one year
+    narrows `period` to it. `FrameShape.one_row_per_entity` answers whether
+    a rank needs a reduction, and is set on a `sum_of` holding a series of
+    years.
+
+    The years are the input's `period` once a rank's own window is applied
+    (`shapes.windowed_years`). `planner.shapes` reads them off the stated
+    periods, and a dataset a start following the newest data reads is
+    retrieved from the first year it holds (`_year_ends`), so they start
+    earlier where a bound sets an earlier first year, and at the dataset's
+    first year where none sets one. They follow the newest data when the
+    step rests on a dataset retrieved with no end year and newer data can
+    add years after the one they end in today: one year then becomes
+    several once newer data exists. They stay one year when the last year
+    is fixed there, or when the first year follows the newest data with it,
+    which a window does with both ends at one offset.
+    """
+    window: Period | None = None
+    if (
+        isinstance(requirement, RankRequirement)
+        and requirement.window_start is not None
+        and requirement.window_end is not None
+    ):
+        window = Period(start=requirement.window_start, end=requirement.window_end)
     input_shape = shapes_by_id[requirement.input_id]
     years = windowed_years(input_shape.period, window)
     if input_shape.time is not TimeLabel.OBSERVATION or years is None:
@@ -3466,9 +3543,13 @@ def _years_reduced(
         and ends.following_first != years.start
         and (ends.until is None or ends.until > years.end)
     )
-    if years.end > years.start or follows_newest:
-        return _YearsReduced(years, follows_newest, ends.until if follows_newest else None)
-    return None
+    return YearsHeld(
+        years=years,
+        from_first_year=ends.first is None,
+        follows_newest=follows_newest,
+        until=ends.until if follows_newest else None,
+        dataset_id=input_shape.roots[0],
+    )
 
 
 def _later(first: int | None, second: int | None) -> int | None:

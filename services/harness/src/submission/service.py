@@ -1801,11 +1801,8 @@ def _period_reduction_unstated(
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
     for gap in gaps:
-        start, end = gap.years.start, gap.years.end
-        years = f"{start}-{end}"
-        if gap.follows_newest:
-            stops = "" if gap.until is None else f", as far as {gap.until},"
-            years = f"the years from {start} to the newest{stops}"
+        held = gap.held
+        years = held.phrase()
         step = repr(gap.step_id)
         output = repr(gap.output_id)
         result = "which" if gap.output_id == gap.step_id else f"and {output}, computed from it,"
@@ -1835,7 +1832,7 @@ def _period_reduction_unstated(
             )
         elif isinstance(reducing, RankRequirement):
             fixed = (
-                " with `rolling` unset or naming both at one offset" if gap.follows_newest else ""
+                " with `rolling` unset or naming both at one offset" if held.follows_newest else ""
             )
             remedies = (
                 f"To keep the years, set `per_period` to true on {step}. To read one year, set "
@@ -1849,11 +1846,21 @@ def _period_reduction_unstated(
                 )
         else:
             assert isinstance(reducing, AggregateRequirement)
-            fixed = " with `period_end_open` unset" if gap.follows_newest else ""
+            if held.from_first_year:
+                # Another step has the dataset retrieved from its first
+                # year, so a narrower `period` on it bounds nothing.
+                one_year = (
+                    f"have {step} read {held.dataset_id!r} through a `filter` whose "
+                    "`period_threshold` keeps that year alone, with op `eq`"
+                )
+            else:
+                fixed = " with `period_end_open` unset" if held.follows_newest else ""
+                one_year = (
+                    f"narrow the `period` of {gap.dataset_id!r} to that year{fixed} and cite "
+                    f"on {gap.dataset_id!r} a decision whose `fixes` names `period`"
+                )
             remedies = (
-                f"To keep the years, {_keep_the_years(reducing)}. To read one year, narrow the "
-                f"`period` of {gap.dataset_id!r} to that year{fixed} and cite on "
-                f"{gap.dataset_id!r} a decision whose `fixes` names `period`."
+                f"To keep the years, {_keep_the_years(reducing)}. To read one year, {one_year}."
             )
             if amended:
                 remedies += (
@@ -1874,9 +1881,10 @@ def _period_reduction_unstated(
                     "requirement_id": gap.step_id,
                     "output_id": gap.output_id,
                     "asks": list(gap.asks),
-                    "years": {"start": gap.years.start, "end": gap.years.end},
-                    "follows_newest": gap.follows_newest,
-                    "until": gap.until,
+                    "years": {"start": gap.held.years.start, "end": gap.held.years.end},
+                    "from_first_year": gap.held.from_first_year,
+                    "follows_newest": gap.held.follows_newest,
+                    "until": gap.held.until,
                     "dataset_requirement_id": gap.dataset_id,
                 }
                 for gap in gaps
@@ -2102,8 +2110,9 @@ def _open_window(
             f"{requirement.id!r} is read from a start that follows the newest data, and "
             f"Search's answer for {pin} over all its years states no first year, so the "
             "retrieval cannot be started there. This is a limit of what was read, not a "
-            "fault in the question. State the start as a fixed year and roll only the "
-            "end, or drop `rolling` and `period_end_open` for fixed years",
+            "fault in the question. Where the window covers several years, state the "
+            "start as a fixed year and roll only the end; a window of one year cannot, so "
+            "drop `rolling` and `period_end_open` there for fixed years",
             requirement_ids=[requirement.id],
             fault=OpenPeriodFault.FIRST_YEAR_READ_FAILED,
             spec_id=pin,
@@ -2113,8 +2122,9 @@ def _open_window(
             RollingIssue.NEEDS_OPEN_PERIOD,
             f"{requirement.id!r} is read from a start that follows the newest data, which "
             f"needs the first year {pin} holds, and no search result over all its years "
-            "states one. State the start as a fixed year and roll only the end, or drop "
-            "`rolling` and `period_end_open` for fixed years",
+            "states one. Where the window covers several years, state the start as a "
+            "fixed year and roll only the end; a window of one year cannot, so drop "
+            "`rolling` and `period_end_open` there for fixed years",
             requirement_ids=[requirement.id],
             fault=OpenPeriodFault.FIRST_YEAR_UNKNOWN,
             spec_id=pin,
@@ -2125,8 +2135,9 @@ def _open_window(
             RollingIssue.FRAME_TOO_LARGE,
             f"{requirement.id!r} is read from a start that follows the newest data, so it "
             f"retrieves every year {pin} holds: {history.rows:,} rows, over the {ceiling:,} "
-            "one retrieval may return. Name fewer entities, state the start as a fixed "
-            "year and roll only the end, or drop `rolling` and `period_end_open`",
+            "one retrieval may return. Name fewer entities, or, where the window covers "
+            "several years, state the start as a fixed year and roll only the end, or "
+            "drop `rolling` and `period_end_open` for fixed years",
             requirement_ids=[requirement.id],
         )
     return open_window(history.first_year)

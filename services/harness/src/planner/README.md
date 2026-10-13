@@ -131,10 +131,17 @@ aggregate that keeps `period` in its `group_by`, a rank stating `per_period`,
 and a rank whose `window_start` and `window_end` state the same year reduce no
 years. One year counts as several when its dataset is retrieved with
 `period_end_open` and newer data can add years to it: a fixed last year still
-ahead of the data stops them only once the data reaches it. In an entry the
-user's amendment at the approval card opened, the step is also admitted when
-it cites a decision resolved by `user` whose `fixes` names `group_by`, for an
-aggregate, or `per_period`, which the rank states false, for a rank. A rank's
+ahead of the data stops them only once the data reaches it. A dataset that a
+start following the newest data reads is retrieved from the first year it
+holds, so every step reading it holds those years unless its own window or
+threshold sets a later start, and a step reducing them is refused the same
+way. A rank with no `reduction` is held to one year on the same reading
+(`_check_unreduced_rank_stays_one_year`, an `invalid_plan` refusal): its window
+stays one year with both ends fixed on it, or both following the newest data at
+one offset. In an entry the user's amendment at the approval card opened, the
+step is also admitted when it cites a decision resolved by `user` whose
+`fixes` names `group_by`, for an aggregate, or `per_period`, which the rank
+states false, for a rank. A rank's
 `window_start` and `window_end` say which years it covers and license nothing.
 The decision has to be that entry's own: one the previous plan already makes,
 with the same `chosen` and `fixes` under any slot, was made for that plan. A

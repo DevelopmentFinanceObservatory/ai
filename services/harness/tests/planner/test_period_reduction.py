@@ -225,6 +225,7 @@ def _gap(
         "output_id": output,
         "asks": list(asks),
         "years": {"start": years.start, "end": years.end},
+        "from_first_year": False,
         "follows_newest": False,
         "until": None,
         "dataset_requirement_id": "aid",
@@ -1313,7 +1314,7 @@ def test_a_sum_with_a_source_of_fixed_years_follows_the_newest_as_far_as_they_re
 
     gaps = unstated_period_reductions(plan)
 
-    assert [(gap.step_id, gap.follows_newest, gap.until) for gap in gaps] == (
+    assert [(gap.step_id, gap.held.follows_newest, gap.held.until) for gap in gaps] == (
         [("result", True, until)] if until else []
     )
 
@@ -1415,3 +1416,171 @@ def test_a_following_start_behind_a_fixed_one_keeps_no_year_from_becoming_severa
     )
 
     _refused(result, _gap(years=ONE_YEAR_ONLY) | {"follows_newest": True})
+
+
+def _latest_year(**overrides: Any) -> RankRequirement:
+    """A ranking of the newest year, both ends of its window following the newest data.
+
+    Its start follows, so the dataset it reads is retrieved from the first
+    year it holds.
+    """
+    fields: dict[str, Any] = {
+        "id": "latest",
+        "window_start": 2024,
+        "window_end": 2024,
+        "rolling": RollingWindow(window_start=_NEWEST, window_end=_NEWEST),
+    }
+    return _ranked(**(fields | overrides))
+
+
+def _keeping(*predicates: PeriodThreshold) -> FilterRequirement:
+    return FilterRequirement(id="kept", input_id="aid", predicates=predicates)
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param([_total()], id="an-aggregate-with-no-bound"),
+        pytest.param(
+            [_keeping(PeriodThreshold(op="lte", year=2024)), _total(input_id="kept")],
+            id="under-lte",
+        ),
+        pytest.param(
+            [_keeping(PeriodThreshold(op="lt", year=2025)), _total(input_id="kept")],
+            id="under-lt",
+        ),
+        pytest.param(
+            [_keeping(PeriodThreshold(op="ne", year=2023)), _total(input_id="kept")],
+            id="under-ne",
+        ),
+        pytest.param(
+            [
+                _total(id="all", group_by=(GroupBy.PERIOD,)),
+                _shares("all"),
+                _ranked(input_id="shares", reduction=Reduction.MEAN),
+            ],
+            id="over-a-two-sided-step",
+        ),
+    ],
+)
+def test_a_reader_of_a_dataset_another_branch_reads_from_its_first_year_holds_those_years(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement]
+) -> None:
+    """The plan states 2024 alone. `latest` follows the newest data from its
+    start, so 'aid' is retrieved from its first year for every step reading it."""
+    ctx = _context(pins=_SHOWN_OPEN)
+    aid = _open(period=ONE_YEAR_ONLY, decision_ids=("measure", "population", "pooled"))
+
+    result = _propose(ctx, [aid, _latest_year(), *steps], [decision(), POPULATION, POOLED])
+
+    assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
+    (gap,) = result["detail"]["gaps"]
+    assert (gap["requirement_id"], gap["from_first_year"]) == ("result", True)
+    assert "every year 'aid' holds" in result["message"]
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_one_year_rank_with_no_reduction_whose_end_alone_follows_is_refused(
+    decision: Callable[..., Decision],
+) -> None:
+    """2024 alone today, 2024 and 2025 once 2025 arrives, when no entity has a
+    single value to rank on."""
+    ranked = _ranked(
+        axis=None,
+        reduction=None,
+        window_start=2024,
+        window_end=2024,
+        rolling=RollingWindow(window_end=_NEWEST),
+    )
+    kenya = _open(period=ONE_YEAR_ONLY).model_copy(update={"across": ()})
+
+    result = _propose(_context(pins=_SHOWN_OPEN), [kenya, ranked], [decision(), POPULATION])
+
+    assert result["outcome"] == Outcome.INVALID_INPUT.value, result
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_fixed_first_year_bounds_a_read_from_the_datasets_first_year(
+    decision: Callable[..., Decision],
+) -> None:
+    """A rank window from 2020 over a dataset stated as 2024 and retrieved from
+    its first year ranks 2020 to 2024."""
+    ctx = _context(pins=_SHOWN_OPEN)
+    steps = [_latest_year(), _ranked(window_start=2020, window_end=2024)]
+
+    result = _propose(ctx, [_open(period=ONE_YEAR_ONLY), *steps], [decision(), POPULATION])
+
+    _refused(result, _gap(years=Period(start=2020, end=2024)))
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param(
+            [_keeping(PeriodThreshold(op="eq", year=2024)), _total(input_id="kept")],
+            id="the-filter-the-refusal-names",
+        ),
+        pytest.param([_ranked(window_start=2024, window_end=2024)], id="a-rank-of-one-year"),
+        pytest.param(
+            [_total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD))], id="an-aggregate-by-period"
+        ),
+    ],
+)
+def test_a_reader_setting_its_own_year_or_keeping_the_years_is_admitted_beside_a_rolling_branch(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement]
+) -> None:
+    ctx = _context(pins=_SHOWN_OPEN)
+
+    result = _propose(
+        ctx, [_open(period=ONE_YEAR_ONLY), _latest_year(), *steps], [decision(), POPULATION]
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+def _kenya_alone(*, end_open: bool) -> DatasetRequirement:
+    """Aid to Kenya in 2024, one role, so a rank of one year needs no reduction."""
+    base = _open(period=ONE_YEAR_ONLY) if end_open else _aid(period=ONE_YEAR_ONLY)
+    return base.model_copy(update={"across": ()})
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("end_open", "rolling"),
+    [
+        pytest.param(False, None, id="a-fixed-year-of-a-closed-dataset"),
+        pytest.param(True, None, id="a-fixed-year-of-an-open-dataset"),
+        pytest.param(
+            True,
+            RollingWindow(window_start=_NEWEST, window_end=_NEWEST),
+            id="both-ends-following-at-one-offset",
+        ),
+    ],
+)
+def test_a_rank_with_no_reduction_over_a_window_that_stays_one_year_is_admitted(
+    decision: Callable[..., Decision], end_open: bool, rolling: RollingWindow | None
+) -> None:
+    """The two windows the refusal of an end that alone follows names, and a closed year."""
+    ranked = _ranked(axis=None, reduction=None, window_start=2024, window_end=2024, rolling=rolling)
+    ctx = _context(pins=_SHOWN_OPEN)
+
+    result = _propose(ctx, [_kenya_alone(end_open=end_open), ranked], [decision(), POPULATION])
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_rank_with_no_reduction_and_no_window_holds_every_year_a_rolling_branch_retrieves(
+    decision: Callable[..., Decision],
+) -> None:
+    ctx = _context(pins=_SHOWN_OPEN)
+    newest = _latest_year(axis=None, reduction=None)
+    ranked = _ranked(axis=None, reduction=None)
+
+    result = _propose(ctx, [_kenya_alone(end_open=True), newest, ranked], [decision(), POPULATION])
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "every year 'aid' holds" in result["message"]
