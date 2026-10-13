@@ -55,6 +55,7 @@ from translator.discovery import (
     save_log,
 )
 
+from ..described_nodes import stat_var_node
 from ..search_results import search_result_parts
 
 SPEC = "spec_" + "a" * 32
@@ -118,10 +119,7 @@ def _slow_server(*, calls: list[dict[str, Any]], concurrency: list[int]) -> Fast
 
     @server.tool(name="describe")
     async def describe(ids: list[str]) -> ToolResult:
-        nodes = [
-            {"shape": "stat_var", "dcid": dcid, "label": dcid, "definition": "d", "roles": []}
-            for dcid in ids
-        ]
+        nodes = [stat_var_node(dcid, label=dcid, description="d", roles=()) for dcid in ids]
         return ToolResult(content="nodes", structured_content={"nodes": nodes})
 
     return server

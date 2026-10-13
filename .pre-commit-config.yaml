@@ -95,7 +95,8 @@ repos:
             .*\.feather|
             .*/tests/fixtures/.*\.jsonl?|
             .*/tests/wire_fixtures/.*\.json|
-            .*/tests/differential/.*\.jsonl
+            .*/tests/differential/.*\.jsonl|
+            evals/planner_entry/recordings/.*\.json
           )$
 
   # ---------------------------------------------------------------------------

@@ -23,11 +23,8 @@ from data_mcp.search_tool import MAX_PARTS
 from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
+from planner.plan import AskBreakdown, SessionState, stored_plan
 from planner.plan import Plan as PlannerPlan
-from planner.plan import (
-    SessionState,
-    stored_plan,
-)
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 
 from harness.tool_contracts import (
@@ -57,7 +54,7 @@ PLANNER_STARTED_KEY = "planner_started"
 # The orchestrator's session state (`create_root_workflow`'s
 # `orchestrator`), written by its tools (`harness.orchestrator_tools`) and
 # read by the workflow's nodes. Prefixed, so `GraphState` never validates it.
-ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view"}
+ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
 ORCHESTRATOR_SPECS_KEY = "orchestrator:specs"  # spec_id -> its search spec block
 ORCHESTRATOR_PENDING_KEY = "orchestrator:pending"  # the turn's one pending action
 ORCHESTRATOR_CALLS_KEY = "orchestrator:calls"  # tool name -> calls this turn
@@ -94,7 +91,7 @@ ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # The status a plan hand-back carries when the planner made no plan, and
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
-ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading the planner's answer"
+ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
@@ -141,11 +138,13 @@ class PendingAsk(BaseModel):
 
 class PendingPlan(BaseModel):
     """`plan` asked: the workflow runs the plan path on the brief, holding the
-    plan to `asks`, the outputs the user asked for."""
+    plan to `asks`, the outputs the user asked for, and to `ask_breakdowns`,
+    the parties those asks break down by."""
 
     kind: Literal["plan"] = "plan"
     brief: str
     asks: list[str] = []
+    ask_breakdowns: list[AskBreakdown] = []
 
 
 def ask_candidates(options: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -198,6 +197,16 @@ def turn_budgets(state: Any) -> dict[str, int]:
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
 
 
+def count_call(state: Any, tool: str, step: int = 1) -> None:
+    """Add `step` to `tool`'s calls this turn (`ORCHESTRATOR_CALLS_KEY`),
+    reading the counts afresh: 1 to take a call, -1 to give one back.
+    Synchronous, so no other tool call runs between a check of a budget and
+    the change."""
+    calls = dict(state.get(ORCHESTRATOR_CALLS_KEY) or {})
+    calls[tool] = int(calls.get(tool, 0)) + step
+    state[ORCHESTRATOR_CALLS_KEY] = calls
+
+
 def pending_action(state: Any) -> PendingAsk | PendingPlan | None:
     """The one action the orchestrator asked the workflow for this turn, or None.
     `state` is any mapping-like read of session state (`Context.state`, a dict)."""
@@ -212,17 +221,43 @@ def frame_id_for(ref: dict[str, Any]) -> str:
     return f"f{digest[:6]}"
 
 
+type DescribedFrame = tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]
+
+
 def register_frames(
-    frames: dict[str, Any], described: list[tuple[dict[str, Any], dict[str, Any]]]
+    frames: dict[str, Any], described: Sequence[DescribedFrame]
 ) -> list[dict[str, Any]]:
-    """Add each (frame ref, `describe_frame` view) to `frames` under its id,
-    and return the entries as the orchestrator reads them."""
+    """Add each (frame ref, `describe_frame` view, store ref) to `frames`
+    under its id, and return the entries as the orchestrator reads them.
+
+    The frame ref is the pair the frame is described and drawn by; the store
+    ref is the pair the materialisation store holds it under, kept as the
+    entry's `store_ref`. It is None for a frame whose executor states no
+    store pair. The entry then carries no `store_ref` and is read by its
+    frame ref (`frame_store_ref`).
+    """
     entries = []
-    for ref, view in described:
+    for ref, view, store_ref in described:
         frame_id = frame_id_for(ref)
         frames[frame_id] = {"ref": ref, "view": view}
+        if store_ref is not None:
+            frames[frame_id]["store_ref"] = store_ref
         entries.append({"frame": frame_id, "view": view})
     return entries
+
+
+def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """The pair to open the materialisation store with for `entry`, an entry
+    of `ORCHESTRATOR_FRAMES_KEY`: its `store_ref`, or its `ref` when the
+    entry states no store pair or one with a member missing."""
+    store_ref = entry.get("store_ref")
+    if (
+        isinstance(store_ref, Mapping)
+        and store_ref.get("spec_id") is not None
+        and store_ref.get("content_version") is not None
+    ):
+        return dict(store_ref)
+    return entry["ref"]
 
 
 def store_search(
@@ -230,17 +265,21 @@ def store_search(
     digest: Mapping[str, Any],
     *,
     asked: Sequence[Sequence[str]] = (),
+    held_open: Sequence[Sequence[str]] = (),
     origin: Origin = "search",
 ) -> list[dict[str, Any]]:
     """Store what a `resolver_digest` read in the orchestrator's session state,
-    and return its parts as the model reads them, without their blocks.
+    and return its parts as the model reads them, without their blocks. A
+    definite part searched for the latest period keeps its `recent_years`
+    (`reading_facts`), the per-year counts behind that period.
 
     Each part's spec blocks, its own and its candidates', go under
     `ORCHESTRATOR_SPECS_KEY` and the part's warnings under
     `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
     joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
-    `asked` holds each part's asked flow parties by position, and is empty
-    when no part's are known.
+    `asked` holds each part's asked flow parties by position, and
+    `held_open` those it asked to hold open; each is empty when no part's
+    are known.
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -259,6 +298,8 @@ def store_search(
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
             facts = reading_facts(part["spec_block"])
+            if facts["requested_window_kind"] == "latest" and facts["recent_years"]:
+                reading["recent_years"] = facts["recent_years"]
         if mentions := reading.get("resolved_sources"):
             blocks = {
                 spec_id: {**block, "_resolved_sources": mentions}
@@ -268,6 +309,8 @@ def store_search(
         spec_warnings.update(dict.fromkeys(blocks, reading.get("warnings") or []))
         if asked:
             facts["asked_roles"] = list(asked[index])
+        if held_open:
+            facts["open_roles"] = list(held_open[index])
         stored = SearchReading.from_part(
             {**reading, **facts}, skills=skill_ids, origin=origin, observed_at=observed_at
         )

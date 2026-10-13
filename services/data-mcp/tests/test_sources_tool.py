@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date
 from typing import Any
 
 import httpx2
-from data_mcp import client_holder
+import pytest
+from data_mcp import client_holder, sources_tool
+from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from data_mcp.server import mcp
 from data_mcp.sources_tool import RESULT_CAP_CHARS
 from fastmcp import Client
@@ -18,6 +21,12 @@ from .test_client import _client, _problem_body, text_of
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
 CRS = "provenance/OECDCreditorReportingSystem"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A clock before the fixture's next release, so no result depends on the run date."""
+    monkeypatch.setattr(sources_tool, "_today", lambda: date(2026, 10, 11))
 
 
 def _catalogue() -> dict[str, Any]:
@@ -126,8 +135,42 @@ def _documentation(**overrides: Any) -> dict[str, Any]:
     return doc
 
 
-def _serving(body: dict[str, Any], requests: list[httpx2.Request] | None = None) -> Handler:
+def _search_catalogue() -> dict[str, Any]:
+    """The search catalogue as `GET /api/search/catalogue` serves it."""
+    return {
+        "catalogue_version": "2026-10-11T04:00:00Z",
+        "counts": {
+            "indicators": 108905,
+            "datasets": 92,
+            "publishers": 42,
+            "countries": 230,
+            "aid": {"donors": 172, "recipients": 235, "years": {"first": 1960, "last": 2024}},
+        },
+        "examples": [],
+    }
+
+
+_COUNTS_SENTENCE = (
+    "DFO holds 108,905 indicators in 92 datasets from 42 publishers, with data for 230 "
+    "countries. Aid data covers 172 donors and 235 recipients from 1960 to 2024."
+)
+
+
+def _serving(
+    body: dict[str, Any],
+    requests: list[httpx2.Request] | None = None,
+    *,
+    search_catalogue: Handler | None = None,
+) -> Handler:
+    """Serve `body` on the Graph API's doors and `search_catalogue` (by default
+    `_search_catalogue()`) on the search catalogue route; `requests` records
+    the Graph API reads."""
+
     def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/search/catalogue":
+            if search_catalogue is not None:
+                return search_catalogue(request)
+            return httpx2.Response(200, json=_search_catalogue())
         if requests is not None:
             requests.append(request)
         return httpx2.Response(200, json=body)
@@ -163,8 +206,7 @@ async def test_the_catalogue_is_grouped_by_publisher_with_one_line_per_dataset()
     assert requests[0].method == "GET"
     assert requests[0].url.path == "/api/graph/sources"
     text = text_of(result)
-    assert text.startswith("DFO holds 2 datasets from 2 publishers")
-    assert "1 under Development Finance Observatory, 1 under Data Commons by Google" in text
+    assert text.startswith(_COUNTS_SENTENCE + "\nDatasets by publisher, one line per dataset")
     assert (
         "## Organisation for Economic Co-operation and Development (OECD) "
         "[Development Finance Observatory]" in text
@@ -202,12 +244,33 @@ async def test_the_catalogue_answer_carries_the_counts_and_the_publishers() -> N
     result = await _call_sources(_serving(_catalogue()))
 
     assert result.structured_content == {
-        "datasets": 2,
+        "counts": _search_catalogue()["counts"],
         "publishers": [
             "Organisation for Economic Co-operation and Development (OECD)",
             "World Bank",
         ],
     }
+
+
+@pytest.mark.parametrize(
+    "search_catalogue",
+    [
+        _refusing(503, "service_unavailable"),
+        lambda _request: httpx2.Response(200, json={"catalogue_version": "v", "counts": {}}),
+    ],
+    ids=["no_catalogue_published", "wrong_shape"],
+)
+async def test_a_search_catalogue_that_cannot_be_read_opens_the_digest_with_no_count(
+    search_catalogue: Handler,
+) -> None:
+    """The source catalogue still answers; the counts line says the counts are
+    unavailable, and no count comes from anywhere else."""
+    result = await _call_sources(_serving(_catalogue(), search_catalogue=search_catalogue))
+
+    assert result.is_error is False
+    assert text_of(result).startswith(COUNTS_UNAVAILABLE + "\n")
+    assert result.structured_content is not None
+    assert result.structured_content["counts"] is None
 
 
 async def test_a_catalogue_of_the_wrong_shape_refuses_upstream_response_unusable() -> None:
@@ -235,8 +298,8 @@ async def test_documentation_reads_the_documentation_door_for_the_ref() -> None:
         "part of Development Finance Observatory." in text
     )
     assert (
-        "Licence: OECD Terms and Conditions; updated quarterly; last update 2026-09-11; "
-        "next expected 2026-12. Terms: https://www.oecd.org/terms" in text
+        "Licence: OECD Terms and Conditions; updated quarterly. Terms: https://www.oecd.org/terms"
+        "\n\nDownloaded by DFO 2026-09-11; Next release expected 2026-12.\n\n" in text
     )
     assert "Coverage: 1973-2024; Annual, by provider and recipient; USD." in text
     assert "Citation: OECD (2026), Creditor Reporting System (CRS)." in text
@@ -249,6 +312,64 @@ async def test_documentation_reads_the_documentation_door_for_the_ref() -> None:
         in text
     )
     assert "Data download: https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet." in text
+
+
+@pytest.mark.parametrize(
+    ("last_update", "next_expected_update", "today", "line"),
+    [
+        (
+            "2026-09-11T04:12:00Z",
+            "2026-12",
+            date(2026, 12, 31),
+            "Downloaded by DFO 2026-09-11; Next release expected 2026-12.",
+        ),
+        (
+            "2026-09-11",
+            "2026-12",
+            date(2027, 1, 1),
+            "Downloaded by DFO 2026-09-11; Next release expected 2026-12 (overdue).",
+        ),
+        (None, "2026-12-15", date(2027, 1, 1), "Next release expected 2026-12-15 (overdue)."),
+        (None, "2026-10-01", date(2026, 10, 12), "Next release expected 2026-10-01 (overdue)."),
+        (None, "2026-10-12", date(2026, 10, 12), "Next release expected 2026-10-12."),
+        (None, "early 2027", date(2028, 1, 1), "Next release expected early 2027."),
+        (None, None, date(2027, 1, 1), None),
+    ],
+    ids=[
+        "expected_this_month",
+        "overdue",
+        "overdue_date",
+        "overdue_day_this_month",
+        "due_today",
+        "unparsed_month",
+        "neither",
+    ],
+)
+async def test_licence_dates_are_labelled_for_what_they_hold(
+    monkeypatch: pytest.MonkeyPatch,
+    last_update: str | None,
+    next_expected_update: str | None,
+    today: date,
+    line: str | None,
+) -> None:
+    """`last_update` is DFO's download; the next release is overdue once it is
+    before today on the tool's clock, by day for a full date and by month for
+    a `YYYY-MM` value."""
+    monkeypatch.setattr(sources_tool, "_today", lambda: today)
+    licence = {
+        **_documentation()["license"],
+        "last_update": last_update,
+        "next_expected_update": next_expected_update,
+    }
+
+    result = await _call_sources(_serving(_documentation(license=licence)), ref=CRS)
+
+    text = text_of(result)
+    if line is None:
+        assert "Downloaded by DFO" not in text
+        assert "Next release expected" not in text
+    else:
+        assert f"\n{line}" in text
 
 
 async def test_documentation_names_its_gaps_in_plain_words_instead_of_empty_fields() -> None:

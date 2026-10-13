@@ -23,6 +23,7 @@ from compiler.sources import (
     resolved_source_mentions,
     total_reading,
 )
+from data_mcp.digest import source_codes
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,13 @@ class ResolverError(RuntimeError):
         self.refusal = refusal or {}
 
 
-def harness_refusal(*, code: str, message: str) -> dict[str, Any]:
+def harness_refusal(*, code: str, message: str, retry_mode: str = "do_not_retry") -> dict[str, Any]:
     """The refusal grammar's body for a refusal the harness mints itself: stamped
-    `origin: harness`, never retried, with no fix."""
+    `origin: harness`, with no fix. It is `do_not_retry` unless the message
+    names a corrected call the harness accepts, which is `correct_and_retry`."""
     return {
         "code": code,
-        "retry_mode": "do_not_retry",
+        "retry_mode": retry_mode,
         "fix": None,
         "origin": REFUSAL_ORIGIN_HARNESS,
         "message": message,
@@ -306,7 +308,10 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     `group_readings`, a sentence each saying so (`_total_readings`). A
     `definite` part whose count Search elected beside others carries
     `counted_as` and `alternatives`, each by its own spec_id
-    (`measure_choice`). The top-level fields above read the first part only.
+    (`measure_choice`), and `source_codes`, the publisher codes of the family
+    it found, each with its source's label when the part binds that source
+    (`data_mcp.digest.source_codes`). The top-level fields above read the
+    first part only.
 
     `skills`, on every branch, reads the whole envelope: the skills the
     envelope's `skills` map attaches to any part's specs, as
@@ -347,10 +352,11 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
 
     `graph_envelope` reduces each spec to its `spec_id`. Each part digest
     also carries a `definite` part's own `spec` block whole as `spec_block`,
-    `None` on every other status, and `candidate_blocks`, each candidate's
-    block keyed by its spec_id. `harness.graph.state.store_search` stores them, so
-    `fetch` and the planner's pins read a part's or a picked candidate's
-    block with no second `search` call. The top-level `spec_block` holds
+    `None` on every other status, and `candidate_blocks`, the block of each
+    candidate its digest offers keyed by its spec_id (`_offered_specs`).
+    `harness.graph.state.store_search` stores them, so `fetch` and the
+    planner's pins read a part's or a picked candidate's block with no
+    second `search` call. The top-level `spec_block` holds
     the first part's block the same way. `kind` is what the envelope says
     of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
@@ -363,12 +369,26 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
         summary["spec_block"] = part.get("spec") if summary.get("status") == "definite" else None
         summary["candidate_blocks"] = {
-            spec["spec_id"]: spec
-            for spec in (part.get("candidates") or {}).get("specs") or []
-            if spec.get("spec_id")
+            spec["spec_id"]: spec for spec in _offered_specs(part) if spec.get("spec_id")
         }
     digest["kind"] = envelope.get("kind") or "resolution"
     return digest
+
+
+def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The spec blocks `part` offers as its digest's `candidates` (`_part_digest`).
+
+    A `candidates` part offers its `candidates.specs`; a `no_data` part its
+    nearest real series (`no_data.nearest_real`), which the orchestrator may
+    fetch and the planner pin as it would a candidate. Every other part
+    offers none.
+    """
+    status = part.get("status")
+    if status == "candidates":
+        return list((part.get("candidates") or {}).get("specs") or [])
+    if status == "no_data":
+        return list((part.get("no_data") or {}).get("nearest_real") or [])
+    return []
 
 
 def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -381,7 +401,8 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     newest first, as `{"year", "observations", "series"}`, empty when the
     block carries no headline or the headline no `recent_years`. These are
     keys `harness.turn_records.SearchReading.from_part` reads. The
-    orchestrator's search result shows the model none of them.
+    orchestrator's search result shows the model `recent_years` alone, and
+    only when `requested_window_kind` is `latest`.
     """
     spec = dict(spec)
     resolved = spec.get("resolved") or {}
@@ -469,6 +490,8 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
         summary["group_readings"] = readings
     if digest["status"] == "definite":
         summary.update(measure_choice(part.get("spec") or {}))
+        if codes := source_codes(part.get("spec") or {}):
+            summary["source_codes"] = codes
     return summary
 
 
@@ -572,7 +595,7 @@ def _answer_kind_digest(envelope: dict[str, Any], kind: str) -> dict[str, Any]:
     the confirmed country ride along for a caller that answers differently.
     """
     place = (envelope.get("scope") or {}).get("place") or {}
-    label = place.get("label") or place.get("dcid")
+    label = place.get("label") or place.get("ref")
     named = f" It named {label}." if label else ""
     reason = envelope.get("reason")
     if kind == "catalogue":

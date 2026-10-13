@@ -22,6 +22,10 @@ different labels, so `compare` and `join` match only results over the same
 window. An input that already carries a span refuses
 (`derived_input_unusable`) before the engine runs, since growth reads one row
 per period.
+
+The stored step (`_growth_step`) counts the entities the growth keeps and
+those it leaves out by reason, and names a relative growth's unit as a
+dimensionless ratio.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from analysis_mcp.engine.growth import (
     GrowthAmbiguousEntityError,
     GrowthEndpointsMissingError,
     GrowthNonFiniteResultError,
+    GrowthResult,
     run_growth,
 )
 from analysis_mcp.frame_ref_resolution import (
@@ -51,6 +56,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merged_time,
     read_derived_marker,
@@ -66,6 +72,15 @@ from analysis_mcp.op_spec import (
 )
 from analysis_mcp.rolling_tool import anchored_input
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import (
+    LeftOut,
+    Step,
+    build_step,
+    caller_params,
+    left_out_from_exclusions,
+    step_unit,
+    window_params,
+)
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -153,6 +168,31 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             non_finite=exc.non_finite,
         )
     return refusal
+
+
+def _growth_step(op_spec: GrowthOpSpec, result: GrowthResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the entities it
+    computed, the entities it left out by reason, and its unit, a
+    dimensionless ratio for a relative change and the input's unit for an
+    absolute one. The window's bounds are the params `start` and `end`."""
+    return build_step(
+        op="growth",
+        trace=trace,
+        inputs={"input": op_spec.frame_ref},
+        params=window_params(caller_params(trace.execution_record.content)),
+        kept={"entities": len(result.entity_growths)},
+        left_out=[
+            *(
+                LeftOut(reason=reason, count=count, of="entities")
+                for reason, count in result.entities_left_out.items()
+            ),
+            *left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
+        ],
+        unit=step_unit(
+            result.resolved_unit if result.change == "absolute" else None,
+            ratio=holds_ratio(trace),
+        ),
+    )
 
 
 def _unreadable_input_refusal(
@@ -456,7 +496,7 @@ async def growth(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[input_trace],
+        step=_growth_step(op_spec, result, trace=output_trace),
         digest=lambda: render_growth_digest(
             window_start=op_spec.window_start,
             window_end=op_spec.window_end,

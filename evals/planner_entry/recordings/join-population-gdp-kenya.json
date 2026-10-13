@@ -1,0 +1,2433 @@
+{
+  "answers": [
+    "218ea168b7259664",
+    "6c3fcaba6b65d3a6",
+    "c689ec80a91a28c5",
+    "e7e3c48d56e3d761",
+    "f279c775491b5692",
+    "f7368e5f13734aba"
+  ],
+  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
+  "recorded_at": "2026-10-12T05:55:57+00:00",
+  "schema": 2,
+  "searches": [
+    {
+      "envelope": {
+        "diagnostics": {
+          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "llm_usage": {
+            "cached_tokens": 0,
+            "input_tokens": 2765,
+            "output_tokens": 346
+          },
+          "timed_out": false,
+          "timing_ms": {
+            "total": 1966
+          },
+          "trace_id": "05dccf9e4a9743db8e369204b5bc51a3",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "Kenya"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "time_text": "2010 to 2022",
+              "variable_text": "population"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/KEN"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2022,
+                    "kind": "range",
+                    "start_year": 2010
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "count",
+                    "population_type": "Person",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "age"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "gender"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maritalStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "nativity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfBirth"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_0125be4f3501bdf69a020d8ba3bd69d6"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 13,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 13,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 13,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Kenya",
+                    "ref": "country/KEN",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Bank Subnational Population",
+                            "ref": "dc/base/Subnational_Demographics_Stats"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Kenya Census",
+                            "ref": "dc/base/Kenya_Census"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "measurementMethod",
+                    "options": [
+                      {
+                        "value": {
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Bank Subnational Population Estimates",
+                            "ref": "WorldBankSubnationalPopulationEstimate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "age",
+                  "maritalStatus",
+                  "gender",
+                  "placeOfBirth",
+                  "nativity",
+                  "employment",
+                  "employmentStatus"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Demographics",
+                  "ref": "dc/g/Demographics"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2010
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_f3ed4dfd94f1e738b1d0847343d33eac"
+                    },
+                    "stat_var": {
+                      "label": "Rate of Population Growth",
+                      "ref": "GrowthRate_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2010
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "lifeExpectancy",
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_4fdde4d95bc2859b9a1cf85d33422d9f"
+                    },
+                    "stat_var": {
+                      "label": "Life Expectancy",
+                      "ref": "LifeExpectancy_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2010
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "measurement_denominator": {
+                            "ref": "area"
+                          },
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_0839569d01d592d67972e43e440c1399"
+                    },
+                    "stat_var": {
+                      "label": "Population Density",
+                      "ref": "Count_Person_PerArea"
+                    }
+                  }
+                ],
+                "rendered_sentence": "Kenya's total population, 2010 to 2022. World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Kenya"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "total population"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:age",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "age",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:gender",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "gender",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maritalStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maritalStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nativity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nativity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfBirth",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfBirth",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2010 to 2022"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Total population",
+                  "measured_property": {
+                    "label": "count",
+                    "ref": "count"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 497,
+                  "population_type": {
+                    "label": "Person",
+                    "ref": "Person"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "person_count_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 0 To 4",
+                            "ref": "Years0To4"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Female",
+                            "ref": "Female"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Male",
+                            "ref": "Male"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2022",
+                    "start": "2010"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Kenya",
+                      "ref": "country/KEN"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age",
+                        "property": {
+                          "label": "age",
+                          "ref": "age"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "marital status",
+                        "property": {
+                          "label": "maritalStatus",
+                          "ref": "maritalStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "gender",
+                        "property": {
+                          "label": "gender",
+                          "ref": "gender"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of birth",
+                        "property": {
+                          "label": "placeOfBirth",
+                          "ref": "placeOfBirth"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "nativity",
+                        "property": {
+                          "label": "nativity",
+                          "ref": "nativity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment",
+                        "property": {
+                          "label": "employment",
+                          "ref": "employment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment status",
+                        "property": {
+                          "label": "employmentStatus",
+                          "ref": "employmentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_0125be4f3501bdf69a020d8ba3bd69d6"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 6,
+                "bind": 1384,
+                "materialise": 165,
+                "options": 2,
+                "recall": 1,
+                "shape": 149
+              },
+              "total": 1707
+            },
+            "variable_text": "population",
+            "warnings": []
+          },
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "Kenya"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "time_text": "2010 to 2022",
+              "variable_text": "GDP"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/KEN"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2022,
+                    "kind": "range",
+                    "start_year": 2010
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "amount",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "EconomicActivity",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "ref": "GrossDomesticProduction",
+                        "state": "value"
+                      },
+                      "property": "activitySource"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "economicSector"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_74372a7a2091a57bcc83aa73d1b3bf4a"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 13,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 13,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 13,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Kenya",
+                    "ref": "country/KEN",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "equivalent_readings": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN"
+                          ]
+                        },
+                        "facets": {
+                          "unit": {
+                            "ref": "CurrencyUSD",
+                            "state": "value"
+                          }
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2010
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "valueAdded",
+                          "measurement_qualifier": "Nominal",
+                          "population_type": "EconomicProduction",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "GrossOfFixedCapitalConsumption",
+                              "state": "value"
+                            },
+                            "property": "fixedCapitalConsumptionBasis"
+                          },
+                          {
+                            "binding": {
+                              "ref": "IncludingProductTaxes",
+                              "state": "value"
+                            },
+                            "property": "productTaxBasis"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_00de9c80b5d1ab24dbbb7e4b61a9c94b"
+                    },
+                    "resolved": {
+                      "available_at_place": true,
+                      "confidence": "high",
+                      "coverage": {
+                        "dimensions": [
+                          {
+                            "count": 1,
+                            "label": "sources"
+                          },
+                          {
+                            "count": 13,
+                            "label": "observations"
+                          },
+                          {
+                            "count": 1,
+                            "label": "variables"
+                          }
+                        ],
+                        "evidence": "facet_metadata",
+                        "has_data": true,
+                        "kind": "exact",
+                        "observation_count": 13,
+                        "window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        }
+                      },
+                      "download": {
+                        "licence": {
+                          "label": "IMF Copyright and Usage"
+                        },
+                        "rows": 13,
+                        "rows_exact": true,
+                        "series": 1,
+                        "window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        }
+                      },
+                      "entities": [
+                        {
+                          "entity_type": "Country",
+                          "label": "Kenya",
+                          "ref": "country/KEN",
+                          "role": "observationAbout"
+                        }
+                      ],
+                      "entity_options": [],
+                      "facet_options": [],
+                      "facets": {
+                        "provenance": {
+                          "basis": "fallback",
+                          "data_commons": {
+                            "id": "dfo",
+                            "label": "Development Finance Observatory"
+                          },
+                          "label": "IMF World Economic Outlook (WEO)",
+                          "ref": "provenance/IMFWorldEconomicOutlook",
+                          "source": {
+                            "label": "International Monetary Fund (IMF)",
+                            "ref": "source/InternationalMonetaryFund"
+                          }
+                        },
+                        "unit": {
+                          "basis": "bound",
+                          "currency": "USD",
+                          "label": "US Dollar",
+                          "ref": "CurrencyUSD"
+                        }
+                      },
+                      "inapplicable_slots": [],
+                      "measure_axis_values": [],
+                      "measure_label_axes": [],
+                      "shape": {
+                        "data_commons": [
+                          {
+                            "id": "dfo",
+                            "label": "Development Finance Observatory"
+                          }
+                        ],
+                        "label": "Gross domestic product (GDP), Current prices",
+                        "measured_property": {
+                          "label": "value added",
+                          "ref": "valueAdded"
+                        },
+                        "measurement_denominator_unresolved": false,
+                        "measurement_qualifier": {
+                          "label": "Nominal",
+                          "ref": "Nominal"
+                        },
+                        "member_count": 1,
+                        "member_digest": "5183d7a4f4c8471dee107680b8ce8b8a830d580f61723e9aa649255787800663",
+                        "population_type": {
+                          "label": "economic production",
+                          "ref": "EconomicProduction"
+                        },
+                        "refine_supported": true,
+                        "shape_id": "economicproduction_valueadded_measuredvalue_nominal",
+                        "slot_keys": [
+                          {
+                            "axis": "how",
+                            "label": "fixed capital consumption basis",
+                            "property": {
+                              "label": "fixed capital consumption basis",
+                              "ref": "fixedCapitalConsumptionBasis"
+                            }
+                          },
+                          {
+                            "axis": "how",
+                            "label": "product tax basis",
+                            "property": {
+                              "label": "product tax basis",
+                              "ref": "productTaxBasis"
+                            }
+                          },
+                          {
+                            "axis": "where",
+                            "label": "place"
+                          },
+                          {
+                            "axis": "when",
+                            "label": "time window"
+                          },
+                          {
+                            "axis": "source",
+                            "label": "data source"
+                          }
+                        ],
+                        "stat_type": {
+                          "label": "measuredValue",
+                          "ref": "measuredValue"
+                        }
+                      },
+                      "skills": [
+                        "imf-weo"
+                      ],
+                      "slot_options": [
+                        {
+                          "key": {
+                            "axis": "how",
+                            "label": "fixed capital consumption basis",
+                            "property": {
+                              "label": "fixed capital consumption basis",
+                              "ref": "fixedCapitalConsumptionBasis"
+                            }
+                          },
+                          "options": [
+                            {
+                              "value": {
+                                "ref": {
+                                  "label": "gross of fixed capital consumption",
+                                  "ref": "GrossOfFixedCapitalConsumption"
+                                },
+                                "value_kind": "enum_value"
+                              }
+                            }
+                          ],
+                          "source": "observed",
+                          "truncated": true
+                        },
+                        {
+                          "key": {
+                            "axis": "how",
+                            "label": "product tax basis",
+                            "property": {
+                              "label": "product tax basis",
+                              "ref": "productTaxBasis"
+                            }
+                          },
+                          "options": [
+                            {
+                              "value": {
+                                "ref": {
+                                  "label": "including taxes on products",
+                                  "ref": "IncludingProductTaxes"
+                                },
+                                "value_kind": "enum_value"
+                              }
+                            }
+                          ],
+                          "source": "observed",
+                          "truncated": true
+                        }
+                      ],
+                      "slots": [
+                        {
+                          "binding": {
+                            "kind": "value",
+                            "value": {
+                              "ref": {
+                                "label": "gross of fixed capital consumption",
+                                "ref": "GrossOfFixedCapitalConsumption"
+                              },
+                              "value_kind": "enum_value"
+                            }
+                          },
+                          "key": {
+                            "axis": "how",
+                            "label": "fixed capital consumption basis",
+                            "property": {
+                              "label": "fixed capital consumption basis",
+                              "ref": "fixedCapitalConsumptionBasis"
+                            }
+                          },
+                          "summable": false
+                        },
+                        {
+                          "binding": {
+                            "kind": "value",
+                            "value": {
+                              "ref": {
+                                "label": "including taxes on products",
+                                "ref": "IncludingProductTaxes"
+                              },
+                              "value_kind": "enum_value"
+                            }
+                          },
+                          "key": {
+                            "axis": "how",
+                            "label": "product tax basis",
+                            "property": {
+                              "label": "product tax basis",
+                              "ref": "productTaxBasis"
+                            }
+                          },
+                          "summable": false
+                        },
+                        {
+                          "binding": {
+                            "kind": "value",
+                            "value": {
+                              "ref": {
+                                "label": "Kenya",
+                                "ref": "country/KEN"
+                              },
+                              "value_kind": "entity"
+                            }
+                          },
+                          "key": {
+                            "axis": "where",
+                            "label": "place"
+                          },
+                          "summable": false
+                        },
+                        {
+                          "binding": {
+                            "kind": "value",
+                            "value": {
+                              "time_window": {
+                                "end_year": 2022,
+                                "start_year": 2010
+                              },
+                              "value_kind": "time_window"
+                            }
+                          },
+                          "key": {
+                            "axis": "when",
+                            "label": "time window"
+                          },
+                          "summable": false
+                        },
+                        {
+                          "binding": {
+                            "kind": "unbound"
+                          },
+                          "key": {
+                            "axis": "source",
+                            "label": "data source"
+                          },
+                          "summable": false
+                        }
+                      ],
+                      "stat_vars": {
+                        "data_date_range": {
+                          "end": "2022",
+                          "start": "2010"
+                        },
+                        "member_count": 1,
+                        "member_count_exact": false,
+                        "served_count": 1
+                      },
+                      "trace": {
+                        "capability_version": "cap_daf889452657d56d",
+                        "default_reading": {
+                          "applied": true,
+                          "removed_stat_vars": [
+                            "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
+                            "InflationAdjustedGDP",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_ConstructionSector",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_ElectricityGasSteamAirConditionSupply",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_FinanceService",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_MOSPIOtherService",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector"
+                          ]
+                        },
+                        "query_qualifiers": [],
+                        "requested_window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        },
+                        "resolved_entities": [
+                          {
+                            "label": "Kenya",
+                            "ref": "country/KEN"
+                          }
+                        ],
+                        "resolved_sources": [
+                          {
+                            "data_commons": {
+                              "id": "dfo",
+                              "label": "Development Finance Observatory"
+                            },
+                            "label": "IMF World Economic Outlook (WEO)",
+                            "ref": "provenance/IMFWorldEconomicOutlook",
+                            "source": {
+                              "label": "International Monetary Fund (IMF)",
+                              "ref": "source/InternationalMonetaryFund"
+                            }
+                          }
+                        ],
+                        "slot_filters": [
+                          {
+                            "binding_kind": "value",
+                            "key": {
+                              "axis": "how",
+                              "label": "fixed capital consumption basis",
+                              "property": {
+                                "label": "fixed capital consumption basis",
+                                "ref": "fixedCapitalConsumptionBasis"
+                              }
+                            },
+                            "provenance": "binder",
+                            "refs": [
+                              {
+                                "label": "gross of fixed capital consumption",
+                                "ref": "GrossOfFixedCapitalConsumption"
+                              }
+                            ]
+                          },
+                          {
+                            "binding_kind": "value",
+                            "key": {
+                              "axis": "how",
+                              "label": "product tax basis",
+                              "property": {
+                                "label": "product tax basis",
+                                "ref": "productTaxBasis"
+                              }
+                            },
+                            "provenance": "binder",
+                            "refs": [
+                              {
+                                "label": "including taxes on products",
+                                "ref": "IncludingProductTaxes"
+                              }
+                            ]
+                          },
+                          {
+                            "binding_kind": "value",
+                            "key": {
+                              "axis": "where",
+                              "label": "place"
+                            },
+                            "provenance": "binder",
+                            "refs": [
+                              {
+                                "label": "Kenya",
+                                "ref": "country/KEN"
+                              }
+                            ]
+                          },
+                          {
+                            "binding_kind": "value",
+                            "key": {
+                              "axis": "when",
+                              "label": "time window"
+                            },
+                            "provenance": "binder",
+                            "refs": []
+                          },
+                          {
+                            "binding_kind": "unbound",
+                            "key": {
+                              "axis": "source",
+                              "label": "data source"
+                            },
+                            "provenance": "binder",
+                            "refs": []
+                          }
+                        ]
+                      },
+                      "unresolved_slots": []
+                    },
+                    "spec_id": "spec_00de9c80b5d1ab24dbbb7e4b61a9c94b"
+                  }
+                ],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "USDollar",
+                            "ref": "USDollar"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  },
+                  "unit": {
+                    "basis": "fallback",
+                    "currency": "USD",
+                    "label": "USDollar",
+                    "ref": "USDollar"
+                  }
+                },
+                "inapplicable_slots": [
+                  "economicSector"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Economic Activity With Activity Source = Gross Domestic Production",
+                  "ref": "dc/g/EconomicActivity_ActivitySource-GrossDomesticProduction"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2010
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "amount",
+                          "population_type": "EconomicActivity",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "GrossDomesticProduction",
+                              "state": "value"
+                            },
+                            "property": "activitySource"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_08831757d62037c34f7c580ba027f09b"
+                    },
+                    "stat_var": {
+                      "label": "Gross domestic product growth rate",
+                      "ref": "GrowthRate_Amount_EconomicActivity_GrossDomesticProduction"
+                    }
+                  }
+                ],
+                "rendered_sentence": "Kenya's GDP, 2010 to 2022. Current US dollars \u00b7 World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Kenya"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:activitySource",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "GDP"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:economicSector",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "economicSector",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:activitySource",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "activitySource",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2010 to 2022"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Current US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Nominal gross domestic product",
+                  "measured_property": {
+                    "label": "amount",
+                    "ref": "amount"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 38,
+                  "member_digest": "1ae8522ab52505085339d62a68eaa593526913a493dc36be6240e8712b0dfff3",
+                  "population_type": {
+                    "label": "EconomicActivity",
+                    "ref": "EconomicActivity"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "economicactivity_amount_measuredvalue_nominal",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "GrossDomesticProduction",
+                            "ref": "GrossDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2022",
+                    "start": "2010"
+                  },
+                  "member_count": 38,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": [
+                      "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
+                      "InflationAdjustedGDP",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ConstructionSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ElectricityGasSteamAirConditionSupply",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_FinanceService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_MOSPIOtherService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector"
+                    ]
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Kenya",
+                      "ref": "country/KEN"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "activity source",
+                        "property": {
+                          "label": "activitySource",
+                          "ref": "activitySource"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "economic sector",
+                        "property": {
+                          "label": "economicSector",
+                          "ref": "economicSector"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_74372a7a2091a57bcc83aa73d1b3bf4a"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 76,
+                "bind": 3,
+                "materialise": 96,
+                "options": 6,
+                "recall": 1,
+                "shape": 259
+              },
+              "total": 441
+            },
+            "variable_text": "GDP",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true,
+          "raw_query": "Put Kenya's population and GDP side by side for each year from 2010 to 2022."
+        },
+        "rendered_sentence": "Kenya's total population, 2010 to 2022. World Development Indicators. Kenya's GDP, 2010 to 2022. Current US dollars \u00b7 World Development Indicators.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Kenya"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "total population"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:age",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "age",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employment",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "employment",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employmentStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "employmentStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:gender",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "gender",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:maritalStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "maritalStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nativity",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "nativity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:placeOfBirth",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "placeOfBirth",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2010 to 2022"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Development Indicators"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Kenya"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "how:activitySource",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "GDP"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:economicSector",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "economicSector",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:activitySource",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "activitySource",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2010 to 2022"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Current US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Development Indicators"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "skills": {
+          "imf-weo": {
+            "content_version": "sha256:fed443d0e2523e4ebba2ae66b0faa930642ca94ec54af332a7a25e06fc44fdbf",
+            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
+            "id": "imf-weo",
+            "name": "imf-weo"
+          }
+        },
+        "status": "definite"
+      },
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "time": "2010 to 2022",
+          "variable": "population"
+        },
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "time": "2010 to 2022",
+          "variable": "GDP"
+        }
+      ],
+      "question": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+      "raw_text": false
+    }
+  ],
+  "task": "join-population-gdp-kenya"
+}

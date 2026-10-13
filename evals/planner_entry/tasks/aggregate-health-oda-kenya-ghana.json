@@ -1,0 +1,98 @@
+{
+  "id": "aggregate-health-oda-kenya-ghana",
+  "kind": "aggregate",
+  "origin": "trace 5788b967-3fbd-4d5c-8078-1f89d32e7d5e",
+  "question": "show a table of gross ODA disbursements for health to Kenya and Ghana, 2020 to 2024",
+  "searches": [
+    {
+      "query": "show a table of gross ODA disbursements for health to Kenya and Ghana, 2020 to 2024",
+      "parts": [
+        {
+          "variable": "gross ODA disbursements for health",
+          "unit": "constant 2023 US dollars",
+          "time": "2020 to 2024",
+          "entities": [
+            {
+              "role": "to",
+              "text": "Kenya"
+            },
+            {
+              "role": "to",
+              "text": "Ghana"
+            }
+          ],
+          "sources": [
+            {
+              "text": "OECD Creditor Reporting System"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "gross ODA disbursements for health to Kenya and Ghana from all providers summed, 2020 to 2024, in current US dollars",
+  "asks": [
+    "table of gross ODA disbursements for health to Kenya and Ghana by year, 2020 to 2024"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "sum_of",
+    "distinction": "aggregate, not sum_of: the providers are summed within each recipient, and Kenya and Ghana stay apart; nothing from two sources is added"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "gross ODA disbursements for health to Kenya and Ghana from all providers summed, 2020 to 2024, in current US dollars",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda_health",
+        "measure": "gross ODA disbursements for health",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "Ghana",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_ed70bdc12219cce9e0b278222bffa4e2"
+      },
+      {
+        "kind": "aggregate",
+        "id": "table",
+        "input_id": "oda_health",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ]
+  }
+}

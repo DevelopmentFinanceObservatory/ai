@@ -13,17 +13,19 @@ from data_mcp import client_holder
 from data_mcp.errors import UpstreamError
 from data_mcp.resolution import (
     Ambiguous,
+    AmbiguousCandidate,
     InvalidName,
     NotFound,
     NotHeld,
-    OutOfScope,
     RegionMember,
     ResolvedEntity,
     ResolvedRegion,
     resolve_entities,
 )
+from pydantic import ValidationError
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
+from .resolve_results import resolve_result, resolved_result
 from .test_client import _client
 
 Handler = (
@@ -31,10 +33,33 @@ Handler = (
     | Callable[[httpx2.Request], Coroutine[None, None, httpx2.Response]]
 )
 
+_G7_MEMBERS = [
+    {"ref": "country/CAN", "label": "Canada"},
+    {"ref": "country/DEU", "label": "Germany"},
+    {"ref": "country/FRA", "label": "France"},
+    {"ref": "country/GBR", "label": "United Kingdom"},
+    {"ref": "country/ITA", "label": "Italy"},
+    {"ref": "country/JPN", "label": "Japan"},
+    {"ref": "country/USA", "label": "United States"},
+]
 
-def _json_handler(payload: dict[str, Any]) -> Handler:
+
+def _json_handler(*results: dict[str, Any]) -> Handler:
     def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=payload)
+        return httpx2.Response(200, json={"results": list(results)})
+
+    return handler
+
+
+def _echo_handler(requests: list[dict[str, Any]] | None = None) -> Handler:
+    """Resolve every text to a country named by the text itself."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        if requests is not None:
+            requests.append(body)
+        results = [resolved_result(text, f"dcid:{text}") for text in body["texts"]]
+        return httpx2.Response(200, json={"results": results})
 
     return handler
 
@@ -45,236 +70,190 @@ async def _resolve(handler: Handler, scope: dict[str, list[str]]) -> dict[str, d
         return await resolve_entities(scope)
 
 
-# The six wire statuses
+# The request
+
+
+async def test_request_posts_the_texts_with_members_expanded() -> None:
+    requests: list[dict[str, Any]] = []
+
+    await _resolve(_echo_handler(requests), {"donor": ["France"]})
+
+    assert requests == [{"texts": ["France"], "expand": ["members"]}]
+
+
+# The four wire statuses
 
 
 async def test_resolved_status_maps_to_resolved_entity() -> None:
-    payload = {
-        "results": [
-            {
-                "status": "resolved",
-                "entity": {"dcid": "country/FRA", "name": "France", "entity_type": "geo.country"},
-                "confidence": 0.98,
-            }
-        ]
-    }
+    outcomes = await _resolve(
+        _json_handler(resolved_result("France", "country/FRA")), {"donor": ["France"]}
+    )
 
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["France"]})
-
-    outcome = outcomes["donor"]["France"]
-    assert outcome == ResolvedEntity(dcid="country/FRA", name="France", entity_type="geo.country")
-
-
-async def test_resolved_region_status_maps_its_members() -> None:
-    """The door's region carries `members` only: every member it lists is a graph node."""
-    payload = {
-        "results": [
-            {
-                "status": "resolved_region",
-                "region": {
-                    "dcid": "africa",
-                    "name": "Africa",
-                    "entity_type": "Continent",
-                    "kind": "continent",
-                },
-                "members": [
-                    {"dcid": "country/AGO", "name": "Angola"},
-                    {"dcid": "country/KEN", "name": "Kenya"},
-                ],
-            }
-        ]
-    }
-
-    outcomes = await _resolve(_json_handler(payload), {"observationAbout": ["Africa"]})
-
-    assert outcomes["observationAbout"]["Africa"] == ResolvedRegion(
-        name="Africa",
-        entity_type="Continent",
-        members=[
-            RegionMember(dcid="country/AGO", name="Angola"),
-            RegionMember(dcid="country/KEN", name="Kenya"),
-        ],
-        members_not_held=[],
+    assert outcomes["donor"]["France"] == ResolvedEntity(
+        dcid="country/FRA", name="France", entity_type="country"
     )
 
 
-async def test_resolved_group_status_maps_to_its_members() -> None:
-    """A group with no node of its own is named by the text that asked for it."""
-    payload = {
-        "results": [
-            {
-                "status": "resolved_group",
-                "entity": None,
-                "members": [
-                    {
-                        "dcid": "country/CAN",
-                        "name": "Canada",
-                        "entity_type": "Country",
-                        "kind": "country",
-                    },
-                    {
-                        "dcid": "country/DEU",
-                        "name": "Germany",
-                        "entity_type": "Country",
-                        "kind": "country",
-                    },
-                ],
-            }
-        ]
-    }
+async def test_resolved_organisation_maps_to_resolved_entity() -> None:
+    result = resolved_result("World Bank", "WorldBank", kind="organisation")
 
-    outcomes = await _resolve(_json_handler(payload), {"observationAbout": ["G7"]})
+    outcomes = await _resolve(_json_handler(result), {"provider": ["World Bank"]})
+
+    assert outcomes["provider"]["World Bank"] == ResolvedEntity(
+        dcid="WorldBank", name="World Bank", entity_type="organisation"
+    )
+
+
+async def test_resolved_group_maps_to_its_inline_members() -> None:
+    result = resolve_result(
+        "G7",
+        "resolved",
+        entity={"ref": "GroupOfSeven", "label": "Group of Seven", "kind": "group"},
+        matched={"text": "G7", "as": "alias"},
+        reading="entity",
+        projection="countries",
+        member_count=7,
+        members=_G7_MEMBERS,
+    )
+
+    outcomes = await _resolve(_json_handler(result), {"observationAbout": ["G7"]})
 
     assert outcomes["observationAbout"]["G7"] == ResolvedRegion(
-        name="G7",
+        name="Group of Seven",
         entity_type="group",
+        members=[RegionMember(dcid=m["ref"], name=m["label"]) for m in _G7_MEMBERS],
+    )
+
+
+async def test_resolved_region_maps_its_members_and_names_an_unlabelled_one_by_ref() -> None:
+    result = resolved_result(
+        "North America",
+        "northamerica",
+        kind="continent",
+        projection="countries",
+        member_count=2,
+        members=[{"ref": "country/CAN", "label": "Canada"}, {"ref": "country/XKX", "label": None}],
+    )
+
+    outcomes = await _resolve(_json_handler(result), {"observationAbout": ["North America"]})
+
+    assert outcomes["observationAbout"]["North America"] == ResolvedRegion(
+        name="North America",
+        entity_type="continent",
         members=[
             RegionMember(dcid="country/CAN", name="Canada"),
-            RegionMember(dcid="country/DEU", name="Germany"),
+            RegionMember(dcid="country/XKX", name="country/XKX"),
         ],
-        members_not_held=[],
     )
+
+
+async def test_a_region_the_membership_policy_does_not_hold_resolves_as_an_entity() -> None:
+    # Its `projection`, `member_count` and `members` are `null`.
+    result = resolved_result("Polynesia", "polynesia", kind="subregion")
+
+    outcomes = await _resolve(_json_handler(result), {"observationAbout": ["Polynesia"]})
+
+    assert outcomes["observationAbout"]["Polynesia"] == ResolvedEntity(
+        dcid="polynesia", name="Polynesia", entity_type="subregion"
+    )
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        "/api/graph/node/GroupOfSeven/members?relation=members&projection=countries",
+        _G7_MEMBERS[:6],
+    ],
+    ids=["a link", "fewer than member_count"],
+)
+async def test_a_group_without_all_its_members_inline_raises(members: object) -> None:
+    result = resolved_result("G7", "GroupOfSeven", kind="group", member_count=7, members=members)
+
+    with pytest.raises(ValueError, match="members inline"):
+        await _resolve(_json_handler(result), {"observationAbout": ["G7"]})
 
 
 async def test_ambiguous_status_preserves_candidates() -> None:
-    payload = {
-        "results": [
-            {
-                "status": "ambiguous",
-                "candidates": [
-                    {
-                        "dcid": "country/COD",
-                        "name": "Congo [DRC]",
-                        "entity_type": "Country",
-                        "kind": "country",
-                    },
-                    {
-                        "dcid": "country/COG",
-                        "name": "Congo [Republic]",
-                        "entity_type": "Country",
-                        "kind": "country",
-                    },
-                ],
-            }
+    result = resolve_result(
+        "Congo",
+        "ambiguous",
+        candidates=[
+            {"ref": "country/COD", "label": "Congo [DRC]", "kind": "country"},
+            {"ref": "country/COG", "label": "Congo [Republic]", "kind": "country"},
+        ],
+    )
+
+    outcomes = await _resolve(_json_handler(result), {"recipient": ["Congo"]})
+
+    assert outcomes["recipient"]["Congo"] == Ambiguous(
+        candidates=[
+            AmbiguousCandidate(dcid="country/COD", name="Congo [DRC]", entity_type="country"),
+            AmbiguousCandidate(dcid="country/COG", name="Congo [Republic]", entity_type="country"),
         ]
-    }
-
-    outcomes = await _resolve(_json_handler(payload), {"recipient": ["Congo"]})
-
-    outcome = outcomes["recipient"]["Congo"]
-    assert isinstance(outcome, Ambiguous)
-    assert outcome.truncated is False
-    assert [(c.dcid, c.name, c.parent) for c in outcome.candidates] == [
-        ("country/COD", "Congo [DRC]", None),
-        ("country/COG", "Congo [Republic]", None),
-    ]
-
-
-async def test_not_found_with_near_matches_signals_a_probable_misspelling() -> None:
-    payload = {
-        "results": [
-            {
-                "status": "not_found",
-                "near_matches": ["France"],
-            }
-        ]
-    }
-
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["Fance"]})
-
-    outcome = outcomes["donor"]["Fance"]
-    assert isinstance(outcome, NotFound)
-    assert len(outcome.near_matches) == 1
-    assert outcome.near_matches[0].name == "France"
-
-
-async def test_not_found_with_no_near_matches_signals_nonsense() -> None:
-    """An organisation name matches nothing and has nothing close to offer either."""
-    payload = {"results": [{"status": "not_found", "near_matches": []}]}
-
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["World Health Organization"]})
-
-    outcome = outcomes["donor"]["World Health Organization"]
-    assert isinstance(outcome, NotFound)
-    assert outcome.near_matches == []
-
-
-async def test_not_held_maps_to_not_held() -> None:
-    payload = {"results": [{"status": "not_held", "name": "Andorra", "dcid": "country/AND"}]}
-
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["Andorra"]})
-
-    assert outcomes["donor"]["Andorra"] == NotHeld(name="Andorra", entity_type="entity")
-
-
-async def test_out_of_scope_with_a_held_dcid_preserves_it() -> None:
-    payload = {
-        "results": [
-            {
-                "status": "out_of_scope",
-                "name": "World Bank",
-                "entity_type": "geo.organization",
-                "dcid": "dc/s/WorldBank",
-            }
-        ]
-    }
-
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["World Bank"]})
-
-    outcome = outcomes["donor"]["World Bank"]
-    assert outcome == OutOfScope(
-        name="World Bank", entity_type="geo.organization", dcid="dc/s/WorldBank"
     )
 
 
-async def test_out_of_scope_with_no_held_dcid_is_none() -> None:
-    payload = {
-        "results": [
-            {
-                "status": "out_of_scope",
-                "name": "African Union",
-                "entity_type": "geo.continental_union",
-            }
-        ]
-    }
+async def test_not_found_with_near_matches_signals_a_probable_misspelling() -> None:
+    result = resolve_result(
+        "Lagos",
+        "not_found",
+        near_matches=[{"ref": "country/LAO", "label": "Laos", "kind": "country"}],
+    )
 
-    outcomes = await _resolve(_json_handler(payload), {"donor": ["African Union"]})
+    outcomes = await _resolve(_json_handler(result), {"donor": ["Lagos"]})
 
-    outcome = outcomes["donor"]["African Union"]
-    assert isinstance(outcome, OutOfScope)
-    assert outcome.dcid is None
+    outcome = outcomes["donor"]["Lagos"]
+    assert isinstance(outcome, NotFound)
+    assert [m.name for m in outcome.near_matches] == ["Laos"]
+
+
+async def test_not_found_with_no_near_matches_signals_nonsense() -> None:
+    result = resolve_result("Atlantis Prime", "not_found", near_matches=[])
+
+    outcomes = await _resolve(_json_handler(result), {"donor": ["Atlantis Prime"]})
+
+    assert outcomes["donor"]["Atlantis Prime"] == NotFound(near_matches=[])
+
+
+async def test_not_held_maps_to_not_held() -> None:
+    result = resolve_result(
+        "Andorra", "not_held", entity={"ref": "country/AND", "label": "Andorra", "kind": None}
+    )
+
+    outcomes = await _resolve(_json_handler(result), {"donor": ["Andorra"]})
+
+    assert outcomes["donor"]["Andorra"] == NotHeld(name="Andorra")
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"input": "France", "status": "out_of_scope"},
+        resolve_result("France", "resolved_region"),
+    ],
+    ids=["retired status", "unknown status"],
+)
+async def test_an_unrecognised_status_raises_a_validation_error(result: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        await _resolve(_json_handler(result), {"donor": ["France"]})
+
+
+async def test_a_result_missing_the_field_its_status_sets_raises() -> None:
+    with pytest.raises(ValueError, match="entity"):
+        await _resolve(_json_handler(resolve_result("France", "resolved")), {"donor": ["France"]})
 
 
 # Dedup
 
 
 async def test_same_name_under_two_roles_is_resolved_once() -> None:
-    requests: list[list[str]] = []
+    requests: list[dict[str, Any]] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = json.loads(request.content)["texts"]
-        requests.append(texts)
-        return httpx2.Response(
-            200,
-            json={
-                "results": [
-                    {
-                        "status": "resolved",
-                        "entity": {
-                            "dcid": "country/FRA",
-                            "name": "France",
-                            "entity_type": "geo.country",
-                        },
-                        "confidence": 0.95,
-                    }
-                    for _ in texts
-                ]
-            },
-        )
+    outcomes = await _resolve(
+        _echo_handler(requests), {"donor": ["France"], "recipient": ["France"]}
+    )
 
-    outcomes = await _resolve(handler, {"donor": ["France"], "recipient": ["France"]})
-
-    assert requests == [["France"]]
+    assert [body["texts"] for body in requests] == [["France"]]
     assert outcomes["donor"]["France"] == outcomes["recipient"]["France"]
 
 
@@ -282,28 +261,12 @@ async def test_same_name_under_two_roles_is_resolved_once() -> None:
 
 
 async def test_chunking_preserves_index_alignment_across_the_25_boundary() -> None:
-    requests: list[list[str]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = json.loads(request.content)["texts"]
-        requests.append(texts)
-        results = [
-            {
-                "status": "resolved",
-                "entity": {"dcid": f"dcid:{text}", "name": text, "entity_type": "geo.country"},
-                "confidence": 0.9,
-            }
-            for text in texts
-        ]
-        return httpx2.Response(200, json={"results": results})
-
+    requests: list[dict[str, Any]] = []
     names = [f"Country{i}" for i in range(30)]
 
-    outcomes = await _resolve(handler, {"role": names})
+    outcomes = await _resolve(_echo_handler(requests), {"role": names})
 
-    assert len(requests) == 2
-    assert len(requests[0]) == 25
-    assert len(requests[1]) == 5
+    assert [len(body["texts"]) for body in requests] == [25, 5]
     for i, name in enumerate(names):
         outcome = outcomes["role"][name]
         assert isinstance(outcome, ResolvedEntity)
@@ -317,64 +280,33 @@ async def test_chunking_preserves_index_alignment_across_the_25_boundary() -> No
 
 
 async def test_empty_after_strip_name_needs_no_upstream_call() -> None:
-    calls = 0
+    requests: list[dict[str, Any]] = []
 
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        nonlocal calls
-        calls += 1
-        return httpx2.Response(200, json={"results": []})
+    outcomes = await _resolve(_echo_handler(requests), {"donor": ["   "]})
 
-    outcomes = await _resolve(handler, {"donor": ["   "]})
-
-    assert calls == 0
+    assert requests == []
     outcome = outcomes["donor"]["   "]
     assert isinstance(outcome, InvalidName)
     assert outcome.name == "   "
 
 
 async def test_overlength_name_needs_no_upstream_call() -> None:
-    calls = 0
+    requests: list[dict[str, Any]] = []
     name = "x" * 201
 
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        nonlocal calls
-        calls += 1
-        return httpx2.Response(200, json={"results": []})
+    outcomes = await _resolve(_echo_handler(requests), {"donor": [name]})
 
-    outcomes = await _resolve(handler, {"donor": [name]})
-
-    assert calls == 0
-    outcome = outcomes["donor"][name]
-    assert isinstance(outcome, InvalidName)
+    assert requests == []
+    assert isinstance(outcomes["donor"][name], InvalidName)
 
 
 async def test_valid_name_alongside_an_invalid_one_still_reaches_the_door() -> None:
     """One bad name in a role's list shouldn't stop the rest of the batch from resolving."""
-    requests: list[list[str]] = []
+    requests: list[dict[str, Any]] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = json.loads(request.content)["texts"]
-        requests.append(texts)
-        return httpx2.Response(
-            200,
-            json={
-                "results": [
-                    {
-                        "status": "resolved",
-                        "entity": {
-                            "dcid": "country/FRA",
-                            "name": "France",
-                            "entity_type": "geo.country",
-                        },
-                        "confidence": 0.95,
-                    }
-                ]
-            },
-        )
+    outcomes = await _resolve(_echo_handler(requests), {"donor": ["France", ""]})
 
-    outcomes = await _resolve(handler, {"donor": ["France", ""]})
-
-    assert requests == [["France"]]
+    assert [body["texts"] for body in requests] == [["France"]]
     assert isinstance(outcomes["donor"]["France"], ResolvedEntity)
     assert isinstance(outcomes["donor"][""], InvalidName)
 
@@ -404,22 +336,16 @@ async def test_chunks_are_dispatched_concurrently_not_serially() -> None:
     a regression fails fast instead of hanging the suite.
     """
     chunk_two_started = asyncio.Event()
+    echo = _echo_handler()
 
     async def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = json.loads(request.content)["texts"]
-        if len(texts) == 25:
+        if len(json.loads(request.content)["texts"]) == 25:
             await chunk_two_started.wait()
         else:
             chunk_two_started.set()
-        results = [
-            {
-                "status": "resolved",
-                "entity": {"dcid": f"dcid:{text}", "name": text, "entity_type": "geo.country"},
-                "confidence": 0.9,
-            }
-            for text in texts
-        ]
-        return httpx2.Response(200, json={"results": results})
+        response = echo(request)
+        assert isinstance(response, httpx2.Response)
+        return response
 
     names = [f"Country{i}" for i in range(30)]
 
@@ -437,20 +363,14 @@ async def test_one_failing_chunk_raises_while_the_other_still_completes() -> Non
     request runs to completion in the background rather than being left orphaned --
     there is nothing here for pytest to report as an unretrieved task exception.
     """
+    echo = _echo_handler()
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        texts = json.loads(request.content)["texts"]
-        if len(texts) == 25:
+        if len(json.loads(request.content)["texts"]) == 25:
             raise httpx2.ConnectError("boom", request=request)
-        results = [
-            {
-                "status": "resolved",
-                "entity": {"dcid": f"dcid:{text}", "name": text, "entity_type": "geo.country"},
-                "confidence": 0.9,
-            }
-            for text in texts
-        ]
-        return httpx2.Response(200, json={"results": results})
+        response = echo(request)
+        assert isinstance(response, httpx2.Response)
+        return response
 
     names = [f"Country{i}" for i in range(30)]
 

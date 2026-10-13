@@ -27,12 +27,13 @@ from planner.agent import create_planner_agent
 from planner.settings import AgentSettings
 from translator.tool import build_translate
 
-# The same field the deployed planner is built from, so this scores the model
-# the service runs; `PLANNER_MODEL_NAME` overrides it here exactly as it does
-# there.
+# The same fields the deployed planner is built from, so this scores the model
+# and schema delivery the service runs; `PLANNER_MODEL_NAME` and
+# `PLANNER_SCHEMA_DELIVERY` override them here exactly as they do there.
 _AGENT_SETTINGS = AgentSettings()
 
 root_agent = create_planner_agent(
     model_name=_AGENT_SETTINGS.planner_model_name,
     translate=build_translate(surface=EvalSurface()),
+    schema_delivery=_AGENT_SETTINGS.planner_schema_delivery,
 )

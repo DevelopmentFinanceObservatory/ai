@@ -1,0 +1,175 @@
+{
+  "id": "quotient-external-debt-gdp-kenya-nigeria",
+  "kind": "quotient_of",
+  "origin": "trace ad2095ee-ef2c-4580-9086-b0aec611c5d2",
+  "question": "Show Kenya's and Nigeria's external debt as a share of GDP over time",
+  "searches": [
+    {
+      "query": "Show Kenya's and Nigeria's external debt as a share of GDP over time",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            },
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "variable": "external debt as a share of GDP"
+        }
+      ]
+    },
+    {
+      "query": "Kenya and Nigeria external debt and GDP",
+      "parts": [
+        {
+          "variable": "external debt stocks as a share of GDP",
+          "entities": [
+            {
+              "text": "Kenya"
+            },
+            {
+              "text": "Nigeria"
+            }
+          ]
+        },
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            },
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "variable": "external debt"
+        },
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            },
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "variable": "GDP"
+        }
+      ]
+    },
+    {
+      "query": "external debt of Kenya and Nigeria",
+      "parts": [
+        {
+          "entities": [
+            {
+              "role": "to",
+              "text": "Kenya"
+            },
+            {
+              "role": "to",
+              "text": "Nigeria"
+            }
+          ],
+          "variable": "external debt stocks as a share of GDP"
+        },
+        {
+          "entities": [
+            {
+              "role": "to",
+              "text": "Kenya"
+            },
+            {
+              "role": "to",
+              "text": "Nigeria"
+            }
+          ],
+          "variable": "external debt"
+        }
+      ]
+    }
+  ],
+  "brief": "Kenya and Nigeria external debt as a share of GDP over time, using external debt stocks and GDP",
+  "asks": [
+    "External debt as a share of GDP for Kenya and Nigeria over time"
+  ],
+  "required_kinds": [
+    "dataset",
+    "quotient_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "quotient_of"
+  ],
+  "neighbour": {
+    "kind": "share_of",
+    "distinction": "quotient_of, not share_of: external debt is a stock set against a year's GDP, not a part of it"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Kenya and Nigeria external debt as a share of GDP over time, using external debt stocks and GDP",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "debtor"
+          },
+          {
+            "name": "Nigeria",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "source_spec_id": "spec_73da03ce27f249bdeb35e7d4cf1b363d"
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Kenya"
+          },
+          {
+            "name": "Nigeria"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "source_spec_id": "spec_7c65660e43f2418f209a844a76aeef4a"
+      },
+      {
+        "kind": "quotient_of",
+        "id": "debt_to_gdp",
+        "numerator": {
+          "input_id": "debt"
+        },
+        "denominator": {
+          "input_id": "gdp"
+        },
+        "axis": "debtor",
+        "denominator_axis": "country"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt_to_gdp"
+        ]
+      }
+    ]
+  }
+}

@@ -12,7 +12,6 @@ from common.materialisation.anchor_record import (
     decode_anchor_record,
     encode_anchor_record,
 )
-from common.materialisation.composed_stat_var import ComposedStatVar, composed_stat_vars_of
 from common.materialisation.content_version import (
     ContentVersionDeriverUnregistered,
     get_content_version_deriver,
@@ -53,7 +52,6 @@ __all__ = [
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",
-    "ComposedStatVar",
     "ContentVersionDeriverUnregistered",
     "FrameExpired",
     "FrameIntegrityError",
@@ -72,7 +70,6 @@ __all__ = [
     "TraceCodecUnknown",
     "aclose_store",
     "build_store",
-    "composed_stat_vars_of",
     "decode_anchor_record",
     "decode_mint_record",
     "decode_trace",

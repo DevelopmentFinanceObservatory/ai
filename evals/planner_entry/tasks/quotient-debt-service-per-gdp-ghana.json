@@ -1,0 +1,162 @@
+{
+  "id": "quotient-debt-service-per-gdp-ghana",
+  "kind": "quotient_of",
+  "origin": "pilot",
+  "question": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
+  "searches": [
+    {
+      "query": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
+      "parts": [
+        {
+          "variable": "external debt service",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2012 to 2021"
+        },
+        {
+          "variable": "GDP",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2012 to 2021"
+        }
+      ]
+    }
+  ],
+  "brief": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
+  "asks": [
+    "Ghana's external debt service relative to GDP, each year 2012 to 2021"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "required_one_of": [
+    "quotient_of",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "quotient_of",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "quotient_of or share_of, not comparison: 'relative to' divides debt service by GDP, and no difference is asked for"
+  },
+  "reference_payload": {
+    "question": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Ghana"
+          }
+        ],
+        "period": {
+          "start": 2012,
+          "end": 2021
+        }
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Ghana"
+          }
+        ],
+        "period": {
+          "start": 2012,
+          "end": 2021
+        }
+      },
+      {
+        "kind": "quotient_of",
+        "id": "ratio",
+        "numerator": {
+          "input_id": "debt_service"
+        },
+        "denominator": {
+          "input_id": "gdp"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "ratio"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Debt service as a percentage of GDP, the figure as it is usually reported.",
+      "payload": {
+        "question": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
+        "answer_mode": "computed",
+        "decisions": [],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "debt_service",
+            "measure": "external debt service",
+            "entities": [
+              {
+                "name": "Ghana"
+              }
+            ],
+            "period": {
+              "start": 2012,
+              "end": 2021
+            }
+          },
+          {
+            "kind": "dataset",
+            "id": "gdp",
+            "measure": "GDP",
+            "entities": [
+              {
+                "name": "Ghana"
+              }
+            ],
+            "period": {
+              "start": 2012,
+              "end": 2021
+            }
+          },
+          {
+            "kind": "share_of",
+            "id": "share",
+            "numerator": {
+              "input_id": "debt_service"
+            },
+            "denominator": {
+              "input_id": "gdp"
+            }
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "share"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -382,7 +382,8 @@ def retrieved(
     period: Period,
     measures: MeasureCount,
     unsummable_axes: tuple[str, ...] | None = None,
-    names_no_place: bool = False,
+    place_typed: bool = False,
+    mixed_levels: bool = False,
 ) -> FrameShape:
     """The shape a fresh `get_data` retrieval carries.
 
@@ -394,8 +395,13 @@ def retrieved(
     values are kept, and this function states which requirement a role
     belongs to and whether it is narrowed.
     `measures` and `unsummable_axes` are the caller's (see `FrameShape`).
-    A retrieval that `names_no_place` holds every level of place and may be
-    read by a place-level filter.
+    `place_typed` lets a place-level filter read the retrieval, which
+    names no place. `mixed_levels` says it holds places at every level. The
+    plan states the first for a requirement whose `across` names the place
+    (`planner.plan.names_no_place`), since it cannot know which axis the word
+    covers. The compiler states both from the selected source: only a
+    source that leaves `observationAbout` open over several places mixes
+    levels (`compiler.evidence.opens_place_axis`).
     """
     stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
     return FrameShape(
@@ -409,8 +415,8 @@ def retrieved(
         limited=False,
         roots=(requirement_id,),
         unsummable_axes=unsummable_axes,
-        mixed_levels=names_no_place,
-        place_typed=names_no_place,
+        mixed_levels=mixed_levels,
+        place_typed=place_typed,
     )
 
 

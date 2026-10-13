@@ -1,13 +1,37 @@
 {
-  "shape": "source",
-  "dcid": "dc/base/WHO",
+  "ref": "dc/base/WHO",
   "label": "World Health Organization",
-  "license": "CC BY-NC-SA 3.0 IGO",
-  "license_type": "cc-by-nc-sa",
+  "types": [
+    "Source"
+  ],
   "description": "Global health statistics and indicators published by WHO.",
-  "url": "https://www.who.int",
-  "freshness": {
-    "release_frequency": "P1Y",
-    "refresh_schedule": "P3M"
+  "links": {
+    "datasets": "/api/graph/node/dc/base/WHO/members?relation=datasets"
+  },
+  "gaps": [],
+  "built_from": {
+    "origin_catalogue": "restrictive-catalogue-6fde3fb68115"
+  },
+  "kind": "source",
+  "source": {
+    "publisher": null,
+    "parent": null,
+    "license": "CC BY-NC-SA 3.0 IGO",
+    "license_type": "cc-by-nc-sa",
+    "url": "https://www.who.int",
+    "source_data_url": null,
+    "description_url": null,
+    "transformation_logic_url": null,
+    "last_data_refresh_date": null,
+    "next_data_refresh_date": null,
+    "earliest_observation_date": null,
+    "latest_observation_date": null,
+    "freshness": {
+      "release_frequency": "P1Y",
+      "release_frequency_label": "Yearly",
+      "refresh_type": "NoAutomaticRefresh"
+    },
+    "data_commons": null,
+    "documentation": "/api/graph/documentation/dc/base/WHO"
   }
 }

@@ -4,17 +4,19 @@ period, a `{spec_id, content_version}` pair and a trace out.
 Flow mirrors `compare_tool.compare` and shares its two-slice pieces:
 `resolve_slice_pair` resolves both sides, `SLICE_PAIR_ERRORS` and
 `compare_tool._refusal_for_engine_error` turn the engine's typed exceptions into the
-same refusals `compare` gives. One step comes first that `compare` lacks.
-The op-spec hash is minted before the engine runs, since the result's
-`stat_var` is `dcid:<op_spec_hash>`, the operation's own ref, the same
-`dcid:<spec_id>` shape a summed `get_data` retrieval carries.
+same refusals `compare` gives. As in `compare`, the op-spec hash is minted
+before the engine runs, since the result's `stat_var` is
+`dcid:<op_spec_hash>`, the operation's own ref, the same `dcid:<spec_id>`
+shape a summed `get_data` retrieval carries.
+
+The stored step (`_sum_step`) counts the periods the sum keeps and the
+periods one side alone reports, which it leaves out.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from common.materialisation import ComposedStatVar
 from dfo_frame_grammar import Frame
 from fastmcp.tools import ToolResult
 from pydantic import Field
@@ -32,6 +34,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     merge_derived_markers,
     merged_time,
     op_spec_hash_or_refusal,
@@ -39,6 +42,7 @@ from analysis_mcp.frame_ref_resolution import (
 )
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import PinnedUnit, SumOfOpSpec
+from analysis_mcp.steps import LeftOut, Step, build_step, left_out_from_exclusions, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -48,6 +52,28 @@ from analysis_mcp.tool_pipeline import (
 )
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from analysis_mcp.units import unit_json
+
+
+def _sum_step(op_spec: SumOfOpSpec, result: SumOfResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the periods it summed,
+    the periods one side alone reports, and the unit both sides share, the
+    ratio unit when the sum is of ratios."""
+    one_sided = len({entry.time_period for entry in result.left_out})
+    return build_step(
+        op="sum",
+        trace=trace,
+        inputs={"left": op_spec.frame_ref, "right": op_spec.right_frame_ref or op_spec.frame_ref},
+        kept={"periods": len(result.intersected_periods)},
+        left_out=[
+            *(
+                [LeftOut(reason="period_unmatched", count=one_sided, of="periods")]
+                if one_sided
+                else []
+            ),
+            *left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
+        ],
+        unit=step_unit(result.unit, ratio=holds_ratio(trace)),
+    )
 
 
 def _sum_or_refusal(
@@ -251,13 +277,7 @@ async def sum_of(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[left.trace, right.trace],
-        own_composed_stat_var=ComposedStatVar(
-            stat_var=f"dcid:{op_spec_hash}",
-            relation="sum",
-            first=tuple(result.left_stat_vars),
-            second=tuple(result.right_stat_vars),
-        ),
+        step=_sum_step(op_spec, result, trace=output_trace),
         digest=lambda: render_sum_of_digest(
             result=result,
             op_spec_hash=op_spec_hash,

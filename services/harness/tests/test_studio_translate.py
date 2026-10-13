@@ -1,8 +1,6 @@
 """Unit tests for `harness.studio_translate`'s pure helpers.
 
-`_refusal_detail` builds the Activity feed's one-line reason for a failed
-step; these tests pin its truncation behaviour directly, without a full
-studio round trip. The `_interrupt_frames` tests below drive its elicitation
+The `_interrupt_frames` tests below drive the translator's elicitation
 branch directly with plain `args` dicts -- what `_request_input_call` would
 have already pulled off a real ADK event -- rather than building one, since
 that branch's own logic (which shape's `candidates` to read, which option to
@@ -27,19 +25,18 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
-from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
 from harness.planner_seam import PlannerSeamError
 from harness.scripted_plan import scripted_plan
+from harness.seeds import SEED_STEP_TOOL
+from harness.sentences import DECLINE_REASONS
 from harness.studio_state import ConversationState, StudioStore, _next_manifest
 from harness.studio_translate import (
     _PLANNER_FAILED_DETAIL,
-    _STEP_DETAIL_CAP,
     _ExecutorRecord,
     _RecordingExecutor,
     _RecordingSurface,
-    _refusal_detail,
     _stream_fatal,
     _Translator,
 )
@@ -68,64 +65,6 @@ def _translator() -> _Translator:
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService())),
     )
-
-
-def test_a_short_refusal_passes_through_unmodified() -> None:
-    refusal = {"code": "unsupported_component_type", "message": "no such component"}
-    assert _refusal_detail(refusal) == "unsupported_component_type: no such component"
-
-
-def test_the_platforms_trace_id_is_not_part_of_the_activity_detail() -> None:
-    refusal = {
-        "code": "internal_error",
-        "message": "Internal error",
-        "platform_trace_id": "41d94ed2",
-    }
-
-    assert _refusal_detail(refusal) == "internal_error: Internal error"
-
-
-def test_a_real_member_cardinality_refusal_fits_whole() -> None:
-    """The advice sentence -- scope can't narrow it, ask a narrower question --
-    fits whole under the 400-character cap."""
-    detail = (
-        "member_cardinality is 480 for spec_ed5b608a610cdc5a4bc703cf7d1bc2d0, over the 400 ceiling"
-    )
-    message = (
-        f"Over the coverage ceiling: {detail}. This spec_id's definition "
-        "has more member series than one request can serve. scope.entities and "
-        "scope.window do not change that. A narrower question, such as one naming "
-        "a sector for aid flows, resolves to a smaller definition."
-    )
-    refusal = {"code": "over_ceiling", "message": message}
-
-    result = _refusal_detail(refusal)
-
-    assert result == f"over_ceiling: {message}"
-    assert result.endswith("resolves to a smaller definition.")
-
-
-def test_a_refusal_longer_than_the_cap_cuts_on_a_word_boundary() -> None:
-    long_message = "word " * 200  # far past the cap, and never ends mid-sentence by accident
-    refusal = {"code": "refused", "message": long_message}
-
-    result = _refusal_detail(refusal)
-
-    assert len(result) <= _STEP_DETAIL_CAP + len("...")
-    assert result.endswith("...")
-    assert not result[: -len("...")].endswith(" ")
-    # what precedes the ellipsis is whole words, never a fragment
-    body = result[len("refused: ") : -len("...")]
-    assert body.strip().rsplit(" ", 1)[-1] == "word"
-
-
-def test_a_non_string_fix_is_dumped_to_json_before_capping() -> None:
-    refusal = {"code": "facet_not_available", "fix": {"issues": [{"axis": "gender"}]}}
-
-    result = _refusal_detail(refusal)
-
-    assert result.startswith("facet_not_available: ")
-    assert '"axis": "gender"' in result
 
 
 def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() -> None:
@@ -231,7 +170,7 @@ def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_decline
 
     assert frame.asks is not None
     answered, declined, in_part = frame.asks
-    reason = plan_display.DECLINE_REASONS[UnsupportedOperation.UNSUPPORTED_ASK]
+    reason = DECLINE_REASONS[UnsupportedOperation.UNSUPPORTED_ASK]
     assert answered == PlanAsk(ask=asks[0], answered_by=[step_id])
     assert step_id in {step.id for step in frame.steps}
     assert declined == PlanAsk(ask=asks[1], declined=reason)
@@ -464,7 +403,7 @@ def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() 
 
     assert running.status is StepStatus.RUNNING
     assert final.step_id != running.step_id
-    assert (final.status, final.detail) == (StepStatus.FAILED, "source_drift: drifted")
+    assert (final.status, final.detail) == (StepStatus.FAILED, None)
 
 
 class _HangingSurface(_UnreachableSurface):
@@ -517,7 +456,7 @@ async def test_a_step_cut_off_mid_call_closes_its_line_as_failed() -> None:
         StepStatus.FAILED,
         "get_data",
     )
-    assert final.detail == "transport_failed: ran past its budget"
+    assert final.detail is None
     assert final.duration_ms is not None
 
 
@@ -549,9 +488,39 @@ def test_a_step_that_never_called_gets_a_failed_record_and_a_refused_one_keeps_i
     frames = translator._drain_recorder()
 
     assert [(f.status, f.detail, f.duration_ms) for f in frames] == [
-        (StepStatus.FAILED, "service_unavailable: busy", 1),
-        (StepStatus.FAILED, "transport_failed: out of time", 0),
+        (StepStatus.FAILED, None, 1),
+        (StepStatus.FAILED, None, 0),
     ]
+
+
+@pytest.mark.parametrize(
+    ("step_id", "detail"),
+    [
+        (
+            "seeds",
+            "The datasets from Search could not be used, so the answer starts from your question",
+        ),
+        ("seed-1", "This Search result was left out"),
+    ],
+)
+def test_a_failed_seed_step_says_in_plain_words_what_happened_to_the_datasets(
+    step_id: str, detail: str
+) -> None:
+    """A seed is taken before the agent runs, so its step is where the user
+    learns a dataset they brought was not used; its refusal stays off the wire."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    refusal = {"code": "seed_duplicate", "message": "seed 1 names the dataset seed 0 names"}
+    translator._recorder.record_step(
+        tool=SEED_STEP_TOOL,
+        args={"seed": 1},
+        result={"outcome": "refusal", "refusal": refusal},
+        step_id=step_id,
+    )
+
+    (frame,) = translator._drain_recorder()
+
+    assert (frame.status, frame.detail) == (StepStatus.FAILED, detail)
 
 
 # --- the recorder's components ------------------------------------------------
@@ -580,9 +549,6 @@ def _written_component(
             "component_id": component_id,
             "revision": revision,
             "series": series,
-            "indicators": [
-                {"id": "dcid:LifeExpectancy_Person", "name": "Life Expectancy", "description": ""}
-            ],
             "attribution": {
                 "label": "WDI · 1 indicator(s)",
                 "source_count": 1,
@@ -869,7 +835,14 @@ def _status_lines(frames: list[Any]) -> list[tuple[str, str, StepStatus]]:
     return [(f.step_id, f.label, f.status) for f in frames]
 
 
-def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
+@pytest.mark.parametrize(
+    ("proposing", "accepted"),
+    [("propose_plan", "ok"), ("submit_analysis", "ready_for_review")],
+    ids=["eager", "compact"],
+)
+def test_each_planner_call_becomes_a_status_line_as_it_happens(
+    proposing: str, accepted: str
+) -> None:
     """The planner's function-call events arrive as the model finishes a
     call, so each one opens its line then, and completes the line before it.
     `propose_plan` translates the plan before it answers, so its call opens
@@ -887,15 +860,14 @@ def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
     )
 
     working = translator.translate(_node_event("planner", planner_started={"revising": False}))
-    checking = translator.translate(_planner_call("propose_plan", question="q"))
+    checking = translator.translate(_planner_call(proposing, question="q"))
     checked = translator.translate(
         _planner_answer(
-            "propose_plan",
-            {"outcome": "ok", "translation": {"outcome": "ok"}},
+            proposing,
+            {"outcome": accepted, "translation": {"outcome": "ok"}},
             **{PLAN_STATE_KEY: plan.model_dump_json()},
         )
     )
-    ready = translator.translate(_planner_call("submit_plan", version=1))
     done = translator.translate(_node_event("planner", route="ok", output={"version": 1}))
 
     assert _status_lines(working) == [("s0", "Working on a plan", StepStatus.RUNNING)]
@@ -906,11 +878,11 @@ def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
     assert _status_lines(checked) == [
         ("s2", "Checking the plan against the data", StepStatus.COMPLETE)
     ]
-    assert _status_lines(ready) == [("s4", "Getting the plan ready for you", StepStatus.RUNNING)]
-    assert _status_lines(done) == [("s4", "Getting the plan ready for you", StepStatus.COMPLETE)]
+    # A compiled proposal declares the plan ready itself, so no line follows the check.
+    assert _status_lines(done) == []
     assert [f.detail for f in checked] == ["life expectancy at birth for Kenya and 1 more"]
     # Studio shows a line as done only once a frame carries `duration_ms`.
-    completed = [f for f in checking + checked + ready + done if f.status is StepStatus.COMPLETE]
+    completed = [f for f in checking + checked if f.status is StepStatus.COMPLETE]
     assert all(f.duration_ms is not None for f in completed)
     assert all(f.duration_ms is None for f in working + checking if f.status is StepStatus.RUNNING)
 
@@ -949,12 +921,40 @@ def test_an_accepted_proposal_without_a_translation_still_closes_its_line(record
     assert frames[0].detail is None
 
 
-def test_a_repeated_planner_call_keeps_its_line_and_other_calls_add_none() -> None:
+@pytest.mark.parametrize(
+    ("stage", "lines"),
+    [
+        ("intent", []),
+        ("complete", [("s0", "Checking the plan against the data", StepStatus.COMPLETE)]),
+    ],
+)
+def test_only_a_complete_submission_shows_the_checking_line(
+    stage: str, lines: list[tuple[str, str, StepStatus]]
+) -> None:
+    """An intent checks nothing and records nothing, so it opens no line and
+    its answer closes none and starts no "Reworking the draft" line. A
+    complete call opens the checking line, which its answer completes with no
+    `detail` when it asks for requirements."""
     translator = _translator()
-    opened = translator.translate(_planner_call("submit_plan", version=1))
+    opened = translator.translate(_planner_call("submit_analysis", submission_stage=stage))
 
-    assert _status_lines(opened) == [("s0", "Getting the plan ready for you", StepStatus.RUNNING)]
-    assert translator.translate(_planner_call("submit_plan", version=1)) == []
+    frames = translator.translate(
+        _planner_answer("submit_analysis", {"outcome": "requirements", "contracts": "{}"})
+    )
+
+    assert _status_lines(opened) == (
+        []
+        if stage == "intent"
+        else [("s0", "Checking the plan against the data", StepStatus.RUNNING)]
+    )
+    assert _status_lines(frames) == lines
+    assert all(frame.detail is None for frame in frames)
+
+
+def test_a_planner_call_other_than_a_proposing_one_adds_no_line() -> None:
+    translator = _translator()
+
+    assert translator.translate(_planner_call("reject_plan")) == []
     assert translator.translate(_planner_call("get_skill", skill_id="oda-measures")) == []
 
 
@@ -1047,12 +1047,12 @@ def test_a_question_after_a_draft_that_named_no_drop_is_asked_as_is() -> None:
 
 def test_the_segment_end_completes_a_line_still_running() -> None:
     translator = _translator()
-    translator.translate(_planner_call("submit_plan", version=1))
+    translator.translate(_planner_call("propose_plan", question="q"))
 
     frames = translator.finish()
 
     assert (frames[0].label, frames[0].status) == (
-        "Getting the plan ready for you",
+        "Checking the plan against the data",
         StepStatus.COMPLETE,
     )
 
@@ -1087,13 +1087,12 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
     frames: list[Any] = []
 
     async def run() -> None:
-        with pytest.raises(PlannerSeamError):
-            async for event in runner.run_async(
-                user_id="u",
-                session_id=session.id,
-                new_message=types.Content(role="user", parts=[types.Part(text="probe")]),
-            ):
-                frames.extend(translator.translate(event))
+        async for event in runner.run_async(
+            user_id="u",
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="probe")]),
+        ):
+            frames.extend(translator.translate(event))
 
     task = asyncio.create_task(run())
     await asyncio.wait_for(paused.wait(), timeout=10)

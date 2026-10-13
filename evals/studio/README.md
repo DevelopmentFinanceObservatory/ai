@@ -69,6 +69,9 @@ model or an upstream would answer. It is the same battery CI runs via
   translation's verdict comes back under `translation` in `propose_plan`'s answer.
 - `get_data_refusals`: spec id to the refusal (`code`, `retry_mode`) a plan step's
   `get_data` returns for it.
+- `direct`: set for a case whose orchestrator calls `submit_analysis`, the direct recipes
+  (`harness.direct_recipes`). The tool surface then declares the real servers' tool
+  schemas, which a recipe compiles against, and answers its `growth` step.
 
 Every model request (system instruction and contents, as the model received them) and
 every tool call, a scripted planner's own included, is recorded in order. A
@@ -95,6 +98,10 @@ case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read
   called `plan` is on the plan card, answered by steps the card shows or declined with
   a reason, and comes back in the plan's hand-back with each answering step's status
   or its decline.
+- `direct_run_completed`: a `submit_analysis` call answered `completed` with a run that
+  completed and a frame to chart, and no plan card was proposed.
+- `unverified_source_refused`: a `submit_analysis` call naming a spec_id no search
+  settled on was answered `needs_fields` for that spec_id, and nothing was retrieved.
 - `no_repeated_failed_step` reads frames only, so it also runs live: a failed plan
   step does not fail again with the same tool, label and outcome text.
 
@@ -139,7 +146,14 @@ along with unique case and rubric ids, reasoned xfail markers, and no request
 check on a live case. `message_contains` and
 `message_excludes` each take a non-empty list of strings and match the turn's
 `message.complete` text case-insensitively. Every `message_contains` string
-must appear in it, and no `message_excludes` string may. A turn's `seed_spec` is sent
+must appear in it, and no `message_excludes` string may. `plan.operations_contain`
+takes a list of strings, each of which the turn's highest-version plan card must
+say, case-insensitively, of an ask it answers and does not decline. Only the
+operations that ask lists in `answered_by` count, and of those only a retrieve's
+sentence, which is Search's account of what the source holds, and a rank's
+population after its colon. Every other sentence, the step labels included,
+restates the planner's measure, which repeats the user's words whatever the plan
+keeps. A turn's `seed_spec` is sent
 as the request's seeds, the Search results a seeded turn starts from, and
 `step_tools` takes a non-empty list of tool names, each of which some activity
 step of the turn must have completed (`receive_seeds` is the seed intake); a

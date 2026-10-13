@@ -23,12 +23,13 @@ from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, ComposedUnit, UnitCell
 
 from analysis_mcp.engine.aggregate import ComposedUnitSumError
-from analysis_mcp.engine.columnar import group_rows
+from analysis_mcp.engine.columnar import entity_counts, group_rows
 from analysis_mcp.engine.common import (
     ExclusionReason,
     Exclusions,
     FacetSelection,
     combine_exclusions,
+    entity_roles,
     narrow_and_resolve,
     record_counted_exclusion,
     require_one_place_level,
@@ -88,13 +89,16 @@ class SideSums:
     `{time_period: summed_value}` series -- a key with no rows at all is
     simply absent, never present with an empty series; the caller decides
     what an absent key means for its own side. `row_counts` has the same
-    shape and holds how many rows each sum read. `stat_var` is the whole
-    frame's sole `stat_var`.
+    shape and holds how many rows each sum read, and `entity_counts` how
+    many entities those rows hold: distinct value combinations across the
+    entity roles (`common.entity_roles`) outside `by`. `stat_var` is the whole frame's sole
+    `stat_var`.
     """
 
     stat_var: str
     by_key: dict[tuple[str, ...], dict[str, float]]
     row_counts: dict[tuple[str, ...], dict[str, int]]
+    entity_counts: dict[tuple[str, ...], dict[str, int]]
     unit: UnitCell | None
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
@@ -175,10 +179,17 @@ def sum_side(
                 raise NonFiniteCellError(time_period=period, reason="overflow") from exc
         summed[key] = summed_periods
 
+    entities: dict[tuple[str, ...], dict[str, int]] = {}
+    for (*key, period), count in entity_counts(
+        table, keys=(*by, TIME_PERIOD_COLUMN), entity_columns=entity_roles(frame)
+    ).items():
+        entities.setdefault(tuple(key), {})[period] = count
+
     return SideSums(
         stat_var=stat_var,
         by_key=summed,
         row_counts=row_counts,
+        entity_counts=entities,
         unit=resolved.unit,
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
@@ -375,4 +386,48 @@ def record_unmatched_periods(
         sums=denominator,
         columns=denominator_columns,
         cells=pairing.denominator_unmatched,
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResultCoverage:
+    """What a numerator-over-denominator result kept, counted.
+
+    `entities` is how many numerator keys hold a row and
+    `entities_with_fewer_periods` how many of them hold fewer than
+    `periods`, the distinct periods the result holds; both are `None` for an
+    un-keyed call, whose one series is no entity count. `period_entities`
+    maps each of the result's periods, sorted, to how many entities the
+    denominator totals it divides by sum there: a pooled total counts once,
+    and paired groups add up, since they hold disjoint keys.
+    """
+
+    entities: int | None = None
+    entities_with_fewer_periods: int | None = None
+    periods: int = 0
+    period_entities: tuple[tuple[str, int], ...] = ()
+
+
+def result_coverage(
+    cells: Iterable[tuple[Key, str]], *, keyed: bool, denominator: SideSums, pooled: bool
+) -> ResultCoverage:
+    """The `ResultCoverage` of a result holding the numerator (key, period)
+    `cells`, each divided by `denominator`'s group for its key, or its one
+    pooled group when `pooled`."""
+    periods_by_key: dict[Key, set[str]] = {}
+    groups: set[tuple[Key, str]] = set()
+    for key, period in cells:
+        periods_by_key.setdefault(key, set()).add(period)
+        groups.add(((() if pooled else key), period))
+    periods = {period for held in periods_by_key.values() for period in held}
+    period_entities: dict[str, int] = dict.fromkeys(sorted(periods), 0)
+    for group, period in groups:
+        period_entities[period] += denominator.entity_counts[group][period]
+    return ResultCoverage(
+        entities=len(periods_by_key) if keyed else None,
+        entities_with_fewer_periods=(
+            sum(len(held) < len(periods) for held in periods_by_key.values()) if keyed else None
+        ),
+        periods=len(periods),
+        period_entities=tuple(period_entities.items()),
     )

@@ -1,0 +1,590 @@
+{
+  "comment": "Spec blocks of `search` answers from the dfo-apis dev deployment, one per `variable`, each sent with entities [{\"text\": \"Japan\", \"role\": \"from\"}, {\"text\": \"Kenya\", \"role\": \"to\"}] and time \"2017 to 2020\". All three resolve to the same gross disbursements source offering net disbursements, and differ only in `resolved.trace.slot_filters[*].provenance`: \"gross ODA disbursements\" has `nettingBasis` and `financialFlowType` text_recognized; \"ODA disbursements\" has `nettingBasis` measure_elected; \"gross ODA\" has `nettingBasis` text_recognized and `financialFlowType` measure_elected. Trimmed to `spec_id`, `definition.spec_id` and the `resolved` fields the tests read.",
+  "blocks": {
+    "gross ODA disbursements": {
+      "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f",
+      "definition": {
+        "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f"
+      },
+      "resolved": {
+        "measure_label": "gross disbursements",
+        "measure_axis_values": [
+          {
+            "axis": "populationType",
+            "value": {
+              "ref": "FinancialFlow",
+              "label": "financial flow"
+            }
+          },
+          {
+            "axis": "measuredProperty",
+            "value": {
+              "ref": "amount",
+              "label": "amount"
+            }
+          },
+          {
+            "axis": "measurementQualifier",
+            "value": {
+              "ref": "Nominal",
+              "label": "nominal"
+            }
+          },
+          {
+            "axis": "financialFlowType",
+            "value": {
+              "ref": "Disbursement",
+              "label": "disbursement"
+            }
+          },
+          {
+            "axis": "nettingBasis",
+            "value": {
+              "ref": "Gross",
+              "label": "gross"
+            }
+          }
+        ],
+        "alternative_measures": [
+          {
+            "definition": {
+              "spec_id": "spec_c8c2824465ae25fe3466965fce1497cd"
+            },
+            "label": "net disbursements",
+            "axis": "what",
+            "measure_axis_values": [
+              {
+                "axis": "populationType",
+                "value": {
+                  "ref": "FinancialFlow",
+                  "label": "financial flow"
+                }
+              },
+              {
+                "axis": "measuredProperty",
+                "value": {
+                  "ref": "amount",
+                  "label": "amount"
+                }
+              },
+              {
+                "axis": "measurementQualifier",
+                "value": {
+                  "ref": "Nominal",
+                  "label": "nominal"
+                }
+              },
+              {
+                "axis": "financialFlowType",
+                "value": {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              },
+              {
+                "axis": "nettingBasis",
+                "value": {
+                  "ref": "Net",
+                  "label": "net"
+                }
+              }
+            ]
+          }
+        ],
+        "trace": {
+          "slot_filters": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dac2aAidType",
+                  "label": "DAC 2a aid type"
+                },
+                "label": "aid type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "DAC2aAidType206",
+                  "label": "official development assistance"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dacTypeOfFinance",
+                  "label": "DAC type of finance"
+                },
+                "label": "DAC type of finance"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "financialFlowType",
+                  "label": "financial flow type"
+                },
+                "label": "financial flow type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "nettingBasis",
+                  "label": "netting basis"
+                },
+                "label": "netting basis"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Gross",
+                  "label": "gross"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "country/KEN",
+                  "label": "Kenya"
+                }
+              ],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding_kind": "value",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            }
+          ]
+        }
+      }
+    },
+    "ODA disbursements": {
+      "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f",
+      "definition": {
+        "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f"
+      },
+      "resolved": {
+        "measure_label": "gross disbursements",
+        "measure_axis_values": [
+          {
+            "axis": "populationType",
+            "value": {
+              "ref": "FinancialFlow",
+              "label": "financial flow"
+            }
+          },
+          {
+            "axis": "measuredProperty",
+            "value": {
+              "ref": "amount",
+              "label": "amount"
+            }
+          },
+          {
+            "axis": "measurementQualifier",
+            "value": {
+              "ref": "Nominal",
+              "label": "nominal"
+            }
+          },
+          {
+            "axis": "financialFlowType",
+            "value": {
+              "ref": "Disbursement",
+              "label": "disbursement"
+            }
+          },
+          {
+            "axis": "nettingBasis",
+            "value": {
+              "ref": "Gross",
+              "label": "gross"
+            }
+          }
+        ],
+        "alternative_measures": [
+          {
+            "definition": {
+              "spec_id": "spec_c8c2824465ae25fe3466965fce1497cd"
+            },
+            "label": "net disbursements",
+            "axis": "what",
+            "measure_axis_values": [
+              {
+                "axis": "populationType",
+                "value": {
+                  "ref": "FinancialFlow",
+                  "label": "financial flow"
+                }
+              },
+              {
+                "axis": "measuredProperty",
+                "value": {
+                  "ref": "amount",
+                  "label": "amount"
+                }
+              },
+              {
+                "axis": "measurementQualifier",
+                "value": {
+                  "ref": "Nominal",
+                  "label": "nominal"
+                }
+              },
+              {
+                "axis": "financialFlowType",
+                "value": {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              },
+              {
+                "axis": "nettingBasis",
+                "value": {
+                  "ref": "Net",
+                  "label": "net"
+                }
+              }
+            ]
+          }
+        ],
+        "trace": {
+          "slot_filters": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dac2aAidType",
+                  "label": "DAC 2a aid type"
+                },
+                "label": "aid type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "DAC2aAidType206",
+                  "label": "official development assistance"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dacTypeOfFinance",
+                  "label": "DAC type of finance"
+                },
+                "label": "DAC type of finance"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "financialFlowType",
+                  "label": "financial flow type"
+                },
+                "label": "financial flow type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "nettingBasis",
+                  "label": "netting basis"
+                },
+                "label": "netting basis"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Gross",
+                  "label": "gross"
+                }
+              ],
+              "provenance": "measure_elected"
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "country/KEN",
+                  "label": "Kenya"
+                }
+              ],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding_kind": "value",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            }
+          ]
+        }
+      }
+    },
+    "gross ODA": {
+      "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f",
+      "definition": {
+        "spec_id": "spec_350d00a184eeea7369af38af3bc88a6f"
+      },
+      "resolved": {
+        "measure_label": "gross disbursements",
+        "measure_axis_values": [
+          {
+            "axis": "populationType",
+            "value": {
+              "ref": "FinancialFlow",
+              "label": "financial flow"
+            }
+          },
+          {
+            "axis": "measuredProperty",
+            "value": {
+              "ref": "amount",
+              "label": "amount"
+            }
+          },
+          {
+            "axis": "measurementQualifier",
+            "value": {
+              "ref": "Nominal",
+              "label": "nominal"
+            }
+          },
+          {
+            "axis": "financialFlowType",
+            "value": {
+              "ref": "Disbursement",
+              "label": "disbursement"
+            }
+          },
+          {
+            "axis": "nettingBasis",
+            "value": {
+              "ref": "Gross",
+              "label": "gross"
+            }
+          }
+        ],
+        "alternative_measures": [
+          {
+            "definition": {
+              "spec_id": "spec_c8c2824465ae25fe3466965fce1497cd"
+            },
+            "label": "net disbursements",
+            "axis": "what",
+            "measure_axis_values": [
+              {
+                "axis": "populationType",
+                "value": {
+                  "ref": "FinancialFlow",
+                  "label": "financial flow"
+                }
+              },
+              {
+                "axis": "measuredProperty",
+                "value": {
+                  "ref": "amount",
+                  "label": "amount"
+                }
+              },
+              {
+                "axis": "measurementQualifier",
+                "value": {
+                  "ref": "Nominal",
+                  "label": "nominal"
+                }
+              },
+              {
+                "axis": "financialFlowType",
+                "value": {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              },
+              {
+                "axis": "nettingBasis",
+                "value": {
+                  "ref": "Net",
+                  "label": "net"
+                }
+              }
+            ]
+          }
+        ],
+        "trace": {
+          "slot_filters": [
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dac2aAidType",
+                  "label": "DAC 2a aid type"
+                },
+                "label": "aid type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "DAC2aAidType206",
+                  "label": "official development assistance"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "dacTypeOfFinance",
+                  "label": "DAC type of finance"
+                },
+                "label": "DAC type of finance"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "financialFlowType",
+                  "label": "financial flow type"
+                },
+                "label": "financial flow type"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Disbursement",
+                  "label": "disbursement"
+                }
+              ],
+              "provenance": "measure_elected"
+            },
+            {
+              "key": {
+                "axis": "how",
+                "property": {
+                  "ref": "nettingBasis",
+                  "label": "netting basis"
+                },
+                "label": "netting basis"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "Gross",
+                  "label": "gross"
+                }
+              ],
+              "provenance": "text_recognized"
+            },
+            {
+              "key": {
+                "axis": "where",
+                "label": "place"
+              },
+              "binding_kind": "value",
+              "refs": [
+                {
+                  "ref": "country/KEN",
+                  "label": "Kenya"
+                }
+              ],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "when",
+                "label": "time window"
+              },
+              "binding_kind": "value",
+              "refs": [],
+              "provenance": "binder"
+            },
+            {
+              "key": {
+                "axis": "source",
+                "label": "data source"
+              },
+              "binding_kind": "unbound",
+              "refs": [],
+              "provenance": "binder"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

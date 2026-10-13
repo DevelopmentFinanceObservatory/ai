@@ -144,7 +144,7 @@ async def test_a_named_group_is_posted_beside_its_identity() -> None:
     """A Spec whose role was asked for as a set posts that set beside its identity,
     as Search's `dataset_resubmit` takes it, so the answer names the set again."""
     posted: list[dict[str, Any]] = []
-    groups = {"observationAbout": {"dcid": "africa", "label": "Africa"}}
+    groups = {"observationAbout": {"ref": "africa", "label": "Africa"}}
 
     result = await _call(
         _recorded_answer(posted), _arguments(entity_groups=groups), InMemoryDefinitionStore()

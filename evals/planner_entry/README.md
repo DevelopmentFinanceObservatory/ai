@@ -1,0 +1,117 @@
+# evals/planner_entry: harness-planner-entry-v1
+
+A paired eval of the planner, one entry at a time. It measures how often the planner's first plan is accepted, whether its plans use the right requirement kinds, and what an entry costs in model calls, tokens and time. Use it to judge a change to what the planner is shown, such as its `propose_plan` declaration or a new requirement kind, against the planner as served.
+
+It calls the live planner model, so it never runs in CI. CI runs `validate.py`, which needs no model and no network (`services/harness/tests/test_planner_entry_eval.py`).
+
+## Run it
+
+```bash
+just eval-planner-entry baseline-replica
+```
+
+That runs the arm and the baseline on every task, three times each, and writes `evals/planner_entry/.results/<time>-<arm>/records.jsonl` and `summary.md`. A run of both arms, 372 entries, takes about 30 minutes at the default four entries in flight. `--only` takes task ids, `--reps` and `--concurrency` what they say.
+
+Pass `--out` with an earlier run's directory to resume it: finished runs are skipped and errors retried. Each record carries a fingerprint of its arm's treatment (`run.experiment`: the arm, the model, the code, the turn budget and prefix cache, and `--run-timeout`), and a resume is refused when the directory holds runs of the same arm under another one, so one arm's runs never mix two experiments. The code is the commit, marked `+dirty.<digest>` when `services/harness/src`, `packages` or this eval differs from it, the digest covering the difference.
+
+An entry still running after `--run-timeout` (300 s) is scored as `timeout` with that wall time and not retried, so it counts in the latency figures. A timeout raised inside the entry, such as the model client's own, is an error and is retried.
+
+The arms live in `arms.py`. `baseline` is the planner as served, and `baseline-replica` is the same planner under a second name, for an A/A run that shows the noise floor or for a changed revision set against a stored baseline. An arm edits each request the planner sends its model, after the seam's own before-model callbacks, so add one there to try a declaration or instruction change before writing it into the planner.
+
+An A/A run at b77afb2d put the two arms +1.1% [-4.0%, +6.2%] apart in first-proposal acceptance, level in kind pass, and 3.0 s apart in p90 wall time. At three repetitions, a change has to move acceptance by more than about 5 points to show.
+
+A change written into production code is measured across revisions. Run `just eval-planner-entry baseline` on the base revision, which runs the baseline alone, then run `baseline-replica` on the changed revision against that run's records. `run.py` refuses a stored baseline, `--baseline-records` or `--baseline-langfuse` (below), with the arm `baseline`, whose stored runs would replace the new ones.
+
+```bash
+just eval-planner-entry baseline-replica --baseline-records evals/planner_entry/.results/<base run>/records.jsonl
+```
+
+The two runs then meet the model at different times, so read their wall-time difference with that in mind. Each record also carries a digest of what the planner was shown (`entry.inputs_digest`: the question, searches, brief, asks, and the recorded searches and answers), and the summary leaves out and lists any task whose runs were shown different inputs, such as a task edited or recorded again between the two runs.
+
+## Share a run through Langfuse
+
+A run's records stay in its directory as the source of truth, and a copy in Langfuse lets a baseline run on one machine pair against an arm run on another. Pass `--push` to `run.py` to push a run once it ends, or push a run directory already on disk:
+
+```bash
+just eval-planner-entry-push evals/planner_entry/.results/<run>
+```
+
+A push writes to the Langfuse project the `LANGFUSE_*` keys in `.env` name, and refuses keys that are missing or name any project but "DFO website" (`langfuse_store.PROJECT_ID`), where dfo-apis's search evals keep their experiments. The dataset `harness-planner-entry-v1` holds one item per task: its question, brief and asks, and its input digest. Each arm in the run directory becomes one experiment, named `<run directory>/<arm> <revision> <experiment> <records>` and printed by the push, where `<records>` begins a digest of the arm's records. Langfuse shows one item run per dataset item in an experiment, so each task gets one item run, whose output holds all the task's records: every repetition, and every attempt that errored and was retried. Its scores are the task's, over its runs as the summary counts them, one per repetition: `runs_scored` and `runs_left_out`, the shares `first_proposal_accepted` and `kind_pass` (or `expected_ending` on a refusal task), and the means `model_calls`, `wall_s`, and the four token counts over the runs whose usage is known. The push then reads Langfuse back and fails unless every task and score shows within 180 s. Pushing a directory again sends only what Langfuse lacks, and a directory changed since its push, as by a resume, goes up as a new experiment.
+
+A run pairs against a pushed baseline by its experiment's name, exactly as against its records file. Langfuse lists every pushed experiment on the dataset's page. Every item run carries the number of tasks and records its arm pushed and a digest of them all, so a pull refuses an experiment Langfuse shows only in part, or one whose records differ from those pushed. The records come back in their file order and stay beside the new run as `baseline-records.jsonl`, from which `summarise.py` rebuilds the summary offline.
+
+```bash
+just eval-planner-entry baseline-replica --baseline-langfuse '<base run>/baseline <revision> <experiment> <records>'
+```
+
+`uv run --env-file .env --package harness python evals/planner_entry/langfuse_store.py pull '<name>' --out <file>` writes a pushed experiment's records to a file.
+
+An item run's trace holds the task's records and no planner spans. The eval exports no ADK traces, so no entry trace exists to link to, and the push sends on a tracer provider of its own, so `--push` exports none either.
+
+## What a run is
+
+Each run is one planner entry, as the served harness runs it from the orchestrator's `plan` call onward (`entry.py`):
+
+1. The orchestrator's own `search` tool replays each of the task's searches from its recording, and stores the readings, spec blocks and warnings as a served turn does.
+1. Its `plan` tool checks the task's brief and asks and records the hand-off.
+1. The graph's `route`, `plan_start` and `planner` nodes run the real `PlannerSeam`, wrapped as `harness.server.create_app` wraps it. The planner sees the user's message, then the seam's brief: the search readings, the skills they name, the question and the numbered asks. Its instruction, tools, callbacks and prefix cache are production's, and each request runs under the turn budget a served request gets (`harness.turn_budget`): 90 s of model time, 30 model calls and 600 s of wall time, with one resend of a call whose first chunk takes over 12 s. In production the orchestrator's calls earlier in the request spend part of that budget first.
+
+Two edges are replaced. Every call the planner makes to data-mcp answers from the recording: each skill the readings name and `dfo-faq`, with every file and page, and the first-year read `propose_plan` makes for a window rolling from the start of a dataset the planner was shown. A call the recording lacks, such as a guessed skill name, is answered as an unreachable server is, and the run is left out of the summary, since production would have answered it. Translation never runs: the entry ends when `propose_plan` first records a plan, so a run measures the draft up to its first accepted plan, and costs leave out translation and `submit_analysis`. Every entry runs at the planner's served thinking level. The planner streams, as it does in a studio turn.
+
+Every task is a conversation's first turn: the brief carries no canvas or earlier turns. Tasks replay the orchestrator's `search` calls but not its `fetch` calls, so no reading shows what a fetch returned, and the orchestrator has read no skill, so none is marked read.
+
+An entry also ends when the planner asks the user and the tool takes the ask (`asked_user`), when the seam stops it (a bound of its request's turn budget, its round budget, `plan_not_ready` when the planner stopped before a plan compiled, `gave_up` when corrections drew no plan), or on an error.
+
+## What it measures
+
+First-proposal acceptance says the planner drafted a plan its contract admits; it checks little of whether the source, country, years, grouping or calculation answer the user. Kind pass says the plan uses the kinds the task's reference does, and the acceptable kinds encode the decompositions the task prefers: two donor series added with `sum_of` can equal an `aggregate` of one retrieval and still score apart. Unasked units count only currency and price-basis constraints the user never asked for, not whether a requested unit is right. The tasks are a curated regression set chosen to separate the kinds, so their pass rate says nothing about production's. Every task is a first turn, and the refusal tasks all end in `combination_unasked`, so amendments and other clarifications are untested. A run's quality and costs are those of runs that finished; attempts, errors and recording misses are reported beside them.
+
+## What the summary reports
+
+Per arm: the runs scored and the attempts made, retries included; the runs that errored or missed their recording, which are left out of every figure; first proposals accepted; kind pass over runs and over tasks (a task passes when more than half its scored runs do: two of three); refusal tasks that ended as they should; unasked units; mean model calls; input, cached, output and thinking tokens; mean, p90 and maximum wall time; and runs the turn budget closed. Then, paired by task against the baseline, each outcome's better, worse and same task counts with a sign test and a bootstrap interval, the cost differences, and the switch triggers below.
+
+- A run passes kind selection when its plan, or its last proposal when none was accepted, uses every `required_kinds` kind, at least one `required_one_of` kind when the task lists any, and nothing outside `acceptable_kinds` (`Task.selects_kinds`).
+- Tasks with a `first_proposal_refusal` are scored only on ending in that refusal followed by an ask the tool takes, which awaits the user's answer.
+- Unasked units count the dataset requirements that state a `unit` in first proposals of tasks whose question and brief name no unit (`unit_asked` false).
+- Model calls count every call a run started, including one an entry ended before it answered. Tokens are means over runs whose every call finished; the table says how many runs' usage is unknown.
+- The triggers are the conditions for adding a refusal-driven extension tier to the planner's declaration: first-proposal acceptance down 5 points or more with the interval below zero, kind pass down two or more tasks, p90 wall time up 10 s or more, or more runs closed by the turn budget than the baseline, all compared over the tasks both arms scored. Any run the budget closed in either arm is reported apart, as a budget alarm naming the bounds that closed them, since a single model call that stalls fires it in identical arms.
+- The trigger section names the tasks whose runs errored or missed their recording.
+
+`summarise.py` rebuilds a summary from any records: `uv run --package harness python evals/planner_entry/summarise.py --records <files> --arm <arm> --out <dir>`. It refuses an arm whose records come from more than one experiment.
+
+## Tasks
+
+`tasks/<id>.json`, one task per file (`entry.Task`):
+
+| Field                                | What it holds                                                                                                                                                                                                                                      |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`                               | The requirement kind the task is filed under, one a correct plan uses                                                                                                                                                                              |
+| `origin`                             | `pilot` (the planner's first hand-built task set), `trace <session id>` (a conversation on the dev deployment), or `authored`                                                                                                                      |
+| `question`                           | The user's message, which the planner sees first                                                                                                                                                                                                   |
+| `searches`                           | The orchestrator's `search` calls before it planned: `query`, `parts`, `as_text`                                                                                                                                                                   |
+| `brief`, `asks`                      | The orchestrator's `plan` call                                                                                                                                                                                                                     |
+| `required_kinds`, `acceptable_kinds` | Kinds a correct plan must use, and may use                                                                                                                                                                                                         |
+| `required_one_of`                    | Kinds of which a correct plan uses at least one, when any of several calculations answers the task                                                                                                                                                 |
+| `neighbour`                          | The kind the task is most easily mistaken for, and what tells them apart                                                                                                                                                                           |
+| `unit_asked`                         | Whether the question or the brief names a unit                                                                                                                                                                                                     |
+| `first_proposal_refusal`             | The refusal a correct first proposal draws, when the task's right ending is that refusal and an ask                                                                                                                                                |
+| `reference_payload`                  | `propose_plan` arguments the real tool accepts in this task's state                                                                                                                                                                                |
+| `alternative_payloads`               | Other correct plans; with the reference they use exactly `acceptable_kinds`. One with a `first_proposal_refusal` passes kind selection but counts against first-proposal acceptance, since it asks the user a question the reference plan does not |
+
+A search part that finds nothing stays in a task when a production orchestrator would plan over it: the planner meets `no_data` readings in served turns. A traced task stays only when its brief keeps the scope of the user's question; one whose orchestrator answered a different question, such as all donors' aid where the user asked about one donor, measures the orchestrator, not the planner. Two OECD aid tables pinned from the readings add up without asking the user, so a sum of them is an ordinary task; a refusal task sums datasets across publishers, such as aid and debt.
+
+`validate.py` proposes each task's plans through the same entry with a scripted model and checks each task's fields, including that `unit_asked` agrees with the text and that its recording holds every first-year read the planner can make, and the set: at least 60 tasks, a task requiring each kind, a task filed under each kind that names a neighbour, at least two refusal tasks, and no recording or answer that no task uses. `entry.KINDS` is checked against the kinds `propose_plan` declares.
+
+```bash
+just eval-planner-entry-validate
+```
+
+## Recordings
+
+`recordings/<id>.json` holds what data-mcp answered for a task: each search envelope, and the answers to reading each skill its readings name, and `dfo-faq`, with every file and page, and to each first-year read the planner can make. Each answer is stored once in `recordings/answers/`, named by a hash of the call and its answer, however many tasks read it, so a skill that changes shows up as one changed file. The eval replays them, so a run does not depend on dfo-apis or its data on the day. A replay whose searches differ from the recorded ones is refused, and so is an answer whose content no longer matches its name. GitHub folds the recordings in diffs (`.gitattributes`), and codespell leaves them alone, since it would rewrite the ISO country codes it takes for misspelt words in the envelopes.
+
+```bash
+just eval-planner-entry-record
+```
+
+records every task with no recording or a stale one, running data-mcp in process against `DFO_APIS_URL`; adds any first-year read a recording lacks without searching again; and removes any recording or answer no task uses any more. A first-year read may take up to 180 s while recording, against production's 10 s, since a replay answers at once. Record a task again only to take in a change to search or the skills, and run the baseline again after, since its readings change.

@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_8025ca3a298ad9734762cdaaae456fc4",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_8025ca3a298ad9734762cdaaae456fc4: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{},\"facets\":{\"unit\":{\"request\":{\"currency\":\"USD\",\"prices\":\"current\"},\"state\":\"value\"}},\"identity_version\":\"spec1\",\"open_roles\":[\"origin\"],\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC1AidType1010\",\"state\":\"value\"},\"property\":\"dac1AidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Gross\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_8025ca3a298ad9734762cdaaae456fc4\"}"
+}

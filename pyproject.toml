@@ -35,6 +35,10 @@ dev = [
     # API JSON Schema in its contract test. Otherwise present only as an mcp
     # transitive.
     "jsonschema>=4.26.0",
+    # Generates data-mcp's Graph API wire models from the committed schema
+    # snapshot (`just graph-models`). Pinned exactly: another release renders
+    # the same schema differently, which the drift test reads as drift.
+    "datamodel-code-generator==0.83.0",
 ]
 
 [tool.ruff]

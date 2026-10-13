@@ -1,0 +1,162 @@
+{
+  "id": "aggregate-health-population-oda-kenya-by-sector",
+  "kind": "aggregate",
+  "origin": "trace 24672dcf-e626-48f4-b410-28fbbd673431",
+  "question": "Gross ODA disbursements to Kenya for health, including the population policy and reproductive health sector, 2020 to 2024",
+  "searches": [
+    {
+      "query": "Gross ODA disbursements to Kenya for health, including the population policy and reproductive health sector, 2020 to 2024",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2020 to 2024",
+          "variable": "gross ODA disbursements for health and population policies / reproductive health"
+        }
+      ]
+    },
+    {
+      "query": "gross ODA disbursements to Kenya 2020 to 2024",
+      "parts": [
+        {
+          "sources": [
+            {
+              "text": "OECD Creditor Reporting System"
+            }
+          ],
+          "time": "2020 to 2024",
+          "entities": [
+            {
+              "role": "to",
+              "text": "Kenya"
+            }
+          ],
+          "variable": "gross ODA disbursements"
+        }
+      ]
+    }
+  ],
+  "brief": "Gross ODA disbursements to Kenya for health, including the population policy, programme, and reproductive health sector, from all providers between 2020 and 2024 in current US dollars from the OECD Creditor Reporting System (CRS).",
+  "asks": [
+    "Total gross ODA disbursements to Kenya for health (including population policy, programme, and reproductive health) for each year from 2020 to 2024",
+    "Combined total gross ODA disbursements to Kenya for both sectors across the full 2020 to 2024 period",
+    "Yearly breakdown between health and population policy/reproductive health from 2020 to 2024"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "sum_of",
+    "distinction": "aggregate, not sum_of: both sectors come in one CRS retrieval split by sector, so their total is an aggregate, not two sources added"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "Gross ODA disbursements to Kenya for health, including the population policy, programme, and reproductive health sector, from all providers between 2020 and 2024 in current US dollars from the OECD Creditor Reporting System (CRS).",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "combined",
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_f0dd68bae2abc685668382b756b7d7c6",
+        "stat_vars": "sum"
+      },
+      {
+        "kind": "dataset",
+        "id": "split",
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_f0dd68bae2abc685668382b756b7d7c6",
+        "stat_vars": "separate",
+        "breakdown": {
+          "dimension": "sector",
+          "level": 1
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "yearly",
+        "input_id": "combined",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "cumulative",
+        "input_id": "combined",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_sector",
+        "input_id": "split",
+        "reduction": "sum",
+        "group_by": [
+          "period",
+          "breakdown"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "yearly"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "cumulative"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "by_sector"
+        ]
+      }
+    ]
+  }
+}

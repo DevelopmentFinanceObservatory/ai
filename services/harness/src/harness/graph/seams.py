@@ -18,8 +18,9 @@ from google.adk import Context
 class Executor(Protocol):
     """Runs one plan step against the data layer (data-mcp / analysis-mcp).
 
-    Returns `{"outcome": "ok", "frame_refs": [...], "summary": str?}` (the
-    optional summary is a one-line human result for the Activity feed) or
+    Returns `{"outcome": "ok", "frame_refs": [...], "store_refs": [...]?,
+    "summary": str?}` (the optional summary is a one-line human result for
+    the Activity feed) or
     `{"outcome": "refusal", "refusal": {code, retry_mode, fix, message,
     origin?, advice?, retry_after_s?}}` -- the refusal grammar's shape, minus
     transport. `harness.mcp_client.McpExecutor` retries a `retry_after_delay`
@@ -27,6 +28,13 @@ class Executor(Protocol):
     `origin` is `"service"` when an MCP service refused and `"harness"` when
     the executor itself withheld or misrouted the call; an executor that
     states none is read as unattributed.
+
+    `frame_refs` names each frame by the pair it is described and drawn by.
+    A `get_data` outcome's `store_refs`, parallel to it, names each by the
+    pair the materialisation store holds it under, which differs for a
+    retrieval minted with a `groupby` or extra columns. An executor that
+    states none has its frames read from the store by `frame_refs`
+    (`harness.graph.state.frame_store_ref`).
 
     A concrete executor may also define `land_component(self, component:
     dict[str, Any]) -> None`, an optional, synchronous capability `make_charts`
@@ -49,10 +57,11 @@ class PlannerModel(Protocol):
     """Drafts (or redrafts) a compiled plan from the conversation's search readings.
 
     Returns `{"plan": <planner.plan.Plan as JSON>, "summary": <approval summary>}`
-    on a draft, or `{"refused": {"text": <plain sentence>, "final": <bool>}}`
-    when the seam ends the entry without one (`harness.planner_seam.
-    PlannerSeam._refused`); `final` says no other plan for the same ask can
-    succeed. The node validates a drafted
+    on a draft, or `{"refused": {"text": <plain sentence>, "final": <bool>,
+    "code": <refusal code>}}` when the seam ends the entry without one
+    (`harness.planner_seam.PlannerSeam._refused`); `final` says no other plan
+    for the same ask can succeed, and `code` names the refusal for a caller
+    that tells refusals apart. The node validates a drafted
     plan itself, so a malformed one fails here rather than at the approve
     gate; a refusal never writes `ctx.state["plan"]`, so whatever plan was
     already there is exactly what this call leaves behind. Where that

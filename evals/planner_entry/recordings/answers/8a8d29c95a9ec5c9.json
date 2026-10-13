@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_7f3a4246168a62f6e0b18146f31d6db6",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_7f3a4246168a62f6e0b18146f31d6db6: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"observationAbout\":[\"country/GHA\"]},\"facets\":{\"unit\":{\"request\":{\"base_year\":2015,\"currency\":\"USD\",\"prices\":\"constant\"},\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"valueAdded\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"EconomicProduction\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"GrossOfFixedCapitalConsumption\",\"state\":\"value\"},\"property\":\"fixedCapitalConsumptionBasis\"},{\"binding\":{\"ref\":\"IncludingProductTaxes\",\"state\":\"value\"},\"property\":\"productTaxBasis\"}]},\"spec_id\":\"spec_7f3a4246168a62f6e0b18146f31d6db6\"}"
+}

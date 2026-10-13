@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from common.settings import BaseServiceSettings
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
@@ -16,8 +17,21 @@ from google.genai import types
 _PINNED_AGENT_MODEL = "gemini-3.8-flash"
 
 
+class SchemaDelivery(StrEnum):
+    """How the planner is handed the requirement kinds' schemas.
+
+    `eager` declares every kind's full schema on `propose_plan`. `compact`
+    declares `submission.tool`'s stable `submit_analysis` envelope, puts one
+    card per kind in the instruction, and returns a kind's contract when an
+    `intent` call names it. Both record plans through `submission.service`.
+    """
+
+    EAGER = "eager"
+    COMPACT = "compact"
+
+
 class AgentSettings(BaseServiceSettings):
-    """The model the planner agent runs on, and its entry deadlines.
+    """The model the planner agent runs on, and its schema delivery.
 
     Separate from `harness.settings.Settings`, which configures the service
     around them -- the MCP URLs, the session backend -- and whose inherited
@@ -28,40 +42,12 @@ class AgentSettings(BaseServiceSettings):
     `PLANNER_MODEL_NAME` overrides the pin. That override is how a
     different model gets scored (see `evals/README.md`).
 
-    `PLANNER_ENTRY_DEADLINE_SECONDS` bounds one entry into the planner
-    (`harness.planner_seam.PlannerSeam.__call__`), wall-clock, from the
-    call's start. A correction round inside the same entry shares it; a
-    resume after a user answer gets a fresh one, since that is its own
-    `__call__`. 70s sets the time a discovery call inside the entry may
-    take against the services beneath it. That call gets the deadline less
-    `harness.planner_seam._NEXT_MODEL_CALL_MARGIN_S` (10s) less the
-    generations before it, about 6s for the first, so 54s, which is not
-    below dfo-apis' `request_timeout_s` (45s) for a search. A
-    `resolve_definition` re-reads a family's members, which dfo-apis allows
-    `resubmit_full_read_timeout_s` (90s), data-mcp `RESUBMIT_CALL_BUDGET_S`
-    (100s), and the harness capability row `call_timeout_s` (110s). One cut
-    at the entry's 54s keeps running for the entry's next proposal
-    (`translator.discovery.CutCalls`).
-
-    `PLANNER_ENTRY_DEADLINE_SECONDS_SAMPLED` is the deadline an entry drawn
-    for `THINKING_SAMPLE_RATE` sampling gets instead: a sampled turn runs at
-    the model's own default thinking level, deliberately slower than `LOW`
-    by design, not by accident, so bounding it at the ordinary deadline would
-    refuse a turn for having been sampled rather than for taking too long.
-    240s clears a measured default-thinking generation of 79.92s (20,348
-    reasoning tokens) with room for a multi-generation entry (a referral plus
-    a correction round).
-
-    `THINKING_SAMPLE_RATE` is the share of turns `harness.planner_seam.
-    PlannerSeam` runs the planner at the model's default thinking level
-    instead of `AGENT_THINKING_CONFIG`'s `LOW` (see `DEFAULT_THINKING_CONFIG`
-    and `override_thinking_on_sampled_turns`). `0` disables sampling.
+    `PLANNER_SCHEMA_DELIVERY` is the planner's `SchemaDelivery`, `eager`
+    unless set.
     """
 
     planner_model_name: str = _PINNED_AGENT_MODEL
-    planner_entry_deadline_seconds: float = 70.0
-    planner_entry_deadline_seconds_sampled: float = 240.0
-    thinking_sample_rate: float = 0.05
+    planner_schema_delivery: SchemaDelivery = SchemaDelivery.EAGER
 
 
 # `gemini-3.8-flash` takes a `thinking_level` of `LOW`, `MEDIUM` or `HIGH`
@@ -78,40 +64,6 @@ class AgentSettings(BaseServiceSettings):
 AGENT_THINKING_CONFIG = types.ThinkingConfig(
     thinking_level=types.ThinkingLevel.LOW, include_thoughts=True
 )
-
-# Session-state slot `harness.planner_seam.PlannerSeam.__call__` writes once
-# per turn with this turn's sampling draw (a `bool`), and
-# `override_thinking_on_sampled_turns` reads on every planner generation.
-# Absent (a standalone agent run outside the seam) reads as `False`,
-# so `AGENT_THINKING_CONFIG`'s `LOW` stands, unoverridden.
-THINKING_SAMPLE_STATE_KEY = "planner:thinking_sampled"
-
-# `AGENT_THINKING_CONFIG` with `thinking_level` left unset, the model's own
-# default level, the much larger and slower budget its own comment measures
-# `LOW` against. `override_thinking_on_sampled_turns` substitutes this on
-# every generation of a sampled turn, so the unsampled `LOW` default stays
-# measured against a live sample of what the larger budget would have done.
-DEFAULT_THINKING_CONFIG = types.ThinkingConfig(include_thoughts=True)
-
-
-def override_thinking_on_sampled_turns(
-    callback_context: CallbackContext, llm_request: LlmRequest
-) -> None:
-    """Replace this generation's `thinking_config` with `DEFAULT_THINKING_CONFIG`
-    on a turn `THINKING_SAMPLE_STATE_KEY` marks sampled.
-
-    `BuiltInPlanner.apply_thinking_config` runs ahead of every
-    `before_model_callback` and always sets
-    `llm_request.config.thinking_config` to `AGENT_THINKING_CONFIG` first, so
-    `llm_request.config` already exists by the time this runs and this only
-    has to overwrite the one field. Mutates `llm_request` in place and
-    returns `None`, so composing this ahead of another `before_model_callback`
-    never short-circuits the list, see
-    `harness.planner_seam.PlannerSeam.__init__`.
-    """
-    if callback_context.session.state.get(THINKING_SAMPLE_STATE_KEY, False):
-        assert llm_request.config is not None
-        llm_request.config.thinking_config = DEFAULT_THINKING_CONFIG
 
 
 def drop_thought_parts(

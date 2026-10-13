@@ -10,8 +10,8 @@ The canvas and conversation digests the models read carry a stated maximum
 size (`CANVAS_DIGEST_MAX_BYTES`, `CONVERSATION_DIGEST_MAX_BYTES`); the tests
 below feed each one oversized input and assert the maximum holds.
 
-The canvas digest entry is pinned here too: what a card shows (its variable,
-entities and span) travels in the digest the models read, from the names the
+The canvas digest entry is pinned here too: what a card shows (its entities
+and span) travels in the digest the models read, from the names the
 component's own fact summary and stored intent carry.
 
 The ledger-backed store (`StudioStore.create`/`load`/`save`/`checkpoint`/
@@ -46,6 +46,7 @@ from google.adk.errors import StaleSessionError
 from google.adk.sessions import DatabaseSessionService, InMemorySessionService
 from harness import studio_state
 from harness.approval import ApprovalDecision, ApprovalRecord
+from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.studio_state import (
     CANVAS_DIGEST_MAX_BYTES,
@@ -59,10 +60,12 @@ from harness.studio_state import (
     _next_manifest,
     _PendingInterrupt,
     land_component,
+    make_recall_part,
     remove_cards,
 )
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 
 from .resolved_revision import resolved_revision
@@ -233,9 +236,6 @@ def _two_entity_component() -> dict:
             "component_id": "cmp_two",
             "revision": 1,
             "series": series,
-            "indicators": [
-                {"id": "dcid:LifeExpectancy_Person", "name": "Life Expectancy", "description": ""}
-            ],
             "attribution": {
                 "label": "WDI · 1 indicator(s)",
                 "source_count": 1,
@@ -246,26 +246,24 @@ def _two_entity_component() -> dict:
     }
 
 
-def test_digest_entry_carries_the_variable_entities_and_span_the_card_shows() -> None:
+def test_digest_entry_carries_the_entities_and_span_the_card_shows() -> None:
     entry = _digest_entry(_two_entity_component())
 
     assert entry["type"] == "line_chart"
     assert entry["title"] == "Life expectancy in Guatemala and Nigeria"
-    assert entry["variable"] == ["Life Expectancy"]
     assert entry["entities"] == ["Guatemala", "Nigeria"]
     assert entry["time"] == "1960-2023"
 
 
 def test_digest_entry_takes_nothing_but_the_title_from_the_resolved_revision() -> None:
     """The digest's names come from the wire fact summary alone. A summary
-    without labels leaves `variable`, `entities` and `time` out, although
+    without labels leaves `entities` and `time` out, although
     the resolved revision in `payload` names its own series and window."""
     component = _two_entity_component()
     component["fact_summary"] = {
         "component_id": "cmp_two",
         "revision": 1,
         "series": [],
-        "indicators": [],
         "attribution": {"label": "WDI", "source_count": 1, "indicator_count": 1},
     }
     assert component["payload"]["component"]["series"][0]["label"]
@@ -273,7 +271,6 @@ def test_digest_entry_takes_nothing_but_the_title_from_the_resolved_revision() -
     entry = _digest_entry(component)
 
     assert entry["title"] == "Life expectancy in Guatemala and Nigeria"
-    assert "variable" not in entry
     assert "entities" not in entry
     assert "time" not in entry
 
@@ -309,12 +306,11 @@ def test_digest_entry_stays_bounded_however_many_series_the_frame_holds() -> Non
         "total": 200,
         "rule": "display order",
     }
-    assert "variable_truncated" not in block
 
 
 def test_digest_entry_omits_what_a_component_does_not_show() -> None:
-    """A note card names no variable, no entity and no span: it keeps none of
-    the three keys rather than carrying empty lists. It carries no title
+    """A note card names no entity and no span: it keeps neither key
+    rather than carrying empty lists. It carries no title
     either, so its type stands in."""
     entry = _digest_entry(
         {
@@ -326,7 +322,6 @@ def test_digest_entry_omits_what_a_component_does_not_show() -> None:
     )
 
     assert entry["title"] == "note_narration"
-    assert "variable" not in entry
     assert "entities" not in entry
     assert "time" not in entry
 
@@ -354,14 +349,6 @@ def _fact_summary(series: int = 1) -> dict[str, Any]:
             }
             for index in range(series)
         ],
-        "indicators": [
-            {
-                "id": f"dcid:Count_Person_{index}",
-                "name": "Grants, Excluding Technical Cooperation (current US$)",
-                "description": "Grants are legally binding commitments.",
-            }
-            for index in range(series)
-        ],
         "attribution": {"label": "World Bank IDS", "source_count": 1, "indicator_count": series},
     }
 
@@ -383,8 +370,8 @@ def _entry(
 
 
 def _shows(name: str, time: str, *, count: int = studio_state._DIGEST_SHOW_CAP) -> dict[str, Any]:
-    """The `variable` / `entities` / `time` keys `_digest_shows` adds to an entry."""
-    return {"variable": [name] * count, "entities": [name] * count, "time": time}
+    """The `entities` / `time` keys `_digest_shows` adds to an entry."""
+    return {"entities": [name] * count, "time": time}
 
 
 def _canvas(entries: dict[str, dict[str, Any]]) -> ConversationState:
@@ -426,7 +413,6 @@ def test_a_realistic_canvas_block_states_its_shared_coordinates_once():
     def factored(summary: dict[str, Any]) -> dict[str, Any]:
         return {
             "window": summary["window"],
-            "indicators": summary["indicators"],
             "attribution": summary["attribution"],
             "shared_coordinates": {"unit": "Year", "observationAbout": "country/COD"},
             "series": [
@@ -535,7 +521,10 @@ def test_an_oversized_fact_summary_keeps_its_leading_series_and_labels_the_subse
 def test_an_oversized_fact_summary_becomes_a_stub_that_says_it_was_cut():
     """A summary that does not fit even with no series, or that is not a
     summary at all, becomes a stub."""
-    no_series_fit = {**_fact_summary(), "indicators": _fact_summary(BIG // 100)["indicators"]}
+    no_series_fit = {
+        **_fact_summary(),
+        "attribution": {**_fact_summary()["attribution"], "label": "s" * BIG},
+    }
     for oversized in (no_series_fit, "s" * BIG):
         state = _canvas({"cmp_01": _entry("Aid", oversized)})
 
@@ -1195,13 +1184,21 @@ def test_the_digest_keeps_asks_and_the_previous_answer_whole_and_states_each_pla
     assert len(json.dumps(digest)) <= CONVERSATION_DIGEST_MAX_BYTES
 
 
+# A plan record loads past keys it does not declare, so its malformed one has a
+# status this release does not know.
+_MALFORMED_PLAN = {"status": "superseded"}
+
+
 def test_the_digest_skips_a_stored_plan_record_that_no_longer_validates(
     caplog: pytest.LogCaptureFixture,
 ):
+    """A record whose status this release does not know is skipped; one
+    carrying a key a later release added loads."""
     state = ConversationState(conversation_id=CONVERSATION)
-    malformed = {**_PLAN_JSON, "unknown_field": 1}
+    malformed = {**_PLAN_JSON, **_MALFORMED_PLAN}
+    later = {**_PLAN_JSON, "from_a_later_release": 1}
     state.turns = [
-        {"user": "q1", "assistant": "a1", "plans": [malformed, _PLAN_JSON]},
+        {"user": "q1", "assistant": "a1", "plans": [malformed, later, _PLAN_JSON]},
         {"user": "q2", "assistant": "a2"},
     ]
 
@@ -1209,7 +1206,7 @@ def test_the_digest_skips_a_stored_plan_record_that_no_longer_validates(
         digest = state.conversation_digest_state()
 
     assert digest is not None
-    assert digest["turns"][0]["plans"] == [_PLAN.digest_line()]
+    assert digest["turns"][0]["plans"] == [_PLAN.digest_line()] * 2
     assert "skipping a stored plan record" in caplog.text
 
 
@@ -1234,11 +1231,11 @@ def test_every_reader_of_stored_turn_records_skips_one_that_no_longer_validates(
         {
             "user": "q1",
             "assistant": "a1",
-            "plans": [{**_PLAN_JSON, **_MALFORMED}, _PLAN_JSON],
+            "plans": [{**_PLAN_JSON, **_MALFORMED_PLAN}, _PLAN_JSON],
             "readings": [{**_READING_JSON, **_MALFORMED}, _READING_JSON],
         }
     ]
-    state.turn_plans = [{**_PLAN_JSON, **_MALFORMED}, _PLAN_JSON]
+    state.turn_plans = [{**_PLAN_JSON, **_MALFORMED_PLAN}, _PLAN_JSON]
     state.turn_readings = [_READING_JSON]
 
     with caplog.at_level(logging.WARNING, logger="harness.studio_state"):
@@ -1287,13 +1284,17 @@ def test_the_prior_ledger_keeps_each_spec_ids_newest_reading_and_its_turns_block
     assert ConversationState(conversation_id=CONVERSATION).prior_ledger_state() is None
 
 
-def test_a_ledger_turn_stored_before_search_stopped_listing_members_still_loads():
+def test_a_ledger_turn_holding_keys_this_release_does_not_declare_still_loads():
     """A conversation's ledger holds turns stored when Search listed each source's
-    members: every plan source and recorded identity carries `stat_vars`. The
-    turn still reads as its plan and its identities, the list left behind."""
+    members, where every plan source and recorded identity carries `stat_vars`,
+    and turns a later release wrote with fields this one lacks. The turn still
+    reads as its plan and its identities, the extra keys left behind."""
     plan = copy.deepcopy(_PLAN_JSON)
     for source in plan["sources"]:
         source["stat_vars"] = [] if source["members"] else [_GDP_STAT_VAR]
+    assert plan["decisions"]
+    for decision in plan["decisions"]:
+        decision["from_a_later_release"] = True
     state = ConversationState(conversation_id=CONVERSATION)
     state.turns = [
         {
@@ -1378,6 +1379,62 @@ def test_recall_part_bounds_what_it_renders_of_a_turn_with_several_plans():
 
     assert len(text) == 4
     assert all(len(plan) <= studio_state._RECALL_TEXT_BUDGET // 4 for plan in text)
+
+
+async def test_recall_reads_an_executing_plans_status_from_its_run(
+    session_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan recorded executing states its run's status in the run ledger
+    once the run has settled; one recorded with no run, or whose run is still
+    unfinished, keeps its recorded status. The ledger is read only while a
+    record awaits a run."""
+    store = StudioStore(session_service, app_name="app")
+    state = await store.create("principal", CONVERSATION)
+    segment_id = store.claim_segment("principal", CONVERSATION)
+    await store.save("principal", CONVERSATION)
+    await store.append_run_items(
+        "principal",
+        CONVERSATION,
+        segment_id,
+        lambda items: {
+            f"{studio_state.RUN_ITEM_PREFIX}run_done": {"status": "completed"},
+            f"{studio_state.RUN_ITEM_PREFIX}run_held": {"status": "pending"},
+        },
+    )
+    executing = {**_PLAN_JSON, "status": PlanStatus.EXECUTING.value}
+    plans = [
+        {**executing, "run_id": "run_done"},
+        {**executing, "run_id": "run_held"},
+        executing,
+        {**_PLAN_JSON, "status": PlanStatus.FAILED.value, "run_id": "run_done"},
+    ]
+    state.turns = [{"user": "q", "assistant": "a", "plans": plans}]
+    token = current_conversation_key.set(("principal", CONVERSATION))
+    try:
+        recalled = await make_recall_part(store)(part="plan", turn=1, component_id=None)
+    finally:
+        current_conversation_key.reset(token)
+
+    stated = [
+        PlanStatus.COMPLETED,
+        PlanStatus.EXECUTING,
+        PlanStatus.EXECUTING,
+        PlanStatus.FAILED,
+    ]
+    expected = [
+        PlanRecord.model_validate(plan).model_copy(update={"status": status})
+        for plan, status in zip(plans, stated, strict=True)
+    ]
+    assert recalled["text"] == [
+        record.render(budget=studio_state._RECALL_TEXT_BUDGET // len(plans)) for record in expected
+    ]
+
+    async def unread(*args: Any) -> dict[str, Any]:
+        raise AssertionError("the ledger is read with no record awaiting a run")
+
+    monkeypatch.setattr(store, "run_items", unread)
+    state.turns = [{"user": "q", "assistant": "a", "plans": [_PLAN_JSON, executing]}]
+    assert await store.run_statuses("principal", CONVERSATION, conversation=state) == {}
 
 
 def _turn(index: int, **fields: Any) -> dict[str, Any]:

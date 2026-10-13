@@ -86,7 +86,9 @@
           "on_missing": "report_gaps"
         },
         "source": "OECD Creditor Reporting System (CRS)",
-        "across": "donor",
+        "across": [
+          "donor"
+        ],
         "source_spec_id": "spec_2cdf1c28095aa2918dc7039705ada64b",
         "kind": "dataset",
         "frequency": "annual",
@@ -250,7 +252,9 @@
           "prices": "current",
           "currency": "USD"
         },
-        "across": "donor",
+        "across": [
+          "donor"
+        ],
         "measure": "official development assistance",
         "source": "OECD Creditor Reporting System (CRS)"
       },
@@ -396,7 +400,9 @@
           }
         ],
         "source_spec_id": "spec_2cdf1c28095aa2918dc7039705ada64b",
-        "across": "donor",
+        "across": [
+          "donor"
+        ],
         "unit": {
           "prices": "current",
           "currency": "USD"

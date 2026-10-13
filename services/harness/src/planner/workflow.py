@@ -268,6 +268,13 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
+    `exact_codes` are the publisher series codes the source is exactly:
+    the entries of `resolved.stat_vars.source_codes` that Search marks
+    `exact`, meaning a `source_code` search for that code would accept this
+    source as its answer. They are upper-cased as Search reads a code. Empty
+    when the block marks none, as on a source recorded without the field. A
+    code the family lists without that mark confirms nothing.
+
     `definition` is the source's own definition, read from data-mcp's
     `describe` rather than `search`; for a StatVar it is the graph's
     constraint encoding ("mp=count,pt=Person"), not prose.
@@ -310,6 +317,11 @@ class SelectedSource(StrictModel):
     provenance_label: str | None = None
     provenance_account: Annotated[str | None, HASHED_WHEN_SET] = None
     resolved_sources: Annotated[tuple[ResolvedSourceMention, ...], HASHED_WHEN_SET] = ()
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    exact_codes: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda codes: not codes
+    )
     coverage_kind: str | None = None
     coverage_window: Period | None = None
     identity: dict[str, JsonValue] | None = None

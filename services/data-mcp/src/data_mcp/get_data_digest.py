@@ -16,7 +16,7 @@ reaches the model.
 
 Scope for this module: the acknowledgement line, the coverage line, any
 warnings that qualify that coverage, the frame reference, the citation
-line, per-series statistics, any dropped-role, unheld-region,
+line, the version description's steps, caveats and unknowns, per-series statistics, any dropped-role,
 remint-persistence, operation-poll, or degraded-frame notes, and any
 remaining manifest warnings.
 
@@ -49,18 +49,14 @@ from data_mcp.manifest import (
     SeriesStatisticsModel,
     WarningModel,
 )
+from data_mcp.series_statistics import continued_series, continuing_method
+from data_mcp.version_description import VersionDescription
 
 # How the digest's frame reference line and operation poll note begin. Both
 # address a caller handling frame references by hand; `harness.graph` drops
 # lines starting with either from a plan step's summary.
 FRAME_REFERENCE_PREFIX = "Frame: spec_id="
 OPERATION_POLL_PREFIX = "Note: this mint exceeded the synchronous budget"
-
-# At most this many unheld region members are named; the rest are only
-# counted. A region can carry dozens of unheld members (a continent's worth
-# of countries this graph doesn't hold), and naming all of them would let one
-# region dominate the digest.
-_UNHELD_MEMBER_NAME_CAP = 3
 
 # The digest carries statistics for up to this many series; past it, only the
 # series count is reported. Matches the platform contract's own ceiling: a
@@ -89,6 +85,13 @@ _ACKNOWLEDGEMENT_ENTITY_CAP = 8
 # grow with the frame instead of summarising it.
 _CITATION_SOURCE_CAP = 5
 
+# At most this many of a version description's steps, caveats and unknown members are
+# rendered; the rest are only counted. A description can carry 50 caveats and 100
+# gaps, and the digest names the leading few.
+_DESCRIPTION_STEP_CAP = 5
+_DESCRIPTION_CAVEAT_CAP = 5
+_DESCRIPTION_GAP_CAP = 6
+
 # The SDG/OECD price-basis unit-code family: current prices (`CU`) or
 # constant prices carrying an optional base year (`CON`, `CON_1999`),
 # a three-letter currency, and an optional magnitude suffix.
@@ -106,10 +109,10 @@ _DEPLOYMENT_CONSTANT_RE = re.compile(r"^Constant(?P<currency>[A-Z]{3})_(?P<year>
 
 _MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
 
-# The manifest warning dfo-apis adds when a summed mint adds more than one
-# StatVar into the series it labels `dcid:<spec_id>`. Its message carries the
-# count of StatVars summed, which nothing else in the digest states, so it
-# renders outside `_MANIFEST_WARNING_CAP`.
+# The manifest warning dfo-apis added, on versions stored before descriptions, when a
+# summed mint added more than one StatVar into the series it labels `dcid:<spec_id>`.
+# Its message carries the count of StatVars summed, so it renders outside
+# `_MANIFEST_WARNING_CAP`.
 _STAT_VARS_SUMMED = "stat_vars_summed"
 
 # The coverage dimension dfo-apis counts after every declared role column.
@@ -118,21 +121,6 @@ _YEARS_DIMENSION = "years"
 # A reader's noun for each flow axis a role column can sit on; a role with no
 # axis (`observationAbout`) reads "entity".
 _GRAIN_NOUNS = {"origin": "provider", "destination": "recipient"}
-
-
-@dataclass(frozen=True, kw_only=True)
-class UnheldRegionSummary:
-    """One resolved region this call queried that carries members outside this graph.
-
-    Built by `get_data_tool.py` from a `data_mcp.resolution.ResolvedRegion`, and
-    kept as plain data here rather than importing that type directly -- this
-    module renders whatever summary it's handed, with no seam of its own onto
-    the resolution grammar.
-    """
-
-    region_name: str
-    unheld_names: list[str]
-    unheld_count: int
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -159,16 +147,61 @@ class BreakdownLevel:
 
 
 @dataclass(frozen=True, kw_only=True)
-class _SummedFamily:
+class SummedFamily:
     """The family a summed mint added into one series per entity.
 
-    `ref` is the `stat_var` every summed series carries, and `label` is the
-    family's name from the `stat_vars_summed` warning, `None` when dfo-apis
-    sent none.
+    `ref` is the `stat_var` every summed series carries, `dcid:<spec_id>`. `label` is
+    the family's name, the version description's title, `None` when the description
+    was not read or its title is a gap. `count` is how many StatVars with data were
+    summed, `None` when the trace records no member's rows.
     """
 
     ref: str
     label: str | None
+    count: int | None
+
+
+def summed_family(
+    manifest: Manifest,
+    *,
+    frame_summed: bool | None,
+    series_stats: Sequence[SeriesStatisticsModel] | None,
+    description: VersionDescription | None,
+) -> SummedFamily | None:
+    """The family `manifest`'s version summed, or `None` when it summed nothing.
+
+    dfo-apis gives a summed series the family ref `dcid:<spec_id>` as its `stat_var`,
+    and no other series carries it, so a frame holding that ref summed its family.
+    `frame_summed` says whether the frame this call read holds it
+    (`MaterialisationOutcome.family_summed`); when this call read no frame, the
+    fetched statistics rows say instead. The count is the trace's members with rows,
+    the count dfo-apis' `sum_variables` step states. Only the name comes from
+    `description`, its title unless the title is a gap.
+    """
+    ref = f"dcid:{manifest.definition.spec_id}"
+    if frame_summed is None:
+        frame_summed = any(series.stat_var == ref for series in series_stats or ())
+    if not frame_summed:
+        return None
+    label = None
+    if description is not None and "title" not in description.gaps:
+        label = description.title or None
+    return SummedFamily(ref=ref, label=label, count=_members_with_rows(manifest.trace) or None)
+
+
+def _members_with_rows(trace: Mapping[str, object]) -> int:
+    """How many of the trace's `resolved_stat_vars` hold rows, by their
+    `observation_count`."""
+    entries = trace.get("resolved_stat_vars")
+    if not isinstance(entries, list):
+        return 0
+    return sum(
+        1
+        for entry in entries
+        if isinstance(entry, Mapping)
+        and isinstance(rows := entry.get("observation_count"), int)
+        and rows > 0
+    )
 
 
 def statistics_needs_fetch(series_count: int | None) -> bool:
@@ -189,13 +222,14 @@ def render_get_data_digest(
     frame_ref: FrameRef,
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
-    unheld_regions: Sequence[UnheldRegionSummary],
     remint_persist_failed: bool = False,
     degraded_frame: MaterialisationOutcome | None = None,
     series_stats: Sequence[SeriesStatisticsModel] | None = None,
     statistics_fetch_failed: bool = False,
     operation_poll: OperationPollNote | None = None,
     breakdown: BreakdownLevel | None = None,
+    description: VersionDescription | None = None,
+    summed: SummedFamily | None = None,
 ) -> str:
     """Render `manifest` into the model-facing digest for `get_data`.
 
@@ -209,8 +243,6 @@ def render_get_data_digest(
             resolved) renders as itself.
         dropped_roles: Roles the base definition bound that an incoming,
             non-empty `entities` override silently left unbound.
-        unheld_regions: One summary per resolved region that came back with
-            members this deployment's graph doesn't hold.
         remint_persist_failed: This call re-minted under a new `spec_id` and
             could not confirm the definition store write -- the store was
             unreachable, or the write outran the deadline and may still land.
@@ -247,26 +279,30 @@ def render_get_data_digest(
             code system at one hierarchy level. Renders a line after the
             coverage that names the frame's `stat_var` and
             `stat_var_<code_system>` columns.
+        description: dfo-apis' description of the manifest's version
+            (`data_mcp.version_description.fetch_version_description`), the one
+            the version's cards carry. Its citation, which names the sources, and its
+            latest period replace the manifest's citation line, and its steps, caveats and gaps
+            follow as one line each. `None` (the read failed, or the default)
+            renders the manifest's citation line alone.
+        summed: The family the frame summed (`summed_family`), `None` (the default) for
+            a frame that summed none.
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
         coverage, any warnings that qualify that coverage, the frame
         reference for downstream tools, then the citation, per-series statistics, any
-        dropped-role, unheld-region, remint-persistence, or operation-poll
+        dropped-role, remint-persistence, or operation-poll
         notes, any degraded-fetch note, the `stat_vars_summed` warning, and
-        any remaining manifest warnings. On a `stat_vars_summed` warning the
-        acknowledgement names the grain of the total and each summed series
-        is headed as the family's total.
+        any remaining manifest warnings. On a summed version the acknowledgement
+        names the family and the grain it was summed to, and each summed series is
+        headed as the family's total.
     """
     definition = manifest.definition
+    family = None if summed is None else _family_name(summed, manifest.citation)
+    # A stored version's `stat_vars_summed` warning only renders its message here;
+    # whether the frame summed comes from `summed`.
     summed_warnings = [w for w in manifest.warnings if w.code == _STAT_VARS_SUMMED]
-    summed = (
-        _SummedFamily(
-            ref=f"dcid:{definition.spec_id}", label=summed_warnings[0].stat_var_label or None
-        )
-        if summed_warnings
-        else None
-    )
     coverage_warnings, other_warnings = _split_coverage_warnings(
         [w for w in manifest.warnings if w.code != _STAT_VARS_SUMMED]
     )
@@ -274,25 +310,30 @@ def render_get_data_digest(
         coverage_warnings, other_warnings
     )
     sections = [
-        _acknowledgement_line(definition, manifest.coverage, entity_labels, summed=summed),
+        _acknowledgement_line(
+            definition, manifest.coverage, entity_labels, family=family, breakdown=breakdown
+        ),
         _coverage_line(manifest.coverage, definition),
     ]
     if breakdown is not None:
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
     sections.extend(_warning_lines(shown_coverage))
     sections.append(_frame_reference_line(frame_ref))
-    if manifest.citation.text or manifest.citation.sources:
+    if description is not None:
+        sections.extend(_description_lines(description))
+    elif manifest.citation.text or manifest.citation.sources:
         sections.append(_citation_line(manifest.citation))
     sections.extend(
         _statistics_sections(
-            manifest.series_count,
+            manifest,
             series_stats,
             fetch_failed=statistics_fetch_failed,
-            summed=summed,
+            summed_ref=None if summed is None else summed.ref,
+            family=family,
+            breakdown=breakdown,
         )
     )
     sections.extend(_dropped_role_line(role) for role in dropped_roles)
-    sections.extend(_unheld_region_line(region) for region in unheld_regions)
     if remint_persist_failed:
         sections.append(_remint_persist_failed_line())
     if operation_poll is not None:
@@ -304,6 +345,17 @@ def render_get_data_digest(
     if warning_remainder > 0:
         sections.append(f"{warning_remainder} more warning(s) not shown.")
     return "\n\n".join(sections)
+
+
+def _family_name(summed: SummedFamily, citation: CitationModel) -> str:
+    """What the digest calls a summed family: its label, else the family of the sources
+    the manifest cites, else the requested StatVar family."""
+    if summed.label:
+        return summed.label
+    sources = list(dict.fromkeys(source.label for source in citation.sources if source.label))
+    if sources:
+        return f"the {_joined_with_cap(sources, _ACKNOWLEDGEMENT_ENTITY_CAP)} family"
+    return "the requested StatVar family"
 
 
 def _breakdown_line(breakdown: BreakdownLevel, *, spec_id: str) -> str:
@@ -338,19 +390,22 @@ def _acknowledgement_line(
     coverage: CoverageModel,
     entity_labels: Mapping[str, str],
     *,
-    summed: _SummedFamily | None,
+    family: str | None,
+    breakdown: BreakdownLevel | None,
 ) -> str:
     """A factual line built only from the identity document and its own entities.
 
     No prose source exists here the way `search`'s `rendered_sentence` does --
     `StoredDefinition` carries only `{spec_id, schema_version, canonical_bytes}`
     -- so this states only what the identity document itself says: what shape
-    was minted, and for whom. A summed mint also names its family, by the
-    label dfo-apis gave it when there is one, and says the family's StatVars
-    were summed into one total series per entity role. dfo-apis sums away the
+    was minted, and for whom. A summed mint instead names its `family`
+    (`_family_name`) and says the family's StatVars were summed into one total series
+    per entity role, or, on a `breakdown` mint, into one series per entity role and code
+    at the breakdown's level. dfo-apis sums away the
     StatVar axis and keeps every declared role column, a role the question
     left open included, so the roles come from `coverage.dimensions`, one per
-    frame role column plus `years`. The identity's `entities` hold only the
+    frame role column plus `years`, less a breakdown's `stat_var_<code_system>`
+    column, which the code names. The identity's `entities` hold only the
     bound roles, keyed by flow axis, and its `open_roles` the axes it covers
     every member of, each named "every <noun>" by the role column the response
     declares on that axis (`creditor` on IDS, `financingProvider` on CRS), or by
@@ -359,8 +414,8 @@ def _acknowledgement_line(
     identity = definition.identity
     shape = identity.get("shape")
     shape_id = shape.get("id") if isinstance(shape, Mapping) else None
-    if summed is not None:
-        subject = summed.label or "the requested StatVar family"
+    if family is not None:
+        subject = family
     elif isinstance(shape_id, str) and shape_id:
         subject = shape_id
     else:
@@ -381,15 +436,21 @@ def _acknowledgement_line(
     scope_text = " · ".join(pieces)
 
     line = f"Retrieved {subject} for {scope_text}" if scope_text else f"Retrieved {subject}"
-    if summed is None:
+    if family is None:
         return f"{line}."
+    code_column = None if breakdown is None else f"stat_var_{breakdown.code_system}"
     nouns = dict.fromkeys(
         _GRAIN_NOUNS.get(dim.axis or "", "entity")
         for dim in coverage.dimensions
-        if dim.label != _YEARS_DIMENSION
+        if dim.label not in (_YEARS_DIMENSION, code_column)
     )
     grain = " and ".join(nouns) or "entity"
-    return f"{line}, with its StatVars summed into one total series per {grain}."
+    if breakdown is None:
+        return f"{line}, with its StatVars summed into one total series per {grain}."
+    return (
+        f"{line}, with its StatVars summed into one series per {grain} and "
+        f"{breakdown.code_system} code at level {breakdown.level}."
+    )
 
 
 def render_dcids(dcids: Sequence[Any], entity_labels: Mapping[str, str]) -> str:
@@ -468,22 +529,47 @@ def _citation_line(citation: CitationModel) -> str:
     return f"Source: {citation.text} ({labels})." if labels else f"Source: {citation.text}."
 
 
+def _description_lines(description: VersionDescription) -> list[str]:
+    """The citation line with the latest period, then one line each for the steps,
+    the caveats and the members dfo-apis could not fill, when there are any."""
+    # `cite.text` is the composer's citation line, which names every source.
+    citation = f"Source: {description.cite.text}"
+    latest = description.freshness.latest_period
+    lines = [f"{citation}; latest period {latest}." if latest else f"{citation}."]
+    if description.steps:
+        steps = [step.text for step in description.steps]
+        lines.append(f"Steps: {_sentences_with_cap(steps, _DESCRIPTION_STEP_CAP, 'step')}")
+    if description.caveats:
+        caveats = [caveat.text for caveat in description.caveats]
+        lines.append(f"Caveats: {_sentences_with_cap(caveats, _DESCRIPTION_CAVEAT_CAP, 'caveat')}")
+    unknown = list(dict.fromkeys(_gap_words(path) for path in description.gaps))
+    if unknown:
+        lines.append(f"Not known: {_joined_with_cap(unknown, _DESCRIPTION_GAP_CAP)}.")
+    return lines
+
+
+def _sentences_with_cap(sentences: Sequence[str], cap: int, noun: str) -> str:
+    """`sentences` joined by spaces, naming at most `cap` and counting the rest."""
+    text = " ".join(sentence.strip() for sentence in sentences[:cap])
+    remainder = len(sentences) - cap
+    if remainder <= 0:
+        return text
+    return f"{text} {remainder} more {noun}{'' if remainder == 1 else 's'} not shown."
+
+
+def _gap_words(path: str) -> str:
+    """A gap's dotted path as words: the members below its block, without list
+    indexes, so `freshness.source_release` reads "source release" and a bare
+    `steps` reads "steps"."""
+    segments = path.split(".")
+    named = [segment for segment in segments[1:] or segments if not segment.isdigit()]
+    return " ".join(named).replace("_", " ")
+
+
 def _dropped_role_line(role: str) -> str:
     return (
         f"Note: this call's entities override did not restate {role!r}, so that "
         "role is no longer bound in the re-minted definition."
-    )
-
-
-def _unheld_region_line(region: UnheldRegionSummary) -> str:
-    shown = region.unheld_names[:_UNHELD_MEMBER_NAME_CAP]
-    remainder = region.unheld_count - len(shown)
-    names_text = ", ".join(shown)
-    if remainder > 0:
-        names_text = f"{names_text}, and {remainder} more" if names_text else f"{remainder} more"
-    return (
-        f"Note: {region.region_name!r} has {region.unheld_count} member(s) this "
-        f"deployment's graph does not hold ({names_text})."
     )
 
 
@@ -549,15 +635,22 @@ def _degraded_frame_note(outcome: MaterialisationOutcome) -> str:
 
 
 def _statistics_sections(
-    series_count: int | None,
+    manifest: Manifest,
     series_stats: Sequence[SeriesStatisticsModel] | None,
     *,
     fetch_failed: bool,
-    summed: _SummedFamily | None,
+    summed_ref: str | None,
+    family: str | None,
+    breakdown: BreakdownLevel | None,
 ) -> list[str]:
     """One rendered block per series, or a single count-only line, or nothing.
 
-    `series_count` is `None` for a manifest minted before the field existed
+    A series the mint's estimates continue (`continuing_method`) holds two
+    rows, one per method, and renders as one block, its reported row's
+    figures followed by a line naming the estimates' years
+    (`continued_series`).
+
+    `manifest.series_count` is `None` for a manifest minted before the field existed
     -- that snapshot renders everything else and simply carries no
     statistics section, the same as `0` (a mint that resolved to no series
     at all): neither is worth a line. Past `_STATISTICS_SERIES_CAP`, or on a
@@ -566,9 +659,12 @@ def _statistics_sections(
     case. Otherwise `series_stats` is exactly what the caller fetched from
     the manifest's own statistics artifact; series membership comes from
     those rows alone, never from `coverage.dimensions` or any other reading
-    of the frame's own rows. `summed` is the family a summed mint added into
-    one series, and `None` otherwise.
+    of the frame's own rows. `summed_ref` is the `stat_var` of a summed
+    family's series and `family` its name (`_family_name`), both `None` for a
+    frame that summed none. On a `breakdown` mint each row holds the family summed
+    within one code, which the row's `stat_var_<code_system>` entity names.
     """
+    series_count = manifest.series_count
     if not series_count:
         return []
     if series_count > _STATISTICS_SERIES_CAP:
@@ -581,17 +677,41 @@ def _statistics_sections(
             f"Statistics: {series_count} series retrieved -- could not fetch or decode "
             "the statistics artifact, showing the count only."
         ]
-    return [_series_statistics_block(series, summed) for series in series_stats or ()]
+    return [
+        _series_statistics_block(
+            series.reported,
+            family if series.reported.stat_var == summed_ref else None,
+            estimates=series.estimates,
+            breakdown=breakdown,
+        )
+        for series in continued_series(series_stats or (), continuing=continuing_method(manifest))
+    ]
 
 
-def _series_statistics_block(series: SeriesStatisticsModel, summed: _SummedFamily | None) -> str:
-    # Only a summed series carries the family's own ref as its stat_var.
-    if summed is not None and series.stat_var == summed.ref:
-        name = summed.label or f"[{series.stat_var}]"
-        header_pieces = [f"Summed total of the family {name}"]
+def _series_statistics_block(
+    series: SeriesStatisticsModel,
+    family: str | None,
+    *,
+    estimates: SeriesStatisticsModel | None = None,
+    breakdown: BreakdownLevel | None = None,
+) -> str:
+    """One series' block, headed as the summed total of `family` when it is one, or
+    on a `breakdown` as `family` summed within the code its `stat_var_<code_system>`
+    entity names, with a line for the `estimates` continuing it past its reported end."""
+    code_column = None if breakdown is None else f"stat_var_{breakdown.code_system}"
+    code = next((entity.ref for entity in series.entities if entity.role == code_column), None)
+    if family is None:
+        header = series.stat_var
+    elif breakdown is not None and code is not None:
+        header = f"Sum of {family} within {breakdown.code_system} code {code}"
     else:
-        header_pieces = [series.stat_var]
-    header_pieces.extend(f"{entity.role} {entity.ref}" for entity in series.entities)
+        header = f"Summed total of {family}"
+    header_pieces = [header]
+    header_pieces.extend(
+        f"{entity.role} {entity.ref}"
+        for entity in series.entities
+        if family is None or entity.role != code_column
+    )
     unit = series.facet.get("unit")
     if isinstance(unit, str):
         reading = _unit_reading(unit)
@@ -609,6 +729,14 @@ def _series_statistics_block(series: SeriesStatisticsModel, summed: _SummedFamil
         if series.change.percent is not None:
             change_line += f" ({_format_percent(series.change.percent)}%)"
         lines.append(change_line)
+    if estimates is not None:
+        method = estimates.facet.get("measurementMethod")
+        lines.append(
+            f"  continued {estimates.first.period} to {estimates.latest.period} by its "
+            f"source's {method} values, part of this one series: "
+            f"first {_format_magnitude(estimates.first.value)} ({estimates.first.period}) · "
+            f"latest {_format_magnitude(estimates.latest.value)} ({estimates.latest.period})"
+        )
     return "\n".join(lines)
 
 

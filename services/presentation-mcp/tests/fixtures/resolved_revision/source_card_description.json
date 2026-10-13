@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.10.0",
+  "component_id": "cmp_Ab3dE5gH7k",
+  "revision": 2,
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_91d7345eec81a029629938b3d0ffd775",
+        "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c"
+      }
+    ],
+    "execution_ref": null,
+    "generated_at": "2026-07-14T10:02:00Z",
+    "refreshed_from": null
+  },
+  "description": {
+    "describes": {
+      "kind": "card_revision",
+      "component_id": "cmp_Ab3dE5gH7k",
+      "revision": 2
+    },
+    "title": "OECD Creditor Reporting System (CRS)",
+    "about": {
+      "name": "OECD Creditor Reporting System (CRS)"
+    },
+    "sources": [
+      {
+        "ref": "provenance/OECDCreditorReportingSystem",
+        "label": "OECD Creditor Reporting System (CRS)",
+        "publisher": "OECD",
+        "licence": "OECD Terms and Conditions",
+        "series": 3,
+        "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem"
+      }
+    ],
+    "freshness": {
+      "source_downloaded_at_mint": "2026-09-28",
+      "source_downloaded_since": "2026-10-08",
+      "next_release": "2026-12"
+    },
+    "steps": [],
+    "caveats": [],
+    "cite": {
+      "title": "OECD Creditor Reporting System (CRS)",
+      "text": "OECD Creditor Reporting System (CRS) via ONE DFO, retrieved 2026-09-28",
+      "component_id": "cmp_Ab3dE5gH7k",
+      "revision": 2,
+      "id": "spec_91d7345eec81a029629938b3d0ffd775",
+      "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c",
+      "retrieved": "2026-09-28",
+      "data": "/api/datasets/spec_91d7345eec81a029629938b3d0ffd775/cv_b785befb9f87471de96eb31cd7c56f5c"
+    },
+    "gaps": [],
+    "built_from": {
+      "facts_schema": 1,
+      "vocabulary": "voc_5e1d9a3c7b2f8e64"
+    }
+  },
+  "component": {
+    "type": "source_card",
+    "source_refs": [
+      "provenance/OECDCreditorReportingSystem"
+    ]
+  }
+}

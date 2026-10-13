@@ -1,0 +1,244 @@
+{
+  "id": "share-two-donors-of-kenya-oda",
+  "kind": "share_of",
+  "origin": "pilot",
+  "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
+  "searches": [
+    {
+      "query": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "United States",
+              "role": "from"
+            },
+            {
+              "text": "United Kingdom",
+              "role": "from"
+            },
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        },
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        }
+      ]
+    }
+  ],
+  "brief": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
+  "asks": [
+    "Share of Kenya's ODA from the United States and the United Kingdom together, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of",
+    "share_of"
+  ],
+  "reference_payload": {
+    "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda_two",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          },
+          {
+            "name": "United Kingdom",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "two_donors",
+        "input_id": "oda_two",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "oda_total",
+        "measure": "total ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "share",
+        "numerator": {
+          "input_id": "two_donors"
+        },
+        "denominator": {
+          "input_id": "oda_total"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "share"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Retrieve each donor's ODA on its own, add the two series, then take the share of the total.",
+      "payload": {
+        "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
+        "answer_mode": "computed",
+        "decisions": [
+          {
+            "slot": "combine",
+            "description": "Whether the two donors' ODA series are added into one total.",
+            "options": [
+              "add them",
+              "show them separately"
+            ],
+            "chosen": "add them",
+            "resolved_by": "user",
+            "rationale": "The user chose to add them."
+          }
+        ],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "oda_us",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "United States",
+                "role": "donor"
+              },
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            }
+          },
+          {
+            "kind": "dataset",
+            "id": "oda_uk",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "United Kingdom",
+                "role": "donor"
+              },
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            }
+          },
+          {
+            "kind": "sum_of",
+            "id": "two_donors",
+            "left": {
+              "input_id": "oda_us"
+            },
+            "right": {
+              "input_id": "oda_uk"
+            },
+            "decision_ids": [
+              "combine"
+            ]
+          },
+          {
+            "kind": "dataset",
+            "id": "oda_total",
+            "measure": "total ODA",
+            "entities": [
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            },
+            "across": [
+              "donor"
+            ]
+          },
+          {
+            "kind": "share_of",
+            "id": "share",
+            "numerator": {
+              "input_id": "two_donors"
+            },
+            "denominator": {
+              "input_id": "oda_total"
+            }
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "share"
+            ]
+          }
+        ]
+      },
+      "first_proposal_refusal": "combination_unasked"
+    }
+  ]
+}

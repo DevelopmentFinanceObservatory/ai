@@ -3,11 +3,11 @@
 `frame_publish.publish_body`, and the bytes it returns must equal httpx's
 `json=` encoding of the publish body holding the recorded `role_keys` and
 `rows`: row order, key order within each row, cell types (`1` against
-`1.0`), float digits and the unit objects. A case that names composed
-StatVars records the `composed_stat_vars` member too.
+`1.0`), float digits and the unit objects. A case that carries steps
+records the `steps` member too.
 
 Cases are seeded (`_SEED`). One draws its units from `_COMPOSED_UNITS`, and
-the cases after it carry `_COMPOSED_STAT_VARS` lists. Record the fixture again with
+the cases after it carry `_STEPS` lists. Record the fixture again with
 `uv run --package presentation_mcp python services/presentation-mcp/tests/test_frame_to_wire_differential.py`.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from common.materialisation import ComposedStatVar
+import rfc8785
 from dfo_frame_grammar import STATUS_COLUMN, Frame, canonical_frame_bytes
 from presentation_mcp import frame_publish
 from presentation_mcp.frame_publish import publish_body
@@ -47,29 +47,44 @@ _COMPOSED_UNITS: tuple[object, ...] = (
     "dcid:USDollar",
     None,
 )
-# Drawn after every other case. The second list nests: its sum names the
-# quotient before it.
-_COMPOSED_STAT_VARS: tuple[list[dict[str, Any]], ...] = (
+# Drawn after every other case. The second list chains a quotient onto two
+# retrievals and carries labels outside ASCII.
+_STEPS: tuple[list[dict[str, Any]], ...] = (
     [
         {
-            "stat_var": "dcid:StatVarA",
-            "relation": "quotient",
-            "first": ["dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal"],
-            "second": ["dcid:Count_Person"],
-        }
+            "id": "s1",
+            "op": "retrieve",
+            "input": {"id": "spec_" + "1" * 32, "content_version": "cv_" + "2" * 32},
+            "options": {"layout": "frame"},
+        },
     ],
     [
         {
-            "stat_var": "dcid:StatVarA",
-            "relation": "quotient",
-            "first": ["dcid:Dépense_Santé"],
-            "second": ["dcid:Count_Person"],
+            "id": "s1",
+            "op": "retrieve",
+            "input": {
+                "id": "spec_" + "1" * 32,
+                "content_version": "cv_" + "2" * 32,
+                "label": "Dépense de santé",
+            },
+            "options": {},
         },
         {
-            "stat_var": "dcid:StatVarB",
-            "relation": "sum",
-            "first": ["dcid:StatVarA", "dcid:人口"],
-            "second": ["dcid:StatVarA"],
+            "id": "s2",
+            "op": "retrieve",
+            "input": {"id": "spec_" + "3" * 32, "content_version": "cv_" + "4" * 32},
+            "options": {},
+        },
+        {
+            "id": "s3",
+            "op": "quotient",
+            "inputs": {"numerator": "s1", "denominator": "s2"},
+            "policy": "quotient_of_intersect_periods",
+            "params": {"numerator_by": ["recipient"]},
+            "kept": {"entities": 38, "periods": 15},
+            "left_out": [{"reason": "zero_denominator", "count": 2, "of": "entities"}],
+            "unit": {"numerator": {"ref": "USDollar"}, "denominator": {"stat_var": "人口"}},
+            "period_coverage": [{"period": "2010", "entities": 32}],
         },
     ],
 )
@@ -132,9 +147,9 @@ def generate_cases() -> list[dict[str, Any]]:
     cases.extend(
         {
             "frame": _spec(_random_frame(rng, roles=("donor",), row_count=6)),
-            "composed_stat_vars": entries,
+            "steps": steps,
         }
-        for entries in _COMPOSED_STAT_VARS
+        for steps in _STEPS
     )
     return [{"id": f"wire-{index:03d}", **case} for index, case in enumerate(cases)]
 
@@ -145,9 +160,7 @@ def _body(case: dict[str, Any]) -> bytes:
         spec_id=_SPEC_ID,
         content_version=_CONTENT_VERSION,
         input_content_versions=_INPUT_CONTENT_VERSIONS,
-        composed_stat_vars=[
-            ComposedStatVar(**entry) for entry in case.get("composed_stat_vars", ())
-        ],
+        steps=case.get("steps"),
     )
 
 
@@ -160,8 +173,8 @@ def _httpx_body(wire: dict[str, Any]) -> bytes:
         "rows": wire["rows"],
         "input_content_versions": list(_INPUT_CONTENT_VERSIONS),
     }
-    if "composed_stat_vars" in wire:
-        document["composed_stat_vars"] = wire["composed_stat_vars"]
+    if "steps" in wire:
+        document["steps"] = wire["steps"]
     return json.dumps(document, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
         "utf-8"
     )
@@ -200,75 +213,162 @@ def test_generator_reproduces_fixture_inputs() -> None:
     assert json.dumps(generate_cases()) == json.dumps(recorded)
 
 
-def _entry(index: int, *, sides: int = 1, ref: str = "dcid:Count_Person") -> ComposedStatVar:
-    return ComposedStatVar(
-        stat_var=f"dcid:StatVar{index}", relation="sum", first=(ref,) * sides, second=(ref,)
+def _retrieve(index: int, *, note: str = "", scale: object = None) -> dict[str, Any]:
+    options: dict[str, Any] = {"note": note}
+    if scale is not None:
+        options["scale"] = scale
+    return {
+        "id": f"s{index + 1}",
+        "op": "retrieve",
+        "input": {"id": "spec_" + "1" * 32, "content_version": "cv_" + "2" * 32},
+        "options": options,
+    }
+
+
+def _one_step_of(size: int, *, char: str = "x", scale: object = None) -> list[dict[str, Any]]:
+    """One retrieve step that takes `size` bytes as JCS UTF-8 JSON, its note
+    padded with `char`."""
+    base = len(rfc8785.dumps([_retrieve(0, scale=scale)]))
+    padding, remainder = divmod(size - base, len(char.encode()))
+    assert remainder == 0
+    return [_retrieve(0, note=char * padding, scale=scale)]
+
+
+def test_the_step_bounds_mirror_the_kit() -> None:
+    kit = pytest.importorskip("dfo_descriptions")
+    assert (frame_publish._MAX_SERVED_STEPS, frame_publish._MAX_STEPS_BYTES) == (
+        kit.MAX_STEPS,
+        kit.MAX_STEPS_BYTES,
     )
 
 
 @pytest.mark.parametrize(
-    "entries",
+    "steps",
     [
-        pytest.param([_entry(index) for index in range(16)], id="16-entries"),
-        pytest.param([_entry(0, sides=63)], id="64-side-refs"),
-        pytest.param([_entry(0, ref="dcid:" + "x" * 195)], id="200-character-ref"),
+        pytest.param([_retrieve(index) for index in range(62)], id="62-steps"),
+        pytest.param(_one_step_of(65_536), id="65536-bytes"),
+        # JCS spells 1.0 as `1`, two bytes under Python's `1.0`.
+        pytest.param(_one_step_of(65_536, scale=1.0), id="65536-bytes-holding-1.0"),
     ],
 )
-def test_a_list_at_a_door_bound_is_sent(entries: list[ComposedStatVar]) -> None:
-    case = {**RECORDS[1], "composed_stat_vars": [entry.model_dump() for entry in entries]}
+def test_a_step_list_at_a_door_bound_is_sent(steps: list[dict[str, Any]]) -> None:
+    document = json.loads(_body({**RECORDS[1], "steps": steps}))
 
-    document = json.loads(_body(case))
-
-    assert len(document["composed_stat_vars"]) == len(entries)
+    assert document["steps"] == steps
 
 
 @pytest.mark.parametrize(
-    "entries",
+    "steps",
     [
-        pytest.param([], id="no-entries"),
-        pytest.param([_entry(index) for index in range(17)], id="17-entries"),
-        pytest.param([_entry(0, sides=64)], id="65-side-refs"),
-        pytest.param([_entry(0, ref="dcid:" + "x" * 196)], id="201-character-ref"),
-        pytest.param(
-            [ComposedStatVar(stat_var="dcid:" + "x" * 196, relation="sum", first=(), second=())],
-            id="201-character-stat-var",
-        ),
-        pytest.param([_entry(0, sides=0)], id="empty-side"),
-        # 395 characters as written; NFC composes each "e" and its accent, leaving 200.
-        pytest.param([_entry(0, ref="dcid:" + "e\u0301" * 195)], id="over-200-raw-200-after-nfc"),
-        # 105 characters as written; NFC splits each letter in two, leaving 205.
-        pytest.param([_entry(0, ref="dcid:" + "\u0958" * 100)], id="under-200-raw-205-after-nfc"),
-        pytest.param([_entry(0, ref="dcid:Count\x00Person")], id="nul-in-a-ref"),
-        pytest.param([_entry(0, ref="Count_Person")], id="ref-without-the-dcid-prefix"),
-        pytest.param([_entry(0, ref="dcid:")], id="ref-of-the-prefix-alone"),
-        pytest.param([_entry(0), _entry(0)], id="repeated-stat-var"),
-        pytest.param([_entry(0, ref="dcid:StatVar0")], id="side-names-its-own-entry"),
-        pytest.param([_entry(0, ref="dcid:StatVar1"), _entry(1)], id="side-names-a-later-entry"),
+        # The kit's 64 less the two steps a card drawn from the frame adds.
+        pytest.param([_retrieve(index) for index in range(63)], id="63-steps"),
+        pytest.param(_one_step_of(65_537), id="65537-bytes"),
+        # JCS spells 1e16 as `10000000000000000`, twelve bytes over Python's `1e+16`.
+        pytest.param(_one_step_of(65_537, scale=1e16), id="65537-bytes-holding-1e16"),
+        # The kit refuses an integer outside ±(2**53 - 1) as `not_i_json`.
+        pytest.param([_retrieve(0, scale=2**53)], id="an-integer-past-i-json"),
+        # Under 65,536 characters, over 65,536 bytes.
+        pytest.param(_one_step_of(65_538, char="é"), id="65538-bytes-of-two-byte-characters"),
     ],
 )
-def test_a_list_the_door_would_refuse_leaves_the_member_out(
-    entries: list[ComposedStatVar], caplog: pytest.LogCaptureFixture
+def test_a_step_list_over_a_door_bound_refuses_locally(steps: list[dict[str, Any]]) -> None:
+    with pytest.raises(frame_publish.PublishBodyNotBuildable) as refused:
+        _body({**RECORDS[1], "steps": steps})
+
+    assert refused.value.refuse_locally is True
+
+
+def _covered(index: int, member: str, entries: int) -> dict[str, Any]:
+    """A rank or a share reading step `s<index>`, holding `entries` entries
+    of `member` (`entity_coverage` naming provider-recipient pairs, or
+    `period_coverage`)."""
+    if member == "entity_coverage":
+        coverage = [
+            {
+                "entity": {
+                    "ref": f"financingProvider=country/P{entry:04d}, financingRecipient=country/KEN"
+                },
+                "periods": 15,
+                "of": 15,
+            }
+            for entry in range(entries)
+        ]
+    else:
+        coverage = [{"period": str(entry), "entities": 2} for entry in range(entries)]
+    return {
+        "id": f"s{index + 1}",
+        "op": "rank" if member == "entity_coverage" else "share",
+        "input": f"s{index}",
+        "params": {"limit": entries},
+        "kept": {"entities": entries},
+        "left_out": [],
+        member: coverage,
+    }
+
+
+@pytest.mark.parametrize(
+    ("steps", "shed"),
+    [
+        # 300 pairs take about 32 KB and 400 about 43 KB: shedding the larger
+        # alone fits, so the smaller keeps its coverage.
+        pytest.param(
+            [
+                _retrieve(0),
+                _covered(1, "entity_coverage", 300),
+                _covered(2, "entity_coverage", 400),
+            ],
+            {2},
+            id="two-multi-role-ranks-shed-the-larger",
+        ),
+        pytest.param(
+            [
+                _retrieve(0),
+                _covered(1, "entity_coverage", 200),
+                _covered(2, "entity_coverage", 300),
+            ],
+            set(),
+            id="under-the-bound-keeps-all-coverage",
+        ),
+        # A rank's 11 KB of coverage is shed before a share's 15 KB of period
+        # coverage, and shedding it alone fits.
+        pytest.param(
+            [
+                _retrieve(0, note="x" * 45_000),
+                _covered(1, "period_coverage", 500),
+                _covered(2, "entity_coverage", 100),
+            ],
+            {2},
+            id="entity-coverage-before-period-coverage",
+        ),
+    ],
+)
+def test_a_step_list_over_the_byte_bound_sheds_the_largest_coverage_first(
+    steps: list[dict[str, Any]], shed: set[int]
 ) -> None:
-    """The body is then the one a frame naming no composed StatVar publishes,
-    and only a list that breaks a bound is logged, without any ref it holds."""
-    record = RECORDS[1]
-    case = {**record, "composed_stat_vars": [entry.model_dump() for entry in entries]}
+    document = json.loads(_body({**RECORDS[1], "steps": steps}))
 
-    with caplog.at_level("INFO", logger=frame_publish.__name__):
-        body = _body(case)
+    assert document["steps"] == [
+        {
+            key: value
+            for key, value in step.items()
+            if not (index in shed and key.endswith("_coverage"))
+        }
+        for index, step in enumerate(steps)
+    ]
 
-    assert body == _httpx_body(record["wire"])
-    assert len(caplog.records) == bool(entries)
-    for logged in caplog.records:
-        assert logged.args[:2] == (_SPEC_ID, _CONTENT_VERSION)
-        assert not any(ref in logged.getMessage() for entry in entries for ref in entry.first)
+
+def test_a_step_list_over_the_byte_bound_after_shedding_its_coverage_refuses_locally() -> None:
+    steps = [*_one_step_of(65_537), _covered(1, "entity_coverage", 10)]
+
+    with pytest.raises(frame_publish.PublishBodyNotBuildable) as refused:
+        _body({**RECORDS[1], "steps": steps})
+
+    assert refused.value.refuse_locally is True
 
 
 def _wire(body: bytes) -> dict[str, Any]:
     document = json.loads(body)
-    return {
-        key: document[key] for key in ("role_keys", "rows", "composed_stat_vars") if key in document
-    }
+    return {key: document[key] for key in ("role_keys", "rows", "steps") if key in document}
 
 
 def _record() -> None:

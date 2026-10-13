@@ -3,22 +3,7 @@
 Each item names the studio screen that needs it and what the harness does
 in the meantime. Live traces reference the hosted dev deployment.
 
-## 1. Indicator definitions (the More Info panel)
-
-The More Info panel renders, per indicator: id (e.g. `BX.GRT.EXTA.CD.DT`),
-display name, and the full definition text ("Grants are defined as legally
-binding commitments…"). Neither the presentation surface nor the mint
-manifest carries names or definitions — a component GET returns
-`stored_intent`, `fact_summary` and the resolved revision, none of which
-names an indicator, and `trace.resolved_stat_vars` carries bare refs.
-
-**Ask:** prose definitions. data-mcp `describe` already serves the graph's
-label and a technical definition string (e.g. `mp=lifeExpectancy,pt=Person`)
-— the More Info panel needs the human paragraph.
-**Meanwhile:** the harness fills `fact_summary.indicators` from `describe`
-(cached per dcid): real labels, technical definition strings.
-
-## 2. Intent fields for card presentation (the Edit Card panel)
+## 1. Intent fields for card presentation (the Edit Card panel)
 
 The Edit Card panel edits subtitle, description, axis labels, and style.
 The platform intent schema is `type / frame_ref / select / title / window`
@@ -31,7 +16,7 @@ intent, if ONE wants them platform-durable.
 (`CompositionBlock.meta`, written by the `set_card_meta` op) — no platform
 involvement needed, additive migration if the intent grows them later.
 
-## 3. Revisable `window` / windowed fetch (the Edit Card panel and the plan card)
+## 2. Revisable `window` / windowed fetch (the Edit Card panel and the plan card)
 
 Verified against the HOSTED dev platform (2026-08-28): a revise patch was
 accepted only with `title` and/or `select` — a patch carrying `window`
@@ -50,7 +35,7 @@ revisable on components.
 **Meanwhile:** window edits recreate the component (new id, block replaced
 in place); window amendments are declined honestly in the plan's rationale.
 
-## 4. Identity-reproduction failures on some specs (blocks compare/rank turns)
+## 3. Identity-reproduction failures on some specs (blocks compare/rank turns)
 
 Some search envelopes fail data-mcp's identity check: "identity does not
 reproduce spec_id". The failure is per-spec and deterministic:
@@ -64,7 +49,7 @@ inflation / Kenya+Tanzania compare resolve fine.
 **Meanwhile:** the search step fails with the refusal and its trace id,
 and the agent answers without that data.
 
-## 5. `fact_summary.changed` is always empty (the Edit Card panel)
+## 4. `fact_summary.changed` is always empty (the Edit Card panel)
 
 Component revisions from the hosted dev platform were observed returning
 `changed: []` even when the revision genuinely changed title or selection
@@ -75,7 +60,7 @@ contract models support non-empty `changed`). The wire `component.revised` frame
 **Ask:** populate `changed` on revisions (nice-to-have; the harness
 workaround is complete).
 
-## 6. The datasets snapshot route is now production-critical
+## 5. The datasets snapshot route is now production-critical
 
 `GET /api/datasets/{id}/{cv}` (manifest + fresh signed artifact URL) is
 the frontend's plot-data path: every chart card fetches its points through
@@ -85,7 +70,7 @@ it (`docs/frontend-interface.md`, section 5, verified on hosted dev
 **Ask:** treat this route as production-critical — uptime, monitoring, and
 no breaking changes to the manifest/artifact shape without a version bump.
 
-## 7. Ambiguous questions need a `candidates` envelope (the More Details Question panel)
+## 6. Ambiguous questions need a `candidates` envelope (the More Details Question panel)
 
 Search states a tie between readings only in warning prose. Observed live
 (2026-08-31, "spending in Kenya"): search scores two readings within tolerance —
@@ -100,7 +85,7 @@ the tie out of that text.
 through `ask_user`.
 **Meanwhile:** the tie reaches the agent only as warning text.
 
-## 8. Skills for planner grounding
+## 7. Skills for planner grounding
 
 **Resolved.** dfo-apis serves skills through its Skills API, and data-mcp reads
 them with `get_skill` and `get_skill_file`. The planner carries both as its own
@@ -108,7 +93,7 @@ tools (`services/harness/src/planner/skills.py`), called through the harness's
 tool surface, and loads a skill that bears on the question. Where the Skills
 API is not mounted, both tools refuse `capability_unavailable` and the planner drafts without the skill.
 
-## 9. Frames produced by analysis-mcp are invisible to the presentation surface
+## 8. Frames produced by analysis-mcp are invisible to the presentation surface
 
 **Resolved.** The rejection was not dfo-apis' id validator: `dfo-apis/src/presentation_api/path_params.py` passes an `ops_` spec_id and an `ocv_` content_version through its own format check and leaves the spec\_/ops\_ classification to `FrameStore.load`. The regexes that gate a `frame_ref` before it reaches the platform live in this repo, in `services/presentation-mcp/src/presentation_mcp/client.py` and `tool_schema.py`, and match `^(?:spec|ops)_[a-z0-9]{1,64}$` and `^(?:cv|ocv)_[a-z0-9]{1,64}$`.
 
@@ -118,7 +103,7 @@ dfo-apis exposes `POST /api/datasets/frames/publish` (`src/datasets_api/doors/pu
 
 The remaining gap was in dfo-spec-kit, not in dfo-apis or this repo: its component envelope schema accepted a `spec_`/`ops_` spec_id but only a `cv_` content_version, so stamping a resolved component with a real `ocv_` content_version failed envelope validation even with the platform and client-side checks clear. dfo-spec-kit PR #73 widens that pattern to `^(cv|ocv)_[0-9a-f]{6,64}$`, merged at commit `89ec9988aa2100e8e99684edc249a44a0720c448`. dfo-apis pins commit `91400b0470827a0f156c3a8e6f2cfb39ec280143` on branch `pin/envelope-ocv-on-44c8013d`, which cherry-picks that same envelope fix onto the previous pin. spec-kit main also carries the `facet_probe_ceiling` and `qualifier_not_bound` registry entries, which dfo-apis' `tests/platform/test_registry_binding.py` requires it to serve before it can pin past them.
 
-## 10. Analysis verbs take raw column names (planner grounding)
+## 9. Analysis verbs take raw column names (planner grounding)
 
 `growth.entity_by`, `rank.rank_by`, `aggregate.group_by`, `join.join_keys`,
 and filter predicates all name frame columns literally. The entity column is
@@ -135,7 +120,7 @@ names as an override.
 entity column; a wrong name costs one replan and one further approval, after
 which the turn closes naming the step that could not run.
 
-## 11. A part refused for its denominator names neither side (per-head questions)
+## 10. A part refused for its denominator names neither side (per-head questions)
 
 Search answers "debt service per head" for Kenya `no_data` with reason
 `denominator_not_available`. The `no_data` block carries `reason`,

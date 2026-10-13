@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
+from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
 from google.adk.sessions import InMemorySessionService
@@ -20,6 +21,7 @@ from harness.graph.state import (
 )
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import ProvenanceStore
+from harness.studio import _OpenSteps
 from harness.studio_state import ConversationState, StudioStore, land_component, remove_cards
 from harness.studio_translate import (
     _ExecutorRecord,
@@ -216,17 +218,16 @@ def test_text_after_a_hand_off_is_not_shown_until_the_next_run_starts():
 
 
 @pytest.mark.parametrize(
-    ("answer", "detail"),
+    "answer",
     [
-        ({"error": "search is down"}, "search is down"),
-        ({"refusal": "too big", "code": "over_ceiling"}, "too big"),
+        {"error": "search is down"},
+        {"refusal": "request_invalid: /input/scope/window", "code": "request_invalid"},
         # A refusal that states no reason still fails its step.
-        ({"refusal": None, "code": "over_ceiling"}, None),
+        {"refusal": None, "code": "over_ceiling"},
     ],
 )
-def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_with_the_reason(
-    answer, detail
-):
+def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_without_its_reason(answer):
+    """The reason is written for the model, so the failed line carries none."""
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="fetch", args={"spec_id": "spec_x"})
     failed = types.FunctionResponse(id="call_1", name="fetch", response=answer)
@@ -239,7 +240,7 @@ def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_with_the_re
 
     assert [(f.status, f.detail) for f in frames if f.event == "activity.step"][:2] == [
         (StepStatus.RUNNING, None),
-        (StepStatus.FAILED, detail),
+        (StepStatus.FAILED, None),
     ]
 
 
@@ -290,7 +291,7 @@ def test_a_refused_hand_off_leaves_the_models_text_showing(answer):
     assert [f.text for f in closing if f.event == "message.complete"] == [
         "I cannot plan this; here is what I found."
     ]
-    assert ("Handing the question to the planner", StepStatus.FAILED) in _steps(frames)
+    assert ("Working on a plan", StepStatus.FAILED) in _steps(frames)
 
 
 def test_the_models_thinking_sends_no_thought_text():
@@ -323,6 +324,32 @@ def test_the_models_thinking_sends_no_thought_text():
     ]
 
 
+@pytest.mark.parametrize(
+    ("counts", "detail"),
+    [
+        ("DFO holds 92 datasets.", "DFO holds 92 datasets."),
+        # The model's instruction to quote no count is not shown to the user.
+        (COUNTS_UNAVAILABLE, None),
+    ],
+)
+def test_explain_dfos_step_shows_the_counts_it_read(counts, detail):
+    call = types.FunctionCall(id="call_1", name="explain_dfo", args={})
+    read = types.FunctionResponse(
+        id="call_1", name="explain_dfo", response={"explainer": "DFO is", "counts": counts}
+    )
+
+    frames = _frames(
+        _translator(),
+        _event(types.Part(function_call=call)),
+        _event(types.Part(function_response=read)),
+    )
+
+    assert [(f.status, f.detail) for f in frames if f.tool == "explain_dfo"] == [
+        (StepStatus.RUNNING, None),
+        (StepStatus.COMPLETE, detail),
+    ]
+
+
 def test_a_plan_the_planner_could_not_make_shows_as_a_failed_step():
     translator = _translator()
 
@@ -337,7 +364,7 @@ def test_a_plan_the_planner_could_not_make_shows_as_a_failed_step():
     assert _steps(frames) == [
         ("Reading your question", StepStatus.RUNNING),
         ("Reading your question", StepStatus.COMPLETE),
-        ("The planner could not make a plan", StepStatus.FAILED),
+        ("No plan could be made", StepStatus.FAILED),
         (ORCHESTRATOR_PLAN_FAILED_STATUS, StepStatus.RUNNING),
     ]
 
@@ -419,7 +446,7 @@ def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
     )
 
     assert [(f.label, f.status, f.detail) for f in frames if f.event == "activity.step"] == [
-        ("Reading background notes", StepStatus.FAILED, "no skill nope"),
+        ("Reading background notes", StepStatus.FAILED, None),
     ]
 
 
@@ -430,7 +457,12 @@ def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
     )
     found = {
         "parts": [
-            {"variable": "life expectancy", "status": "definite", "spec_id": "spec_le"},
+            {
+                "variable": "life expectancy",
+                "status": "definite",
+                "spec_id": "spec_le",
+                "resolved": "Life expectancy at birth in Rwanda",
+            },
             {"variable": "infant mortality", "status": "definite", "spec_id": "spec_im"},
             {"variable": "maternal deaths", "status": "no_data", "spec_id": None},
             {"variable": "aid per person", "status": "unsupported", "spec_id": None},
@@ -486,7 +518,8 @@ def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
             "Searching for data",
             StepStatus.COMPLETE,
             "life expectancy and infant mortality in Rwanda · "
-            "Found life expectancy, infant mortality; no data for maternal deaths; "
+            "Found Life expectancy at birth in Rwanda, infant mortality; "
+            "no data for maternal deaths; "
             "no supported dataset for aid per person",
         ),
         ("Fetching life expectancy", StepStatus.RUNNING, None),
@@ -541,14 +574,14 @@ def test_a_fetch_names_its_measure_from_the_conversations_readings_after_a_resum
     [
         (
             {"charts": [{"title": "A", "facts": {}}, {"title": "B", "error": "no such column"}]},
-            "1 of 2 could not be drawn: B: no such column",
+            "1 of 2 could not be drawn: B",
         ),
         (
             {
                 "charts": [{"title": "A", "facts": {}}],
                 "not_drawn": "1 charts past the 1 one call may draw",
             },
-            "1 of 2 could not be drawn: 1 charts past the 1 one call may draw",
+            "1 of 2 could not be drawn",
         ),
     ],
 )
@@ -572,6 +605,75 @@ def test_a_chart_call_that_drew_only_some_of_its_charts_fails(answer, detail):
         ("Making 2 charts", StepStatus.RUNNING, None),
         ("Making 2 charts", StepStatus.FAILED, detail),
     ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "status", "detail"),
+    [
+        ({"outcome": "completed", "run": {"run_id": "run_1"}}, StepStatus.COMPLETE, None),
+        ({"outcome": "not_chartable"}, StepStatus.COMPLETE, "The result cannot be drawn"),
+        (
+            {"outcome": "pending", "run": {"run_id": "run_1", "status": "pending"}},
+            StepStatus.PENDING,
+            "Storing the result is unfinished",
+        ),
+        (
+            {"outcome": "failed", "run": {"run_id": "run_1", "code": "publication_abandoned"}},
+            StepStatus.FAILED,
+            "The calculation failed",
+        ),
+        (
+            {"outcome": "failed", "run": {"run_id": "run_1", "status": "failed"}},
+            StepStatus.FAILED,
+            "The calculation failed",
+        ),
+        (
+            {"outcome": "requires_planning", "code": "plan_pending", "message": "End your turn."},
+            StepStatus.SKIPPED,
+            None,
+        ),
+        (
+            {"outcome": "needs_decision", "message": "Ask the user."},
+            StepStatus.SKIPPED,
+            None,
+        ),
+    ],
+    ids=[
+        "completed",
+        "not_chartable",
+        "pending",
+        "failed",
+        "failed-with-no-code",
+        "requires_planning",
+        "needs_decision",
+    ],
+)
+def test_a_direct_calculation_line_states_its_outcome(answer, status, detail):
+    translator = _translator()
+    call = types.FunctionCall(id="call_1", name="submit_analysis", args={"recipe": "growth"})
+
+    frames = _frames(
+        translator,
+        _event(types.Part(function_call=call)),
+        _event(
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id="call_1", name="submit_analysis", response=answer
+                )
+            )
+        ),
+    )
+
+    steps = [f for f in frames if f.event == "activity.step"][:2]
+    assert [(f.label, f.status, f.detail) for f in steps] == [
+        ("Calculating", StepStatus.RUNNING, None),
+        ("Calculating", status, detail),
+    ]
+    # Every line closes, a pending one included.
+    open_steps = _OpenSteps()
+    for step in steps:
+        open_steps.observe(step)
+    assert open_steps.close(ConversationState(conversation_id="c1"), detail="ended") == []
 
 
 def _record(tool: str, *, step_id: str | None = None, **result: object) -> _ExecutorRecord:
@@ -669,7 +771,7 @@ def test_tool_call_labels_come_from_the_arguments():
     assert _tool_call_label("make_charts", {"charts": [{}, {}]}) == "Making 2 charts"
     assert _tool_call_label("make_charts", {"charts": [{}]}) == "Making 1 chart"
     assert _tool_call_label("get_skill", {"skill_id": "oda-measures"}) == "Reading background notes"
-    assert _tool_call_label("plan", {"brief": "b"}) == "Handing the question to the planner"
+    assert _tool_call_label("plan", {"brief": "b"}) == "Working on a plan"
     assert _tool_call_label("explain_dfo", {}) == "Reading about DFO"
     assert _tool_call_label("recall", {"part": "plan"}) == "Looking back at an earlier turn"
     assert _tool_call_label("recall", {"part": "canvas"}) == "Looking at your canvas"

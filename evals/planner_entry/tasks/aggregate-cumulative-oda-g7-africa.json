@@ -1,0 +1,116 @@
+{
+  "id": "aggregate-cumulative-oda-g7-africa",
+  "kind": "aggregate",
+  "origin": "trace 7b16b47f-96b4-46cc-a95e-f1e4153ddd6f",
+  "question": "Total aid from G7 to Africa since 1965",
+  "searches": [
+    {
+      "query": "Total aid from G7 to Africa since 1965",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "text": "Africa",
+              "role": "to"
+            }
+          ],
+          "variable": "Total aid",
+          "time": "since 1965"
+        }
+      ]
+    },
+    {
+      "query": "Total aid gross disbursements in constant prices from G7 to Africa since 1965",
+      "parts": [
+        {
+          "unit": "constant US dollars",
+          "time": "since 1965",
+          "entities": [
+            {
+              "text": "G7",
+              "role": "from"
+            },
+            {
+              "text": "Africa",
+              "role": "to"
+            }
+          ],
+          "variable": "Gross disbursements of official development assistance"
+        }
+      ]
+    }
+  ],
+  "brief": "Total gross disbursements of official development assistance in constant 2024 US dollars from G7 to Africa from 1965 to 2024",
+  "asks": [
+    "Total cumulative gross disbursements of ODA from G7 to Africa between 1965 and 2024",
+    "Annual gross disbursements of ODA from G7 to Africa from 1965 to 2024"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "sum_of",
+    "distinction": "aggregate, not sum_of: the cumulative total sums the years of one series, where a sum_of adds two sources"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "Total gross disbursements of official development assistance in constant 2024 US dollars from G7 to Africa from 1965 to 2024",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "gross disbursements of ODA",
+        "entities": [
+          {
+            "name": "G7",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1965,
+          "end": 2024
+        },
+        "period_end_open": true,
+        "source_spec_id": "spec_845c457b3bab756a9a3e765e3cf8e8be"
+      },
+      {
+        "kind": "aggregate",
+        "id": "cumulative",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "cumulative"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "oda"
+        ]
+      }
+    ]
+  }
+}

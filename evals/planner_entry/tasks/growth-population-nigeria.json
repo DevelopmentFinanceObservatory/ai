@@ -1,0 +1,77 @@
+{
+  "id": "growth-population-nigeria",
+  "kind": "growth",
+  "origin": "authored",
+  "question": "How many people did Nigeria's population grow by between 2000 and 2023?",
+  "searches": [
+    {
+      "query": "How many people did Nigeria's population grow by between 2000 and 2023?",
+      "parts": [
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "time": "2000 to 2023"
+        }
+      ]
+    }
+  ],
+  "brief": "How many people did Nigeria's population grow by between 2000 and 2023?",
+  "asks": [
+    "The increase in Nigeria's population, in people, 2000 to 2023"
+  ],
+  "required_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "growth, not comparison: the absolute change in one series between two years, not a difference between two series"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "How many people did Nigeria's population grow by between 2000 and 2023?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "population",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Nigeria"
+          }
+        ],
+        "period": {
+          "start": 2000,
+          "end": 2023
+        },
+        "source_spec_id": "spec_ca8f2290c92fff4556cfd3acfa2ea121"
+      },
+      {
+        "kind": "growth",
+        "id": "increase",
+        "input_id": "population",
+        "window_start": 2000,
+        "window_end": 2023,
+        "change": "absolute"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "increase"
+        ]
+      }
+    ]
+  }
+}

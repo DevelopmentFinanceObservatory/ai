@@ -231,7 +231,7 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
         )
 
 
-def _coordinate(cell: str | UnitCell | None) -> str | None:
+def coordinate_text(cell: str | UnitCell | None) -> str | None:
     """One cell of a series' coordinates as text, in the form `dfo-apis`' assembler
     groups it under: a converted unit as `currency/prices[/base_year]`, a composed
     unit as the RFC 8785 text of its JSON object, and any other cell as itself."""
@@ -261,7 +261,7 @@ def _series(table: pa.Table) -> Iterator[tuple[dict[str, str], set[str]]]:
         coordinates = {
             column: text
             for column in dimensions
-            if (text := _coordinate(cells[column])) is not None
+            if (text := coordinate_text(cells[column])) is not None
         }
         rows = indices[groups.offsets[group] : groups.offsets[group + 1]]
         yield coordinates, {periods[row] for row in rows}

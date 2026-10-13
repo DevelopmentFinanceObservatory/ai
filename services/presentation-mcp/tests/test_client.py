@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import dataclasses
 import gzip
 import hashlib
@@ -21,8 +22,9 @@ from typing import Any
 
 import httpx2
 import pytest
+import rfc8785
 from common.materialisation import (
-    ComposedStatVar,
+    FrameIntegrityError,
     FrameRef,
     GcsMaterialisationStore,
     HeldFrame,
@@ -66,14 +68,25 @@ class _StubTrace:
     """A minimal stand-in for `analysis_mcp.trace.Trace`: satisfies
     `common.materialisation.trace.StoredFrameTrace` structurally, plus the
     `input_content_versions` field `frame_publish._input_content_versions`
-    reads duck-typed off the real thing and the `composed_stat_vars` field
-    `common.materialisation.composed_stat_vars_of` requires of it.
+    reads duck-typed off the real thing, and the `steps` `common.steps
+    .assemble_steps` reads: one `_StubStep`, or none for a trace stored before
+    steps were.
     """
 
     upstream_trace: dict[str, object]
     frame_content_version: str
     input_content_versions: tuple[str, ...]
-    composed_stat_vars: tuple[ComposedStatVar, ...] = ()
+    steps: tuple[_StubStep, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class _StubStep:
+    """A stand-in for `analysis_mcp.steps.Step`: the JSON form of one step."""
+
+    record: dict[str, Any]
+
+    def model_dump(self, *, mode: str) -> dict[str, Any]:
+        return copy.deepcopy(self.record)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,10 +130,11 @@ async def _put_ops_frame(
     content_version: str = _OCV_CONTENT_VERSION,
     input_content_versions: tuple[str, ...] = ("cv_" + "c" * 32,),
     execution_record: _StubExecutionRecord | None = None,
-    composed_stat_vars: tuple[ComposedStatVar, ...] = (),
+    step: dict[str, Any] | None = None,
 ) -> None:
     """Stores a one-row frame under an `ops_`/`ocv_` pair. With `execution_record`
-    its trace also carries what a recipe is built from."""
+    its trace also carries what a recipe is built from, and with `step` the
+    record of its own operation."""
     frame = Frame.build(
         role_keys=["recipientCountry"],
         rows=[
@@ -136,10 +150,10 @@ async def _put_ops_frame(
         upstream_trace={},
         frame_content_version=content_version,
         input_content_versions=input_content_versions,
-        composed_stat_vars=composed_stat_vars,
+        steps=() if step is None else (_StubStep(step),),
     )
     if execution_record is not None:
-        trace = _DerivedTrace(**dataclasses.asdict(trace), execution_record=execution_record)
+        trace = _DerivedTrace(**vars(trace), execution_record=execution_record)
     await store.put(
         FrameRef(spec_id=spec_id, content_version=content_version),
         frame=frame,
@@ -498,8 +512,9 @@ async def test_get_frame_view_publishes_an_ops_ref_before_reaching_the_platform(
 ) -> None:
     """An `ops_`/`ocv_` ref this process holds gets published to dfo-apis'
     `datasets_api` surface before the `presentation_api` call that reads it
-    -- the whole point of the publish hook. Its trace carries no op-spec, so
-    it is published without a recipe and the pair is logged.
+    -- the whole point of the publish hook. Its trace carries no op-spec and
+    no step, so it is published without a recipe or steps, and the pair is
+    logged for each.
     """
     caplog.set_level(logging.WARNING, logger=frame_publish.__name__)
     await _put_ops_frame(materialisation_store)
@@ -523,25 +538,31 @@ async def test_get_frame_view_publishes_an_ops_ref_before_reaching_the_platform(
     assert publish_body["role_keys"] == ["recipientCountry"]
     assert publish_body["input_content_versions"] == ["cv_" + "c" * 32]
     assert "recipe" not in publish_body
-    assert "composed_stat_vars" not in publish_body
+    assert "steps" not in publish_body
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert [record.args[:2] for record in warnings if isinstance(record.args, tuple)] == [
         (_OPS_SPEC_ID, _OCV_CONTENT_VERSION)
-    ]
+    ] * 2
 
 
 _ROOT_REF = FrameRef(spec_id="spec_" + "1" * 32, content_version="cv_" + "c" * 32)
 
 
-async def _put_derived_frame(store: InMemoryMaterialisationStore) -> FrameRef:
-    """Stores a `rank` of `_ROOT_REF` with the trace a recipe is built from, and the
-    root's mint record, and returns the derived frame's pair."""
+async def _put_derived_frame(
+    store: InMemoryMaterialisationStore,
+    *,
+    of: FrameRef = _ROOT_REF,
+    content_version: str = _OCV_CONTENT_VERSION,
+) -> FrameRef:
+    """Stores a `rank` of `of` under `content_version` with the trace a recipe is
+    built from and its step, and `_ROOT_REF`'s mint record, and returns the derived
+    frame's pair."""
     await store.put_mint_record(
         MintRecord(frame=_ROOT_REF, dataset=_ROOT_REF, options={"layout": "frame"})
     )
     content = json.dumps(
         {
-            "frame_ref": _ROOT_REF.model_dump(),
+            "frame_ref": of.model_dump(),
             "identity_version": "ops1",
             "parameters": {"rank_by": ["recipientCountry"]},
             "verb": "rank",
@@ -552,13 +573,38 @@ async def _put_derived_frame(store: InMemoryMaterialisationStore) -> FrameRef:
     await _put_ops_frame(
         store,
         spec_id=spec_id,
-        input_content_versions=(_ROOT_REF.content_version,),
+        content_version=content_version,
+        input_content_versions=(of.content_version,),
         execution_record=_StubExecutionRecord(content),
+        step={**_RANK_STEP, "id": spec_id, "input": _version_ref(of)},
     )
-    return FrameRef(spec_id=spec_id, content_version=_OCV_CONTENT_VERSION)
+    return FrameRef(spec_id=spec_id, content_version=content_version)
 
 
-async def test_a_derived_frame_is_published_with_its_recipe(
+def _version_ref(ref: FrameRef) -> dict[str, str]:
+    return {"id": ref.spec_id, "content_version": ref.content_version}
+
+
+_RANK_STEP: dict[str, Any] = {
+    "op": "rank",
+    "policy": "rank_by_latest_value",
+    "params": {"limit": 1},
+    "kept": {"entities": 1},
+}
+
+# The step list of `_put_derived_frame`'s rank: the root's retrieval, then the rank.
+_RANK_STEPS = [
+    {
+        "id": "s1",
+        "op": "retrieve",
+        "input": _version_ref(_ROOT_REF),
+        "options": {"layout": "frame"},
+    },
+    {**_RANK_STEP, "id": "s2", "input": "s1"},
+]
+
+
+async def test_a_derived_frame_is_published_with_its_recipe_and_steps(
     materialisation_store: InMemoryMaterialisationStore,
 ) -> None:
     ref = await _put_derived_frame(materialisation_store)
@@ -577,6 +623,7 @@ async def test_a_derived_frame_is_published_with_its_recipe(
         "frame_ref": {"frame": root.model_dump(), "root": 0}
     }
     assert publish_body["recipe"]["roots"][0]["dataset"] == root.model_dump()
+    assert publish_body["steps"] == _RANK_STEPS
     assert set(publish_body) == {
         "spec_id",
         "content_version",
@@ -584,7 +631,40 @@ async def test_a_derived_frame_is_published_with_its_recipe(
         "rows",
         "input_content_versions",
         "recipe",
+        "steps",
     }
+
+
+async def test_publishing_reads_each_ancestor_s_trace_and_mint_record_once(
+    materialisation_store: InMemoryMaterialisationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rank of a rank of a root: the recipe and the steps of the leaf read the
+    derived ancestor's trace and the root's mint record once between them."""
+    ancestor = await _put_derived_frame(materialisation_store)
+    leaf = await _put_derived_frame(
+        materialisation_store, of=ancestor, content_version="ocv_" + "9" * 32
+    )
+    reads: list[tuple[str, str]] = []
+    for name in ("get_trace", "get_mint_record"):
+        read = getattr(materialisation_store, name)
+
+        async def counted(ref: FrameRef, *, name: str = name, read: Any = read) -> Any:
+            reads.append((name, ref.spec_id))
+            return await read(ref)
+
+        monkeypatch.setattr(materialisation_store, name, counted)
+
+    async with client_module.publish_body_for(
+        spec_id=leaf.spec_id, content_version=leaf.content_version, max_frame_rows=10
+    ) as published:
+        body = json.loads(published.data)
+
+    assert [step["op"] for step in body["steps"]] == ["retrieve", "rank", "rank"]
+    assert body["recipe"]["tree"]["inputs"]["frame_ref"]["frame"] == ancestor.model_dump()
+    assert sorted(reads) == [
+        ("get_mint_record", _ROOT_REF.spec_id),
+        ("get_trace", ancestor.spec_id),
+    ]
 
 
 async def test_a_recipe_over_the_platforms_size_ceiling_is_left_out_of_the_body(
@@ -633,6 +713,7 @@ async def test_publish_frame_sends_the_callers_recipe_and_says_whether_it_was_ne
     assert answers == [True, False]
     bodies = [json.loads(gzip.decompress(request.content)) for request in requests]
     assert [body["recipe"] for body in bodies] == [recipe, recipe]
+    assert [body["steps"] for body in bodies] == [_RANK_STEPS, _RANK_STEPS]
     assert requests[0].headers[PRINCIPAL_HEADER]
 
 
@@ -722,27 +803,116 @@ async def test_a_recipe_conflict_leaves_the_frame_published_and_any_other_confli
         assert paths == ["/api/datasets/frames/publish"] * 2
 
 
-async def test_publish_sends_the_composed_stat_vars_the_stored_trace_describes(
+@pytest.mark.parametrize("ancestor", ["stores_no_step", "fails_a_store_check"])
+async def test_a_chain_through_an_unreadable_ancestor_step_publishes_without_steps(
     materialisation_store: InMemoryMaterialisationStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    ancestor: str,
 ) -> None:
-    per_head = ComposedStatVar(
-        stat_var="dcid:health_oda",
-        relation="quotient",
-        first=("dcid:OfficialDevelopmentAssistanceNet_Disbursement",),
-        second=("dcid:Count_Person",),
+    """The frame's own trace holds a step, and the trace of the frame it read was
+    stored before steps were or fails a store check, so the chain is unknown and
+    the frame publishes without it."""
+    caplog.set_level(logging.WARNING, logger=frame_publish.__name__)
+    older = FrameRef(spec_id="ops_" + "d" * 32, content_version="ocv_" + "e" * 32)
+    await _put_ops_frame(
+        materialisation_store, spec_id=older.spec_id, content_version=older.content_version
     )
-    await _put_ops_frame(materialisation_store, composed_stat_vars=(per_head,))
+    if ancestor == "fails_a_store_check":
+        get_trace = materialisation_store.get_trace
+
+        async def failing_get_trace(ref: FrameRef) -> StoredFrameTrace | None:
+            if ref == older:
+                raise FrameIntegrityError(ref, reason="sha256_mismatch")
+            return await get_trace(ref)
+
+        monkeypatch.setattr(materialisation_store, "get_trace", failing_get_trace)
+    await _put_ops_frame(
+        materialisation_store,
+        input_content_versions=("cv_" + "f" * 32,),
+        step={**_RANK_STEP, "id": _OPS_SPEC_ID, "input": _version_ref(older)},
+    )
     requests, handler = _publish_then_frame_handler(
         httpx2.Response(200, json={"spec_id": _OPS_SPEC_ID, "dimensions": {}})
     )
 
     async with _assembler(handler) as assembler:
-        await assembler.get_frame_view(
+        view = await assembler.get_frame_view(
             frame_ref={"spec_id": _OPS_SPEC_ID, "content_version": _OCV_CONTENT_VERSION}
         )
 
+    assert not isinstance(view, Refusal)
     publish_body = json.loads(gzip.decompress(requests[0].content))
-    assert publish_body["composed_stat_vars"] == [per_head.model_dump(mode="json")]
+    assert "steps" not in publish_body
+    assert "composed_stat_vars" not in publish_body
+    assert any(
+        record.getMessage().startswith(
+            f"publishing {_OPS_SPEC_ID}/{_OCV_CONTENT_VERSION} without steps"
+        )
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("bound", ["_MAX_STEPS", "_MAX_STEPS_BYTES"])
+async def test_a_step_list_over_a_door_bound_refuses_the_publish_and_sends_nothing(
+    materialisation_store: InMemoryMaterialisationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str,
+) -> None:
+    """The steps are never dropped to make a body fit."""
+    ref = await _put_derived_frame(materialisation_store)
+    at_bound = {
+        "_MAX_STEPS": len(_RANK_STEPS),
+        "_MAX_STEPS_BYTES": len(rfc8785.dumps(_RANK_STEPS)),
+    }[bound]
+    monkeypatch.setattr(frame_publish, bound, at_bound - 1)
+    requests, handler = _counting_handler(httpx2.Response(200, json={}))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(frame_ref=ref.model_dump())
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == "request_invalid"
+    assert reply.retry == RetryMode.DO_NOT_RETRY
+    assert requests == []
+
+
+async def test_a_stored_step_naming_no_frame_pair_refuses_the_publish_and_sends_nothing(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    await _put_ops_frame(
+        materialisation_store, step={**_RANK_STEP, "id": _OPS_SPEC_ID, "input": "s1"}
+    )
+    requests, handler = _counting_handler(httpx2.Response(200, json={}))
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(
+            frame_ref={"spec_id": _OPS_SPEC_ID, "content_version": _OCV_CONTENT_VERSION}
+        )
+
+    assert isinstance(reply, Refusal)
+    assert reply.error == "request_invalid"
+    assert requests == []
+
+
+async def test_a_door_refusal_of_the_steps_fails_the_publish(
+    materialisation_store: InMemoryMaterialisationStore,
+) -> None:
+    ref = await _put_derived_frame(materialisation_store)
+    requests, handler = _counting_handler(
+        httpx2.Response(
+            400,
+            content=_problem_body(code="request_invalid", retryable=False, pointer="/steps/1"),
+        )
+    )
+
+    async with _assembler(handler) as assembler:
+        reply = await assembler.get_frame_view(frame_ref=ref.model_dump())
+
+    assert isinstance(reply, Refusal)
+    assert (reply.error, reply.pointer) == ("request_invalid", "/steps/1")
+    assert "Publishing this frame to the platform failed" in reply.detail
+    assert [request.url.path for request in requests] == ["/api/datasets/frames/publish"]
 
 
 @pytest.mark.parametrize(
@@ -753,12 +923,12 @@ async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_publi
     materialisation_store: InMemoryMaterialisationStore, role: str, cell: str
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
-    sum keyed by a flow party carries `financingRecipient_kind`. dfo-apis joins
+    sum keyed by a flow party carries `financingRecipient_party_kind`. dfo-apis joins
     every role's value into a series label, so the published frame holds the
     place column alone, and the door's own `Frame.build` accepts it with every
     row kept.
     """
-    described = f"{role}_type" if role == "observationAbout" else f"{role}_kind"
+    described = f"{role}_type" if role == "observationAbout" else f"{role}_party_kind"
     rows = [
         {
             "stat_var": "dcid:LifeExpectancy_Person",

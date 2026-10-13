@@ -77,10 +77,22 @@ def test_entities_phrase_tells_a_sets_members_from_the_set() -> None:
 
 
 def test_entities_phrase_states_the_party_across_covers_last() -> None:
-    assert phrasing.entities_phrase([], across="donor") == "every donor"
+    assert phrasing.entities_phrase([], across=("donor",)) == "every donor"
     assert (
-        phrasing.entities_phrase([Entity(name="Kenya", role="recipient")], across="donor")
+        phrasing.entities_phrase([Entity(name="Kenya", role="recipient")], across=("donor",))
         == "Kenya and every donor"
+    )
+    assert (
+        phrasing.entities_phrase([], across=("donor", "recipients"))
+        == "every donor and every recipient"
+    )
+    assert (
+        phrasing.entities_phrase(
+            [],
+            across=("donor", "recipients", "country"),
+            member_counts={"donor": 55, "country": 193},
+        )
+        == "all 55 donors, every recipient and every place with data"
     )
 
 
@@ -114,14 +126,16 @@ def test_a_party_reads_as_every_member_and_the_place_as_every_place_with_data(
 ) -> None:
     # A retrieval that names no place holds every level of place, so the card
     # does not call it "every country".
-    assert phrasing.entities_phrase([], across=across) == every
+    assert phrasing.entities_phrase([], across=(across,)) == every
 
 
 def test_the_place_reads_as_the_level_a_filter_keeps() -> None:
-    assert phrasing.entities_phrase([], across="country", level=PlaceType.CONTINENT) == (
+    assert phrasing.entities_phrase([], across=("country",), level=PlaceType.CONTINENT) == (
         "every continent"
     )
-    assert phrasing.entities_phrase([], across="donors", level=PlaceType.COUNTRY) == "every donor"
+    assert (
+        phrasing.entities_phrase([], across=("donors",), level=PlaceType.COUNTRY) == "every donor"
+    )
 
 
 def test_every_level_of_place_has_a_noun_the_card_can_pluralise() -> None:

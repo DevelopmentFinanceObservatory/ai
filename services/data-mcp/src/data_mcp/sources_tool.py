@@ -9,7 +9,9 @@ as a digest a model can quote from without inventing a dataset's name:
 - with no `ref`, the source catalogue (`GET /api/graph/sources`): every
   publisher, each with the datasets DFO holds from it, one line per dataset
   with its years, cadence, licence and the first sentence of its
-  description;
+  description, opened by the counts of what DFO holds from the search
+  catalogue (`data_mcp.catalogue_counts`), or a line saying they are
+  unavailable;
 - with a `ref`, one dataset's documentation (`GET /api/graph/documentation/
   {dcid}`): what it is, who publishes it, its licence and cadence, its
   coverage, its methodology and data notes when the publisher wrote any,
@@ -17,20 +19,40 @@ as a digest a model can quote from without inventing a dataset's name:
   could not read and what is not published for it.
 
 Upstream access goes through the shared `UpstreamClient`; this module reads
-the two doors' wire shapes and nothing else of the Graph API.
+the two doors' wire shapes and nothing else of the Graph API. A licence's
+dates are labelled for what they are: `last_update` is the day DFO
+downloaded the data, and `next_expected_update` the month the publisher's
+next release is expected, marked overdue once that month has passed.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ConfigDict, Field
 
+from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE, counts_sentence, read_catalogue_counts
 from data_mcp.client_holder import get_client
 from data_mcp.describe_tool import DCID_PATTERN
 from data_mcp.errors import UpstreamError
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
+
+logger = logging.getLogger(__name__)
+
+
+def _utc_today() -> date:
+    return datetime.now(UTC).date()
+
+
+# The clock that decides whether a next release is overdue. Tests replace it.
+_today: Callable[[], date] = _utc_today
+_LEADING_DATE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})(?:-(?P<day>\d{2}))?")
 
 _CATALOGUE_ROUTE = "/api/graph/sources"
 _DOCUMENTATION_ROUTE = "/api/graph/documentation/{dcid}"
@@ -123,7 +145,9 @@ class _License(BaseModel):
     type: str | None = None
     url: str | None = None
     update_cadence: str | None = None
+    # The day DFO downloaded the data, an ISO 8601 date or timestamp.
     last_update: str | None = None
+    # When the publisher's next release is expected, an ISO 8601 month or date.
     next_expected_update: str | None = None
 
 
@@ -253,13 +277,14 @@ def _facts(*values: str | None) -> str:
     return "; ".join(stated)
 
 
-def _render_catalogue(catalogue: _Catalogue) -> tuple[str, dict[str, Any]]:
-    """The catalogue as a digest grouped by publisher, and its small answer,
-    under `RESULT_CAP_CHARS`: without description sentences when the full
-    digest is over it, and cut at a line break when that is still over."""
-    content, answer = _catalogue_digest(catalogue, with_descriptions=True)
+def _render_catalogue(catalogue: _Catalogue, *, counts: str) -> tuple[str, dict[str, Any]]:
+    """The catalogue as a digest grouped by publisher, opened by `counts`, and
+    its small answer, under `RESULT_CAP_CHARS`: without description sentences
+    when the full digest is over it, and cut at a line break when that is
+    still over."""
+    content, answer = _catalogue_digest(catalogue, counts=counts, with_descriptions=True)
     if len(content) > RESULT_CAP_CHARS:
-        content, answer = _catalogue_digest(catalogue, with_descriptions=False)
+        content, answer = _catalogue_digest(catalogue, counts=counts, with_descriptions=False)
         answer["descriptions_left_out"] = True
     return _bounded(content, what="datasets"), answer
 
@@ -276,23 +301,19 @@ def _bounded(content: str, *, what: str) -> str:
 
 
 def _catalogue_digest(
-    catalogue: _Catalogue, *, with_descriptions: bool
+    catalogue: _Catalogue, *, counts: str, with_descriptions: bool
 ) -> tuple[str, dict[str, Any]]:
-    """The catalogue digest, with or without each dataset's first description sentence."""
-    dataset_count = sum(len(entry.datasets) for entry in catalogue.sources)
-    buckets: dict[str, int] = {}
-    for entry in catalogue.sources:
-        buckets[entry.data_commons.label] = buckets.get(entry.data_commons.label, 0) + 1
-    bucket_line = ", ".join(f"{count} under {label}" for label, count in buckets.items())
+    """The catalogue digest under its `counts` line, with or without each
+    dataset's first description sentence."""
     lines = [
-        f"DFO holds {dataset_count} datasets from {len(catalogue.sources)} publishers "
-        f"({bucket_line}). One line per dataset: label [ref] (years; cadence; licence)"
+        counts,
+        "Datasets by publisher, one line per dataset: label [ref] (years; cadence; licence)"
         + (
             " -- the first sentence of its description."
             if with_descriptions
             else ". Descriptions are left out to fit one result."
         )
-        + " Pass a dataset's ref to this tool for its full documentation."
+        + " Pass a dataset's ref to this tool for its full documentation.",
     ]
     for entry in catalogue.sources:
         lines.append("")
@@ -311,10 +332,7 @@ def _catalogue_digest(
                 f"- {len(superseded)} dataset(s) from this publisher are served through DFO's "
                 "own version instead."
             )
-    answer = {
-        "datasets": dataset_count,
-        "publishers": [entry.source.label for entry in catalogue.sources],
-    }
+    answer = {"publishers": [entry.source.label for entry in catalogue.sources]}
     return "\n".join(lines), answer
 
 
@@ -339,8 +357,30 @@ def _plain_gap(path: str) -> str:
     return named.get(path, path.rsplit(".", 1)[-1].replace("_", " "))
 
 
-def _render_documentation(ref: str, doc: _Documentation) -> tuple[str, dict[str, Any]]:
-    """One dataset's documentation as a digest, and its small answer."""
+def _release_dates(licence: _License, *, today: date) -> str:
+    """The licence's dates, each labelled for what it is: the day DFO downloaded
+    the data, and when the publisher's next release is expected. The expected
+    date is marked overdue once it falls before `today`, by day for a
+    `YYYY-MM-DD` value and by month for a `YYYY-MM` one. A date with no leading
+    `YYYY-MM` is not marked. Returns `""` when neither date is stated."""
+    downloaded = licence.last_update.split("T", 1)[0] if licence.last_update else None
+    expected = licence.next_expected_update
+    due = _LEADING_DATE.match(expected) if expected else None
+    if due is not None:
+        parts = tuple(int(part) for part in due.groups() if part is not None)
+        if parts < (today.year, today.month, today.day)[: len(parts)]:
+            expected = f"{expected} (overdue)"
+    return _facts(
+        f"Downloaded by DFO {downloaded}" if downloaded else None,
+        f"Next release expected {expected}" if expected else None,
+    )
+
+
+def _render_documentation(
+    ref: str, doc: _Documentation, *, today: date
+) -> tuple[str, dict[str, Any]]:
+    """One dataset's documentation as a digest, and its small answer; `today`
+    decides whether the next release is overdue."""
     details, licence, scope = doc.details, doc.license, doc.scope_and_units
     title = details.name_of_source or ref
     lines = [f"# {title} [{ref}]"]
@@ -355,14 +395,15 @@ def _render_documentation(ref: str, doc: _Documentation) -> tuple[str, dict[str,
     licence_facts = _facts(
         licence.type,
         f"updated {licence.update_cadence.lower()}" if licence.update_cadence else None,
-        f"last update {licence.last_update}" if licence.last_update else None,
-        f"next expected {licence.next_expected_update}" if licence.next_expected_update else None,
     )
     if licence_facts:
         line = f"Licence: {licence_facts}."
         if licence.url:
             line += f" Terms: {licence.url}"
         lines.append(line)
+    release_dates = _release_dates(licence, today=today)
+    if release_dates:
+        lines.append(f"{release_dates}.")
     coverage = _facts(scope.years_covered, scope.granularity, scope.currency)
     if scope.countries:
         coverage = _facts(coverage, f"{len(scope.countries)} countries")
@@ -446,16 +487,19 @@ async def sources(
 ) -> ToolResult:
     """What data DFO holds, and how one of its datasets is made.
 
-    Call this with no `ref` to learn what DFO holds: every publisher and, under
-    each, the datasets DFO serves from it, one line per dataset with its years,
-    update cadence, licence and the first sentence of its description. Use it
+    Call this with no `ref` to learn what DFO holds: how many indicators,
+    datasets, publishers, countries and aid donors and recipients, then every
+    publisher and, under each, the datasets DFO serves from it, one line per
+    dataset with its years, update cadence, licence and the first sentence of
+    its description. Use it
     for a question about the data itself rather than about a measure -- what
     datasets exist, who publishes them, how far back they go -- which `search`
     cannot answer because it names no indicator to resolve. Never invent a
     dataset the catalogue does not list.
 
     Call it with a `ref` from the catalogue for that dataset's documentation:
-    what it is, who publishes it, its licence and cadence, its coverage, its
+    what it is, who publishes it, its licence and cadence, when DFO downloaded
+    it and when the publisher's next release is expected, its coverage, its
     methodology and data notes when the publisher wrote any, how DFO transforms
     it, and what is not published for it, named plainly. A ref the catalogue
     does not name refuses `node_not_held`.
@@ -469,28 +513,50 @@ async def sources(
     if ref is None:
         return await _catalogue_result()
     refusal = _ref_refusal(ref)
-    return refusal if refusal is not None else await _documentation_result(ref)
+    if refusal is not None:
+        return refusal
+    return await _documentation_result(ref, today=_today())
 
 
-async def _catalogue_result() -> ToolResult:
-    """The catalogue digest, or the refusal for a read that failed."""
+async def _counts_line() -> tuple[str, dict[str, Any] | None]:
+    """The counts sentence and counts of the live search catalogue, or
+    `COUNTS_UNAVAILABLE` and `None` when it could not be read."""
+    try:
+        _version, counts = await read_catalogue_counts()
+    except (UpstreamError, ValueError) as exc:
+        logger.warning("search catalogue counts not read: %s", exc)
+        return COUNTS_UNAVAILABLE, None
+    return counts_sentence(counts), counts.model_dump()
+
+
+async def _source_catalogue() -> _Catalogue | ToolResult:
+    """The Graph API's source catalogue, or the refusal for a read that failed."""
     try:
         response = await get_client().request("GET", _CATALOGUE_ROUTE, route=_CATALOGUE_ROUTE)
     except UpstreamError as exc:
         return _refusal_from_upstream(exc, None)
     try:
-        catalogue = _Catalogue.model_validate(response.json())
+        return _Catalogue.model_validate(response.json())
     except ValueError as exc:
         return to_tool_result(
             ToolRefusal.upstream_response_unusable(
                 detail=f"the source catalogue did not match the shape this service expects: {exc}"
             )
         )
-    content, answer = _render_catalogue(catalogue)
+
+
+async def _catalogue_result() -> ToolResult:
+    """The catalogue digest under the counts line, or the refusal for a
+    source catalogue read that failed. The two reads run together."""
+    (counts, counted), catalogue = await asyncio.gather(_counts_line(), _source_catalogue())
+    if isinstance(catalogue, ToolResult):
+        return catalogue
+    content, answer = _render_catalogue(catalogue, counts=counts)
+    answer["counts"] = counted
     return ToolResult(content=content, structured_content=answer, is_error=False)
 
 
-async def _documentation_result(ref: str) -> ToolResult:
+async def _documentation_result(ref: str, *, today: date) -> ToolResult:
     """One dataset's documentation digest, or the refusal for a read that failed."""
     try:
         response = await get_client().request(
@@ -506,7 +572,7 @@ async def _documentation_result(ref: str) -> ToolResult:
                 detail=f"the source documentation did not match the shape this service expects: {exc}"
             )
         )
-    content, answer = _render_documentation(ref, doc)
+    content, answer = _render_documentation(ref, doc, today=today)
     content = _bounded(content, what="documentation")
     return ToolResult(content=content, structured_content=answer, is_error=False)
 

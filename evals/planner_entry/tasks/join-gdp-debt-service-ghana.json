@@ -1,0 +1,96 @@
+{
+  "id": "join-gdp-debt-service-ghana",
+  "kind": "join",
+  "origin": "pilot",
+  "question": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
+  "searches": [
+    {
+      "query": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
+      "parts": [
+        {
+          "variable": "GDP",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2015 to 2022"
+        },
+        {
+          "variable": "external debt service",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
+  "asks": [
+    "One table of Ghana's GDP and external debt service, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "join"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "join"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "join, not comparison: two different measures are set in one table, with no difference asked for"
+  },
+  "reference_payload": {
+    "question": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Ghana"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        }
+      },
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Ghana"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        }
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "left_id": "gdp",
+        "right_id": "debt_service"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ]
+  }
+}

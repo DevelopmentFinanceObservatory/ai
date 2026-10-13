@@ -341,14 +341,25 @@ _KENYA_DEBTOR = Entity(name="Kenya", role="debtor")
 @pytest.mark.parametrize(
     ("entities", "across", "open_roles"),
     [
-        ([_KENYA_DEBTOR], "creditor", ["creditor"]),
-        ([], "creditor", ["creditor"]),
-        ([_KENYA_DEBTOR], "lenders", ["creditor"]),
-        ([Entity(name="Kenya")], "donor", ["donor"]),
-        ([_KENYA_DEBTOR], "countries", None),
-        ([_KENYA_DEBTOR], "bilateral creditor", None),
+        ([_KENYA_DEBTOR], ("creditor",), ["creditor"]),
+        ([], ("creditor",), ["creditor"]),
+        ([_KENYA_DEBTOR], ("lenders",), ["creditor"]),
+        ([Entity(name="Kenya")], ("donor",), ["donor"]),
+        ([_KENYA_DEBTOR], ("countries",), None),
+        ([_KENYA_DEBTOR], ("bilateral creditor",), None),
+        ([], ("donors", "recipient"), ["donor", "recipient"]),
+        ([_KENYA_DEBTOR], ("creditor", "country"), ["creditor"]),
     ],
-    ids=["beside-entity", "alone", "plural-synonym", "unroled-entity", "place", "narrower"],
+    ids=[
+        "beside-entity",
+        "alone",
+        "plural-synonym",
+        "unroled-entity",
+        "place",
+        "narrower",
+        "both-sides",
+        "beside-the-place",
+    ],
 )
 async def test_a_flow_party_stated_in_across_reaches_search_as_an_open_role(
     surface: McpSurface,
@@ -357,7 +368,7 @@ async def test_a_flow_party_stated_in_across_reaches_search_as_an_open_role(
     search_calls: list[dict[str, Any]],
     context_holding: ContextHolding,
     entities: list[Entity],
-    across: str,
+    across: tuple[str, ...],
     open_roles: list[str] | None,
 ) -> None:
     # Search elects a source broken down by the open role over its total, so
@@ -399,7 +410,7 @@ async def test_a_source_dumped_without_its_open_axes_is_not_selectable_for_acros
     stored = context.state[DISCOVERY_STATE_KEY]["sources"]["annual_debt_service"][SPEC_KENYA]
     del stored["open_entity_axes"]
     keys = _requirement_keys(context, "annual_debt_service")
-    across = requirement(across="bilateral creditor")
+    across = requirement(across=("bilateral creditor",))
     assert requirement_revision(across) == keys["annual_debt_service"]
 
     restored = load_log(context.state)
@@ -1234,7 +1245,7 @@ async def test_a_pin_leaving_the_across_side_closed_is_searched_for_as_an_open_r
         draft(
             decisions=[pinning_decision(spec_id)],
             evidence_requirements=[
-                requirement(source_spec_id=spec_id, period=period, across="creditors"),
+                requirement(source_spec_id=spec_id, period=period, across=("creditors",)),
                 derived_requirement(),
             ],
         )
@@ -2917,10 +2928,139 @@ async def test_excluded_source_and_chosen_reference_reach_search(
     )
 
 
-async def test_discovery_preserves_source_name_candidates_for_the_referral(draft, context_holding):
+async def test_a_source_code_reaches_search_upper_cased(
+    surface, draft, requirement, derived_requirement, search_calls, context_holding
+):
+    ask = requirement(source_code=" dt.tds.degg.cd ")
+    context = context_holding(draft(evidence_requirements=[ask, derived_requirement()]))
+    await _discover(surface, context)
+    assert search_calls[0]["parts"][0]["source_code"] == "DT.TDS.DEGG.CD"
+    assert requirement_revision(ask) != requirement_revision(
+        ask.model_copy(update={"source_code": None})
+    )
+
+
+_DEGG = "DT.TDS.DEGG.CD"
+_MIDA = "DT.NFL.MIDA.CD"
+_IMFC = "DT.NFL.IMFC.CD"
+
+
+@pytest.mark.parametrize(
+    ("held", "asked", "searched"),
+    [
+        ([{"code": _DEGG, "exact": True}], " dt.tds.degg.cd ", None),
+        (
+            [{"code": "dt.dod.dect.cd", "exact": False}, {"code": _DEGG, "exact": True}],
+            _DEGG,
+            None,
+        ),
+        ([{"code": _DEGG, "exact": True}], "DT.DOD.DECT.CD", "DT.DOD.DECT.CD"),
+        ([], _DEGG, _DEGG),
+        # A family listing two codes, neither marked exact, is neither series.
+        ([{"code": _MIDA}, {"code": _IMFC}], _MIDA, _MIDA),
+        ([{"code": _DEGG}], _DEGG, _DEGG),
+        ([{"code": _DEGG, "exact": False}], _DEGG, _DEGG),
+        ([{"code": _DEGG, "exact": "true"}], _DEGG, _DEGG),
+        ([{"code": _DEGG, "exact": 1}], _DEGG, _DEGG),
+    ],
+    ids=[
+        "exact",
+        "exact_among_several",
+        "another_code",
+        "no_codes_on_record",
+        "listed_not_exact",
+        "no_exact_key",
+        "exact_false",
+        "exact_string",
+        "exact_integer",
+    ],
+)
+async def test_a_pin_is_reused_only_when_its_dataset_is_the_source_code_series(
+    surface,
+    draft,
+    pinning_decision,
+    requirement,
+    derived_requirement,
+    search_calls,
+    context_holding,
+    held,
+    asked,
+    searched,
+):
+    ask = requirement(source_code=asked, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[ask, derived_requirement()],
+        )
+    )
+    stat_vars = {"member_count": 1, "member_count_exact": True, "served_count": 1}
+    if held:
+        stat_vars["source_codes"] = [{"provenance": "provenance/IDS", **entry} for entry in held]
+    _shown(
+        context,
+        SPEC_KENYA,
+        _spec(
+            SPEC_KENYA,
+            "debt service paid by Kenya",
+            coverage=_matching_window(),
+            stat_vars=stat_vars,
+        ),
+    )
+
+    await _discover(surface, context)
+
+    assert [call["parts"][0].get("source_code") for call in search_calls] == (
+        [searched] if searched else []
+    )
+    assert [record.tool for record in load_log(context.state).records] == (
+        ["search"] if searched else ["pin"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "variable", "kind"),
+    [
+        (_MIDA, "debt service", "no_data"),
+        ("DT.NFL.NONE.CD", "debt service", "no_data"),
+        # A refusal that does not name the code leaves the pin not found.
+        (None, "unicorn debt service", "pinned_source_not_found"),
+        (_DEGG, "unicorn debt service", "pinned_source_not_found"),
+    ],
+    ids=["shares_variable", "not_held", "no_code", "code_with_another_refusal"],
+)
+async def test_a_pinned_requirement_is_told_its_pin_is_missing_unless_search_refused_its_code(
+    surface,
+    draft,
+    pinning_decision,
+    requirement,
+    derived_requirement,
+    search_calls,
+    context_holding,
+    code,
+    variable,
+    kind,
+):
+    ask = requirement(source_code=code, measure=variable, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[ask, derived_requirement()],
+        )
+    )
+
+    result = await _discover(surface, context)
+
+    assert len(search_calls) == 1
+    assert result["action"]["arguments"]["kind"] == kind
+
+
+async def test_a_pinned_requirement_is_told_its_code_is_ambiguous(
+    draft, pinning_decision, requirement, derived_requirement, context_holding
+):
     groups = [
         {
-            "text": "shared",
+            "text": _DEGG,
             "candidates": [
                 {"ref": "provenance/a", "label": "A", "kind": "provenance"},
                 {"ref": "provenance/b", "label": "B", "kind": "provenance"},
@@ -2933,7 +3073,56 @@ async def test_discovery_preserves_source_name_candidates_for_the_referral(draft
                 "status": "no_data",
                 "no_data": {
                     "category": "unresolved",
-                    "reason": "source_ambiguous",
+                    "reason": "source_code_ambiguous",
+                    "ambiguous_sources": groups,
+                },
+            }
+        ]
+    }
+    surface = FixtureSurface(
+        schemas=[],
+        responses={
+            "search": ToolCallResult(
+                is_error=False, structured_content={}, meta={SEARCH_ENVELOPE_META_KEY: envelope}
+            )
+        },
+    )
+    ask = requirement(source_code=_DEGG, source_spec_id=SPEC_KENYA)
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[ask, derived_requirement()],
+        )
+    )
+
+    result = await _discover(surface, context)
+
+    assert result["action"]["arguments"]["kind"] == "source_name_ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("reason", "text"),
+    [("source_ambiguous", "shared"), ("source_code_ambiguous", "DT.TDS.DEGG.CD")],
+)
+async def test_discovery_preserves_source_name_candidates_for_the_referral(
+    draft, context_holding, reason, text
+):
+    groups = [
+        {
+            "text": text,
+            "candidates": [
+                {"ref": "provenance/a", "label": "A", "kind": "provenance"},
+                {"ref": "provenance/b", "label": "B", "kind": "provenance"},
+            ],
+        }
+    ]
+    envelope = {
+        "parts": [
+            {
+                "status": "no_data",
+                "no_data": {
+                    "category": "unresolved",
+                    "reason": reason,
                     "ambiguous_sources": groups,
                 },
             }

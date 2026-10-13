@@ -19,7 +19,7 @@ from compiler.surface import McpSurface, ToolSurface
 from google.adk.agents import LlmAgent
 from planner.agent import create_planner_agent
 from planner.settings import AgentSettings
-from translator.tool import build_translate
+from translator.tool import Translate, build_translate
 
 from harness.conversation import current_conversation_caller
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -67,14 +67,16 @@ def create_planner_with_translator(
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
     prefix_cache: PrefixCache | None = None,
+    translate: Translate | None = None,
 ) -> LlmAgent:
     """Build the planner agent with translation attached to `propose_plan`.
 
     Args:
         settings: The harness service's settings, read for the MCP URLs the
             default surface covers.
-        agent_settings: The model the planner runs on. Defaults to reading the
-            environment, the same way the deployed service does.
+        agent_settings: The model the planner runs on and how it is handed the
+            requirement schemas (`planner_schema_delivery`). Defaults to
+            reading the environment, the same way the deployed service does.
         surface: The tool surface translation discovers on and compiles
             against, and the planner's `get_skill` and `get_skill_file` call
             data-mcp through. Tests pin one here so the planner builds without
@@ -87,6 +89,9 @@ def create_planner_with_translator(
             function, so the default here only has to keep this function's
             other callers byte-identical.
         prefix_cache: Passed straight through to `create_planner_agent`.
+        translate: The translation `propose_plan` runs on each plan it
+            records. Defaults to `translator.tool.build_translate` over
+            `surface`.
 
     Returns:
         The planner `LlmAgent`, whose `propose_plan` translates each plan it
@@ -96,8 +101,9 @@ def create_planner_with_translator(
     resolved_surface = surface if surface is not None else build_tool_surface(settings=settings)
     return create_planner_agent(
         model_name=resolved_agent_settings.planner_model_name,
-        translate=build_translate(surface=resolved_surface),
+        translate=translate if translate is not None else build_translate(surface=resolved_surface),
         surface=resolved_surface,
         question_fixed=question_fixed,
         prefix_cache=prefix_cache,
+        schema_delivery=resolved_agent_settings.planner_schema_delivery,
     )

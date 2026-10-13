@@ -58,6 +58,7 @@ from typing import Any, Final
 from analysis_mcp.execution_identity import current_execution_identity
 from common import live_apis
 from common.live_apis import (
+    DatasetVersion,
     FramePair,
     LiveApisClient,
     LiveApisError,
@@ -354,6 +355,13 @@ class LiveRefresh:
         """Release the dependencies' connections."""
         for close in self._closers:
             await close()
+
+    async def dataset_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
+        """The stored versions of the dataset `spec_id` names, newest first,
+        read through this refresh's dfo-apis client: the reader
+        `data_mcp.mint_recovery.recover_mint_record` rebuilds a root's mint
+        record from (`harness.mcp_client.McpExecutor.publish_result`)."""
+        return await self._apis.list_versions(spec_id=spec_id)
 
     async def answer(self, *, component_id: str, revision: int) -> _Answer:
         """The answer to one admitted request, drawing on the route's rate bucket

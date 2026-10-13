@@ -24,6 +24,7 @@ from presentation_mcp.projection import (
     MAX_VALUE_COLUMNS,
     PROJECTION_CUT_NOTICE,
     ROWLESS_NOTICE,
+    card_facts,
     delta_projection,
     describe,
     shared_unit,
@@ -37,6 +38,14 @@ from .stub_assembler import resolved_revision
 MEMBERS = ("line_chart", "bar_chart", "table", "stat_card", "note_narration", "source_card")
 # The catalogue's payloads whose unit is a quotient of two measures.
 COMPOSED_UNIT_PAYLOADS = ("stat_card_composed_unit", "table_composed_unit")
+# Cards that keep lineage alone in their provenance: two with a description,
+# whose sources, freshness, caveats and citation it holds, and a narration
+# note, which states none.
+LINEAGE_ONLY_PAYLOADS = (
+    "line_chart_description",
+    "source_card_description",
+    "note_narration_lineage",
+)
 _GOLDEN = Path(__file__).parent / "fixtures" / "projection"
 
 # Four bytes in UTF-8, so a clipped string is as large in bytes as it gets.
@@ -47,7 +56,7 @@ def _wide(length: int) -> str:
     return _WIDE * length
 
 
-@pytest.mark.parametrize("member", [*MEMBERS, *COMPOSED_UNIT_PAYLOADS])
+@pytest.mark.parametrize("member", [*MEMBERS, *COMPOSED_UNIT_PAYLOADS, *LINEAGE_ONLY_PAYLOADS])
 def test_each_member_projects_to_its_pinned_markdown(member: str) -> None:
     envelope = resolved_revision(member)
 
@@ -97,11 +106,11 @@ def test_a_rowless_projection_of_a_cut_payload_drops_the_cut_line() -> None:
 
 def test_warning_texts_clip_each_detail_unless_the_limit_is_none() -> None:
     detail = "word " * 60
-    provenance = {"warnings": [{"kind": "facet_axis", "detail": detail}]}
+    facts = card_facts({"provenance": {"warnings": [{"kind": "facet_axis", "detail": detail}]}})
 
-    (clipped,) = warning_texts(provenance)
-    (whole,) = warning_texts(provenance, limit=None)
-    (short,) = warning_texts(provenance, limit=10)
+    (clipped,) = warning_texts(facts)
+    (whole,) = warning_texts(facts, limit=None)
+    (short,) = warning_texts(facts, limit=10)
 
     assert clipped == f"facet axis: {detail.strip()[: MAX_TEXT_CHARS - 1]}…"
     assert whole == f"facet axis: {detail}"
@@ -109,10 +118,11 @@ def test_warning_texts_clip_each_detail_unless_the_limit_is_none() -> None:
 
 
 def test_warning_texts_count_the_rest_past_the_cap_unless_the_count_is_none() -> None:
-    provenance = {"warnings": [{"kind": "no_data", "detail": f"Gap {i}."} for i in range(5)]}
+    warnings = [{"kind": "no_data", "detail": f"Gap {i}."} for i in range(5)]
+    facts = card_facts({"provenance": {"warnings": warnings}})
 
-    capped = warning_texts(provenance)
-    every = warning_texts(provenance, count=None)
+    capped = warning_texts(facts)
+    every = warning_texts(facts, count=None)
 
     assert capped == ["no data: Gap 0.", "no data: Gap 1.", "no data: Gap 2.", "2 more warnings"]
     assert every == [f"no data: Gap {i}." for i in range(5)]

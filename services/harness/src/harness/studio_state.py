@@ -41,7 +41,7 @@ import math
 import re
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,13 +50,14 @@ from typing import Any, Literal
 from common.telemetry import end_turn_span, start_turn_span, use_turn_span
 from compiler.sources import alternative_definitions, source_from_spec_block
 from data_mcp.definition_store.identity import IdentityMismatch
-from data_mcp.definition_writes import IdentityUnusable, caller_definition
+from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
+from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
 from google.adk.errors import StaleSessionError
 from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig
-from planner.plan import cut_user_text
+from planner.plan import PlanStatus, ResolvedBy, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
@@ -64,6 +65,7 @@ from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.turn_records import (
     PlanRecord,
+    PlanSource,
     RecordedIdentity,
     SearchReading,
     named_spec_ids,
@@ -112,19 +114,21 @@ _CUT_MARKER = "[cut]"
 _BLOCK_ID_BYTES = 64
 _BLOCK_TYPE_BYTES = 32
 _BLOCK_FRAME_BYTES = 128
-# What a block shows (`_digest_shows`): up to `_DIGEST_SHOW_CAP` variable names
-# and as many entity names, the widest select a component admits (`line_chart`'s
-# 8 values), each cut to `_DIGEST_NAME_BYTE_CAP`, and a time span cut to
-# `_DIGEST_TIME_BYTE_CAP`. `_BLOCK_SHOWS_BYTES` covers both lists with their keys,
-# brackets and separators, and the time span with its key.
-# A list cut to its cap carries a `<key>_truncated` label of up to
+# What a block shows (`_digest_shows`): up to `_DIGEST_SHOW_CAP` entity names,
+# the widest select a component admits (`line_chart`'s 8 values), each cut to
+# `_DIGEST_NAME_BYTE_CAP`, and a time span cut to `_DIGEST_TIME_BYTE_CAP`.
+# `_BLOCK_SHOWS_BYTES` covers the list with its key, brackets and separators,
+# and the time span with its key.
+# A list cut to its cap carries an `entities_truncated` label of up to
 # `_SUBSET_LABEL_BYTES`, key included (`_subset_label`).
 _DIGEST_SHOW_CAP = 8
 _DIGEST_NAME_BYTE_CAP = 64
 _DIGEST_TIME_BYTE_CAP = 24
 _SUBSET_LABEL_BYTES = 96
 _BLOCK_SHOWS_BYTES = (
-    2 * (16 + _DIGEST_SHOW_CAP * (_DIGEST_NAME_BYTE_CAP + 2) + _SUBSET_LABEL_BYTES)
+    16
+    + _DIGEST_SHOW_CAP * (_DIGEST_NAME_BYTE_CAP + 2)
+    + _SUBSET_LABEL_BYTES
     + 12
     + _DIGEST_TIME_BYTE_CAP
 )
@@ -615,6 +619,19 @@ class ConversationState:
                 listing[f"{name}_not_shown"] = rest
         return listing
 
+    def awaited_runs(self) -> set[str]:
+        """The run ids of the stored plan records that state `EXECUTING`,
+        whose status the run ledger may since have settled
+        (`PlanRecord.with_run_status`)."""
+        return {
+            plan["run_id"]
+            for turn in self.turns
+            for plan in turn.get("plans") or ()
+            if isinstance(plan, dict)
+            and plan.get("status") == PlanStatus.EXECUTING
+            and isinstance(plan.get("run_id"), str)
+        }
+
     def conversation_digest_state(self) -> dict[str, Any] | None:
         """The newest turns as compact {user, assistant, plans, cards}
         records, the models' cross-turn memory.
@@ -658,11 +675,14 @@ class ConversationState:
         part: RecallPart,
         turn: int | None = None,
         component_id: str | None = None,
+        runs: Mapping[str, RunStatus] | None = None,
     ) -> dict[str, Any]:
         """One earlier part of this conversation, in full: the plan records
         (`plan`) or search readings (`readings`) of turn number `turn`
         (1-based; the newest turn that has any when `turn` is None), each
-        rendered to at most `_RECALL_TEXT_BUDGET` characters, the stored
+        rendered to at most `_RECALL_TEXT_BUDGET` characters, a plan record's
+        status read from its run in `runs`, the run ledger's statuses by run
+        id (`PlanRecord.with_run_status`), the stored
         entry of the canvas component `component_id`, or, with no
         `component_id`, the canvas listing (`canvas_listing_state`). Raises
         `RecallRefusedError` naming the legal values when the target does not
@@ -692,7 +712,12 @@ class ConversationState:
             )
         record = self.turns[turn - 1]
         if part == "plan":
-            plans = _validated(PlanRecord, record["plans"], reader="recall", what="plan record")
+            plans = [
+                plan.with_run_status(runs or {})
+                for plan in _validated(
+                    PlanRecord, record["plans"], reader="recall", what="plan record"
+                )
+            ]
             budget = _RECALL_TEXT_BUDGET // max(len(plans), 1)
             text = [plan.render(budget=budget) for plan in plans]
         else:
@@ -738,14 +763,21 @@ class ConversationState:
         readings = [*self.turn_readings, *(reading.model_dump(mode="json") for reading in sourced)]
         if readings:
             record["readings"] = readings
-        # Only the blocks of the sources the turn's plans used, since a block
-        # can run to about 120 KB and the record is kept for the whole
-        # conversation.
+        # Only the blocks of the sources the turn's plans used, and of the
+        # source each windowed copy among them copies, since a block can run
+        # to about 120 KB and the record is kept for the whole conversation.
+        identities = _turn_identities(self.turn_specs, plans)
+        windowed_from = _windowed_from(
+            [source for plan in plans for source in plan.sources],
+            {**self._earlier_identities(), **identities},
+        )
+        if windowed_from:
+            record["windowed_from"] = windowed_from
         used = {source.spec_id for plan in plans for source in plan.sources}
+        used |= set(windowed_from.values())
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
-        identities = _turn_identities(self.turn_specs, plans)
         if identities:
             record["identities"] = {
                 spec_id: recorded.model_dump(mode="json")
@@ -773,6 +805,14 @@ class ConversationState:
                 return RecordedIdentity.model_validate(stored)
         return None
 
+    def _earlier_identities(self) -> dict[str, RecordedIdentity]:
+        """The identities earlier turns stored (`close_turn`), by spec_id."""
+        return {
+            spec_id: RecordedIdentity.model_validate(stored)
+            for turn in self.turns
+            for spec_id, stored in (turn.get("identities") or {}).items()
+        }
+
     def prior_ledger_state(self) -> dict[str, Any] | None:
         """The search readings of every earlier turn, for this turn's planner
         to render beside its own and pin from. None when no turn read any.
@@ -785,15 +825,41 @@ class ConversationState:
         reading that names a spec_id decides. `spec_ids` lists the spec_ids
         `earlier_block` resolves. No block is included. A pin or a fetch
         reads one through `earlier_block`.
+
+        `windowed_from` maps each windowed copy a plan retrieved to the
+        source it copies (`close_turn`), and `elected` lists the spec_ids
+        the user chose, read off each plan decision resolved by the user
+        that fixes a source, with the source each such copy copies. Each is
+        left out when empty.
         """
         readings, blocks, warnings = self._earlier_ledger()
         if not readings:
             return None
-        return {
+        ledger: dict[str, Any] = {
             "readings": [r.model_dump(mode="json") for r in newest_per_spec_id(readings)],
             "warnings": warnings,
             "spec_ids": list(blocks),
         }
+        windowed_from: dict[str, str] = {}
+        for turn in self.turns:
+            windowed_from.update(turn.get("windowed_from") or {})
+        if windowed_from:
+            ledger["windowed_from"] = windowed_from
+        chosen = {
+            decision.source_spec_id
+            for turn in self.turns
+            for plan in _validated(
+                PlanRecord, turn.get("plans") or (), reader="ledger", what="plan record"
+            )
+            for decision in plan.decisions
+            if decision.resolved_by is ResolvedBy.USER and decision.source_spec_id is not None
+        }
+        elected = chosen | {
+            windowed_from[spec_id] for spec_id in chosen if spec_id in windowed_from
+        }
+        if elected:
+            ledger["elected"] = sorted(elected)
+        return ledger
 
     def earlier_block(self, spec_id: str) -> dict[str, Any] | None:
         """The spec block an earlier turn stored for `spec_id`, decided by the
@@ -992,6 +1058,26 @@ _COMPONENT_ITEM_PREFIX = "studio:component:"
 _WRITE_TOKEN_ITEM_PREFIX = "studio:write_token:"
 _APPROVAL_ITEM_PREFIX = "studio:approval:"
 
+# The run ledger's items (`harness.run_ledger`): one record per run, one
+# idempotency-key index entry per key, one canonical submission and one set of
+# sealed retrievals per run, and one compiling plan per revision.
+# They live in the ledger session but are no part of `ConversationState`;
+# only `StudioStore.append_run_items` writes them.
+RUN_ITEM_PREFIX = "studio:run:"
+RUN_KEY_ITEM_PREFIX = "studio:run_key:"
+RUN_SUBMISSION_ITEM_PREFIX = "studio:run_submission:"
+RUN_RETRIEVALS_ITEM_PREFIX = "studio:run_retrievals:"
+RUN_PLAN_ITEM_PREFIX = "studio:run_plan:"
+_RUN_ITEM_PREFIXES = (
+    RUN_ITEM_PREFIX,
+    RUN_KEY_ITEM_PREFIX,
+    RUN_SUBMISSION_ITEM_PREFIX,
+    RUN_RETRIEVALS_ITEM_PREFIX,
+    RUN_PLAN_ITEM_PREFIX,
+)
+# `StudioStore.append_run_items`' fetch-fence-append cycles.
+_RUN_ITEMS_RETRY_ATTEMPTS = 3
+
 # Identity, the five process-local runtime objects, and the turn's spec
 # blocks (`turn_specs`, read back from the turn's own ADK session by
 # `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
@@ -1152,6 +1238,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         elif key.startswith(_APPROVAL_ITEM_PREFIX):
             index = int(key.removeprefix(_APPROVAL_ITEM_PREFIX))
             _set_list_item(state.approvals, index, ApprovalRecord.model_validate(value))
+        elif key.startswith(_RUN_ITEM_PREFIXES):
+            pass  # the run ledger's, read through `StudioStore.run_items`
         else:
             logger.warning("studio ledger: ignoring unknown state key %r", key)
 
@@ -1770,6 +1858,92 @@ class StudioStore:
         assert last_error is not None
         raise last_error
 
+    async def run_items(self, principal: str, conversation_id: str) -> dict[str, Any]:
+        """The run ledger's items in `conversation_id`'s ledger session, read
+        fresh. Empty when the conversation has no ledger session."""
+        session = await self._fetch_session(principal, conversation_id)
+        if session is None:
+            return {}
+        return {k: v for k, v in session.state.items() if k.startswith(_RUN_ITEM_PREFIXES)}
+
+    async def run_statuses(
+        self, principal: str, conversation_id: str, *, conversation: ConversationState
+    ) -> dict[str, RunStatus]:
+        """The run ledger's status of each run `conversation`'s plan records
+        await (`ConversationState.awaited_runs`), by run id, read off the
+        stored run items without validating the rest. The ledger is read
+        once, and not at all when no record awaits a run."""
+        awaited = conversation.awaited_runs()
+        if not awaited:
+            return {}
+        items = await self.run_items(principal, conversation_id)
+        statuses: dict[str, RunStatus] = {}
+        for run_id in awaited:
+            raw = items.get(f"{RUN_ITEM_PREFIX}{run_id}")
+            status = raw.get("status") if isinstance(raw, dict) else None
+            if status in RunStatus:
+                statuses[run_id] = RunStatus(status)
+        return statuses
+
+    async def append_run_items(
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        items_for: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        """Append the run-ledger items `items_for` derives from the ledger's
+        current run items, as one event fenced on `segment_id`.
+
+        Each attempt fetches the ledger fresh and fences first, the way
+        `checkpoint` does: raises `SegmentLost` and writes nothing when the
+        live segment is not `segment_id`. `items_for` then sees the fetched
+        run items and returns the keys to write (each under one of the
+        `RUN_*_ITEM_PREFIX`es), or an empty
+        dict to write nothing; whatever it raises propagates with nothing written. A stale
+        append retries the whole cycle, so `items_for` decides again against
+        what the other writer landed, up to `_RUN_ITEMS_RETRY_ATTEMPTS`
+        times before the last `StaleSessionError` is raised.
+        """
+        entry = self._entry(principal, conversation_id)
+        last_error: StaleSessionError | None = None
+        async with entry.write_lock:
+            for _attempt in range(1, _RUN_ITEMS_RETRY_ATTEMPTS + 1):
+                session = await self._fetch_session(principal, conversation_id)
+                if session is None:
+                    raise SegmentLost(
+                        f"conversation {conversation_id!r} no longer has a ledger session"
+                    )
+                fenced = _deserialize_segment(session.state.get(_KEY_SEGMENT))
+                if fenced is None or fenced.id != segment_id:
+                    raise SegmentLost(
+                        f"conversation {conversation_id!r} segment {segment_id!r} was taken over"
+                    )
+                current = {
+                    k: v for k, v in session.state.items() if k.startswith(_RUN_ITEM_PREFIXES)
+                }
+                delta = items_for(current)
+                if not delta:
+                    return
+                outside = sorted(key for key in delta if not key.startswith(_RUN_ITEM_PREFIXES))
+                if outside:
+                    raise ValueError(f"run ledger items outside its prefixes: {outside}")
+                event = Event(
+                    author="studio",
+                    actions=EventActions(
+                        state_delta={key: _json_safe(value) for key, value in delta.items()}
+                    ),
+                )
+                try:
+                    await self._session_service.append_event(session, event)
+                except StaleSessionError as exc:
+                    last_error = exc
+                    continue
+                entry.session = session
+                return
+        assert last_error is not None
+        raise last_error
+
 
 class RecallRefusedError(Exception):
     """`ConversationState.recall_part`'s target does not exist. `legal` maps
@@ -1790,9 +1964,10 @@ def make_recall_part(store: StudioStore) -> Any:
     ) -> dict[str, Any]:
         key = current_conversation_key.get()
         conversation = store.current(*key) if key is not None else None
-        if conversation is None:
+        if key is None or conversation is None:
             raise RecallRefusedError("there is no conversation to recall from", {})
-        return conversation.recall_part(part=part, turn=turn, component_id=component_id)
+        runs = await store.run_statuses(*key, conversation=conversation) if part == "plan" else {}
+        return conversation.recall_part(part=part, turn=turn, component_id=component_id, runs=runs)
 
     return recall_part
 
@@ -1909,9 +2084,9 @@ def _bounded_fact_summary(summary: Any) -> Any:
 
 def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     """One block of the canvas digest: the stored entry with its id, type,
-    title, fact summary and what it shows bounded. A `variable` or
-    `entities` list shorter than the names the card draws carries a
-    `<key>_truncated` label. The stored entry stays whole for `recall_part`
+    title, fact summary and what it shows bounded. An `entities` list
+    shorter than the names the card draws carries an `entities_truncated`
+    label. The stored entry stays whole for `recall_part`
     and the composition "add" op."""
     block: dict[str, Any] = {"component_id": _cut_text(component_id, _BLOCK_ID_BYTES), **entry}
     if isinstance(block.get("type"), str):
@@ -1920,16 +2095,15 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         block["title"] = _cut_text(str(block["title"]), _TITLE_BYTE_CAP)
     if "fact_summary" in block:
         block["fact_summary"] = _bounded_fact_summary(block["fact_summary"])
-    drawn = _summary_names(entry.get("fact_summary"))
-    for key in ("variable", "entities"):
-        if key in block:
-            names = block[key] if isinstance(block[key], list) else [block[key]]
-            block[key] = [
-                _cut_text(str(name), _DIGEST_NAME_BYTE_CAP) for name in names[:_DIGEST_SHOW_CAP]
-            ]
-            total = max(len(names), len(set(drawn[key])))
-            if total > len(block[key]):
-                block[f"{key}_truncated"] = _subset_label(showing=len(block[key]), total=total)
+    if "entities" in block:
+        drawn = _entity_names(entry.get("fact_summary"))
+        names = block["entities"] if isinstance(block["entities"], list) else [block["entities"]]
+        block["entities"] = [
+            _cut_text(str(name), _DIGEST_NAME_BYTE_CAP) for name in names[:_DIGEST_SHOW_CAP]
+        ]
+        total = max(len(names), len(set(drawn)))
+        if total > len(block["entities"]):
+            block["entities_truncated"] = _subset_label(showing=len(block["entities"]), total=total)
     if "time" in block:
         block["time"] = _cut_text(str(block["time"]), _DIGEST_TIME_BYTE_CAP)
     return block
@@ -2065,6 +2239,32 @@ def _turn_identities(
     return identities
 
 
+def _windowed_from(
+    sources: Iterable[PlanSource], candidates: dict[str, RecordedIdentity]
+) -> dict[str, str]:
+    """Each of `sources` that is one of `candidates` over another window,
+    mapped to the spec_id of the one it copies.
+
+    A copy's identity is its source's with `requested_window` replaced
+    (`data_mcp.definition_writes.windowed_identity`), so a candidate whose
+    identity over the copy's window hashes to the copy's spec_id is the one
+    it copies.
+    """
+    relation: dict[str, str] = {}
+    for source in sources:
+        window = (source.identity or {}).get("requested_window")
+        if not isinstance(window, dict):
+            continue
+        for spec_id, recorded in candidates.items():
+            if (
+                spec_id != source.spec_id
+                and windowed_identity(recorded.identity, window)[0] == source.spec_id
+            ):
+                relation[source.spec_id] = spec_id
+                break
+    return relation
+
+
 def _validated[M: BaseModel](
     model: type[M], stored: Iterable[Any], *, reader: str, what: str
 ) -> list[M]:
@@ -2092,8 +2292,8 @@ def _leading_sentences(text: str, cap: int) -> str:
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
     """The per-component slice of the models' canvas digest. It states what
-    the card is and what it shows, as names only, no rows: the variable
-    name(s), the entities it draws, and the span it covers. The resolved
+    the card is and what it shows, as names only, no rows: the entities it
+    draws and the span it covers. The resolved
     revision in `payload` contributes only its title (`_block_title`). The
     model never sees the rest of it."""
     return {
@@ -2123,21 +2323,19 @@ def _turn_component_entry(
 
 
 def _digest_shows(component: dict[str, Any]) -> dict[str, Any]:
-    """The `variable` / `entities` / `time` keys of a digest entry, from the
-    component's wire fact summary: each series carries the entity's label,
-    each indicator the variable's name, and `window` the resolved span. The
-    summary is decoded for its names only, and a key the summary cannot
-    answer is left out. Each list is capped at `_DIGEST_SHOW_CAP`, keeping
-    the entry's size bounded however many series the underlying frame
-    holds.
+    """The `entities` / `time` keys of a digest entry, from the component's
+    wire fact summary: each series carries the entity's label and `window`
+    the resolved span. The summary is decoded for its names only, and a key
+    the summary cannot answer is left out. The list is capped at
+    `_DIGEST_SHOW_CAP`, keeping the entry's size bounded however many series
+    the underlying frame holds.
     """
     summary = component.get("fact_summary") or {}
-    names = _summary_names(summary)
+    names = _entity_names(summary)
 
     shows: dict[str, Any] = {}
-    for key in ("variable", "entities"):
-        if names[key]:
-            shows[key] = _bounded_names(names[key])
+    if names:
+        shows["entities"] = _bounded_names(names)
     window = summary.get("window") or {}
     start = window.get("start") if isinstance(window, dict) else None
     end = window.get("end") if isinstance(window, dict) else None
@@ -2146,24 +2344,16 @@ def _digest_shows(component: dict[str, Any]) -> dict[str, Any]:
     return shows
 
 
-def _summary_names(summary: Any) -> dict[str, list[str]]:
-    """Every name a wire fact summary draws, in display order: `variable`
-    from its indicators' names, `entities` from its series' labels. Empty
-    lists for a summary that is not a dict."""
+def _entity_names(summary: Any) -> list[str]:
+    """The series labels a wire fact summary draws, in display order. Empty
+    for a summary that is not a dict."""
     if not isinstance(summary, dict):
-        return {"variable": [], "entities": []}
-    return {
-        "variable": [
-            str(indicator["name"])
-            for indicator in summary.get("indicators") or []
-            if isinstance(indicator, dict) and indicator.get("name")
-        ],
-        "entities": [
-            str(series["label"])
-            for series in summary.get("series") or []
-            if isinstance(series, dict) and series.get("label")
-        ],
-    }
+        return []
+    return [
+        str(series["label"])
+        for series in summary.get("series") or []
+        if isinstance(series, dict) and series.get("label")
+    ]
 
 
 def _bounded_names(names: list[str]) -> list[str]:

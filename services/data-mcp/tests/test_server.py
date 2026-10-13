@@ -23,7 +23,7 @@ from fastmcp import Client
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 
 
-async def test_server_exposes_its_seven_tools() -> None:
+async def test_server_exposes_its_eight_tools() -> None:
     async with Client(mcp) as client:
         tools = await client.list_tools()
 
@@ -35,6 +35,7 @@ async def test_server_exposes_its_seven_tools() -> None:
         "get_skill_file",
         "sources",
         "resolve_definition",
+        "catalogue_counts",
     ]
 
 
@@ -55,6 +56,7 @@ async def test_every_tool_declares_a_version() -> None:
         "get_skill_file": "1",
         "sources": "1",
         "resolve_definition": "1",
+        "catalogue_counts": "1",
     }
     assert all(tool.output_schema is None for tool in tools)
 

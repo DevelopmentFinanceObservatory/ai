@@ -23,7 +23,7 @@ from pydantic import Field, ValidationError
 from data_mcp import node_lookup
 from data_mcp.describe_digest import render_describe_digest
 from data_mcp.errors import UpstreamError
-from data_mcp.node_lookup import NotHeldNode
+from data_mcp.graph_wire import NotHeldEntry
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
 # At most this many dcids per call. A named module constant so every refusal
@@ -31,15 +31,10 @@ from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_resul
 # drift from the check below.
 DESCRIBE_ID_CAP = 8
 
-# Mirrors the node door's own `{dcid}` path grammar: one or more
-# `/`-separated segments, each drawn from `[A-Za-z0-9_.-]`. An empty dcid,
-# or one containing a character outside that set (a space, a leading `/`),
-# falls through to the platform's own routing 404 rather than the node
-# door's `node_not_held` -- which would misreport a malformed argument as
-# "this capability isn't live", since the Graph surface serves no
-# `capabilities` route to tell an unmounted surface apart from any other
-# `not_found`. Validating the grammar locally, before dispatch, keeps a
-# malformed id from ever reaching that ambiguity.
+# Mirrors the node batch route's own dcid grammar: one or more `/`-separated
+# segments, each drawn from `[A-Za-z0-9_.-]`. The route refuses a whole batch
+# that holds one malformed dcid, so validating each id locally, before
+# dispatch, names the offending id at its own `/ids/<index>` pointer.
 DCID_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*$")
 
 # Other tools' own refusals quote a stat_var ref with this prefix, e.g.
@@ -76,10 +71,9 @@ def _cap_and_grammar_refusal(ids: list[str]) -> ToolResult | None:
                     ),
                 )
             )
-        # The dcid reaches an upstream URL path, and a `.` or `..` segment
-        # would resolve against that route rather than within it -- the
-        # grammar above admits dots inside a segment, which stay legal, but
-        # a segment that is exactly `.` or `..` is never a legitimate dcid.
+        # The grammar above admits dots inside a segment, which stay legal,
+        # but a segment that is exactly `.` or `..` is never a dcid. Refusing
+        # it here names it malformed, where the route would call it unheld.
         if any(segment in (".", "..") for segment in dcid.split("/")):
             return to_tool_result(
                 ToolRefusal.request_invalid(
@@ -111,15 +105,18 @@ async def describe(
     Call this on a dcid you read out of `search`'s or `get_data`'s own
     digest -- never on one you invented. Pass 1 to 8 ids per call.
 
-    What comes back depends on the node's own shape:
-      - a StatVar: its label, definition, and the roles it declares.
-        Facet values per axis, processing level, and sources are not
-        available for a StatVar through this tool -- do not call it again
-        expecting them.
-      - a source or provenance node: its label, licence and licence type,
-        freshness, and description.
-      - an entity: its label, type, and what it's contained in.
-      - any other node: its label, types, and key properties.
+    Every node comes back with its label, kind and description, plus what
+    its kind carries:
+      - a StatVar: what it measures, the roles it declares, the years held
+        and its sources.
+      - a source, dataset or provenance node: its publisher, licence and
+        licence type, freshness, and url.
+      - a place: what it's contained in, and a region's member count.
+      - a group: its membership authority and member count.
+      - an organisation or aggregate: the roles it can fill.
+      - a code, code system or unit: what it codes or measures.
+      - any other node: its types.
+    A value the graph does not record is named under "not known".
 
     Labels return in English, whatever language the query was in.
 
@@ -153,7 +150,7 @@ async def describe(
         )
 
     unique_ids = list(dict.fromkeys(ids))
-    unheld = [dcid for dcid in unique_ids if isinstance(outcomes[dcid], NotHeldNode)]
+    unheld = [dcid for dcid in unique_ids if isinstance(outcomes[dcid], NotHeldEntry)]
     held_present = len(unheld) < len(unique_ids)
     digest = render_describe_digest(dcids=ids, outcomes=outcomes)
 
@@ -161,11 +158,11 @@ async def describe(
         nodes = []
         for dcid in unique_ids:
             node = outcomes[dcid]
-            # Guaranteed by `unheld` being empty: every outcome here is one
-            # of the four node shapes, never `NotHeldNode`. The assert
-            # narrows the type for the type checker as well as at runtime.
-            assert not isinstance(node, NotHeldNode)
-            nodes.append(node.model_dump(mode="json"))
+            # Guaranteed by `unheld` being empty: every outcome here is a
+            # node envelope, never `NotHeldEntry`. The assert narrows the
+            # type for the type checker as well as at runtime.
+            assert not isinstance(node, NotHeldEntry)
+            nodes.append(node.model_dump(mode="json", by_alias=True))
         # The full node data goes in structured content for code that reads it. The
         # combined server drops structured content from a successful result, so the
         # digest must stand alone for an outside model.

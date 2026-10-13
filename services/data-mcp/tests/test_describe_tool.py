@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Coroutine
+from typing import Any
 
 import httpx2
 import pytest
@@ -13,13 +15,12 @@ from data_mcp.describe_tool import (
     _strip_dcid_prefix,
     describe,
 )
-from data_mcp.node_lookup import EntityNode
 from data_mcp.server import mcp
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .node_fixtures import load_node_fixture
+from .node_fixtures import load_node_fixture, node_fixture
 from .test_client import _client, text_of
 
 Handler = (
@@ -35,33 +36,26 @@ async def _call_describe(handler: Handler, arguments: dict[str, object]) -> Call
             return await client.call_tool("describe", arguments, raise_on_error=False)
 
 
-def _entity_handler() -> Handler:
+def _country(dcid: str) -> dict[str, Any]:
+    return {**load_node_fixture("node_country"), "ref": dcid, "label": dcid}
+
+
+def _not_held(dcid: str) -> dict[str, Any]:
+    return {"ref": dcid, "status": "not_held"}
+
+
+def _nodes_handler(
+    entry_for: Callable[[str], dict[str, Any]], requests: list[list[str]] | None = None
+) -> Handler:
+    """Answer each node batch request with `entry_for(dcid)` per requested dcid."""
+
     def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
-        return httpx2.Response(
-            200,
-            json={
-                "shape": "entity",
-                "dcid": dcid,
-                "label": dcid,
-                "entity_type": "geo.country",
-                "contained_in": [],
-            },
-        )
+        dcids = json.loads(request.content)["dcids"]
+        if requests is not None:
+            requests.append(dcids)
+        return httpx2.Response(200, json={"nodes": [entry_for(dcid) for dcid in dcids]})
 
     return handler
-
-
-def _not_held_response(dcid: str) -> httpx2.Response:
-    return httpx2.Response(
-        404,
-        json={
-            "code": "node_not_held",
-            "title": "not held",
-            "detail": f"{dcid} is not held",
-            "retryable": False,
-        },
-    )
 
 
 # 1. Eight ids return one successful result whose digest carries all eight.
@@ -70,7 +64,7 @@ def _not_held_response(dcid: str) -> httpx2.Response:
 async def test_eight_ids_return_one_successful_digest_with_all_eight() -> None:
     dcids = [f"country/{i:03d}" for i in range(8)]
 
-    result = await _call_describe(_entity_handler(), {"ids": dcids})
+    result = await _call_describe(_nodes_handler(_country), {"ids": dcids})
 
     assert result.is_error is False
     text = text_of(result)
@@ -178,22 +172,10 @@ async def test_one_unheld_among_eight_is_partial_success() -> None:
     dcids = [f"country/{i:03d}" for i in range(8)]
     not_held_dcid = dcids[3]
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
-        if dcid == not_held_dcid:
-            return _not_held_response(dcid)
-        return httpx2.Response(
-            200,
-            json={
-                "shape": "entity",
-                "dcid": dcid,
-                "label": dcid,
-                "entity_type": "geo.country",
-                "contained_in": [],
-            },
-        )
+    def entry_for(dcid: str) -> dict[str, Any]:
+        return _not_held(dcid) if dcid == not_held_dcid else _country(dcid)
 
-    result = await _call_describe(handler, {"ids": dcids})
+    result = await _call_describe(_nodes_handler(entry_for), {"ids": dcids})
 
     assert result.is_error is True
     assert result.structured_content is not None
@@ -211,11 +193,7 @@ async def test_one_unheld_among_eight_is_partial_success() -> None:
 async def test_every_dcid_unheld_refuses_with_no_rendered_descriptions() -> None:
     dcids = ["country/AAA", "country/BBB"]
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
-        return _not_held_response(dcid)
-
-    result = await _call_describe(handler, {"ids": dcids})
+    result = await _call_describe(_nodes_handler(_not_held), {"ids": dcids})
 
     assert result.is_error is True
     assert result.structured_content is not None
@@ -233,22 +211,10 @@ async def test_every_dcid_unheld_refuses_with_no_rendered_descriptions() -> None
 async def test_partial_success_structured_content_matches_a_plain_refusal() -> None:
     dcids = ["country/AAA", "country/BBB"]
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
-        if dcid == "country/AAA":
-            return httpx2.Response(
-                200,
-                json={
-                    "shape": "entity",
-                    "dcid": dcid,
-                    "label": dcid,
-                    "entity_type": "geo.country",
-                    "contained_in": [],
-                },
-            )
-        return _not_held_response(dcid)
+    def entry_for(dcid: str) -> dict[str, Any]:
+        return _country(dcid) if dcid == "country/AAA" else _not_held(dcid)
 
-    result = await _call_describe(handler, {"ids": dcids})
+    result = await _call_describe(_nodes_handler(entry_for), {"ids": dcids})
 
     assert result.is_error is True
     assert result.structured_content is not None
@@ -263,17 +229,28 @@ async def test_partial_success_structured_content_matches_a_plain_refusal() -> N
 async def test_successful_call_structured_content_carries_nodes() -> None:
     dcid = "country/KEN"
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json=load_node_fixture("node_entity"))
+    payload = load_node_fixture("node_country")
 
-    result = await _call_describe(handler, {"ids": [dcid]})
+    result = await _call_describe(_nodes_handler(lambda _dcid: payload), {"ids": [dcid]})
 
     assert result.is_error is False
     assert result.structured_content is not None
-    nodes = result.structured_content["nodes"]
-    assert len(nodes) == 1
-    assert nodes[0]["label"] == "Kenya"
+    assert result.structured_content["nodes"] == [payload]
     assert "Kenya" in text_of(result)
+
+
+async def test_stat_var_description_reaches_the_digest_and_structured_content() -> None:
+    payload = {
+        **load_node_fixture("node_stat_var"),
+        "description": "Publisher prose about the variable.",
+    }
+
+    result = await _call_describe(_nodes_handler(lambda _dcid: payload), {"ids": [payload["ref"]]})
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["nodes"][0]["description"] == payload["description"]
+    assert payload["description"] in text_of(result)
 
 
 # 9. A 503 from the door refuses service_unavailable with retry_after_delay.
@@ -304,7 +281,7 @@ async def test_503_from_the_door_refuses_service_unavailable() -> None:
 
 async def test_unvalidatable_2xx_body_refuses_upstream_response_unusable() -> None:
     def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(200, json={"shape": "not_a_real_shape"})
+        return httpx2.Response(200, json={"nodes": [{"ref": "country/KEN", "kind": "nope"}]})
 
     result = await _call_describe(handler, {"ids": ["country/KEN"]})
 
@@ -319,17 +296,7 @@ async def test_unvalidatable_2xx_body_refuses_upstream_response_unusable() -> No
 
 
 async def test_response_dcid_mismatch_refuses_upstream_response_unusable() -> None:
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(
-            200,
-            json={
-                "shape": "entity",
-                "dcid": "country/OTHER",
-                "label": "Someone Else",
-                "entity_type": "geo.country",
-                "contained_in": [],
-            },
-        )
+    handler = _nodes_handler(lambda _dcid: _country("country/OTHER"))
 
     result = await _call_describe(handler, {"ids": ["country/KEN"]})
 
@@ -347,13 +314,7 @@ async def test_response_dcid_mismatch_refuses_upstream_response_unusable() -> No
 async def test_stubbed_node_lookup_produces_the_full_digest_with_no_http_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stub_node = EntityNode(
-        shape="entity",
-        dcid="country/KEN",
-        label="Kenya",
-        entity_type="geo.country",
-        contained_in=[],
-    )
+    stub_node = node_fixture("node_country")
 
     async def stub_describe_nodes(dcids: list[str]) -> dict[str, object]:
         return dict.fromkeys(dcids, stub_node)
@@ -426,28 +387,14 @@ def test_strip_dcid_prefix_removes_only_the_leading_prefix() -> None:
 
 
 async def test_leading_dcid_prefix_is_stripped_before_dispatch() -> None:
-    requests: list[str] = []
+    requests: list[list[str]] = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
-        requests.append(dcid)
-        return httpx2.Response(
-            200,
-            json={
-                "shape": "entity",
-                "dcid": dcid,
-                "label": dcid,
-                "entity_type": "geo.country",
-                "contained_in": [],
-            },
-        )
-
-    result = await _call_describe(handler, {"ids": ["dcid:country/KEN"]})
+    result = await _call_describe(_nodes_handler(_country, requests), {"ids": ["dcid:country/KEN"]})
 
     assert result.is_error is False
-    assert requests == ["country/KEN"]
+    assert requests == [["country/KEN"]]
     assert result.structured_content is not None
-    assert result.structured_content["nodes"][0]["dcid"] == "country/KEN"
+    assert result.structured_content["nodes"][0]["ref"] == "country/KEN"
     assert "dcid:country/KEN" not in text_of(result)
 
 
@@ -462,44 +409,29 @@ async def test_dcid_prefix_stripped_before_grammar_check_still_rejects_malformed
     assert result.structured_content["code"] == "request_invalid"
 
 
-# 18. A classification-value node and a genuine entity, described together,
-# both render correctly and distinctly -- `describe(["Japan"])` and
-# `describe(["country/JPN"])` stay individually correct.
+# 18. A classification-value node and a genuine place, described together, both render
+# correctly and distinctly -- `describe(["Japan"])` and `describe(["country/JPN"])` stay
+# individually correct.
 
 
-async def test_classification_value_and_entity_render_distinctly_in_one_call() -> None:
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        dcid = request.url.path.removeprefix("/api/graph/node/")
+async def test_classification_value_and_place_render_distinctly_in_one_call() -> None:
+    def entry_for(dcid: str) -> dict[str, Any]:
         if dcid == "Japan":
-            return httpx2.Response(
-                200,
-                json={
-                    "shape": "node",
-                    "dcid": "Japan",
-                    "label": "Japan",
-                    "types": ["GeographicalIndicatorEnum"],
-                    "properties": {},
-                },
-            )
-        return httpx2.Response(
-            200,
-            json={
-                "shape": "entity",
-                "dcid": "country/JPN",
+            return {
+                **load_node_fixture("node_other"),
+                "ref": "Japan",
                 "label": "Japan",
-                "entity_type": "Country",
-                "contained_in": [],
-            },
-        )
+                "types": ["GeographicalIndicatorEnum"],
+            }
+        return {**_country(dcid), "label": "Japan"}
 
-    result = await _call_describe(handler, {"ids": ["Japan", "country/JPN"]})
+    result = await _call_describe(_nodes_handler(entry_for), {"ids": ["Japan", "country/JPN"]})
 
     assert result.is_error is False
     text = text_of(result)
-    assert "classification value" in text
-    assert "type: Country" in text
-    nodes = result.structured_content["nodes"]
-    generic_node = next(n for n in nodes if n["dcid"] == "Japan")
-    entity_node = next(n for n in nodes if n["dcid"] == "country/JPN")
-    assert generic_node["is_classification_value"] is True
-    assert "is_classification_value" not in entity_node
+    japan, country = text.split("\n\n")
+    assert "classification value" in japan
+    assert "kind: other" in japan
+    assert "kind: country" in country
+    assert "classification value" not in country
+    assert [node["kind"] for node in result.structured_content["nodes"]] == ["other", "country"]

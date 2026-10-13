@@ -101,20 +101,23 @@ cannot place, are warnings rather than silence -- the exact check needs
 `search` to say which requested entity each resolved entity answers, which is
 filed as issue #196.
 
-A requirement that states `across` covers every member of a party it names
-no member of, such as every donor of aid to Kenya. `open_axis_for` matches
-the word to the one entity axis the source leaves open on that party:
-`origin` for the giving side, `destination` for the receiving side,
-`observationAbout` for a place noun such as `country`. The finding is
-`open_axis_unresolved`, an error, when the word is narrower than a party
-(`bilateral donor`, `donor countries`), when no open axis or more than one
-sits on the word's party, when the axis holds fewer than two members or
-`search` did not count them, and when another open axis holds more than one
-member or is uncounted, since each member of the population would repeat
-once per member of it. At run time the retrieved series have to hold at
-least two distinct entities under the approved axis's column. A source
-recorded without its open entity axes is discovered again for a requirement
-that states `across` (`DiscoveryLog.selectable`).
+A requirement that states `across` covers every member of each party it names,
+one word per party, such as every donor of aid to Kenya (`['donor']`) or every
+donor by every recipient (`['donor', 'recipient']`). `open_axes_for` matches
+each word to one entity axis the source leaves open: `origin` for the giving
+side, `destination` for the receiving side, and for a place noun such as
+`country` the `observationAbout` axis when it is open over several members,
+else the one flow axis open over several members that no other word covers, as
+on a source keyed by debtor. The finding is `open_axis_unresolved`, an error,
+when a word is narrower than a party (`bilateral donor`, `donor countries`),
+when no open axis or more than one sits on a word's party, when a covered axis
+holds fewer than two members or `search` did not count them, and when an open
+axis no word covers holds more than one member or is uncounted, since each
+member of the population would repeat once per member of it. At run time the
+retrieved series have to hold at least two distinct entities under each
+approved axis's column. A source recorded without its open entity axes is
+discovered again for a requirement that states `across`
+(`DiscoveryLog.selectable`).
 
 What a source cannot confirm -- no entities resolved at all, no coverage
 window, coverage stated as breadth rather than an exact window, no

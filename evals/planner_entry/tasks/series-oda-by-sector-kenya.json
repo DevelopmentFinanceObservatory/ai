@@ -1,0 +1,89 @@
+{
+  "id": "series-oda-by-sector-kenya",
+  "kind": "dataset",
+  "origin": "authored",
+  "question": "How much ODA did Kenya receive for each sector in 2022?",
+  "searches": [
+    {
+      "query": "How much ODA did Kenya receive for each sector in 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance by sector",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2022"
+        }
+      ]
+    }
+  ],
+  "brief": "How much ODA did Kenya receive for each sector in 2022?",
+  "asks": [
+    "ODA to Kenya for each sector in 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "rank",
+    "distinction": "dataset, not rank: every sector is listed with its total; no order or top N is asked"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "How much ODA did Kenya receive for each sector in 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "source_spec_id": "spec_de4602b89c82d51412bbac1f5a3c4c97",
+        "across": [
+          "donor"
+        ],
+        "breakdown": {
+          "dimension": "sector",
+          "level": 0
+        },
+        "stat_vars": "separate"
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_sector",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "period",
+          "breakdown"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "by_sector"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "id": "series-oda-germany-kenya",
+  "kind": "dataset",
+  "origin": "pilot",
+  "question": "How much official development assistance did Germany give Kenya in each year from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "How much official development assistance did Germany give Kenya in each year from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Germany",
+              "role": "from"
+            },
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "How much official development assistance did Germany give Kenya in each year from 2015 to 2022?",
+  "asks": [
+    "ODA from Germany to Kenya, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "acceptable_kinds": [
+    "dataset"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "one donor to one recipient is one series; nothing is totalled"
+  },
+  "reference_payload": {
+    "question": "How much official development assistance did Germany give Kenya in each year from 2015 to 2022?",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "official development assistance",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "oda"
+        ]
+      }
+    ]
+  }
+}

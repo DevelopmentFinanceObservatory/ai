@@ -1,0 +1,77 @@
+{
+  "id": "aggregate-total-oda-kenya",
+  "kind": "aggregate",
+  "origin": "pilot",
+  "question": "What was the total ODA Kenya received from all donors between 2015 and 2022?",
+  "searches": [
+    {
+      "query": "What was the total ODA Kenya received from all donors between 2015 and 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "Total official development assistance Kenya received from all donors between 2015 and 2022.",
+  "asks": [
+    "Total ODA to Kenya from all donors, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "reference_payload": {
+    "question": "Total official development assistance Kenya received from all donors between 2015 and 2022.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

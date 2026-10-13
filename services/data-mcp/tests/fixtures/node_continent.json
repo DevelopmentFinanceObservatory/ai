@@ -1,0 +1,58 @@
+{
+  "ref": "northamerica",
+  "label": "North America",
+  "types": [
+    "Continent"
+  ],
+  "description": null,
+  "links": {
+    "countries": "/api/graph/node/northamerica/members?relation=countries&projection=countries"
+  },
+  "gaps": [
+    "continent.membership.effective_date",
+    "continent.membership.projections.institutions"
+  ],
+  "built_from": {
+    "code_index": "952a221e6d43254927fcb75abbf12ce7ba03285fbfeef7d9913e2ddcf49f904c",
+    "membership": "resolvekit 0.1.12, data 2026.06"
+  },
+  "kind": "continent",
+  "continent": {
+    "contained_in": [],
+    "membership": {
+      "authority": {
+        "name": "resolvekit UN M49 containment",
+        "version": "resolvekit 0.1.12, data 2026.06"
+      },
+      "as_of": null,
+      "effective_date": null,
+      "projections": [
+        {
+          "projection": "countries",
+          "count": 23,
+          "complete": true
+        },
+        {
+          "projection": "other_states",
+          "count": 0,
+          "complete": true
+        },
+        {
+          "projection": "territories",
+          "count": 15,
+          "complete": false
+        },
+        {
+          "projection": "former_states",
+          "count": 1,
+          "complete": false
+        },
+        {
+          "projection": "institutions",
+          "count": null,
+          "complete": false
+        }
+      ]
+    }
+  }
+}

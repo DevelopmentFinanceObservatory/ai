@@ -7,10 +7,13 @@ one official development assistance source, two aid candidates, and nothing for
 anything else. Every answer resolves exactly the entities the search part named -- role
 and label as they were sent, `ref` as `country/<code>` -- the way the real
 server resolves what it is asked about, so a plan naming Kenya gets Kenya's
-frame and one naming Kenya and Ghana gets both. Its `describe`
-names only an identifier this stub can ever put in an answer, and refuses any
-other the way the real server refuses a dcid its graph does not hold, so a
-translator cannot confirm an identifier it invented. That set is fixed rather
+frame and one naming Kenya and Ghana gets both. Its `describe` answers
+the real tool's output for the graph's node envelope -- built from the
+generated `data_mcp.graph_wire` models and rendered by the real digest -- for
+the countries and stat vars this stub can ever put in an answer, and refuses any
+other the way the real server refuses a dcid its graph does not hold (a
+spec_id is no graph node, so it is refused too), so a translator cannot
+confirm an identifier it invented. That set is fixed rather
 than gathered from the answers a run happened to give, so which case ran first
 cannot change what `describe` will confirm.
 
@@ -28,7 +31,17 @@ from typing import Any
 
 from analysis_mcp.server import mcp as analysis_mcp
 from compiler.surface import McpSurface, ToolCallResult, ToolSchema
+from data_mcp.describe_digest import render_describe_digest
 from data_mcp.digest import render_answer
+from data_mcp.graph_wire import (
+    CountryNode,
+    PlaceBlock,
+    StatVarBlock,
+    StatVarNode,
+    UnitBlock,
+    UnitNode,
+    VariableDefinition,
+)
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
@@ -118,18 +131,17 @@ def _spec(
     }
 
 
-# Every identifier this stub can ever put in an answer. `describe` holds ids to
+# Every graph identifier this stub can ever put in an answer. `describe` holds ids to
 # this rather than to what the current run happened to search for: `adk eval`
 # runs a whole set in one process, so a closure over past answers would let a
 # later case describe an id an earlier one named and make the refusal depend on
 # case order. The point of the refusal is that an id the stub never emits
 # cannot be confirmed, and that holds run to run.
-NAMED_IDS = frozenset(
-    {DEBT_SPEC, POPULATION_SPEC, ODA_SPEC, EXPORTS_SPEC, *AID_SPECS}
-    | {"DebtServicePaid", "Population", "AidDisbursements", "AidReceived", "OdaReceived", "Exports"}
-    | {str(_USD["ref"])}
-    | {f"country/{code}" for code in _COUNTRY_CODES.values()}
+STAT_VARS = frozenset(
+    {"DebtServicePaid", "Population", "AidDisbursements", "AidReceived", "OdaReceived", "Exports"}
 )
+_COUNTRY_NAMES = {f"country/{code}": name.title() for name, code in _COUNTRY_CODES.items()}
+NAMED_IDS = STAT_VARS | {str(_USD["ref"])} | _COUNTRY_NAMES.keys()
 
 
 def _envelope(status: str, **payload: Any) -> dict[str, Any]:
@@ -200,19 +212,61 @@ def _specs_for(variable: str, entities: list[dict[str, str]]) -> list[dict[str, 
     return []
 
 
-def _node(dcid: str) -> dict[str, Any]:
-    if dcid.startswith("country/"):
-        shape = "entity"
-    elif dcid.startswith("spec_"):
-        shape = "spec"
-    else:
-        shape = "stat_var"
-    return {
-        "shape": shape,
-        "dcid": dcid,
-        "label": dcid,
-        "definition": f"{dcid}, as the graph defines it.",
-    }
+def _node(dcid: str) -> CountryNode | StatVarNode | UnitNode:
+    """The node envelope the Graph API serves for `dcid`, a name this stub can answer with."""
+    if dcid in _COUNTRY_NAMES:
+        return CountryNode(
+            ref=dcid,
+            links={},
+            built_from={"code_index": "eval-stub"},
+            kind="country",
+            label=_COUNTRY_NAMES[dcid],
+            types=["Country"],
+            description=None,
+            gaps=[],
+            country=PlaceBlock(contained_in=[], membership=None),
+        )
+    if dcid in STAT_VARS:
+        return StatVarNode(
+            ref=dcid,
+            links={},
+            built_from={"code_index": "eval-stub"},
+            kind="stat_var",
+            label=dcid,
+            types=["StatisticalVariable"],
+            description=f"{dcid}, as the graph defines it.",
+            gaps=["stat_var.availability"],
+            stat_var=StatVarBlock(
+                availability=None,
+                definition=VariableDefinition(
+                    constraints=[],
+                    definitions=[],
+                    measure=None,
+                    measured_property=None,
+                    population_type=None,
+                    roles=["observationAbout"],
+                    source_indicator_codes=[],
+                    stat_type=None,
+                ),
+            ),
+        )
+    return UnitNode(
+        ref=dcid,
+        links={},
+        built_from={"code_index": "eval-stub"},
+        kind="unit",
+        label=str(_USD["label"]),
+        types=["UnitOfMeasure"],
+        description=None,
+        gaps=[],
+        unit=UnitBlock(
+            changes_magnitude=False,
+            currency="USD",
+            currency_noun=str(_USD["label"]),
+            price_basis=None,
+            unit_class="currency",
+        ),
+    )
 
 
 def make_discovery() -> FastMCP:
@@ -244,12 +298,22 @@ def make_discovery() -> FastMCP:
 
     @discovery.tool(name="describe")
     async def describe(ids: list[str]) -> ToolResult:
-        """Name each identifier this stub can answer with; refuse any other."""
+        """Describe each graph identifier this stub can answer with; refuse any other."""
         unknown = [dcid for dcid in ids if dcid not in NAMED_IDS]
         if unknown:
             return to_tool_result(ToolRefusal.node_not_held(dcids=unknown))
-        nodes = [_node(dcid) for dcid in ids]
-        return ToolResult(content="nodes", structured_content={"nodes": nodes})
+        unique_ids = list(dict.fromkeys(ids))
+        outcomes = {dcid: _node(dcid) for dcid in unique_ids}
+        # The shape `describe_tool.describe` returns on success: the digest for
+        # the model, the dumped envelopes in structured content for code.
+        return ToolResult(
+            content=render_describe_digest(dcids=ids, outcomes=outcomes),
+            structured_content={
+                "nodes": [
+                    outcomes[dcid].model_dump(mode="json", by_alias=True) for dcid in unique_ids
+                ]
+            },
+        )
 
     return discovery
 

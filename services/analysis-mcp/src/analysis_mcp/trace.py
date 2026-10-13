@@ -30,12 +30,11 @@ Everything past `upstream_trace` is what only the toolkit knows:
 - `exclusions`: every row this result's verb narrowed away, and why
   (`analysis_mcp.artifact.Exclusion`). `()` when nothing was dropped, or on
   a `Trace` predating this field.
-- `composed_stat_vars`: what each StatVar an operation minted is made of
-  (`common.materialisation.ComposedStatVar`), for every such StatVar the
-  stored frame holds and every one those name.
+- `steps`: the step record of this result's own operation
+  (`analysis_mcp.steps.Step`), its inputs naming the frames it read.
   `tool_pipeline.store_result_and_render` sets it; no identity field reads
-  it. `()` when the frame holds none, or on a `Trace` stored without the
-  field.
+  it. `()` on a `Trace` stored without the field. `common.steps.assemble_steps` joins the steps along a frame's
+  ancestry.
 - `time`: whether this result's `time_period` names a genuine single
   observation (`analysis_mcp.artifact.Observation`, the default) or stands
   for a collapsed span of more than one real period
@@ -51,12 +50,13 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from common.materialisation import ComposedStatVar, register_trace_codec
+from common.materialisation import register_trace_codec
 from pydantic import BaseModel, ConfigDict, Field
 
 from analysis_mcp.artifact import Exclusion, Observation, Time
 from analysis_mcp.execution_identity import ExecutionIdentity
 from analysis_mcp.identity import OP_SPEC_HASH_PATTERN, TOOLKIT_CONTENT_VERSION_PATTERN
+from analysis_mcp.steps import Step
 
 # Matches `identity._INPUT_CONTENT_VERSION_PATTERN` -- duplicated here rather
 # than imported, since that name is private to `identity.py`. Both patterns
@@ -152,12 +152,12 @@ class Trace(BaseModel):
     applied_policy: AppliedPolicy
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)
-    composed_stat_vars: tuple[ComposedStatVar, ...] = Field(
+    steps: tuple[Step, ...] = Field(
         default=(),
+        max_length=1,
         description=(
-            "The description of every operation-minted StatVar this result's stored "
-            "frame holds, and of every one those descriptions name, each after the "
-            "entries its sides name."
+            "The step record of this result's own operation, whose inputs name the "
+            "frames it read. Empty on a trace stored before steps were."
         ),
     )
     content_version: str = Field(pattern=TOOLKIT_CONTENT_VERSION_PATTERN)

@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_ad0fd4dca125d300410a81114fb7be8c",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_ad0fd4dca125d300410a81114fb7be8c: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"origin\":[\"country/DEU\"]},\"facets\":{\"provenance\":{\"ref\":\"provenance/OECDCreditorReportingSystem\",\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"state\":\"unbound\"},\"property\":\"crsCooperationModality\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"crsPurpose\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"crsTypeOfFinance\"},{\"binding\":{\"ref\":\"CRSTypeOfFlow10\",\"state\":\"value\"},\"property\":\"crsTypeOfFlow\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Gross\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_ad0fd4dca125d300410a81114fb7be8c\"}"
+}

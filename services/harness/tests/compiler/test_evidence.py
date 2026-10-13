@@ -19,7 +19,7 @@ from compiler.evidence import (
     errors,
     evidence_from_manifest,
     evidence_from_source,
-    open_axis_for,
+    open_axes_for,
     opens_place_axis,
     resolve_entity,
 )
@@ -1194,6 +1194,82 @@ def test_more_observations_than_years_mean_the_grain_is_not_annual(
     assert [i.code for i in errors(issues)] == [EvidenceIssueCode.GRAIN_AMBIGUOUS]
 
 
+_ESTIMATED = _stat(
+    "DebtServicePaid",
+    facet={"unit": "USD", "measurementMethod": "Estimated"},
+    observations=2,
+    first={"value": 2.1, "period": "2025"},
+    latest={"value": 2.2, "period": "2026"},
+    minimum={"value": 2.1, "period": "2025"},
+    maximum={"value": 2.2, "period": "2026"},
+)
+_CONTINUED = {
+    "continuations": [
+        {"axis": "measurementMethod", "method": "Estimated", "periods": ["2025", "2026"]}
+    ]
+}
+_PER_SERIES_CODES = {
+    EvidenceIssueCode.WINDOW_SHORT,
+    EvidenceIssueCode.COVERAGE_GAPS,
+    EvidenceIssueCode.GRAIN_AMBIGUOUS,
+}
+
+
+@pytest.mark.parametrize(
+    ("reported_observations", "continuations", "found"),
+    [
+        # Ten reported years and two estimated ones span 2015-2026 as one series.
+        pytest.param(10, _CONTINUED, [], id="continued-series-is-whole"),
+        # Its observations are summed across both rows: 8 + 2 across 12 years.
+        pytest.param(
+            8,
+            _CONTINUED,
+            [(EvidenceIssueCode.COVERAGE_GAPS, 10, 12)],
+            id="continued-series-gaps-count-both-rows",
+        ),
+        # Without a continuation the estimates row is a series of its own, short
+        # of 2015-2024.
+        pytest.param(
+            10,
+            {},
+            [
+                (
+                    EvidenceIssueCode.WINDOW_SHORT,
+                    {"start": 2025, "end": 2026},
+                    {"start": 2015, "end": 2024},
+                )
+            ],
+            id="uncontinued-estimates-are-their-own-series",
+        ),
+    ],
+)
+def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    reported_observations: int,
+    continuations: dict[str, object],
+    found: list[tuple[EvidenceIssueCode, object, object]],
+) -> None:
+    """A frame Datasets continued with its source's estimates (the Zambia IMF case) holds
+    one series as a row per `measurementMethod`; the manifest counts it once."""
+    manifest = _manifest()
+    manifest = manifest.model_copy(update={"trace": {**manifest.trace, **continuations}})
+    evidence = evidence_from_manifest(
+        manifest,
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", observations=reported_observations), _ESTIMATED
+        ),
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=source())
+
+    assert [
+        (issue.code, issue.found, issue.required)
+        for issue in issues
+        if issue.code in _PER_SERIES_CODES
+    ] == found
+
+
 @pytest.mark.parametrize("series_stats", [None, _series_stats()], ids=["none", "empty"])
 def test_a_manifest_missing_statistics_is_always_refused_whatever_on_missing_says(
     requirement: RequirementFactory,
@@ -1406,7 +1482,7 @@ KENYA_DESTINATION = ResolvedEntity(role="destination", ref="country/KEN", label=
 
 
 def test_no_open_axis_answers_a_party_word() -> None:
-    assert open_axis_for("donor", ()) == (
+    assert open_axes_for(("donor",), ()) == (
         "the source leaves no axis open, so it holds no population of every 'donor'"
     )
 
@@ -1414,7 +1490,7 @@ def test_no_open_axis_answers_a_party_word() -> None:
 def test_axes_that_were_never_read_answer_no_party_word() -> None:
     # `None` is a source recorded without its open entity axes: nothing says
     # it leaves none open, so the reason asks for a fresh discovery.
-    assert open_axis_for("donor", None) == (
+    assert open_axes_for(("donor",), None) == (
         "the source was recorded without the axes it leaves open, so whether it holds every "
         "'donor' is unknown; discover the source again"
     )
@@ -1435,7 +1511,7 @@ def test_axes_that_were_never_read_answer_no_party_word() -> None:
 def test_a_lone_open_axis_answers_a_word_on_its_own_side(across: str, lone: OpenEntityAxis) -> None:
     # `observationAbout` is on neither side of a flow, so a word the lexicon
     # places on no side ("country", "economy") is the subject it holds.
-    assert open_axis_for(across, (lone,)) == lone
+    assert open_axes_for((across,), (lone,)) == (lone,)
 
 
 @pytest.mark.parametrize(
@@ -1455,9 +1531,11 @@ def test_a_lone_open_axis_answers_a_word_on_its_own_side(across: str, lone: Open
 def test_a_plural_party_answers_the_axis_its_singular_does(
     across: str, lone: OpenEntityAxis
 ) -> None:
-    # Each token places as written or as its singular.
-    for axis in (DONORS, RECIPIENTS, COUNTRIES):
-        assert (open_axis_for(across, (axis,)) == axis) is (axis == lone)
+    # Each token places as written or as its singular. A place word also
+    # covers a lone flow axis (`open_axes_for`), so only a flow word is held
+    # to its own side here.
+    for axis in (DONORS, RECIPIENTS) if lone != COUNTRIES else (COUNTRIES,):
+        assert (open_axes_for((across,), (axis,)) == (axis,)) is (axis == lone)
 
 
 @pytest.mark.parametrize(
@@ -1478,7 +1556,7 @@ def test_a_place_noun_beside_a_party_word_answers_no_axis_and_names_the_whole_pa
     # donor" is: the open `origin` axis holds agencies too, so the word
     # answers no axis and the reason names the word that covers them all.
     for axes in ((DONORS,), (RECIPIENTS,), (COUNTRIES,), (), (RECIPIENTS, DONORS)):
-        assert open_axis_for(across, axes) == (
+        assert open_axes_for((across,), axes) == (
             f"{across!r} narrows a party to its countries, and a source's open axis holds every "
             f"{party_word}, agencies included; state `across` as {stated_as!r} to cover them "
             "all, or name the countries in `entities`"
@@ -1514,9 +1592,9 @@ def test_a_word_outside_the_party_vocabulary_answers_no_axis(across: str) -> Non
     # the axis does not hold, so ranking it would rank the whole axis under
     # a narrower name. A word on both sides of a flow names no one party.
     for axes in ((DONORS,), (RECIPIENTS,), (COUNTRIES,), (), (RECIPIENTS, DONORS)):
-        assert open_axis_for(across, axes) == (
+        assert open_axes_for((across,), axes) == (
             f"{across!r} is not a party a source's open axis holds: an open axis ranks every "
-            "member it holds, and `across` states that whole party in one word, such as "
+            "member it holds, and each `across` word states that whole party, such as "
             "'donor', 'recipient' or 'country'; a narrower population (a region, an income "
             "group, a donor type) needs its members named in `entities`, or a filter the plan "
             "can express"
@@ -1539,12 +1617,6 @@ def test_a_word_outside_the_party_vocabulary_answers_no_axis(across: str) -> Non
             "'destination'",
         ),
         (
-            "country",
-            DONORS,
-            "the source's one open axis, 'origin', is the giving side of a flow, and "
-            "'country' names neither side; state the party, such as 'donor' or 'recipient'",
-        ),
-        (
             "recipient",
             COUNTRIES,
             "'recipient' names the receiving side of a flow, and the source's one open axis, "
@@ -1563,7 +1635,69 @@ def test_a_word_outside_the_party_vocabulary_answers_no_axis(across: str) -> Non
 def test_a_lone_open_axis_off_the_side_the_word_names_is_a_reason(
     across: str, lone: OpenEntityAxis, reason: str
 ) -> None:
-    assert open_axis_for(across, (lone,)) == reason
+    assert open_axes_for((across,), (lone,)) == reason
+
+
+@pytest.mark.parametrize("across", ["country", "countries", "economy"])
+@pytest.mark.parametrize("lone", [DONORS, RECIPIENTS])
+def test_a_place_word_covers_the_one_flow_axis_open_over_several_members(
+    across: str, lone: OpenEntityAxis
+) -> None:
+    # A source keyed by debtor leaves its countries open on `destination`,
+    # and `observationAbout` is not open, so "country" covers that axis.
+    one_other = OpenEntityAxis(
+        column="origin" if lone is RECIPIENTS else "destination", member_count=1
+    )
+
+    assert open_axes_for((across,), (lone,)) == (lone,)
+    assert open_axes_for((across,), (lone, one_other)) == (lone,)
+
+
+def test_country_covers_the_ids_debtors_on_their_flow_axis() -> None:
+    # IDS leaves its 134 debtors open on `destination` and no `observationAbout`
+    # (dev, total and by-creditor series alike); the twin also opens 165 creditors.
+    debtors = OpenEntityAxis(column="destination", member_count=134)
+    creditors = OpenEntityAxis(column="origin", member_count=165)
+
+    assert open_axes_for(("country",), (debtors,)) == (debtors,)
+    assert open_axes_for(("creditor", "country"), (debtors, creditors)) == (creditors, debtors)
+
+
+def test_a_place_word_prefers_the_place_axis_and_leaves_an_open_flow_axis_unstated() -> None:
+    assert open_axes_for(("country",), (COUNTRIES,)) == (COUNTRIES,)
+    assert open_axes_for(("country",), (DONORS, COUNTRIES)) == (
+        "the source also leaves 'origin' open over several members, a party `across` does "
+        "not state; add its party word to `across` to cover every member of it too, or name "
+        "the members the answer needs in `entities`, so each 'country' is not repeated once "
+        "per member of it"
+    )
+    assert open_axes_for(("donor", "country"), (DONORS, COUNTRIES)) == (DONORS, COUNTRIES)
+
+
+@pytest.mark.parametrize(
+    ("across", "covered"),
+    [
+        (("donor", "recipient"), (DONORS, RECIPIENTS)),
+        (("recipients", "donors"), (RECIPIENTS, DONORS)),
+        (("creditor", "country"), (DONORS, RECIPIENTS)),
+        (("country", "lender"), (RECIPIENTS, DONORS)),
+    ],
+)
+def test_across_covers_every_open_multi_member_axis_one_word_each(
+    across: tuple[str, ...], covered: tuple[OpenEntityAxis, ...]
+) -> None:
+    # "All donors by all recipients": each word covers its own axis, in
+    # `across` order. A place word beside a flow word takes the flow axis the
+    # other word leaves.
+    assert open_axes_for(across, (RECIPIENTS, DONORS)) == covered
+
+
+def test_a_place_word_beside_two_open_flow_axes_is_a_reason() -> None:
+    assert open_axes_for(("country",), (RECIPIENTS, DONORS)) == (
+        "the source leaves 'destination', 'origin' open, each over several members, so "
+        "'country' could be any of them; state each party the requirement covers in "
+        "`across`, such as 'donor' and 'recipient'"
+    )
 
 
 @pytest.mark.parametrize("unknown", ["reportingAgency", "sector", "observation_about"])
@@ -1572,11 +1706,15 @@ def test_an_open_column_no_party_word_names_answers_no_word(unknown: str) -> Non
     # cannot place holds a party nothing in the plan can state.
     lone = OpenEntityAxis(column=unknown, member_count=12)
 
-    for across in ("country", "donor", "recipient"):
-        assert open_axis_for(across, (lone,)) == (
+    for across in ("donor", "recipient"):
+        assert open_axes_for((across,), (lone,)) == (
             f"the source's one open axis, {unknown!r}, is a column no party word names, so it "
             f"cannot be read as holding every {across!r}"
         )
+    assert open_axes_for(("country",), (lone,)) == (
+        f"the source leaves {unknown!r} open, and none of them holds several places a "
+        "requirement over every 'country' could cover"
+    )
 
 
 @pytest.mark.parametrize("across", ["donor", "recipient"])
@@ -1592,9 +1730,11 @@ def test_a_second_open_axis_holding_several_members_or_uncounted_is_a_reason(
     own = RECIPIENTS if across == "recipient" else DONORS
     axes = tuple(sorted((other, own), key=lambda axis: axis.column))
 
-    assert open_axis_for(across, axes) == (
-        "the source leaves 'destination', 'origin' open, and `across` states one party; name "
-        f"the members of the other, so each {across!r} is not repeated once per member of it"
+    assert open_axes_for((across,), axes) == (
+        f"the source also leaves {column!r} open over several members, a party `across` does "
+        "not state; add its party word to `across` to cover every member of it too, or name "
+        f"the members the answer needs in `entities`, so each {across!r} is not repeated once "
+        "per member of it"
     )
 
 
@@ -1603,14 +1743,14 @@ def test_a_second_open_axis_holding_one_member_leaves_the_population_whole() -> 
     # donor still carries one series.
     one_recipient = OpenEntityAxis(column="destination", member_count=1)
 
-    assert open_axis_for("donor", (one_recipient, DONORS)) == DONORS
-    assert open_axis_for("country", (one_recipient, COUNTRIES)) == COUNTRIES
+    assert open_axes_for(("donor",), (one_recipient, DONORS)) == (DONORS,)
+    assert open_axes_for(("country",), (one_recipient, COUNTRIES)) == (COUNTRIES,)
 
 
 def test_several_open_axes_none_on_the_words_party_are_a_reason_naming_them() -> None:
-    assert open_axis_for("country", (RECIPIENTS, DONORS)) == (
-        "the source leaves 'destination', 'origin' open, and exactly one of them has to hold "
-        "the party 'country' names"
+    assert open_axes_for(("donor",), (RECIPIENTS, COUNTRIES)) == (
+        "the source leaves 'destination', 'observationAbout' open, and exactly one of them "
+        "has to hold the giving side of the flow 'donor' names"
     )
 
 
@@ -1621,30 +1761,30 @@ def test_several_open_axes_none_on_the_words_party_are_a_reason_naming_them() ->
             None,
             "the source does not count the members of its open axis 'origin', so it cannot be "
             "shown to hold every 'donor'; name the entities the answer needs in `entities` "
-            "instead of stating `across`",
+            "instead of stating that party in `across`",
         ),
         (
             1,
             "the source holds 1 member on its open axis 'origin', which is no population of "
             "every 'donor'; name the entities the answer needs in `entities` instead of "
-            "stating `across`",
+            "stating that party in `across`",
         ),
         (
             0,
             "the source holds 0 members on its open axis 'origin', which is no population of "
             "every 'donor'; name the entities the answer needs in `entities` instead of "
-            "stating `across`",
+            "stating that party in `across`",
         ),
     ],
 )
 def test_an_open_axis_search_did_not_count_or_holding_fewer_than_two_answers_no_word(
     member_count: int | None, reason: str
 ) -> None:
-    assert open_axis_for(
-        "donor", (OpenEntityAxis(column="origin", member_count=member_count),)
+    assert open_axes_for(
+        ("donor",), (OpenEntityAxis(column="origin", member_count=member_count),)
     ) == (reason)
-    assert open_axis_for("donor", (OpenEntityAxis(column="origin", member_count=2),)) == (
-        OpenEntityAxis(column="origin", member_count=2)
+    assert open_axes_for(("donor",), (OpenEntityAxis(column="origin", member_count=2),)) == (
+        OpenEntityAxis(column="origin", member_count=2),
     )
 
 
@@ -1659,14 +1799,14 @@ def test_a_source_whose_open_axis_holds_no_population_is_open_axis_unresolved(
 
     (issue,) = errors(
         check_evidence(
-            requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor"),
+            requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",)),
             evidence_from_source(uncounted),
         )
     )
 
     assert issue.code is EvidenceIssueCode.OPEN_AXIS_UNRESOLVED
-    assert (issue.found, issue.required) == (["origin"], "donor")
-    assert "instead of stating `across`" in issue.detail
+    assert (issue.found, issue.required) == (["origin"], ["donor"])
+    assert "instead of stating that party in `across`" in issue.detail
 
 
 @pytest.mark.parametrize(
@@ -1758,16 +1898,16 @@ def test_every_word_search_places_answers_the_axis_search_places_it_on(
     by_column = {open_axis.column: open_axis for open_axis in (DONORS, RECIPIENTS)}
     other = "destination" if axis == "origin" else "origin"
 
-    assert open_axis_for(word, (by_column[axis],)) == by_column[axis]
-    assert isinstance(open_axis_for(word, (by_column[other],)), str)
-    assert isinstance(open_axis_for(word, (COUNTRIES,)), str)
+    assert open_axes_for((word,), (by_column[axis],)) == (by_column[axis],)
+    assert isinstance(open_axes_for((word,), (by_column[other],)), str)
+    assert isinstance(open_axes_for((word,), (COUNTRIES,)), str)
 
 
 def test_a_population_the_source_leaves_open_needs_no_named_entity(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
     codes = _codes(
-        requirement(entities=[], across="donor"), source(entities=(), open_entity_axes=(DONORS,))
+        requirement(entities=[], across=("donor",)), source(entities=(), open_entity_axes=(DONORS,))
     )
 
     assert not any(severity == "error" for _, severity in codes)
@@ -1778,13 +1918,13 @@ def test_a_population_no_open_axis_holds_is_an_error(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
     issues = check_evidence(
-        requirement(entities=[], across="donor"),
+        requirement(entities=[], across=("donor",)),
         evidence_from_source(source(entities=(), open_entity_axes=())),
     )
 
     (issue,) = errors(issues)
     assert issue.code is EvidenceIssueCode.OPEN_AXIS_UNRESOLVED
-    assert (issue.found, issue.required) == ([], "donor")
+    assert (issue.found, issue.required) == ([], ["donor"])
     assert issue.detail == (
         "the source leaves no axis open, so it holds no population of every 'donor'"
     )
@@ -1802,7 +1942,7 @@ def test_a_source_recorded_without_its_open_axes_does_not_read_as_leaving_none_o
     restored = SelectedSource.model_validate(dumped)
     asked = requirement(
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2015, end=2023),
     )
 
@@ -1819,7 +1959,7 @@ def test_a_requirement_naming_an_entity_and_a_population_checks_both(
 ) -> None:
     # Education aid to Kenya from every donor: Kenya resolves under
     # `destination`, and the donors are the open `origin` axis.
-    asked = requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor")
+    asked = requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",))
 
     assert (
         errors(
@@ -1852,7 +1992,7 @@ def test_a_recorded_open_donor_side_answers_a_requirement_across_donors(
 ) -> None:
     asked = requirement(
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2015, end=2023),
     )
 
@@ -1872,7 +2012,7 @@ def test_a_recorded_open_donor_side_does_not_answer_a_requirement_across_recipie
 ) -> None:
     # The lone open axis is `origin`, the giving side, so a population of
     # recipients has no column to rank or total over.
-    asked = requirement(entities=[], across="recipient", period=Period(start=2015, end=2023))
+    asked = requirement(entities=[], across=("recipient",), period=Period(start=2015, end=2023))
 
     issues = check_evidence(asked, evidence_from_source(_recorded_role_open_source()))
 
@@ -1982,7 +2122,7 @@ def test_a_retrieval_holding_two_entities_under_the_open_column_covers_the_popul
     )
 
     issues = check_evidence(
-        requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor"),
+        requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",)),
         evidence,
         approved=approved,
     )
@@ -2000,7 +2140,7 @@ def test_a_retrieval_holding_one_entity_under_the_open_column_is_an_error(
 
     (issue,) = errors(
         check_evidence(
-            requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor"),
+            requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",)),
             evidence,
             approved=approved,
         )
@@ -2028,7 +2168,7 @@ def test_a_retrieval_naming_nothing_under_the_open_column_is_an_error(
 
     (issue,) = errors(
         check_evidence(
-            requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor"),
+            requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",)),
             evidence,
             approved=approved,
         )
@@ -2093,7 +2233,7 @@ def _kenya_from_every_donor(requirement: RequirementFactory) -> DatasetRequireme
     return requirement(
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2015, end=2023),
         unit=None,
     )

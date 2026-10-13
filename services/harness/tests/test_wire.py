@@ -630,9 +630,9 @@ _ANSWER_OVER_CAP: dict[str, tuple[Callable[[dict[str, Any]], None], str]] = {
     ),
     "slot-property": (
         lambda seed: _resolved(seed).update(
-            slots=[{"key": {"property": {"dcid": "x" * (MAX_SEED_TEXT_CHARS + 1)}}}]
+            slots=[{"key": {"property": {"ref": "x" * (MAX_SEED_TEXT_CHARS + 1)}}}]
         ),
-        r"resolved\.slots\[0\]\.key\.property\.dcid is 257 characters",
+        r"resolved\.slots\[0\]\.key\.property\.ref is 257 characters",
     ),
     "role-axis-fact": (
         lambda seed: _resolved(seed).update(
@@ -813,15 +813,33 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
     assert seed.spec.entity_groups is not None
     assert {
         role: group.model_dump(exclude_none=True) for role, group in seed.spec.entity_groups.items()
-    } == {"observationAbout": {"dcid": "africa", "label": "Africa"}}
+    } == {"observationAbout": {"ref": "africa", "label": "Africa", "entity_type": "Continent"}}
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        {"dcid": "africa", "label": "Africa"},
+        {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+    ],
+    ids=["dcid-before-ref", "unknown-member"],
+)
+def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: object) -> None:
+    # A block from the Search wire that named a set's node `dcid` would otherwise
+    # hand the set over by its name alone and lose its node.
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    with pytest.raises(ValidationError, match="unknown keys"):
+        Seed.model_validate({"spec": block, "operations": []})
 
 
 @pytest.mark.parametrize(
     "group",
     [
         {"label": ""},
-        {"label": None, "dcid": "africa"},
-        {"label": "A" * 121, "dcid": "africa"},
+        {"label": None, "ref": "africa"},
+        {"label": "A" * 121, "ref": "africa"},
         "Africa",
     ],
     ids=["empty-label", "null-label", "label-too-long", "not-an-object"],
@@ -840,7 +858,7 @@ def test_a_set_search_would_not_take_is_dropped_and_the_seed_stands(group: objec
 
 def test_a_set_on_a_role_the_identity_binds_nothing_on_is_dropped() -> None:
     block = _region_members_block()
-    block["resolved"]["entity_groups"]["origin"] = {"label": "G7", "dcid": "G7"}
+    block["resolved"]["entity_groups"]["origin"] = {"label": "G7", "ref": "G7"}
 
     seed = Seed.model_validate({"spec": block, "operations": []})
 

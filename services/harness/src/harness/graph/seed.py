@@ -1,12 +1,13 @@
-"""The `seed` node: hands the agent the datasets the user brought from Search."""
+"""The `seed` node: opens the turn with the runs an earlier turn left
+unfinished, carried on, and the datasets the user brought from Search."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import (
+    AsyncIterator,
     Callable,
-    Coroutine,
 )
 from typing import Any
 
@@ -20,6 +21,7 @@ from translator.discovery import (
     DefinitionNotResolvedError,
 )
 
+from harness.graph.resume import ResumeRuns
 from harness.graph.seams import (
     Executor,
 )
@@ -69,12 +71,44 @@ def _turn_ran_before(ctx: Context) -> bool:
 
 
 def seed_node(
-    *, executor: Executor, definition_surface: ToolSurface
-) -> Callable[[Context, Any], Coroutine[Any, Any, dict[str, str] | None]]:
-    """The `seed` node, resolving seeds through `definition_surface` and
-    recording its steps through `executor`."""
+    *, executor: Executor, definition_surface: ToolSurface, resume: ResumeRuns | None = None
+) -> Callable[[Context, Any], AsyncIterator[dict[str, str]]]:
+    """The `seed` node, carrying on unfinished runs through `resume`,
+    resolving seeds through `definition_surface` and recording its steps
+    through `executor`."""
 
-    async def receive_seeds(ctx: Context, node_input: Any) -> dict[str, str] | None:
+    async def receive_seeds(ctx: Context, node_input: Any) -> AsyncIterator[dict[str, str]]:
+        """Carry on the runs an earlier turn left unfinished (`resume`,
+        `harness.graph.resume`), then hand the agent the datasets the user
+        brought from Search. The hand-back names the runs first, then the
+        seeds, each as its own paragraph. Once the session holds it, which
+        it does when the yield returns, the runs it delivers are
+        acknowledged (`harness.graph.resume.Resumed.acknowledge`).
+
+        No output when there is neither. A run that resumes a turn already
+        under way (`_turn_ran_before`) clears the seeds slot and does
+        neither.
+        """
+        del node_input
+        raw = state_json(ctx, SEEDS_STATE_KEY, default=[])
+        ctx.state[SEEDS_STATE_KEY] = None
+        if _turn_ran_before(ctx):
+            return
+        resumed = await resume(ctx) if resume is not None else None
+        seeded = await take(ctx, raw)
+        if resumed is None:
+            if seeded is not None:
+                yield seeded
+            return
+        runs = resumed.hand_back
+        yield (
+            runs
+            if seeded is None
+            else {"status": seeded["status"], "text": f"{runs['text']}\n\n{seeded['text']}"}
+        )
+        await resumed.acknowledge()
+
+    async def take(ctx: Context, raw: Any) -> dict[str, str] | None:
         """Hand the agent the datasets the user brought from Search, as
         definite search results.
 
@@ -102,14 +136,7 @@ def seed_node(
         fails that step as `SEED_REFERENCE_UNUSED`.
 
         `None` when no seed was taken: the turn starts from the question.
-        A run that resumes a turn already under way (`_turn_ran_before`)
-        clears the slot and takes nothing.
         """
-        del node_input
-        raw = state_json(ctx, SEEDS_STATE_KEY, default=[])
-        ctx.state[SEEDS_STATE_KEY] = None
-        if _turn_ran_before(ctx):
-            return None
         record_step = getattr(executor, "record_step", None)
         if isinstance(raw, dict):
             refuse_seed_reference(record_step)

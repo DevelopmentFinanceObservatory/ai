@@ -11,7 +11,8 @@ import gzip
 import hashlib
 import io
 import json
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx2
@@ -19,6 +20,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from common.live_apis import PRINCIPAL_HEADER, LiveApisClient
 from common.materialisation import FrameRef, frame_to_parquet_bytes
+from data_mcp.client import DATASETS_PREFIX, GATED_PREFIXES, UpstreamClient
+from data_mcp.settings import Settings as DataMcpSettings
 from dfo_frame_grammar import Frame, frame_sha256, mint_content_version
 from presentation_mcp.client import PlatformAssembler
 from presentation_mcp.settings import Settings as PresentationSettings
@@ -82,12 +85,37 @@ FIRST = version_of(FIRST_VALUES)
 SECOND = version_of(SECOND_VALUES)
 
 
+_DESCRIPTION_PATH = re.compile(r"/api/datasets/[^/]+/[^/]+/description")
+DATASETS_CAPABILITIES = GATED_PREFIXES[DATASETS_PREFIX]
+
+
 def problem(status: int, code: str, **members: object) -> httpx2.Response:
     return httpx2.Response(
         status,
         json={"code": code, "retryable": False, "detail": "refused", **members},
         headers={"content-type": "application/problem+json"},
     )
+
+
+def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> UpstreamClient:
+    """data-mcp's upstream client over `handler`.
+
+    A version's description (`GET /api/datasets/{id}/{content_version}/description`)
+    answers 404 `not_found`, as dfo-apis does for a version stored without a record, so
+    `get_data` renders its digest without a description. The Datasets capabilities route
+    answers 200, so the client's probe after that 404 finds the surface mounted. Every
+    other request reaches `handler`.
+    """
+
+    def answer(request: httpx2.Request) -> httpx2.Response:
+        path = request.url.path
+        if path == DATASETS_CAPABILITIES:
+            return httpx2.Response(200, json={})
+        if request.method == "GET" and _DESCRIPTION_PATH.fullmatch(path):
+            return problem(404, "not_found")
+        return handler(request)
+
+    return UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(answer))
 
 
 class FakeApis:

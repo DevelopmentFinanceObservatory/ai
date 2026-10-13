@@ -12,11 +12,19 @@ redirect to the object store and refuses once the downloaded body exceeds
 bytes against `artifact.artifact_digest` (the same check
 `frame_materialisation._verify_parse_and_register` runs before it trusts a
 frame's bytes), and a read that checks the file's own `dfo.schema` metadata
-and its Parquet-metadata row count against the caller's own `expected_rows`
-(the manifest's `series_count`) before reading a single column, since a
-schema match alone does not prove the artifact carries the series the
-manifest promised. A manifest that carries the artifact but no `series_count`
-has no count to check, so `expected_rows=None` skips that comparison alone.
+and its series against the caller's own `expected_series` (the manifest's
+`series_count`), since a schema match alone does not prove the artifact
+carries the series the manifest promised. A manifest that carries the
+artifact but no `series_count` has no count to check, so
+`expected_series=None` skips that comparison alone.
+
+A file holds a row per series, so its Parquet-metadata row count is checked
+before a single column is read, unless the mint's estimates continue its
+series (`continuing_method`, off the manifest's `trace.continuations`). A
+continued series holds a row for its reported method and a row for the
+continuing one and counts once, as dfo-apis' producer counts it
+(`materialise.statistics.SeriesStatisticsFile`), so such a file's series are
+counted from its rows (`_series_count`).
 
 `fetch_series_statistics_table` returns the verified file as an Arrow table
 in `SERIES_STATISTICS_ARROW_SCHEMA`, the producer's own schema
@@ -41,14 +49,14 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
 
 import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dfo_frame_grammar.columnar import array_kernel
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import (
@@ -63,10 +71,14 @@ from data_mcp.manifest import (
 __all__ = [
     "SERIES_STATISTICS_ARROW_SCHEMA",
     "SERIES_STATISTICS_SCHEMA",
+    "ContinuedSeries",
     "SeriesStatisticsSchemaError",
+    "continued_series",
+    "continuing_method",
     "fetch_series_statistics",
     "fetch_series_statistics_table",
     "find_statistics_artifact",
+    "series_index",
     "series_statistics_table",
 ]
 
@@ -125,10 +137,33 @@ class SeriesStatisticsSchemaError(ValueError):
     `dfo.schema` metadata mismatch, a computed digest that does not match
     `artifact.artifact_digest`, a row whose `facet`, `entities`, or
     `observations` column does not decode into `SeriesStatisticsModel`'s
-    shape, and a Parquet-metadata row count that does not match the caller's
-    own `expected_rows` -- every way this module's own reading can fail,
+    shape, and a series count that does not match the caller's own
+    `expected_series` -- every way this module's own reading can fail,
     folded into the one type its callers catch.
     """
+
+
+class _Continuation(BaseModel):
+    """One `trace.continuations` entry: the method whose estimates continue the
+    mint's series past their end. Its `axis` and `periods` go unread."""
+
+    method: str
+
+
+_CONTINUATIONS = TypeAdapter(list[_Continuation])
+
+
+def continuing_method(manifest: Manifest) -> str | None:
+    """The method `manifest.trace.continuations` names, or `None` when it names
+    none. A mint's one `measurementMethod` selection has at most one
+    continuation, so the first entry is the one.
+
+    Raises:
+        pydantic.ValidationError: `continuations` is not a list of entries
+            each naming a `method`.
+    """
+    continuations = _CONTINUATIONS.validate_python(manifest.trace.get("continuations", []))
+    return next((entry.method for entry in continuations), None)
 
 
 def find_statistics_artifact(manifest: Manifest) -> ArtifactEntry | None:
@@ -149,7 +184,8 @@ async def fetch_series_statistics(
     subject_id: str,
     content_version: str,
     artifact: ArtifactEntry,
-    expected_rows: int | None,
+    expected_series: int | None,
+    continuing: str | None,
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> list[SeriesStatisticsModel]:
@@ -162,7 +198,8 @@ async def fetch_series_statistics(
         subject_id=subject_id,
         content_version=content_version,
         artifact=artifact,
-        expected_rows=expected_rows,
+        expected_series=expected_series,
+        continuing=continuing,
         transport=transport,
         deadline=deadline,
     )
@@ -179,7 +216,8 @@ async def fetch_series_statistics_table(
     subject_id: str,
     content_version: str,
     artifact: ArtifactEntry,
-    expected_rows: int | None,
+    expected_series: int | None,
+    continuing: str | None,
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> pa.Table:
@@ -189,11 +227,15 @@ async def fetch_series_statistics_table(
         subject_id: The `spec_` id `artifact` was minted under.
         content_version: The `cv_` id naming the exact retrieval.
         artifact: The statistics entry itself, from `find_statistics_artifact`.
-        expected_rows: The row count the manifest that named `artifact` already
-            promised (`manifest.series_count`) -- checked against the
-            decoded row count once the fetch succeeds. `None` when the manifest
+        expected_series: The series count the manifest that named `artifact`
+            already promised (`manifest.series_count`) -- checked against the
+            file's series once the fetch succeeds. `None` when the manifest
             carries the artifact but no `series_count` (dfo-apis mints an
             all-years definition that way): there is no count to check.
+        continuing: The method continuing the mint's series
+            (`continuing_method(manifest)`), whose rows count no series of
+            their own beside a row of the series they continue; `None` when
+            nothing continues them.
         transport: Only ever set by a test, exactly like
             `frame_materialisation.materialise_and_register`'s own `transport`
             -- `None` (the default) means a real network GET.
@@ -210,8 +252,8 @@ async def fetch_series_statistics_table(
         SeriesStatisticsSchemaError: the downloaded body exceeds `artifact
             .bytes` (the advertised size), the fetched bytes do not hash to
             `artifact.artifact_digest`, the fetched file's `dfo.schema`
-            metadata is not `series-statistics/1`, its Parquet-metadata row
-            count does not match `expected_rows`, or a column does not fit
+            metadata is not `series-statistics/1`, its series count does not
+            match `expected_series`, or a column does not fit
             `SERIES_STATISTICS_ARROW_SCHEMA` or a facet `SeriesStatisticsModel`.
         httpx2.HTTPStatusError: the link answered with an error status, such
             as 410 `artifact_expired`, or its redirect target did.
@@ -242,7 +284,7 @@ async def fetch_series_statistics_table(
             "fetched artifact bytes do not hash to the advertised artifact_digest "
             f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
         )
-    return _read(fetched, expected_rows=expected_rows)
+    return _read(fetched, expected_series=expected_series, continuing=continuing)
 
 
 async def _get_bounded(client: httpx2.AsyncClient, url: str, *, max_bytes: int) -> bytes:
@@ -277,17 +319,19 @@ async def _get_bounded(client: httpx2.AsyncClient, url: str, *, max_bytes: int) 
         return bytes(fetched)
 
 
-def _read(data: bytes, *, expected_rows: int | None) -> pa.Table:
+def _read(data: bytes, *, expected_series: int | None, continuing: str | None) -> pa.Table:
     """Read `data` as a `series-statistics/1` Parquet file into a checked table.
 
-    Checked against the file's own `dfo.schema` metadata, then its
-    Parquet-metadata row count against `expected_rows`, before any column is
-    read -- a caller trusting the wrong schema version or row count would
-    otherwise misread every column silently, or pay to read rows a
-    mismatched count already disqualifies, instead of refusing.
-    `ParquetFile.metadata.num_rows` and `.schema_arrow`'s own key-value
-    metadata both read off the file's footer, so both checks run without
-    decompressing a single column.
+    Checked against the file's own `dfo.schema` metadata, then, with nothing
+    `continuing` the series, its Parquet-metadata row count against
+    `expected_series`, before any column is read -- a caller trusting the
+    wrong schema version or row count would otherwise misread every column
+    silently, or pay to read rows a mismatched count already disqualifies,
+    instead of refusing. `ParquetFile.metadata.num_rows` and `.schema_arrow`'s
+    own key-value metadata both read off the file's footer, so both checks run
+    without decompressing a single column. With a `continuing` method a
+    series may hold two rows, so its series are counted from the rows read
+    (`_series_count`) and checked against `expected_series` after them.
 
     The columns are then cast to `SERIES_STATISTICS_ARROW_SCHEMA`, which
     refuses a missing column, a value its type cannot hold (a fractional
@@ -309,10 +353,10 @@ def _read(data: bytes, *, expected_rows: int | None) -> pa.Table:
             f"expected dfo.schema={SERIES_STATISTICS_SCHEMA!r} metadata, got {schema_name!r}"
         )
     num_rows = parquet_file.metadata.num_rows
-    if expected_rows is not None and num_rows != expected_rows:
+    if expected_series is not None and continuing is None and num_rows != expected_series:
         raise SeriesStatisticsSchemaError(
             f"the series-statistics/1 artifact carries {num_rows} row(s), but "
-            f"the manifest named {expected_rows}"
+            f"the manifest named {expected_series}"
         )
     try:
         # `pa.ArrowInvalid` and `json.JSONDecodeError` are both `ValueError`s.
@@ -325,7 +369,96 @@ def _read(data: bytes, *, expected_rows: int | None) -> pa.Table:
         raise SeriesStatisticsSchemaError(
             f"the series-statistics/1 artifact does not fit its schema: {exc}"
         ) from exc
+    if (
+        expected_series is not None
+        and continuing is not None
+        and (series := _series_count(table, continuing=continuing)) != expected_series
+    ):
+        raise SeriesStatisticsSchemaError(
+            f"the series-statistics/1 artifact carries {num_rows} row(s) holding "
+            f"{series} series, but the manifest named {expected_series}"
+        )
     return table
+
+
+def _series_count(table: pa.Table, *, continuing: str) -> int:
+    """The series `table`'s rows hold, counted as dfo-apis' producer counts them
+    (`materialise.statistics._FiguresFold`, by `series_index`'s rule)."""
+    return len(set(series_index(table, continuing=continuing).to_pylist()))
+
+
+def series_index(table: pa.Table, *, continuing: str | None) -> pa.Array:
+    """The series each row of `table` belongs to, as the position of its series'
+    head row: a row of the `continuing` method belongs to the first row of
+    another method holding the same variable, entities and facet apart from
+    `measurementMethod`, as dfo-apis' producer folds them
+    (`materialise.statistics._FiguresFold`). Every other row heads its own
+    series, so with nothing `continuing` each row is its own.
+    """
+    keys = [
+        _series_identity(stat_var, entities, json.loads(text))
+        for stat_var, entities, text in zip(
+            table.column("stat_var").to_pylist(),
+            table.column("entities").to_pylist(),
+            table.column("facet").to_pylist(),
+            strict=True,
+        )
+    ]
+    return pa.array(_series_heads(keys, continuing=continuing), pa.int64())
+
+
+class ContinuedSeries(NamedTuple):
+    """One series of a statistics file: its `reported` row, and the row of the
+    method continuing it past its end, or `None` when nothing continues it."""
+
+    reported: SeriesStatisticsModel
+    estimates: SeriesStatisticsModel | None
+
+
+def continued_series(
+    rows: Sequence[SeriesStatisticsModel], *, continuing: str | None
+) -> list[ContinuedSeries]:
+    """`rows` as series, by `series_index`'s rule, in the order of their head rows."""
+    heads = _series_heads(
+        [
+            _series_identity(
+                row.stat_var,
+                [{"role": entity.role, "ref": entity.ref} for entity in row.entities],
+                row.facet,
+            )
+            for row in rows
+        ],
+        continuing=continuing,
+    )
+    estimates = {head: rows[index] for index, head in enumerate(heads) if head != index}
+    return [
+        ContinuedSeries(reported=row, estimates=estimates.get(index))
+        for index, row in enumerate(rows)
+        if heads[index] == index
+    ]
+
+
+def _series_heads(keys: Sequence[tuple[str, str | None]], *, continuing: str | None) -> list[int]:
+    """`series_index` over each row's `_series_identity`."""
+    leads: dict[str, int] = {}
+    for index, (identity, method) in enumerate(keys):
+        if continuing is None or method != continuing:
+            leads.setdefault(identity, index)
+    return [
+        leads.get(identity, index) if continuing is not None and method == continuing else index
+        for index, (identity, method) in enumerate(keys)
+    ]
+
+
+def _series_identity(
+    stat_var: str, entities: Sequence[Mapping[str, str]], facet: Mapping[str, Any]
+) -> tuple[str, str | None]:
+    """A statistics row's series apart from its method, as a comparable string, and
+    its `measurementMethod`."""
+    rest = {key: value for key, value in facet.items() if key != "measurementMethod"}
+    identity = json.dumps([stat_var, list(entities), rest], sort_keys=True)
+    method = facet.get("measurementMethod")
+    return identity, method if isinstance(method, str) else None
 
 
 def series_statistics_table(series: Sequence[SeriesStatisticsModel]) -> pa.Table:

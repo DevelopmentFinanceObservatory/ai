@@ -8,8 +8,11 @@ state and translates it into `harness.graph.seams.PlannerModel`'s contract.
 
 The planner's own tools settle methodology and carry it to a compiled
 workflow (`propose_plan`, whose `translation` is either the compiled outcome
-or the `Referral` translation stopped on) and declare it ready for the
-user's answer (`submit_plan`). This module never constructs a `Plan` itself.
+or the `Referral` translation stopped on); a translation that compiles
+declares the plan ready for the user's answer in code
+(`planner.agent.declare_ready`), and ends the planner's run. This module never
+constructs a `Plan` itself. An entry that ends without a plan ready ends on a
+refusal whose sentence comes from `harness.sentences`.
 
 `ctx.run_node` shares one session both directions with the graph's own
 node: there is no second `Runner`, no second session service, and no LRU or
@@ -46,10 +49,10 @@ otherwise read a write back as it was before this call, undoing it. The
 first call of a session (or a session's first entry after such a clear)
 renders the full brief --
 the search readings, canvas digest, conversation digest, the plan being
-changed, the question. Every later call in that same session -- a correction
-round inside `_propose`'s own loop, the `amend` edge (`approve_n -> planner_n`),
-and the `replan` edge (`execute_n -> planner_n`) -- renders only what is
-new: the amendment or refusal ask, or the correction's problem nudge.
+changed, the question. Every later call in that same session -- the `amend`
+edge (`approve_n -> planner_n`) and the `replan` edge
+(`execute_n -> planner_n`) -- renders only what is new: the amendment or
+refusal ask.
 Resending the full brief on every call would restate a history the model
 can already see with `include_contents` pinned; a continuing call sends
 only the new thing.
@@ -59,19 +62,20 @@ edge it is the plan the model itself drafted and submitted last call,
 untouched since (`approve_n`'s own `"amend"` route never calls
 `Plan.approve`), already in its own tool-call history. On the `replan`
 edge it is `execute`'s own copy of that same plan (`harness.graph.execute`),
-which by then differs from what the model drafted in exactly two fields:
-`status` and `approved_revision`. Both come from upstream of `execute`
-itself -- `approve_n`'s `"approved"` route calls `Plan.approve()`
-(`planner/plan.py:1277-1292`), which sets both before `execute_approved_plan`
-ever runs; `execute_approved_plan` then only ever advances `status` further,
-through `start_execution`, `complete`/`fail`, each a bare
+which by then differs from what the model drafted in exactly three fields:
+`status`, `approved_revision` and `approved_at`. All three come from
+upstream of `execute` itself -- `approve_n`'s `"approved"` route calls
+`Plan.approve`, which sets them before `execute_approved_plan` ever runs;
+`execute_approved_plan` then only ever advances `status` further, through
+`start_execution`, `complete`/`fail`, each a bare
 `model_copy(update={"status": ...})` that touches nothing else. Dropping
-both from the continuing render is still right: `status` states where the
+them from the continuing render is still right: `status` states where the
 plan sits in the approve/execute lifecycle, which the refusal text this
 seam sends already says in its own words; `approved_revision` is
 `plan_revision(self)`, a content hash of the very decisions and
 requirements the model itself just drafted, not a new fact about the
-world. Neither is something the refusal text does not already restate.
+world; and `approved_at` is when the user answered, which no proposal
+acts on. None is something the refusal text does not already restate.
 
 `_plan_context` renders the plan being changed as a digest, and
 `_READINGS_BUDGET` holds the search readings. With a realistic
@@ -87,28 +91,31 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
-import random
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from common.telemetry import current_trace_id, record_span
+from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
+from planner.agent import proposing_tool
 from planner.operations import OperationKind
 from planner.plan import (
-    MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
+    AskBreakdown,
     PinSource,
     Plan,
     PlanStatus,
@@ -118,6 +125,7 @@ from planner.plan import (
     current_discovery_time_left,
     cut_user_text,
     discovery_time_left,
+    load_ask_breakdowns,
     load_asks,
     load_plan,
     load_plan_rounds,
@@ -127,17 +135,13 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
 )
-from planner.settings import (
-    THINKING_SAMPLE_STATE_KEY,
-    AgentSettings,
-    override_thinking_on_sampled_turns,
-)
+from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
-from translator.referral import ReferralKind
-from translator.tool import permitted_repair
+from translator.referral import USER_DECIDES
+from translator.tool import Translate, permitted_repair
 
 from harness.agents import create_planner_with_translator
 from harness.graph.state import (
@@ -147,8 +151,16 @@ from harness.graph.state import (
     ORCHESTRATOR_SPECS_KEY,
 )
 from harness.prefix_cache import PrefixCache
+from harness.sentences import (
+    TERMINAL_PROPOSE_CODES,
+    SeamCode,
+    referral_sentence,
+    refusal_sentence,
+)
 from harness.settings import Settings
+from harness.turn_budget import CLOSED_BY_KEY, current_turn_budget
 from harness.turn_records import (
+    SETTLED_STATUSES,
     RenderedReadings,
     SearchReading,
     measure_choice_text,
@@ -160,12 +172,8 @@ from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
 
-# Corrective rounds after the first run. Past this we raise rather than
-# keep paying for a model that is not converging on `submit_plan`.
-_MAX_CORRECTIONS = 2
-
 # Insurance against a runaway tool loop inside one agent run. A healthy plan
-# takes well under this many tool calls (skill search, propose, submit).
+# takes well under this many tool calls (skill reads and proposals).
 _MAX_EVENTS = 60
 
 # Session-state slot marking that this seam has already sent a message in
@@ -219,11 +227,6 @@ _READINGS_BUDGET = 3_000
 # renders no readings section, or a caller that passes none.
 _NO_READINGS = RenderedReadings("", ())
 
-# A referral candidate's `label` is the resolve's own `rendered_sentence`,
-# which can run to a paragraph. Capped where `_pinnable_candidates` shapes
-# it for a question to the user.
-_CANDIDATE_LABEL_CAP = 120
-
 # A decision's `description` and `rationale` are prose no validator compares,
 # so they are the two fields this render may shorten. Every other plan field
 # is rendered in full. `chosen`, `options` and every requirement field are
@@ -231,6 +234,11 @@ _CANDIDATE_LABEL_CAP = 120
 # change the plan itself, not only the text the model reads.
 _PLAN_DESCRIPTION_CAP = 200
 _PLAN_RATIONALE_CAP = 300
+
+# A referral candidate's `label` is the resolve's own `rendered_sentence`,
+# which can run to a paragraph. Capped where `_pinnable_candidates` shapes
+# it for a question to the user.
+_CANDIDATE_LABEL_CAP = 120
 
 # A compiled source's `sentence` is the resolved reading in search's own
 # words. Capped so a nine-source plan cannot let one verbose sentence carry
@@ -240,6 +248,12 @@ _PLAN_SOURCE_SENTENCE_CAP = 160
 # its spec_id (`_measure_choice_text`). An alternative past the cap is left
 # out whole, since a cut spec_id pins nothing.
 _PLAN_MEASURE_CHOICE_CAP = 240
+
+# Gemini requires a `thought_signature` on a generation's first `functionCall`
+# part and answers a request replaying one without it with a 400. This is
+# the documented placeholder that makes the API skip validation for a call
+# injected outside a model turn.
+_SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
 
 # The run-time refusal codes that mean no operation computes what the refused
 # step was asked to, each with the `unsupported` answer it stands for. A replan
@@ -267,98 +281,12 @@ _SHARE_UNIT_CODES = frozenset({"cross_frame_unit_unbound", "cross_frame_unit_mis
 # of frames. The repair in plan terms is the planner's.
 _FACET_MISMATCH_CODE = "cross_frame_facet_mismatch"
 
-_NO_SUBMIT_NUDGE = (
-    "You have not called submit_plan. Propose the plan with propose_plan, "
-    "which translates it, settle what its `translation` refers back if it did "
-    "not compile, then call submit_plan with the current version."
-)
-
-# The `refused["code"]` `_before_planner_model` stamps on a deadline refusal
-# it builds itself, and `_closing_refusal` on a referral for a call the entry
-# had no time left to issue, never a `planner.tool_results.ProblemCode` read
-# off a `propose_plan` response. `_refusal_text` compares against this to
-# route to `_deadline_text`, and nothing outside this module ever sees it.
-_DEADLINE_REFUSAL_CODE = "planner_deadline_exceeded"
-
-# The seconds of an entry's deadline a discovery call leaves for the planner's
-# next model call, which reads what the call answered. A search that runs into
-# this margin is cut off (`planner.plan.discovery_time_left`), so a search that
-# succeeds still leaves the planner time to use it before the deadline.
-_NEXT_MODEL_CALL_MARGIN_S = 10.0
-
-# The `refused["code"]` `_track_tool_call` stamps once a translation answers
-# with an `internal` referral, a fault no correction round repairs, so it
-# ends the entry the way a deadline does, carrying the referral's reference.
-_INTERNAL_REFUSAL_CODE = "translation_internal_failure"
-
-# The `refused["code"]` `_track_tool_call` stamps once a translation answers
-# with a referral marked `repeated`. The plan failed to translate the way
-# it failed before, unchanged where it failed, so a correction round would
-# translate it a third time to the same stop.
-_REPEATED_REFUSAL_CODE = "translation_repeated"
-
-# The `refused["code"]` `_track_tool_call` stamps once a translation answers
-# with a referral marked `budget_spent`. A discovery budget is spent and the
-# most recent search that spent it timed out, so translating again in this
-# entry is refused before it searches.
-_UNAVAILABLE_REFUSAL_CODE = "discovery_unavailable"
-
-# The `refused["code"]` `_on_planner_tool_error` stamps once one of the
-# planner's own tools raises an exception it did not anticipate. The run
-# stops there, and the entry ends on a final refusal the orchestrator answers
-# around, so the failure costs the plan and leaves the turn standing.
-_TOOL_FAILED_REFUSAL_CODE = "planner_tool_failed"
-
-# What the break `_before_planner_model` returns says, per closing refusal code.
-_CLOSING_REASONS = {
-    _DEADLINE_REFUSAL_CODE: "this turn's time budget ran out",
-    _INTERNAL_REFUSAL_CODE: "translation failed internally",
-    _REPEATED_REFUSAL_CODE: "the plan failed to translate the same way again",
-    _UNAVAILABLE_REFUSAL_CODE: "the data service is unavailable",
-    _TOOL_FAILED_REFUSAL_CODE: "a planner tool failed inside DFO",
-    ProblemCode.NOTHING_TO_PLAN: "every ask in the question is declined",
-}
-
-# What a stalled referral's message tells the planner to do, per kind.
-# `{repair}` and `{constraint}` read the referral's own fields. A transient
-# kind never stalls, and an internal one ends the entry first.
-_STALLED_ACT_DEFAULT = "Change what the requirement asks for"
-_STALLED_ACTS: Mapping[str, str] = {
-    ReferralKind.SOURCE_AMBIGUOUS: "Settle on one of the named candidates",
-    ReferralKind.SOURCE_NAME_AMBIGUOUS: (
-        "Ask the user to choose an offered source reference; keep its wording and exclusion"
-    ),
-    ReferralKind.PINNED_SOURCE_NOT_FOUND: (
-        "Settle on one of the named candidates, or unpin the source and change what "
-        "the requirement asks for"
-    ),
-    ReferralKind.NO_DATA: (
-        "Change what the requirement asks for; the nearest sources are context, not pins"
-    ),
-    ReferralKind.REQUIREMENT_UNMEETABLE: "Tell the user what cannot be done and ask what to change",
-    ReferralKind.ASK_NOT_UNDERSTOOD: "Reword the part of the ask the referral names",
-    ReferralKind.DISCOVERY_BUDGET_EXHAUSTED: "Ask for less at once",
-    ReferralKind.REQUIREMENT_NEEDS_REPAIR: "Make the permitted repair ({repair}) for {constraint}",
-    ReferralKind.UNSUPPORTED_ASK: "Tell the user what cannot be done and ask what to change",
-    ReferralKind.NO_OPERATION_COVERS: (
-        "Record the ask in `declined`, in the user's words, and plan only what can "
-        "still be answered"
-    ),
-}
-
-# Gemini requires a `thought_signature` on a generation's first `functionCall`
-# part and answers a request replaying one without it with a 400. This is
-# the documented placeholder that makes the API skip validation for a call
-# injected outside a model turn. `_before_planner_model`'s other synthetic
-# response is a text part, which the rule does not cover.
-_SKIP_THOUGHT_SIGNATURE = b"skip_thought_signature_validator"
-
 
 class PlannerSeamError(RuntimeError):
     """The planner produced no plan ready for the user's answer.
 
-    Raised so that a plan the user approves is a plan `submit_plan` itself
-    declared ready, never one this seam assembled from a partial run.
+    Raised so that a plan the user approves is a plan
+    `planner.agent.declare_ready` declared ready.
 
     `refusal` is the shape `harness.studio_translate._stream_fatal` reads
     (`code`, `retry_mode`, `fix.detail`), so this reaches the wire as the
@@ -394,25 +322,19 @@ class _RunTracker:
     `_track_tool_call`.
     """
 
-    def __init__(self, deadline_at: float) -> None:
-        # The wall-clock instant (`PlannerSeam._clock()`) this entry into the
-        # planner has to stop generating by, computed once in
-        # `PlannerSeam.__call__` and shared by every `_propose` call of the
-        # same entry; a resumed entry gets a fresh one since `__call__` runs
-        # again to produce it. Checked in `_before_planner_model`.
-        self.deadline_at = deadline_at
-        self.referral_counts: dict[tuple[str, str | None], int] = {}
-        self.stalled: str | None = None
+    def __init__(self) -> None:
+        self.referral_counts: dict[tuple[str, str | None, str | None], int] = {}
         self.refused: dict[str, Any] | None = None
         self.ready_to_break = False
+        # The `adk_request_input` call args the next generation is replaced
+        # with, for a referral the user decides (`_user_decided_ask`).
+        self.ask: dict[str, Any] | None = None
         self.submitted: dict[str, Any] | None = None
         self.events = 0
         # The referral the last translation with an `outcome` answered,
         # or `None` once one of those translations answers something
-        # other than a referral -- see `_track_tool_call`. `_before_planner_
-        # model`'s deadline branch reads this for its own candidates, since
-        # the run can hit its deadline on a referral that has not yet
-        # repeated.
+        # other than a referral -- see `_track_tool_call`. An entry that ends
+        # with no plan ready carries it (`_not_ready`).
         self.last_referral: dict[str, Any] | None = None
         # The clock a progress report's `duration_ms` measures against:
         # reset every time one fires, so each report covers everything
@@ -457,6 +379,12 @@ _active_call: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar
     "planner_seam_active_call", default=None
 )
 
+# A caller's callback on each request the planner sends its model, and on each
+# response the model answers, as `LlmAgent`'s callback lists run them: one that
+# answers a response ends its list there.
+ModelRequestCallback = Callable[[CallbackContext, LlmRequest], LlmResponse | None]
+ModelResponseCallback = Callable[[CallbackContext, LlmResponse], LlmResponse | None]
+
 
 class PlannerSeam:
     """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
@@ -467,25 +395,21 @@ class PlannerSeam:
         settings: Settings,
         agent_settings: AgentSettings | None = None,
         surface: ToolSurface | None = None,
-        clock: Callable[[], float] = time.monotonic,
-        thinking_sample_rng: Callable[[], float] = random.random,
         prefix_cache: PrefixCache | None = None,
+        translate: Translate | None = None,
+        model: BaseLlm | None = None,
+        before_model_callbacks: Sequence[ModelRequestCallback] = (),
+        after_model_callbacks: Sequence[ModelResponseCallback] = (),
     ) -> None:
-        # `planner_entry_deadline_seconds`/`thinking_sample_rate` are read once
-        # here rather than per call, matching the default
-        # `create_planner_with_translator` resolves for the models it builds
-        # (`None` -> `AgentSettings()`). `clock` and `thinking_sample_rng`
-        # stand in for `time.monotonic`/`random.random` in a test driving the
-        # deadline or the sampling draw without a real sleep or RNG, see
-        # `__call__` and `_before_planner_model`.
+        # `translate` replaces the translation `propose_plan` runs, and `model`
+        # the model `agent_settings` names. `before_model_callbacks` run after
+        # the seam's own, which answer a request themselves once the entry
+        # has to stop, so they see only the requests the model is sent.
+        # `after_model_callbacks` run before the seam's own, so they see each
+        # response as the model answered it, before `drop_thought_parts`
+        # replaces one. `evals/planner_entry` runs the served planner this way.
         resolved_agent_settings = agent_settings if agent_settings is not None else AgentSettings()
-        self._planner_deadline_seconds = resolved_agent_settings.planner_entry_deadline_seconds
-        self._planner_deadline_seconds_sampled = (
-            resolved_agent_settings.planner_entry_deadline_seconds_sampled
-        )
-        self._thinking_sample_rate = resolved_agent_settings.thinking_sample_rate
-        self._clock = clock
-        self._thinking_sample_rng = thinking_sample_rng
+        self._proposing = proposing_tool(resolved_agent_settings.planner_schema_delivery)
         self._agent = create_planner_with_translator(
             settings=settings,
             agent_settings=agent_settings,
@@ -500,7 +424,10 @@ class PlannerSeam:
             # `BUDGET_EXHAUSTED` is.
             question_fixed=True,
             prefix_cache=prefix_cache,
+            translate=translate,
         )
+        if model is not None:
+            self._agent.model = model
         # The callbacks are assigned exactly once, here, as bound methods,
         # and read the call they belong to off `_active_call` (a
         # `ContextVar` `_propose` sets for the duration of its own
@@ -513,17 +440,13 @@ class PlannerSeam:
         # the first truthy return, so the usage callback goes first: it
         # always returns `None`, and `drop_thought_parts` still runs after it.
         self._agent.after_model_callback = [
+            *after_model_callbacks,
             self._after_planner_model,
             *self._agent.canonical_after_model_callbacks,
         ]
-        # `override_thinking_on_sampled_turns` always returns `None`, so it
-        # never short-circuits this list: `_before_planner_model` still
-        # decides every response. A single assignment here would silently
-        # drop the override the moment a deadline check or a stalled-referral
-        # stop replaces it.
         self._agent.before_model_callback = [
-            override_thinking_on_sampled_turns,
             self._before_planner_model,
+            *before_model_callbacks,
         ]
 
     async def __call__(
@@ -619,59 +542,22 @@ class PlannerSeam:
                 # already been briefed gets.
                 ctx.session.state[PLAN_STATE_KEY] = None
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
-                # A first-draft entry draws fresh rather than reusing an
-                # earlier turn's draw on the same persistent session: popped
-                # here so the write below sees it absent and draws again.
-                ctx.session.state.pop(THINKING_SAMPLE_STATE_KEY, None)
-        # A `resolve_definition` this entry's deadline cuts keeps running here
+        # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
         # cancelled on the way out (`translator.discovery.CutCalls`).
         cut_calls = CutCalls()
         cut_calls_token = current_cut_calls.set(cut_calls)
         try:
-            # Read once, at the top of `__call__`: `fresh` answers "has this
-            # session ever been briefed," not "is this the first `_propose`
-            # call of this `__call__`" -- a correction round below builds its
-            # own message with `fresh=False` unconditionally, never by
-            # re-reading this flag, because by the time a correction round
-            # runs, the first `_propose` call of this same `__call__` has
-            # already put a message in the session's history.
+            # `fresh` answers "has this session ever been briefed".
             fresh = not ctx.session.state.get(_BRIEFED_STATE_KEY, False)
             ctx.session.state[_BRIEFED_STATE_KEY] = True
-            # Drawn once per turn and shared with every generation through session
-            # state (`THINKING_SAMPLE_STATE_KEY`,
-            # `override_thinking_on_sampled_turns`): a correction round or a
-            # resume within this turn reads the draw already on record.
-            if THINKING_SAMPLE_STATE_KEY not in ctx.session.state:
-                sampled = self._thinking_sample_rng() < self._thinking_sample_rate
-                ctx.session.state[THINKING_SAMPLE_STATE_KEY] = sampled
-                if sampled:
-                    record_span("planner.thinking_sampled", {"dfo.thinking_sampled": True})
-            # Anchored once here and carried unchanged into every `_propose`
-            # call this entry makes, through `_RunTracker.deadline_at`: a
-            # correction round is still the same entry into the planner, so
-            # it shares this deadline, while a resume after a user answer
-            # re-enters `__call__` and gets a fresh one. Checked in
-            # `_before_planner_model`. A sampled turn (the draw just above,
-            # read back off session state so a correction round or a resume
-            # within this turn picks the same budget its own first entry
-            # did) gets its own, larger deadline: it runs the planner at the
-            # model's own default thinking level, deliberately slower than
-            # the ordinary `LOW` turn this deadline is otherwise sized for.
-            deadline_seconds = (
-                self._planner_deadline_seconds_sampled
-                if ctx.session.state[THINKING_SAMPLE_STATE_KEY]
-                else self._planner_deadline_seconds
-            )
-            deadline_at = self._clock() + deadline_seconds
             # Every spec_id the planner's message shows it, written on every
-            # entry so a correction round inside this same `__call__` reads
-            # it (`PIN_SOURCES_STATE_KEY`). Only a shown one reuses its
-            # block, and only a shown, settled one gets a synthesized source
-            # decision. Any other pin needs the model's own decision and is
-            # confirmed by a fresh search. Readings render on a fresh
-            # message only, so a later entry keeps the ones it rendered, less
-            # any the executor has since refused.
+            # entry so `propose_plan` reads it (`PIN_SOURCES_STATE_KEY`). A
+            # pin of a shown one reuses its block, and one of a shown,
+            # settled measure gets the measure decision `propose_plan`
+            # writes. Readings render on a fresh message only, so a later
+            # entry keeps the ones it rendered, less any the executor has
+            # since refused.
             ledger = _NO_READINGS
             if fresh:
                 ledger = _readings_ledger(readings)
@@ -705,59 +591,25 @@ class PlannerSeam:
                 conversation_digest=conversation_digest,
                 ledger=ledger,
                 asks=load_asks(cast(SessionState, ctx.session.state)),
+                ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
             )
             submitted, plan, refused = await self._propose(
-                ctx=ctx, message=message, on_progress=on_progress, deadline_at=deadline_at
+                ctx=ctx, message=message, on_progress=on_progress
             )
             if refused is not None:
                 return self._refused(refused)
-            problem = self._problem(submitted)
-            corrections = 0
-            while problem is not None and corrections < _MAX_CORRECTIONS:
-                corrections += 1
-                logger.info("planner seam correction %d: %s", corrections, problem)
-                # `fresh=False` by construction, not by re-reading the flag:
-                # the first `_propose` call above already briefed this
-                # session, so this round sends only the problem to fix. It is
-                # still its own `ctx.run_node` call, but `ctx.run_node`
-                # shares the graph's own session (see the module docstring),
-                # so the model still sees everything the first call rendered
-                # -- it does not need it repeated.
-                message = self._message(
-                    fresh=False,
-                    question=question,
-                    prior_plan=prior_plan,
-                    refusal=refusal,
-                    amendment=amendment,
-                    canvas_digest=canvas_digest,
-                    conversation_digest=conversation_digest,
-                    problem=problem,
-                )
-                submitted, plan, refused = await self._propose(
-                    ctx=ctx, message=message, on_progress=on_progress, deadline_at=deadline_at
-                )
-                if refused is not None:
-                    # A correction round's own `propose_plan` call can still
-                    # hit the cap (the problem being corrected may have
-                    # burned the last round). Return the same way the first
-                    # call does: never retry a budget refusal, since a retry
-                    # replays the same call against the same exhausted count.
-                    return self._refused(refused)
-                problem = self._problem(submitted)
-            if problem is not None:
-                raise PlannerSeamError(problem)
             assert submitted is not None and plan is not None, (
-                "a None problem means submit_plan answered ok, which only happens once "
-                "load_plan(state) found a plan (see planner.agent.submit_plan)"
+                "_propose answers a refusal unless a proposal declared the plan on record "
+                "ready (see planner.agent.declare_ready)"
             )
             if plan.status is not PlanStatus.PENDING_APPROVAL:
-                # `submit_plan` itself enforces this (`planner.agent.
+                # `declare_ready` enforces this (`planner.agent.
                 # _execution_blocked`); repeated here so a future gap in that
                 # allowlist reaches this seam as a loud `PlannerSeamError`
                 # instead of a plan the graph shows the user as approvable.
                 raise PlannerSeamError(
-                    f"submit_plan answered ok for a plan that is {plan.status.value}, "
-                    "not pending_approval; refusing to report it ready"
+                    f"a plan that is {plan.status.value} was declared ready, not "
+                    "pending_approval; refusing to report it ready"
                 )
             return {"plan": plan.model_dump(mode="json"), "summary": submitted["summary"]}
         finally:
@@ -838,12 +690,6 @@ class PlannerSeam:
         for key in (UNSUPPORTED_STATE_KEY, OPTIONAL_DECLINES_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
-        # `THINKING_SAMPLE_STATE_KEY` needs `PIN_SOURCES_STATE_KEY`'s
-        # treatment: a drawn `False` survives a resume the same as a drawn
-        # `True`, so `__call__`'s "already set" check never draws twice for
-        # the same turn.
-        if THINKING_SAMPLE_STATE_KEY in ctx.session.state:
-            ctx.state[THINKING_SAMPLE_STATE_KEY] = ctx.session.state[THINKING_SAMPLE_STATE_KEY]
 
     # -- one agent run ------------------------------------------------------
 
@@ -853,7 +699,6 @@ class PlannerSeam:
         ctx: Context,
         message: str,
         on_progress: Callable[[dict[str, Any]], None] | None,
-        deadline_at: float,
     ) -> tuple[dict[str, Any] | None, Plan | None, dict[str, Any] | None]:
         """Run the planner once through `ctx.run_node`, in the graph's own
         session.
@@ -874,8 +719,19 @@ class PlannerSeam:
         planner's current turn the way a normal turn ends (a model
         response with no further function call), so the session it leaves
         behind has a `FunctionResponse` recorded for every call. No
-        half-finished turn is left for the next `_propose` call's fresh
-        message to resume instead of seeing.
+        half-finished turn is left for a later entry's message to resume
+        instead of seeing.
+
+        Answers the declared-ready `propose_plan` answer and the plan, or the
+        refusal the run ended on. A run that ends with no plan declared ready
+        and no refusal of its own ends on the bound that closed one of its
+        model calls (`harness.turn_budget.TurnBudget.closed`), or else on
+        `SeamCode.PLAN_NOT_READY`, carrying the referral the last translation
+        answered, if any (`_not_ready`).
+
+        A discovery call inside the run may take what is left of the
+        request's wall-clock bound (`planner.plan.discovery_time_left`); with
+        no request budget set it takes its own timeout alone.
 
         The planner's callbacks themselves are assigned once, in `__init__`
         (see its comment for why). What makes them
@@ -901,10 +757,11 @@ class PlannerSeam:
         raises as well, so a run that suspends for a planner-side ask has the
         events it appended checked before the resume reads them.
         """
-        tracker = _RunTracker(deadline_at)
+        tracker = _RunTracker()
         token = _active_call.set(_CallState(tracker=tracker, on_progress=on_progress))
+        budget = current_turn_budget.get()
         time_left_token = current_discovery_time_left.set(
-            lambda: deadline_at - self._clock() - _NEXT_MODEL_CALL_MARGIN_S
+            budget.wall_left if budget is not None else None
         )
         before = len(ctx.session.events)
         try:
@@ -926,6 +783,9 @@ class PlannerSeam:
         # fresh off the live `Session` object, is what actually reflects
         # what the run just left behind.
         plan = load_plan(cast(SessionState, ctx.session.state))
+        if tracker.submitted is None and tracker.refused is None:
+            closed = budget.closed if budget is not None else None
+            tracker.refused = closed or _not_ready(tracker.last_referral)
         return tracker.submitted, plan, tracker.refused
 
     # -- the seam's own callbacks, assigned once in __init__ ----------------
@@ -958,7 +818,7 @@ class PlannerSeam:
         self, tool: BaseTool, args: dict[str, Any], tool_context: Any, error: Exception
     ) -> dict[str, Any] | None:
         """The planner's `on_tool_error_callback`: an `Exception` one of its
-        own tools raised ends the entry on `_TOOL_FAILED_REFUSAL_CODE`, a
+        own tools raised ends the entry on `SeamCode.PLANNER_TOOL_FAILED`, a
         final refusal, instead of failing the turn.
 
         A name that is none of the planner's tools answers `None`, so ADK's
@@ -988,111 +848,74 @@ class PlannerSeam:
         elif call.tracker.refused is None:
             call.tracker.ready_to_break = True
             call.tracker.refused = {
-                "code": _TOOL_FAILED_REFUSAL_CODE,
+                "code": SeamCode.PLANNER_TOOL_FAILED,
                 "detail": {"tool": tool.name},
             }
         return {"error": f"{tool.name} failed inside DFO ({error_class}). Do not repeat this call."}
 
-    def _after_planner_model(self, callback_context: Any, llm_response: LlmResponse) -> None:
+    def _after_planner_model(
+        self, callback_context: Any, llm_response: LlmResponse
+    ) -> LlmResponse | None:
+        """Log the generation's usage, and answer a call the request's budget
+        closed (`harness.turn_budget.CLOSED_BY_KEY`) with a question to the
+        user when the last referral names sources to choose from.
+
+        The question is the same `adk_request_input` long-running call
+        `planner.agent.ask_user` issues, built here from the referral's
+        candidates (`_pinnable_candidates`), since no model call is left to
+        compose it. `populate_client_function_call_id` gives the call an id,
+        so the resume pairs with the user's answer the way a model-issued ask
+        does (`planner.agent._elected_spec_ids`), and the answer arrives in a
+        request of its own, with a fresh budget. With nothing pinnable (no
+        referral, or a `no_data` referral, whose nearest-series candidates
+        carry no `spec_id`) the closing text stands: the tracker refuses on
+        the bound and the run ends on it.
+
+        Answers `None` for every other response, so `drop_thought_parts`,
+        listed after this callback, still runs on it.
+        """
         del callback_context
         if llm_response.usage_metadata is not None:
             log_usage(self._agent.name, llm_response.usage_metadata)
+        metadata = llm_response.custom_metadata or {}
+        call = _active_call.get()
+        if CLOSED_BY_KEY not in metadata or llm_response.partial or call is None:
+            return None
+        tracker = call.tracker
+        candidates = _pinnable_candidates(tracker.last_referral)
+        if not candidates:
+            tracker.ready_to_break = True
+            tracker.refused = {"code": SeamCode(metadata[CLOSED_BY_KEY]), "detail": {}}
+            return None
+        return _ask_response(_clarifying_question_args(candidates, lead=_BUDGET_CLOSED_LEAD))
 
     def _before_planner_model(self, callback_context: Any, llm_request: Any) -> LlmResponse | None:
         """Substitute a synthetic response once this call's own tracker is
-        ready to break (see `_propose`'s docstring) or its deadline has
-        passed. With no active call, see the class-level note above, there is
-        nothing to check against, so `None` here means "generate normally,"
-        the same as every ordinary turn this callback lets through.
+        ready to break (see `_propose`'s docstring). With no active call, see
+        the class-level note above, there is nothing to check against, so
+        `None` here means "generate normally," the same as every ordinary turn
+        this callback lets through.
 
-        The deadline is checked first, and only while the tracker has not
-        already been told to break some other way: a `ready_to_break` already
-        set (the version cap, a repeating referral) names its own reason
-        instead.
+        A referral the user decides (`_user_decided_ask`) is answered first,
+        with the `adk_request_input` call it asks, which suspends the run in
+        place of a model turn composing the question. Every break carries a
+        refusal, and the substituted text is that refusal's sentence
+        (`harness.sentences.refusal_sentence`). The request's budget is kept
+        by the model itself (`harness.turn_budget.BoundedGemini`).
         """
-        del llm_request
+        del callback_context, llm_request
         call = _active_call.get()
         if call is None:
             logger.warning("planner before_model_callback fired with no active call")
             return None
         tracker = call.tracker
-        if not tracker.ready_to_break and self._clock() >= tracker.deadline_at:
-            return self._deadline_response(callback_context, tracker)
+        if tracker.ask is not None:
+            ask, tracker.ask = tracker.ask, None
+            return _ask_response(ask)
         if not tracker.ready_to_break:
             return None
-        refused_code = (tracker.refused or {}).get("code")
-        if refused_code in _CLOSING_REASONS:
-            reason = _CLOSING_REASONS[refused_code]
-        else:
-            reason = tracker.stalled or "the plan's version cap was reached"
-        return LlmResponse(
-            content=types.Content(
-                role="model",
-                parts=[types.Part(text=f"Stopping this turn: {reason}")],
-            )
-        )
-
-    @staticmethod
-    def _deadline_response(callback_context: Any, tracker: _RunTracker) -> LlmResponse:
-        """The response substituted once a planner entry's wall-clock deadline
-        (`tracker.deadline_at`) passes, before this call would otherwise
-        reach the model for one.
-
-        A referral naming pinnable candidates (`tracker.last_referral`,
-        replaced by the outcome of every later translation that carries one
-        -- an `ok` clears it -- and left unchanged by one that carries none,
-        see `_track_tool_call`) becomes the same
-        `adk_request_input` long-running call `planner.agent.ask_user` issues,
-        built here from those candidates since the model has run out of time
-        to compose it itself.
-        `populate_client_function_call_id` gives the call an id, so the
-        resume pairs with the user's answer the way a model-issued ask does
-        (`planner.agent._elected_spec_ids`), and a `resolved_by=user` pin of
-        the chosen candidate validates. This branch needs no tracker write:
-        the long-running call pauses `ctx.run_node` before any later callback
-        of this tracker could fire.
-
-        With no referral, or one with nothing pinnable (a `no_data`
-        referral's nearest-series candidates carry no `spec_id`, see
-        `_pinnable_candidates`), this refuses instead: `tracker.refused` is
-        set the way a `propose_plan` `BUDGET_EXHAUSTED` refusal is, so
-        `_propose` and `__call__` report it immediately, with no correction
-        round. `submit_plan`'s ok answer ends the planner's run
-        (`skip_summarization`), so no model call, and so no deadline, follows
-        a submitted plan.
-        """
-        candidates = _pinnable_candidates(tracker.last_referral)
-        if candidates:
-            assert tracker.last_referral is not None
-            return LlmResponse(
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                name=REQUEST_INPUT_FUNCTION_CALL_NAME,
-                                args=_clarifying_question_args(candidates),
-                            ),
-                            thought_signature=_SKIP_THOUGHT_SIGNATURE,
-                        )
-                    ],
-                )
-            )
-        tracker.ready_to_break = True
-        tracker.refused = {
-            "code": _DEADLINE_REFUSAL_CODE,
-            "detail": {
-                "requirement_ids": _requirements_without_discovery(
-                    cast(SessionState, callback_context.session.state)
-                )
-            },
-        }
-        return LlmResponse(
-            content=types.Content(
-                role="model",
-                parts=[types.Part(text="Stopping this turn: this turn's time budget ran out")],
-            )
-        )
+        assert tracker.refused is not None, "every break sets the refusal it ends on"
+        return _stop_response(tracker.refused)
 
     @staticmethod
     def _track_tool_call(
@@ -1103,9 +926,13 @@ class PlannerSeam:
         tool: BaseTool,
         tool_response: dict[str, Any] | None,
     ) -> None:
-        """The planner's `after_tool_callback`: progress, then whichever of
-        `submit_plan` / `propose_plan` this tool call is, if any, reading the
-        translation an accepted `propose_plan` answers with.
+        """The planner's `after_tool_callback`: progress, then what the answer settles.
+
+        An answer is read by its shape, so `propose_plan` and `submit_analysis`
+        read alike (`planner.settings.SchemaDelivery`): a terminal refusal
+        (`_is_terminal_refusal`) ends the turn, a `translation` is the verdict
+        on the plan the call recorded, and `summary` says the call declared
+        that plan ready (`planner.agent.declare_ready`).
         """
         tracker.events += 1
         if tracker.events > _MAX_EVENTS:
@@ -1122,10 +949,8 @@ class PlannerSeam:
                 }
             )
             tracker.last_progress = now
-        if tool.name == "submit_plan":
-            tracker.submitted = tool_response
-        elif tool.name == "propose_plan" and PlannerSeam._is_terminal_refusal(tool_response):
-            # `propose_plan` refused with a code that records nothing and
+        if PlannerSeam._is_terminal_refusal(tool_response):
+            # The proposal refused with a code that records nothing and
             # leaves nothing correctable within this entry: the round cap
             # (`planner.plan.MAX_PLAN_ROUNDS`, `BUDGET_EXHAUSTED`), or a
             # restart while the graph holds the question fixed
@@ -1135,15 +960,15 @@ class PlannerSeam:
             # one entry into the planner, since `PlannerSeam.__call__`
             # resets the count on each entry (see `__call__`); a restart is
             # refused however fresh that budget is. Stop the planner's turn
-            # here either way, before the model gets a chance to call
-            # `submit_plan` on the stale plan the refusal names as still
-            # approvable.
+            # here either way.
             tracker.ready_to_break = True
             tracker.refused = tool_response
-        elif tool.name == "propose_plan" and isinstance(tool_response, dict):
+        elif isinstance(tool_response, dict):
             translation = tool_response.get("translation")
             if isinstance(translation, dict):
                 PlannerSeam._track_translation(tracker, translation)
+            if "summary" in tool_response:
+                tracker.submitted = tool_response
 
     @staticmethod
     def _track_translation(tracker: _RunTracker, tool_response: dict[str, Any] | None) -> None:
@@ -1156,16 +981,18 @@ class PlannerSeam:
         replaces whatever the last one recorded. `ok` means every
         requirement compiled, which clears a referral the same way. A response
         with no `outcome` settles nothing and is left alone.
-        `_before_planner_model`'s deadline branch reads `last_referral`
-        whichever way it landed: a deadline can expire on a referral's first
-        appearance, before it ever repeats, and still needs its candidates.
+        An entry that ends with no plan ready carries `last_referral`
+        whichever way it landed (`_not_ready`).
 
         An internal, repeated, budget-spent or never-issued failure, or a
-        transient one with no discovery time left (`_closing_refusal`), ends the entry with
-        no correction round, since the next translation would stop where this
-        one did. A referral that recurs with nothing new
-        (`_stalled_referral`) ends the run for `__call__`'s correction round.
-        Either way the planner's turn stops before its next generation.
+        transient one with no discovery time left (`_closing_refusal`), ends
+        the entry on its own refusal, since the next translation would stop
+        where this one did. A referral that recurs with nothing new
+        (`_stalled_referral`) ends it on `SeamCode.PLAN_NOT_READY`, carrying
+        that referral. Either way the planner's turn stops before its next
+        generation. A referral the user decides, with candidates to pick from
+        (`_user_decided_ask`), replaces that next generation with the
+        question it asks instead.
         """
         if isinstance(tool_response, dict) and "outcome" in tool_response:
             tracker.last_referral = PlannerSeam._referral_dict(tool_response)
@@ -1174,28 +1001,27 @@ class PlannerSeam:
             tracker.ready_to_break = True
             tracker.refused = closing
             return
-        stalled = PlannerSeam._stalled_referral(tool_response, tracker.referral_counts)
-        if stalled is not None:
-            tracker.stalled = stalled
+        ask = _user_decided_ask(PlannerSeam._referral_dict(tool_response))
+        if ask is not None:
+            tracker.ask = ask
+            return
+        if PlannerSeam._stalled_referral(tool_response, tracker.referral_counts):
             tracker.ready_to_break = True
-            tracker.submitted = {"outcome": "referral_stalled", "message": stalled}
-
-    # `propose_plan` codes that record nothing and end the planner's turn
-    # rather than opening a correction round -- see `_is_terminal_refusal`.
-    _TERMINAL_PROPOSE_CODES = frozenset(
-        {ProblemCode.BUDGET_EXHAUSTED, ProblemCode.QUESTION_FIXED, ProblemCode.NOTHING_TO_PLAN}
-    )
+            tracker.refused = _not_ready(tracker.last_referral)
 
     # Refusal codes after which no other plan for the same ask can succeed
     # in this turn: a fault in the system, a plan that failed the same way
-    # twice, a question whose every ask is declined, or a data service that
-    # is not answering.
+    # twice, a question whose every ask is declined, a data service that is
+    # not answering, or a request that spent a bound of its budget.
     _FINAL_CODES = frozenset(
         {
-            _INTERNAL_REFUSAL_CODE,
-            _REPEATED_REFUSAL_CODE,
-            _UNAVAILABLE_REFUSAL_CODE,
-            _TOOL_FAILED_REFUSAL_CODE,
+            SeamCode.TURN_MODEL_TIME_SPENT,
+            SeamCode.TURN_MODEL_CALLS_SPENT,
+            SeamCode.TURN_WALL_TIME_SPENT,
+            SeamCode.TRANSLATION_INTERNAL_FAILURE,
+            SeamCode.TRANSLATION_REPEATED,
+            SeamCode.DISCOVERY_UNAVAILABLE,
+            SeamCode.PLANNER_TOOL_FAILED,
             ProblemCode.NOTHING_TO_PLAN,
         }
     )
@@ -1203,133 +1029,27 @@ class PlannerSeam:
     @staticmethod
     def _refused(refused: dict[str, Any]) -> dict[str, Any]:
         """What `__call__` answers for a refusal that ends the entry: its plain
-        sentence, and whether another plan for the same ask could succeed."""
+        sentence (`harness.sentences.refusal_sentence`), whether another plan
+        for the same ask could succeed, and its code."""
         return {
             "refused": {
-                "text": PlannerSeam._refusal_text(refused),
+                "text": refusal_sentence(refused),
                 "final": refused.get("code") in PlannerSeam._FINAL_CODES,
+                "code": refused.get("code"),
             }
         }
 
     @staticmethod
     def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
-        """Whether a `propose_plan` response is one of `_TERMINAL_PROPOSE_CODES`
-        (`planner.agent.propose_plan`) -- a `propose_plan` outcome that records
-        no new version and must not be treated as a correctable problem.
+        """Whether a tool response refuses with one of
+        `harness.sentences.TERMINAL_PROPOSE_CODES`, which only a proposal
+        (`propose_plan` or `submit_analysis`) answers: an outcome that records
+        no new version and ends the entry.
         """
         return (
             isinstance(tool_response, dict)
             and tool_response.get("outcome") == "refused"
-            and tool_response.get("code") in PlannerSeam._TERMINAL_PROPOSE_CODES
-        )
-
-    @staticmethod
-    def _refusal_text(refused: dict[str, Any]) -> str:
-        """The plain sentence a terminal `propose_plan` refusal becomes for the
-        user, per `code` (see `_TERMINAL_PROPOSE_CODES`).
-
-        This seam has no view of the graph's own record (`ctx.state["plan"]`),
-        so neither text makes a claim about what can still be approved:
-        `harness.graph`'s planner node adds that, naming its own version, when
-        the record it holds supports one.
-        """
-        if refused.get("code") == ProblemCode.QUESTION_FIXED:
-            return (
-                "The plan already on record answers this turn's question, so this "
-                "was not recorded as a change to it. Ask the other question as its "
-                "own message."
-            )
-        if refused.get("code") == _DEADLINE_REFUSAL_CODE:
-            return PlannerSeam._deadline_text(refused)
-        detail = refused.get("detail") or {}
-        if refused.get("code") == _TOOL_FAILED_REFUSAL_CODE:
-            return (
-                f"The planner's {detail.get('tool')} tool failed inside DFO, so no plan "
-                "was made. The fault is in the system, not the request."
-            )
-        if refused.get("code") == ProblemCode.NOTHING_TO_PLAN:
-            asks = "; ".join(str(decline.get("ask")) for decline in detail.get("declined") or [])
-            return f"This cannot be calculated by this system, so nothing was planned: {asks}."
-        translated = PlannerSeam._translation_refusal_text(refused.get("code"), detail)
-        if translated is not None:
-            return translated
-        return PlannerSeam._budget_exhausted_text(refused)
-
-    @staticmethod
-    def _translation_refusal_text(code: object, detail: dict[str, Any]) -> str | None:
-        """The plain sentence a refusal `_closing_refusal` stamped becomes for
-        the user, or `None` for any other code."""
-        if code == _INTERNAL_REFUSAL_CODE:
-            return (
-                f"Translation failed internally (reference {detail.get('reference')}), so "
-                "nothing was recorded. The fault is in the system, not the request, and "
-                "planning the same request again fails the same way."
-            )
-        if code == _UNAVAILABLE_REFUSAL_CODE:
-            return (
-                "The data service did not answer while finding data for requirement "
-                f"{detail.get('requirement_id')!r}, so nothing was recorded. The service is "
-                "unavailable; try again shortly."
-            )
-        if code == _REPEATED_REFUSAL_CODE:
-            return (
-                f"The plan failed to translate the same way twice: requirement "
-                f"{detail.get('requirement_id')!r} came back as {detail.get('kind')!r} "
-                f"({detail.get('reason')}), and the plan did not change there, so nothing was "
-                "recorded. Planning the same request again fails the same way; what that "
-                "requirement asks for has to change."
-            )
-        return None
-
-    @staticmethod
-    def _budget_exhausted_text(refused: dict[str, Any]) -> str:
-        """The plain sentence a `BUDGET_EXHAUSTED` refusal becomes for the
-        user: the per-entry budget it hit, read off its own `detail`, and that
-        the user's next message starts with a fresh one.
-
-        The budget counts the proposals one entry into the planner makes,
-        restarts included (`planner.plan.MAX_PLAN_ROUNDS`). Every entry (a new
-        message, an amendment, a replan) starts it over, while the plan's
-        version keeps climbing across entries, so the text names no version.
-        """
-        detail = refused.get("detail") or {}
-        return (
-            f"This request has used its budget of {detail.get('rounds', MAX_PLAN_ROUNDS)} plan "
-            "drafts, so nothing was recorded. Your next message starts with a fresh "
-            "budget."
-        )
-
-    @staticmethod
-    def _deadline_text(refused: dict[str, Any]) -> str:
-        """The plain sentence a deadline refusal becomes for the user: which
-        requirement(s), if any, had no source discovered yet when this
-        entry's wall-clock budget ran out (`_before_planner_model`'s
-        `detail.requirement_ids`, see `_requirements_without_discovery`).
-
-        Reached only on the branch with no referral carrying pinnable
-        candidates, see `_before_planner_model`. A plan with every
-        requirement bound is one `submit_plan` would already have recorded,
-        ending the entry before its deadline is checked again, so this is
-        never reached for one.
-
-        Says nothing was recorded rather than naming a change:
-        this entry can be a first draft, with no prior plan for anything to
-        be a change to, as readily as an amendment, and `tracker.submitted`
-        being unset (the condition that puts this refusal on the tracker at
-        all, see `_before_planner_model`) means the same thing either way --
-        this entry recorded nothing new.
-        """
-        detail = refused.get("detail") or {}
-        requirement_ids = detail.get("requirement_ids") or []
-        if requirement_ids:
-            named = ", ".join(str(requirement_id) for requirement_id in requirement_ids)
-            pronoun = "it" if len(requirement_ids) == 1 else "them"
-            about = f"requirement(s) {named} had a source discovered for {pronoun}"
-        else:
-            about = "this plan had a source discovered for it"
-        return (
-            f"This request ran out of time before {about}, so nothing was recorded. Your "
-            "next message starts with a fresh budget."
+            and tool_response.get("code") in TERMINAL_PROPOSE_CODES
         )
 
     @staticmethod
@@ -1346,35 +1066,34 @@ class PlannerSeam:
 
     @staticmethod
     def _closing_refusal(referral: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The refusal a referral ends the planner entry on, or `None` when a
-        correction round may still settle it.
+        """The refusal a referral ends the planner entry on, or `None` when the
+        planner may still settle it in this entry.
 
         An `internal` referral ends it with its reference. One marked
         `budget_spent` ends it as the data service unavailable, whatever else
-        it carries. One marked `not_issued`, for a call the entry had no time left to make, ends it
-        as the deadline. Any other `transient` referral once the entry has
-        no discovery time left (`planner.plan.discovery_time_left`) ends it
-        as the data service unavailable: the call was made and did not
-        answer, and no discovery can run again in this entry. Each of these
+        it carries. One marked `not_issued`, for a call the request's
+        wall-clock bound left no time to make, ends it as that bound spent.
+        Any other `transient` referral once no discovery time is left
+        (`planner.plan.discovery_time_left`) ends it as the data service
+        unavailable: the call was made and did not answer, and no discovery
+        can run again in this request. Each of these
         carries the requirement the referral is about and its reason. One
-        marked `repeated` ends it with what it is about.
+        marked `repeated` ends it with what it is about, and the compile issue
+        a `requirement_needs_repair` one names as its `constraint`.
         """
         if referral is None:
             return None
         if referral.get("outcome") == Outcome.INTERNAL.value:
             return {
-                "code": _INTERNAL_REFUSAL_CODE,
+                "code": SeamCode.TRANSLATION_INTERNAL_FAILURE,
                 "detail": {"reference": str(referral.get("reference"))},
             }
         requirement_id = referral.get("requirement_id")
         reason = referral.get("reason")
         if referral.get("not_issued") and not referral.get("budget_spent"):
             return {
-                "code": _DEADLINE_REFUSAL_CODE,
-                "detail": {
-                    "requirement_ids": [requirement_id] if requirement_id else [],
-                    "reason": reason,
-                },
+                "code": SeamCode.TURN_WALL_TIME_SPENT,
+                "detail": {"requirement_id": requirement_id, "reason": reason},
             }
         time_left = discovery_time_left()
         out_of_time = (
@@ -1384,72 +1103,39 @@ class PlannerSeam:
         )
         if referral.get("budget_spent") or out_of_time:
             return {
-                "code": _UNAVAILABLE_REFUSAL_CODE,
+                "code": SeamCode.DISCOVERY_UNAVAILABLE,
                 "detail": {"requirement_id": requirement_id, "reason": reason},
             }
         if referral.get("repeated"):
             return {
-                "code": _REPEATED_REFUSAL_CODE,
-                "detail": {key: referral.get(key) for key in ("kind", "requirement_id", "reason")},
+                "code": SeamCode.TRANSLATION_REPEATED,
+                "detail": _referral_detail(referral),
             }
         return None
 
     @staticmethod
     def _stalled_referral(
-        response: dict[str, Any] | None, counts: dict[tuple[str, str | None], int]
-    ) -> str | None:
-        """Count one referral's `(kind, requirement_id)` pair, and answer the
-        message to stop the run on once that exact pair recurs a second time.
-        A third repetition would carry nothing a model could act on that the
-        second one did not already say. A
-        referral marked `repeated` ends the entry instead
-        (`_closing_refusal`). A transient referral is never counted: the
-        same plan is worth proposing again. The message names what to
-        do per kind (`_STALLED_ACTS`).
-
-        Reads `response` defensively. `MAY_CARRY_CANDIDATES`
-        (`translator/referral.py`) admits `source_ambiguous`,
-        `pinned_source_not_found` and `no_data`, and a kind outside it
-        answers an empty tuple here, so this count holds whichever kinds
-        that set names.
+        response: dict[str, Any] | None, counts: dict[tuple[str, str | None, str | None], int]
+    ) -> bool:
+        """Count one referral by its kind, its requirement and the compile
+        issue it names as its `constraint`, and answer whether that exact
+        referral has now come back a second time, which stops the run. Two
+        different repairs on one requirement count apart, so a planner that
+        fixes one compile issue per round keeps going. A third repetition
+        would carry nothing a model could act on that the second one did not
+        already say. A referral marked `repeated` ends the entry instead
+        (`_closing_refusal`). A transient referral is never counted: the same
+        plan is worth proposing again.
         """
         referral = PlannerSeam._referral_dict(response)
         if referral is None or referral.get("outcome") == Outcome.TRANSIENT.value:
-            return None
+            return False
         kind = referral.get("kind")
         if kind is None:
-            return None
-        requirement_id = referral.get("requirement_id")
-        pair = (kind, requirement_id)
-        count = counts.get(pair, 0) + 1
-        counts[pair] = count
-        if count < 2:
-            return None
-        candidates = referral.get("candidates") or []
-        named = ", ".join(
-            str(candidate["spec_id"])
-            for candidate in candidates
-            if isinstance(candidate, dict) and candidate.get("spec_id")
-        )
-        about = f"requirement {requirement_id!r}" if requirement_id else "the plan"
-        have = f"; candidates on record: {named}" if named else "; no candidates are on record"
-        act = _STALLED_ACTS.get(kind, _STALLED_ACT_DEFAULT).format(
-            repair=referral.get("repair"), constraint=referral.get("constraint")
-        )
-        return (
-            f"Translation referred {about} back as {kind!r} for the second time with "
-            f"nothing new{have}. {act} -- proposing the same plan again "
-            "will not converge."
-        )
-
-    @staticmethod
-    def _problem(submitted: dict[str, Any] | None) -> str | None:
-        """What is wrong with the run, as a message the planner can act on."""
-        if submitted is None:
-            return _NO_SUBMIT_NUDGE
-        if submitted.get("outcome") != "ok":
-            return str(submitted.get("message") or _NO_SUBMIT_NUDGE)
-        return None
+            return False
+        key = (kind, referral.get("requirement_id"), referral.get("constraint"))
+        counts[key] = counts.get(key, 0) + 1
+        return counts[key] >= 2
 
     # -- messages -----------------------------------------------------------
 
@@ -1463,19 +1149,18 @@ class PlannerSeam:
         amendment: str | None,
         canvas_digest: dict[str, Any] | None,
         conversation_digest: dict[str, Any] | None,
-        problem: str | None = None,
         ledger: RenderedReadings = _NO_READINGS,
         asks: Sequence[str] = (),
+        ask_breakdowns: Sequence[AskBreakdown] = (),
     ) -> str:
         """The message for one `_propose` call.
 
         `fresh=True` -- the first call this seam makes in a session --
         renders the full brief: the search readings, the canvas and
         conversation digests, the plan being changed, and the question.
-        `fresh=False` -- a correction round inside `__call__`'s own loop, or a later
-        `__call__` re-entering over the `amend`/`replan` edge -- renders
-        only the new thing: the `amendment`/`refusal` ask, or the
-        correction's `problem` nudge. `prior_plan` is never rendered when
+        `fresh=False` -- a later `__call__` re-entering over the
+        `amend`/`replan` edge -- renders only the new thing: the
+        `amendment`/`refusal` ask. `prior_plan` is never rendered when
         `fresh` is `False`, even though it is still accepted here and still
         seeded into `propose_plan`'s own drafting state unconditionally
         (`__call__`'s own `save_plan` call, which does not read `fresh`).
@@ -1484,7 +1169,8 @@ class PlannerSeam:
         fresh brief's opening section, and a compiled source of the plan
         being changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
-        (`planner.plan.ASKS_STATE_KEY`), render numbered after the question.
+        (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
+        each with the parties `ask_breakdowns` says it breaks down by.
 
         See the module docstring for why a continuing call needs no more
         than this: `ctx.run_node` shares the graph's own session, so the
@@ -1506,10 +1192,10 @@ class PlannerSeam:
             ask = (
                 "\nThe user asks for this change to the plan: "
                 f"{cut_user_text(amendment, MAX_QUESTION_CHARS)}\n"
-                "Call propose_plan again with the revised decisions and evidence "
+                f"Call {self._proposing} again with the revised decisions and evidence "
                 "requirements -- the change has to alter what a requirement "
                 "actually states, not only a decision's rationale -- which has "
-                "it translated and compiled again, then call submit_plan.\n"
+                "it translated and compiled again.\n"
             )
         elif refusal:
             avoid = (
@@ -1522,11 +1208,10 @@ class PlannerSeam:
             ask = (
                 f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
                 f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
-                f"Call propose_plan again with a plan that avoids it.{avoid}\n"
+                f"Call {self._proposing} again with a plan that avoids it.{avoid}\n"
             )
-        nudge = f"\n{problem}\n" if problem is not None else ""
         if not fresh:
-            return "".join([ask, nudge])
+            return ask
         return "".join(
             [
                 _READINGS_CONTEXT.format(readings=ledger.text),
@@ -1534,11 +1219,34 @@ class PlannerSeam:
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
-                _asks_section(asks),
+                _asks_section(asks, ask_breakdowns),
                 ask,
-                nudge,
             ]
         )
+
+
+def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:
+    """What a refusal ending on `referral` carries for its sentence and its reader."""
+    return {key: referral.get(key) for key in ("kind", "requirement_id", "reason", "constraint")}
+
+
+def _not_ready(referral: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The refusal for an entry that ended with no plan ready, carrying `referral` if any."""
+    return {
+        "code": SeamCode.PLAN_NOT_READY,
+        "detail": _referral_detail(referral) if referral is not None else {},
+    }
+
+
+def _stop_response(refused: Mapping[str, Any]) -> LlmResponse:
+    """The terminal text `_before_planner_model` substitutes for a generation,
+    stating the refusal the run ends on in its user sentence."""
+    return LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[types.Part(text=f"Stopping this turn: {refusal_sentence(refused)}")],
+        )
+    )
 
 
 def _failed_run_sentence(computed: Sequence[int] | None) -> str:
@@ -1557,17 +1265,41 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     )
 
 
-def _asks_section(asks: Sequence[str]) -> str:
-    """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none."""
+def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) -> str:
+    """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
+
+    An ask in `breakdowns` names the parties it breaks down by, and the
+    section then states the rule `planner.plan.Plan` holds its answer to.
+    """
     if not asks:
         return ""
-    lines = "".join(f"{number}. {ask}\n" for number, ask in enumerate(asks))
+    by = {breakdown.ask: breakdown.by for breakdown in breakdowns}
+    lines = "".join(
+        f"{number}. {ask}" + (f" (by {', '.join(by[number])})" if number in by else "") + "\n"
+        for number, ask in enumerate(asks)
+    )
+    rule = (
+        "An ask marked with a party, as in (by creditor), lists each member of that party "
+        "one by one, so its answer keeps the party: name its members as `entities` with "
+        "that role when the question names them; otherwise pin a source whose reading above "
+        "holds it open and name the party in the dataset requirement's `across`. Carry it "
+        "to the answer through a rank whose `axis` is that party or no aggregate that sums "
+        "it away. Decline that part with code 'breakdown_not_kept' when the source this "
+        "ask's answer pins cannot hold the party open.\n"
+        + (
+            "An ask marked with several parties is one result: one output keeps them all.\n"
+            if any(len(roles) > 1 for roles in by.values())
+            else ""
+        )
+        if by
+        else ""
+    )
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
         "`answered`, or, when an `unsupported` answer earned its decline (see `declined`), "
         "decline it in `declined` with its number as `ask_ref`. When the plan computes "
         "part of an ask, do both: answer it with what is computed and decline the rest, "
-        "naming that part in the decline's `ask`.\n" + lines
+        "naming that part in the decline's `ask`.\n" + rule + lines
     )
 
 
@@ -1644,44 +1376,76 @@ def _pinnable_candidates(referral: dict[str, Any] | None) -> list[dict[str, str]
     ]
 
 
-def _clarifying_question_args(candidates: list[dict[str, str]]) -> dict[str, Any]:
-    """The `adk_request_input` call args for a deadline that runs out on a
-    referral carrying pinnable candidates: the shape `planner.agent.ask_user`
-    declares, built here from the referral's candidates since the model has run out of
-    time to compose it. It recommends no candidate, since nothing has weighed them.
-    The message reaches the user, so it names no requirement id, referral kind
-    or spec_id; each candidate's label says what it is.
+# What the question a request's closing budget asks opens with.
+_BUDGET_CLOSED_LEAD = "This request reached its limit before the plan settled on a source."
+
+
+# What the question a referral's candidates put to the user asks: which one
+# they meant, or, when the source they named holds none of the data, which
+# other source to use.
+_WHICH_MEANT = "Which of these did you mean?"
+_WHICH_INSTEAD = "Which of these should be used instead?"
+
+
+def _clarifying_question_args(
+    candidates: list[dict[str, str]], *, lead: str, question: str = _WHICH_MEANT
+) -> dict[str, Any]:
+    """The `adk_request_input` call args that put a referral's pinnable
+    candidates to the user: the shape `planner.agent.ask_user` declares, built
+    here from the candidates with no model call composing it. `lead` says why
+    the user is asked and `question` what they are asked. It recommends no
+    candidate, since nothing has weighed them. The message reaches the user, so
+    it names no requirement id, referral kind or spec_id; each candidate's
+    label says what it is.
     """
-    message = (
-        "This turn ran out of time before the plan settled on a source. "
-        "Which of these did you mean?"
-    )
-    return {"message": message, "candidates": candidates}
+    return {"message": f"{lead} {question}", "candidates": candidates}
 
 
-def _requirements_without_discovery(state: SessionState) -> list[str]:
-    """The current draft's evidence requirement ids with no
-    `Workflow.evidence_bindings` entry, every one of them when the draft has
-    no `workflow` at all since translation has not run.
+def _user_decided_ask(referral: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The `adk_request_input` call args for a referral the user decides, or
+    `None` for any other answer.
 
-    Read fresh off session state: `PlannerSeam._deadline_response` calls this
-    at the moment the deadline passes, from whatever `propose_plan` last
-    recorded (`planner.plan.load_plan`), which may be `None` when the
-    deadline runs out before any draft exists.
+    A referral of a kind in `translator.referral.USER_DECIDES` carrying
+    pinnable candidates (`_pinnable_candidates`) leaves the pick to the user,
+    so the seam asks it, led by the referral's sentence
+    (`harness.sentences.referral_sentence`); one marked `source_mismatch`
+    asks which other source to use instead. One with no candidates leaves
+    the planner to say what cannot be done and ask what to change.
     """
-    plan = load_plan(state)
-    if plan is None:
-        return []
-    bound = (
-        {binding.requirement_id for binding in plan.workflow.evidence_bindings}
-        if plan.workflow is not None
-        else set()
+    if referral is None or referral.get("kind") not in USER_DECIDES:
+        return None
+    candidates = _pinnable_candidates(dict(referral))
+    if not candidates:
+        return None
+    source_mismatch = bool(referral.get("source_mismatch"))
+    lead = referral_sentence(
+        referral.get("kind"), referral.get("constraint"), source_mismatch=source_mismatch
     )
-    return [
-        str(requirement.id)
-        for requirement in plan.evidence_requirements
-        if requirement.id not in bound
-    ]
+    return _clarifying_question_args(
+        candidates, lead=lead, question=_WHICH_INSTEAD if source_mismatch else _WHICH_MEANT
+    )
+
+
+def _ask_response(args: dict[str, Any]) -> LlmResponse:
+    """A model turn that is one `adk_request_input` call with `args`.
+
+    `populate_client_function_call_id` gives the call an id, so the resume
+    pairs with the user's answer the way a model-issued ask does
+    (`planner.agent._elected_spec_ids`).
+    """
+    return LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        name=REQUEST_INPUT_FUNCTION_CALL_NAME, args=args
+                    ),
+                    thought_signature=_SKIP_THOUGHT_SIGNATURE,
+                )
+            ],
+        )
+    )
 
 
 def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
@@ -1695,11 +1459,6 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
     )
-
-
-# The reading statuses whose own spec_id a search settled on: a `definite`
-# part, and a candidate `fetch` read (`chosen`).
-_SETTLED_STATUSES = frozenset({"definite", "chosen"})
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:
@@ -1725,12 +1484,13 @@ def _reading_pin_sources(
     search this turn returned, is marked `earlier_turn` and holds no block:
     a pin of it reads the one that turn stored (`PinSource.spec_block`), so
     the turn's session never re-stores it. Any other takes this turn's block
-    (`blocks`). Settled when a reading with a `_SETTLED_STATUSES` status
+    (`blocks`). Settled when a reading with a `SETTLED_STATUSES` status
     holds it as its own spec_id; a spec_id only ever offered as a candidate
     is not. A spec_id that only readings of another count settle
-    (`SearchReading.other_count_of`) names the source that offered it.
+    (`SearchReading.other_count_of`) names the source that offered it. Each
+    keeps the parties its settling reading asked for.
     """
-    settled = [reading for reading in readings if reading.get("status") in _SETTLED_STATUSES]
+    settled = [reading for reading in readings if reading.get("status") in SETTLED_STATUSES]
     elected = {reading.get("spec_id") for reading in settled if not reading.get("other_count_of")}
     counts_of = {
         reading.get("spec_id"): str(reading["other_count_of"])
@@ -1749,6 +1509,7 @@ def _reading_pin_sources(
             settled=spec_id in elected or spec_id in counts_of,
             earlier_turn=from_earlier,
             other_count_of=None if spec_id in elected else counts_of.get(spec_id),
+            asked_roles=tuple(reading.get("asked_roles") or ()),
         )
     return sources
 
@@ -1772,17 +1533,17 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
     docstring and the tests that read the brief use for that section. This
     function supplies only the body.
 
-    Every field of the plan is rendered. This renderer shrinks only the text.
-    The planner's model decides an amendment from what it reads here, and it
-    cannot read session state, so a field dropped here is a field the next
-    proposal cannot preserve. `Decision.description` and `Decision.rationale`
-    are the only two cut, and they are the only two `planner.plan` compares
-    against nothing. `chosen` is checked against `options`, and every
-    requirement field is checked against the decisions it cites. A
-    decision's `fixes` renders as the names of the fields it fixes, the form
-    `propose_plan` takes; their values are on the requirements citing it. A
-    shortened `description` or `rationale` is prose the model is being asked
-    to rewrite anyway. A shortened `measure` would be a different plan.
+    Every field the model states is rendered. This renderer shrinks only the
+    text. The planner's model decides an amendment from what it reads here,
+    and it cannot read session state, so a field dropped here is a field the
+    next proposal cannot preserve. `Decision.description` and
+    `Decision.rationale` are the only two cut, and they are the only two
+    `planner.plan` compares against nothing; `chosen` is checked against
+    `options`. A decision's `fixes` renders as the names of the fields it
+    fixes, the form `propose_plan` takes; their values are on the
+    requirements citing it. `source_spec_id` is left out, since code writes
+    it. A shortened `description` or `rationale` is prose the model is being
+    asked to rewrite anyway. A shortened `measure` would be a different plan.
     """
     if not prior_plan:
         return ""
@@ -1821,7 +1582,9 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
             lines.append(f"  rationale: {rationale}")
         lines.append(f"  resolved_by: {_scalar(decision.get('resolved_by'))}")
         fixes = decision.get("fixes")
-        if isinstance(fixes, dict) and (named := [k for k, v in fixes.items() if v is not None]):
+        if isinstance(fixes, dict) and (
+            named := [k for k, v in fixes.items() if v is not None and k != "source_spec_id"]
+        ):
             lines.append("  fixes: " + _list_text(named))
 
     requirements = prior_plan.get("evidence_requirements") or []
@@ -1859,6 +1622,7 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         "previous_version",
         "status",
         "approved_revision",
+        "approved_at",
         "decisions",
         "evidence_requirements",
         "translation",

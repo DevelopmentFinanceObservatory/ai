@@ -448,6 +448,7 @@ async def test_mounted_data_mcp_reports_its_tools() -> None:
         "get_skill_file",
         "sources",
         "resolve_definition",
+        "catalogue_counts",
     ]
 
 
@@ -637,6 +638,7 @@ async def test_mcp_auth_disabled_lets_an_unauthenticated_request_through() -> No
         "get_skill_file",
         "sources",
         "resolve_definition",
+        "catalogue_counts",
     ]
 
 

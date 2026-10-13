@@ -12,6 +12,12 @@ the studio's HTTP surface: `adk eval` drives agents directly and cannot reach SS
 so this suite ships its own runner. Same two-lane split: its deterministic contract
 layer runs in CI, its judged layer never does. See `evals/studio/README.md`.
 
+`evals/planner_entry/` (harness-planner-entry-v1) has its own runner too. It runs
+the planner one entry at a time over its task set, with data-mcp answering from
+recordings, and pairs an arm against the planner as served, locally or through a
+baseline stored in Langfuse. Only its validation runs in CI. See
+`evals/planner_entry/README.md`.
+
 ## Run it
 
 ```
@@ -133,9 +139,8 @@ reasons unrelated to the behavior you set out to check. (`test_a_set_configuring
 in `test_eval_sets.py` catches the case where a set turns
 `tool_trajectory_avg_score` on but never actually states one of these.)
 
-Trajectory matching also has no way to require that a call is *absent*, and "the
-agent must not call `submit_plan`" is the planner's central claim on an
-adversarial turn. Rubrics cover both gaps, which is why most turns here lean
+Trajectory matching also has no way to require that a call is *absent*, which
+is the planner's central claim on an adversarial turn. Rubrics cover both gaps, which is why most turns here lean
 on them.
 
 ### Give every rubric a type
@@ -223,9 +228,8 @@ metric.
 A case that asks the planner to plan a real question ends up grading its choice
 of measure, which the planner has no way to earn. Its tools as
 `harness-planner-v2` builds it are `adk_request_input`,
-`propose_plan`, `reject_plan` and `submit_plan`, and
-`submit_plan` only declares a compiled plan ready for whatever approves and
-runs it elsewhere. Nothing in `planner` fetches or computes a figure.
+`propose_plan` and `reject_plan`, and a compiled `propose_plan` only declares
+the plan ready for whatever approves and runs it elsewhere. Nothing in `planner` fetches or computes a figure.
 `harness-pair-v1` attaches the translator to `propose_plan`, and still none
 of the tools returns a number. The translation `propose_plan` runs drives
 `discover_source` and `propose_operations` as plain
@@ -291,9 +295,10 @@ finds the actual response of that same name (the last one carrying the
 accepted one does not hide it) and checks it against the expectation as a
 **subset**: only the keys and list positions a case names are compared, so an
 operation id the model chose, or `reason` prose, never enters the comparison.
-A turn also fails when the agent hedged: a reject case that also had
-`submit_plan` answer `ok` -- an agent cannot both record a rejection and
-declare the same plan ready for the user's answer. A `translation`-scored turn
+A turn also fails when the agent hedged, as when a reject case also had a
+`propose_plan` declare a plan ready (its answer carries `summary`). An agent
+cannot both record a rejection and declare the same plan ready for the user's
+answer. A `translation`-scored turn
 hedges the same way when its proposals' translations answered both `ok` and a
 referral.
 

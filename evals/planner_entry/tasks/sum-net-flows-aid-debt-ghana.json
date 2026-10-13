@@ -1,0 +1,144 @@
+{
+  "id": "sum-net-flows-aid-debt-ghana",
+  "kind": "sum_of",
+  "origin": "trace 0b2d60bd-518e-4981-83a1-3877717bffd0",
+  "question": "Help me calculate net flows to Ghana combining aid and debt",
+  "searches": [
+    {
+      "query": "net flows to Ghana combining aid and debt",
+      "parts": [
+        {
+          "entities": [
+            {
+              "role": "to",
+              "text": "Ghana"
+            }
+          ],
+          "variable": "net official development assistance"
+        },
+        {
+          "entities": [
+            {
+              "role": "to",
+              "text": "Ghana"
+            }
+          ],
+          "variable": "net debt flows"
+        }
+      ]
+    }
+  ],
+  "brief": "Calculate net flows to Ghana combining net official development assistance and net debt flows in current US dollars",
+  "asks": [
+    "Combined net flows to Ghana from aid and debt over time in current US dollars"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "sum_of, not join: the flows are added into one total once the user agrees, not set side by side"
+  },
+  "unit_asked": true,
+  "first_proposal_refusal": "combination_unasked",
+  "reference_payload": {
+    "question": "Calculate net flows to Ghana combining net official development assistance and net debt flows in current US dollars",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether the two flows are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "user",
+        "rationale": "The user chose to add them."
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "net_oda",
+        "measure": "net official development assistance",
+        "entities": [
+          {
+            "name": "Ghana",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "source_spec_id": "spec_6a2240ef10e92c927ca5d00e78979a62",
+        "across": [
+          "donor"
+        ],
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "net_oda_total",
+        "input_id": "net_oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "net_debt",
+        "measure": "net debt flows",
+        "entities": [
+          {
+            "name": "Ghana",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 1970,
+          "end": 2024
+        },
+        "source_spec_id": "spec_edc1dac07f6e951072ec6a2ac2d48852",
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
+      },
+      {
+        "kind": "sum_of",
+        "id": "net_flows",
+        "left": {
+          "input_id": "net_oda_total"
+        },
+        "right": {
+          "input_id": "net_debt"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "net_flows"
+        ]
+      }
+    ]
+  }
+}
