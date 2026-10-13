@@ -99,7 +99,7 @@ ONE_RANKING = Decision(
     chosen="every year together",
     resolved_by="planner_default",
     rationale="The question asks who has given the most in all.",
-    fixes=DecisionFixes(window_start=1990, window_end=2024),
+    fixes=DecisionFixes(per_period=False),
 )
 ONE_YEAR = Decision(
     slot="one_year",
@@ -226,6 +226,7 @@ def _gap(
         "asks": list(asks),
         "years": {"start": years.start, "end": years.end},
         "follows_newest": False,
+        "until": None,
         "dataset_requirement_id": "aid",
     }
 
@@ -242,7 +243,7 @@ _STEPS = {
         _ranked,
         [POPULATION],
         USER_RANKING,
-        {"decision_ids": ("population", "one_ranking"), "window_start": 1990, "window_end": 2024},
+        {"decision_ids": ("population", "one_ranking")},
     ),
 }
 
@@ -558,19 +559,18 @@ def test_a_user_decision_that_reduced_no_years_licenses_none_later(
     _refused(result, _gap(years=EVERY_YEAR))
 
 
-def test_a_later_entry_moving_the_users_ranked_years_restates_their_decision(
+def test_a_later_entry_keeps_the_users_ranking_over_another_window(
     decision: Callable[..., Decision],
 ) -> None:
-    """A rank's `user` decision fixes its window, so a window over other years is
-    another decision, which licenses nothing outside an amendment entry."""
+    """The user's decision says the years are ranked together, and the window
+    says which years, so a replan may move the window."""
     build, _, stated, cites = _STEPS["rank"]
     ctx = _context(amendment=True)
     _amended(ctx, decision, "rank")
-    narrower = cites | {"window_start": 2000}
 
-    result = _propose(ctx, [build(**narrower)], [stated])
+    result = _propose(ctx, [build(**cites, window_start=2000, window_end=2024)], [stated])
 
-    _refused(result, _gap(years=Period(start=2000, end=2024)))
+    assert result["outcome"] == Outcome.OK.value, result
 
 
 def _stated(decision: Callable[..., Decision], made: Decision, **fields: Any) -> Plan:
@@ -1202,3 +1202,137 @@ def test_an_unmarked_ask_beside_a_marked_one_gets_a_result_of_its_own(
     assert f"take {output!r} out of that ask's `answered`" in refused["message"]
     assert f"compute {output!r}" not in refused["message"]
     assert admitted["outcome"] == Outcome.OK.value, admitted
+
+
+def test_an_amendment_about_something_else_licenses_no_total_an_older_decision_cited(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user chose one total for 2024, which reduces no years. A later
+    amendment widens the years and restates nothing else: the decision and the
+    aggregate are carried, and the user never asked for 35 years as one figure."""
+    ctx = _context(amendment=False)
+    step = _total(decision_ids=("one_total",))
+    first = _propose(ctx, [_aid(period=ONE_YEAR_ONLY), step], [decision(), USER_TOTAL])
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    result = _propose(ctx, [_aid()], [], answered=())
+
+    _refused(result, _gap(years=EVERY_YEAR))
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("steps", "decisions"),
+    [
+        pytest.param(
+            [_ranked(window_start=2024, window_end=2030)], [POPULATION], id="a-rank-window"
+        ),
+        pytest.param(
+            [
+                FilterRequirement(
+                    id="kept",
+                    input_id="aid",
+                    predicates=(PeriodThreshold(op="lte", year=2030),),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            id="a-filter-threshold",
+        ),
+        pytest.param(
+            [
+                FilterRequirement(
+                    id="kept",
+                    input_id="aid",
+                    predicates=(PeriodThreshold(op="lt", year=2031),),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            id="a-filter-threshold-before-a-year",
+        ),
+    ],
+)
+def test_a_fixed_last_year_newer_data_has_yet_to_reach_is_several_years(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement], decisions: list[Decision]
+) -> None:
+    """The source holds 2024 alone and follows the newest data. A bound of 2030
+    stops it there, six years on."""
+    ctx = _context(pins=_SHOWN_OPEN)
+
+    result = _propose(ctx, [_open(period=ONE_YEAR_ONLY), *steps], [decision(), *decisions])
+
+    _refused(result, _gap(years=ONE_YEAR_ONLY) | {"follows_newest": True, "until": 2030})
+    assert "the years from 2024 to the newest, as far as 2030" in result["message"]
+
+
+def test_a_users_choice_of_years_licenses_no_ranking_over_them_together(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user's amendment chose 2015 to 2022. Which years a ranking covers
+    and whether it combines them are separate statements."""
+    years = Decision(
+        slot="years",
+        description="Which years the ranking covers.",
+        options=["2015 to 2022", "every year"],
+        chosen="2015 to 2022",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user asked for these years.",
+        fixes=DecisionFixes(window_start=2015, window_end=2022),
+    )
+    ranked = _ranked(decision_ids=("population", "years"), window_start=2015, window_end=2022)
+
+    result = _propose(_context(amendment=True), [_aid(), ranked], [decision(), POPULATION, years])
+
+    _refused(result, _gap(years=Period(start=2015, end=2022)))
+
+
+@pytest.mark.parametrize(
+    ("last", "until"),
+    [pytest.param(2030, 2030, id="years-to-come"), pytest.param(2024, None, id="none-to-come")],
+)
+def test_a_sum_with_a_source_of_fixed_years_follows_the_newest_as_far_as_they_reach(
+    decision: Callable[..., Decision], last: int, until: int | None
+) -> None:
+    """One side holds 2024 and follows the newest data; the other states 2020
+    to `last`. Their sum holds the years both cover, 2024 today."""
+    newest = _series("bilateral", period=ONE_YEAR_ONLY).model_copy(update={"period_end_open": True})
+    fixed = _series(
+        "imputed", measure="imputed multilateral aid", period=Period(start=2020, end=last)
+    )
+    both = SumOfRequirement(
+        id="both", decision_ids=("measure",), left=_side("bilateral"), right=_side("imputed")
+    )
+    plan = Plan(
+        question=ASK,
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[decision(), POPULATION, POOLED],
+        evidence_requirements=[newest, fixed, both, _total(input_id="both")],
+    )
+
+    gaps = unstated_period_reductions(plan)
+
+    assert [(gap.step_id, gap.follows_newest, gap.until) for gap in gaps] == (
+        [("result", True, until)] if until else []
+    )
+
+
+def test_restating_an_older_decision_under_another_slot_does_not_make_it_the_amendments(
+    decision: Callable[..., Decision],
+) -> None:
+    """The plan on record already made this choice, for a total of one year.
+    Citing it again under a new slot in an amendment entry is the same choice."""
+    ctx = _context(amendment=False)
+    first = _propose(
+        ctx,
+        [_aid(period=ONE_YEAR_ONLY), _total(decision_ids=("one_total",))],
+        [decision(), USER_TOTAL],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+    again = USER_TOTAL.model_copy(update={"slot": "every_year"})
+
+    result = _propose(ctx, [_aid(), _total(decision_ids=("every_year",))], [again])
+
+    _refused(result, _gap(years=EVERY_YEAR))

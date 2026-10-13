@@ -3242,8 +3242,9 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
 class PeriodReductionGap(NamedTuple):
     """A step that turns several years into one figure for a result no ask across years asks for.
 
-    `step_id` is the reducing step and `years` the years it reduces, which
-    reach every later year when `follows_newest` is set (`_years_reduced`).
+    `step_id` is the reducing step and `years` the years it reduces. With
+    `follows_newest` set they reach every later year newer data brings, up
+    to `until` when a fixed last year stops them (`_years_reduced`).
     `output_id` is the first answering result computed from it
     (`answering_results`) that answers an ask `plan.asks_across_years` does
     not number, or answers no ask, and `asks` the numbers of those asks,
@@ -3258,6 +3259,7 @@ class PeriodReductionGap(NamedTuple):
     asks: tuple[int, ...]
     years: Period
     follows_newest: bool
+    until: int | None
     asked_across: bool
     dataset_id: str
 
@@ -3283,10 +3285,13 @@ def unstated_period_reductions(
     and no ask changes. In such an entry (`amendment_entry`,
     `AMENDMENT_ENTRY_STATE_KEY`) a step also passes when it cites a decision
     resolved by `user` that states the reduction
-    (`_user_period_decisions`). In any other entry such a step passes when
-    `previous`, the plan the call amends, held the licence for it
-    (`_licence_carried`): a replan that narrows the years keeps the total
-    the user asked for.
+    (`_user_period_decisions`) and is the entry's own: `previous`, the plan
+    the call amends, makes no decision with the same `chosen` and `fixes`
+    under any slot (`_Carried.holds`). A decision `previous` already made
+    was made for the plan as it stood, and an amendment about something
+    else does not renew it. In any entry such a step passes when `previous`
+    held the licence for it (`_licence_carried`): a replan that narrows the
+    years keeps the total the user asked for.
 
     Requires a plan whose requirements already validated.
     """
@@ -3299,7 +3304,7 @@ def unstated_period_reductions(
         for output in answer.outputs:
             asks_of[output].append(answer.ask)
     carried: _Carried | None = None
-    if previous is not None and not amendment_entry:
+    if previous is not None:
         carried_steps = {
             requirement.id: requirement for requirement in previous.evidence_requirements
         }
@@ -3313,10 +3318,12 @@ def unstated_period_reductions(
         reduced = _years_reduced(step, shapes, requirements_by_id)
         if reduced is None:
             continue
-        years, follows_newest = reduced
         stated = _user_period_decisions(step, decisions)
+        made_now = amendment_entry and any(
+            carried is None or not carried.holds(made) for made in stated.values()
+        )
         if stated and (
-            amendment_entry or (carried is not None and _licence_carried(step, stated, carried))
+            made_now or (carried is not None and _licence_carried(step, stated, carried))
         ):
             continue
         computed = [
@@ -3337,8 +3344,9 @@ def unstated_period_reductions(
                     step_id=step.id,
                     output_id=offending[0],
                     asks=offending[1],
-                    years=years,
-                    follows_newest=follows_newest,
+                    years=reduced.years,
+                    follows_newest=reduced.follows_newest,
+                    until=reduced.until,
                     asked_across=asked_across,
                     dataset_id=shapes[step.id].roots[0],
                 )
@@ -3352,6 +3360,13 @@ class _Carried(NamedTuple):
     steps: Mapping[str, EvidenceRequirement]
     shapes: Mapping[str, FrameShape]
     decisions: Mapping[str, Decision]
+
+    def holds(self, decision: Decision) -> bool:
+        """Whether the plan already made `decision`: one with its `chosen` and `fixes`, under any slot."""
+        return any(
+            made.chosen == decision.chosen and made.fixes == decision.fixes
+            for made in self.decisions.values()
+        )
 
 
 def _licence_carried(
@@ -3380,12 +3395,25 @@ def _licence_carried(
     )
 
 
+class _YearsReduced(NamedTuple):
+    """The years a step turns into one figure per entity (`_years_reduced`).
+
+    `years` are the years it reduces today. `follows_newest` says newer
+    data adds later years to them, and `until` the last year a fixed bound
+    lets them reach, `None` when nothing stops them.
+    """
+
+    years: Period
+    follows_newest: bool
+    until: int | None
+
+
 def _years_reduced(
     requirement: EvidenceRequirement,
     shapes_by_id: Mapping[str, FrameShape],
     requirements_by_id: Mapping[str, EvidenceRequirement],
-) -> tuple[Period, bool] | None:
-    """The years `requirement` turns into one figure per entity, and whether they reach every later year; `None` when it reduces none.
+) -> _YearsReduced | None:
+    """The years `requirement` turns into one figure per entity; `None` when it reduces none.
 
     An `aggregate` that groups by `period`, and a `rank` that is
     `per_period` or states no `reduction`, keep the years. The input holds
@@ -3400,13 +3428,14 @@ def _years_reduced(
 
     The step reduces several years when its input's `period`, once the
     rank's own window is applied (`shapes.windowed_years`), covers more than
-    one, or when the end of those years follows the newest data and the
-    start does not (`_moving_ends`): one year then becomes several once
-    newer data exists. A window stays one year when both ends are fixed and
-    equal, or both follow the newest data at one offset.
+    one, or when it rests on a dataset retrieved with no end year, newer
+    data can add years after the one they end in today, and the start does
+    not follow it (`_year_ends`): one year then becomes several once newer
+    data exists. A window stays one year
+    when both ends are fixed and equal, or both follow the newest data at
+    one offset.
     """
     window: Period | None = None
-    window_moves = (False, False)
     if isinstance(requirement, AggregateRequirement):
         if GroupBy.PERIOD in requirement.group_by:
             return None
@@ -3415,77 +3444,120 @@ def _years_reduced(
             return None
         if requirement.window_start is not None and requirement.window_end is not None:
             window = Period(start=requirement.window_start, end=requirement.window_end)
-            window_moves = _window_moves(requirement.rolling)
     else:
         return None
     input_shape = shapes_by_id[requirement.input_id]
     years = windowed_years(input_shape.period, window)
     if input_shape.time is not TimeLabel.OBSERVATION or years is None:
         return None
-    start_moves, end_moves = _within(
-        _moving_ends(requirement.input_id, requirements_by_id), window_moves, window is not None
+    ends = _year_ends(requirement.input_id, requirements_by_id)
+    if isinstance(requirement, RankRequirement):
+        ends = ends.within(_window_ends(requirement))
+    open_ended = any(
+        isinstance(root := requirements_by_id[root_id], DatasetRequirement) and root.period_end_open
+        for root_id in input_shape.roots
     )
-    follows_newest = end_moves and not start_moves
+    follows_newest = (
+        open_ended and not ends.start_follows and (ends.until is None or ends.until > years.end)
+    )
     if years.end > years.start or follows_newest:
-        return years, follows_newest
+        return _YearsReduced(years, follows_newest, ends.until if follows_newest else None)
     return None
 
 
-def _window_moves(rolling: RollingWindow | None) -> tuple[bool, bool]:
-    """Which ends of a window `rolling` makes follow the newest data: start, end."""
-    if rolling is None:
-        return False, False
-    return rolling.window_start is not None, rolling.window_end is not None
+class _YearEnds(NamedTuple):
+    """How the years a frame holds move as newer data arrives.
 
-
-def _within(
-    frame: tuple[bool, bool], bounds: tuple[bool, bool], bounded: bool
-) -> tuple[bool, bool]:
-    """Which ends of `frame`'s years follow the newest data once `bounds` cut them.
-
-    The cut keeps the later start and the earlier end. A start follows when
-    either does, since a moving start passes a fixed one. An end follows
-    only when both do, since a fixed end caps a moving one. Unbounded, the
-    frame keeps its own.
+    `start_follows` says the first year follows the newest data. `until`
+    is the last year the frame can come to hold: the year its years end in
+    today for a frame retrieved over fixed years, a later one where a bound
+    is the first thing to stop an open-ended retrieval, and `None` when
+    nothing stops it.
     """
-    if not bounded:
-        return frame
-    return frame[0] or bounds[0], frame[1] and bounds[1]
+
+    start_follows: bool
+    until: int | None
+
+    def within(self, bounds: _YearEnds) -> _YearEnds:
+        """These years once `bounds` cut them, keeping the later start and the earlier end.
+
+        A start follows when either does, since a moving start passes a
+        fixed one. The end reaches the earlier of the two last years: a
+        fixed last year does not stop a moving end until newer data
+        reaches it.
+        """
+        stops = [year for year in (self.until, bounds.until) if year is not None]
+        return _YearEnds(
+            start_follows=self.start_follows or bounds.start_follows,
+            until=min(stops, default=None),
+        )
 
 
-def _moving_ends(
+# Bounds that cut nothing.
+_UNBOUNDED = _YearEnds(start_follows=False, until=None)
+
+
+def _window_ends(requirement: RankRequirement | GrowthRequirement) -> _YearEnds:
+    """The bounds `requirement`'s window sets on the years it reads; `_UNBOUNDED` with no window.
+
+    An end stated with `rolling` follows the newest data. A fixed
+    `window_end` lets the years reach that year and no further.
+    """
+    if requirement.window_start is None or requirement.window_end is None:
+        return _UNBOUNDED
+    rolling = requirement.rolling
+    rolls_at_its_end = rolling is not None and rolling.window_end is not None
+    return _YearEnds(
+        start_follows=rolling is not None and rolling.window_start is not None,
+        until=None if rolls_at_its_end else requirement.window_end,
+    )
+
+
+def _threshold_ends(predicate: PeriodThreshold) -> _YearEnds:
+    """The bounds a filter's year threshold sets on the years it reads.
+
+    `gt`, `gte` and `eq` set the first year, which follows the newest data
+    when the threshold is `rolling`. `lt`, `lte` and `eq` set the last: a
+    rolling one follows, and a fixed one lets the years reach it, the year
+    before for `lt`, and no further. `ne` removes a year and bounds neither
+    end.
+    """
+    fixed = predicate.rolling is None
+    last = predicate.year - 1 if predicate.op == "lt" else predicate.year
+    return _YearEnds(
+        start_follows=predicate.op in ("gt", "gte", "eq") and not fixed,
+        until=last if predicate.op in ("lt", "lte", "eq") and fixed else None,
+    )
+
+
+def _year_ends(
     requirement_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
-) -> tuple[bool, bool]:
-    """Which ends of the years `requirement_id`'s result holds follow the newest data: start, end.
+) -> _YearEnds:
+    """How the years `requirement_id`'s result holds move as newer data arrives.
 
-    A dataset requirement stating `period_end_open` has its end follow.
-    A filter's year thresholds and a rank's or a growth's window cut the
-    years their input holds (`_within`): a threshold or a window end stated
-    with `rolling` follows, and one stated without is fixed. A step reading
-    two inputs holds the years both cover, cut the same way. Every other
-    step holds its input's years.
+    A dataset requirement holds its `period`, and with `period_end_open`
+    every later year too. A filter's year thresholds (`_threshold_ends`)
+    and a rank's or a growth's window (`_window_ends`) cut the years their
+    input holds (`_YearEnds.within`). A step reading two inputs holds the
+    years both cover, cut the same way. Every other step holds its input's
+    years.
     """
     requirement = requirements_by_id[requirement_id]
     if isinstance(requirement, DatasetRequirement):
-        return False, requirement.period_end_open
+        return _YearEnds(
+            start_follows=False,
+            until=None if requirement.period_end_open else requirement.period.end,
+        )
     inputs = inputs_of(requirement)
-    ends = _moving_ends(inputs[0], requirements_by_id)
+    ends = _year_ends(inputs[0], requirements_by_id)
     for other in inputs[1:]:
-        ends = _within(ends, _moving_ends(other, requirements_by_id), True)
+        ends = ends.within(_year_ends(other, requirements_by_id))
     if isinstance(requirement, RankRequirement | GrowthRequirement):
-        bounded = requirement.window_start is not None
-        return _within(ends, _window_moves(requirement.rolling), bounded)
+        return ends.within(_window_ends(requirement))
     if isinstance(requirement, FilterRequirement):
         for predicate in requirement.predicates:
-            if not isinstance(predicate, PeriodThreshold) or predicate.op == "ne":
-                continue
-            moves = predicate.rolling is not None
-            starts = predicate.op in ("gt", "gte", "eq")
-            ending = predicate.op in ("lt", "lte", "eq")
-            ends = (
-                ends[0] or (starts and moves),
-                ends[1] and not (ending and not moves),
-            )
+            if isinstance(predicate, PeriodThreshold):
+                ends = ends.within(_threshold_ends(predicate))
     return ends
 
 
@@ -3496,13 +3568,14 @@ def _user_period_decisions(
 
     `requirement` is a step `_years_reduced` finds years under. For an
     `aggregate` such a decision's `fixes` names `group_by`, the field that
-    leaves `period` out. For a `rank` it names both `window_start` and
-    `window_end`, the years ranked as one. A cited decision fixes the values
-    the requirement states (`_check_requirements_honour_their_decisions`),
-    and `settle_decisions` drops a field the requirement leaves unset, so
-    the rank states its window. A `reduction` decision says how the years
-    combine and a `period` decision which years are retrieved; neither says
-    they become one figure. A slot `decisions` does not hold states nothing.
+    leaves `period` out. For a `rank` it names `per_period`, which the rank
+    states false: the years ranked together. A cited decision fixes the
+    values the requirement states
+    (`_check_requirements_honour_their_decisions`). A rank's `window_start`
+    and `window_end` say which years it covers, a `reduction` decision how
+    the years combine and a `period` decision which years are retrieved;
+    none says they become one figure. A slot `decisions` does not hold
+    states nothing.
     """
     stated: dict[str, Decision] = {}
     for slot in requirement.decision_ids:
@@ -3515,7 +3588,7 @@ def _user_period_decisions(
         if isinstance(requirement, AggregateRequirement):
             if fixes.group_by is not None:
                 stated[slot] = decision
-        elif fixes.window_start is not None and fixes.window_end is not None:
+        elif fixes.per_period is False:
             stated[slot] = decision
     return stated
 

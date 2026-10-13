@@ -1802,7 +1802,10 @@ def _period_reduction_unstated(
     sentences = []
     for gap in gaps:
         start, end = gap.years.start, gap.years.end
-        years = f"the years from {start} to the newest" if gap.follows_newest else f"{start}-{end}"
+        years = f"{start}-{end}"
+        if gap.follows_newest:
+            stops = "" if gap.until is None else f", as far as {gap.until},"
+            years = f"the years from {start} to the newest{stops}"
         step = repr(gap.step_id)
         output = repr(gap.output_id)
         result = "which" if gap.output_id == gap.step_id else f"and {output}, computed from it,"
@@ -1840,10 +1843,9 @@ def _period_reduction_unstated(
             )
             if amended:
                 remedies += (
-                    f" If the user's change to the plan asks for one ranking over {years}, state "
-                    f"`window_start` {start} and `window_end` {end} on {step} and cite on it a "
-                    "decision resolved by `user` whose `fixes` names `window_start` and "
-                    "`window_end`."
+                    f" If the user's change to the plan asks for one ranking over {years}, "
+                    f"leave `per_period` false on {step} and cite on it a decision resolved by "
+                    "`user` whose `fixes` names `per_period`."
                 )
         else:
             assert isinstance(reducing, AggregateRequirement)
@@ -1874,6 +1876,7 @@ def _period_reduction_unstated(
                     "asks": list(gap.asks),
                     "years": {"start": gap.years.start, "end": gap.years.end},
                     "follows_newest": gap.follows_newest,
+                    "until": gap.until,
                     "dataset_requirement_id": gap.dataset_id,
                 }
                 for gap in gaps

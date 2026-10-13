@@ -256,8 +256,8 @@ _PLANNING = (
     'says "The user asks for this change to the plan" and the change asks '
     "for one figure or one ranking over the years, cite on the step that "
     "combines them a `Decision` resolved by `user` whose `fixes` names "
-    "`group_by` for an aggregate, or `window_start` and `window_end`, "
-    "stated as the first and last year, for a rank. For either, an "
+    "`group_by` for an aggregate, or `per_period`, left false, for a "
+    "rank. For either, an "
     "`aggregate` with `reduction='sum'` grouped by `entity` alone sums "
     "the years, as a rank's `reduction` does for a ranking of each "
     "entity's total, and a total of two sources states the question's own "

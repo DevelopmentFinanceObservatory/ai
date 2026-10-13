@@ -129,11 +129,17 @@ computed from the step, the step included, answers at least one ask, and each
 ask it answers carries the mark. A plan with no asks admits no such step. An
 aggregate that keeps `period` in its `group_by`, a rank stating `per_period`,
 and a rank whose `window_start` and `window_end` state the same year reduce no
-years. In an entry the user's amendment at the approval card opened, the step
-is also admitted when it cites a decision resolved by `user` whose `fixes`
-names `group_by`, for an aggregate, or `window_start` and `window_end`, for a
-rank, and a later entry keeps a step the previous plan states unchanged with
-the same decision.
+years. One year counts as several when its dataset is retrieved with
+`period_end_open` and newer data can add years to it: a fixed last year still
+ahead of the data stops them only once the data reaches it. In an entry the
+user's amendment at the approval card opened, the step is also admitted when
+it cites a decision resolved by `user` whose `fixes` names `group_by`, for an
+aggregate, or `per_period`, which the rank states false, for a rank. A rank's
+`window_start` and `window_end` say which years it covers and license nothing.
+The decision has to be that entry's own: one the previous plan already makes,
+with the same `chosen` and `fixes` under any slot, was made for that plan. A
+later entry keeps the licence for a step the previous plan reduced years in,
+with the same `reduction` and the same decision, whatever its years are now.
 `propose_plan` refuses a `SumOfRequirement` adding two datasets unless
 it cites a decision resolved by `user` (`combination_unasked`): whether two
 datasets add up without counting a flow twice, as ODA loans count in both
