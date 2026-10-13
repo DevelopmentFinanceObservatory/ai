@@ -1,0 +1,69 @@
+{
+  "id": "aggregate-malaria-oda-all-recipients",
+  "kind": "aggregate",
+  "origin": "trace 79163c8b-07c9-4ded-b141-6a54fd96c29f",
+  "question": "\"malaria control oda from 2000",
+  "searches": [
+    {
+      "query": "malaria control oda from 2000",
+      "parts": [
+        {
+          "time": "since 2000",
+          "variable": "malaria control oda"
+        }
+      ]
+    }
+  ],
+  "brief": "Total gross ODA disbursements for malaria control from all providers to all recipients from 2000 to 2024 in current US dollars.",
+  "asks": [
+    "Total malaria control ODA gross disbursements over time (2000 to 2024)"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "Total gross ODA disbursements for malaria control from all providers to all recipients from 2000 to 2024 in current US dollars.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "malaria",
+        "measure": "malaria control ODA",
+        "entities": [],
+        "period": {
+          "start": 2000,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "period_end_open": true,
+        "source_spec_id": "spec_475c7e52b3180251ab8d2104521452da"
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "malaria",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

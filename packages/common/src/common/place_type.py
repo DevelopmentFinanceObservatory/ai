@@ -24,7 +24,7 @@ countries typed `Country,Place` share `Place` and no level, and World Bank aggre
 One place alone sits at one level whatever its types.
 
 A flow's parties (`financingProvider`, `financingRecipient`) carry a kind instead, in a
-`{role}_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `total` or
+`{role}_party_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `total` or
 `residual`. DAC tables publish group totals as parties of their own: "Africa, Total", an
 income group, the G7. A total holds other parties' figures, so a sum across a flow role leaves
 it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
@@ -72,12 +72,12 @@ _COUNTRY = "Country"
 _NUTS = frozenset({"EurostatNUTS1", "EurostatNUTS2", "EurostatNUTS3"})
 _SEPARATOR = ","
 
-# The kinds dfo-apis serves in a `{role}_kind` cell. A total holds other parties' figures.
+# The kinds dfo-apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
 PartyKind = Literal["party", "residual", "total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
 TOTAL_KIND: PartyKind = "total"
 
-_ENRICHMENT_SUFFIXES = ("_type", "_kind")
+_ENRICHMENT_SUFFIXES = ("_type", "_party_kind")
 
 
 def type_column(role: str) -> str:
@@ -86,8 +86,8 @@ def type_column(role: str) -> str:
 
 
 def kind_column(role: str) -> str:
-    """The enrichment column naming each `role` party's kind: `financingRecipient_kind`."""
-    return f"{role}_kind"
+    """The enrichment column naming each `role` party's kind: `financingRecipient_party_kind`."""
+    return f"{role}_party_kind"
 
 
 def enrichment_columns(role: str) -> tuple[str, str]:

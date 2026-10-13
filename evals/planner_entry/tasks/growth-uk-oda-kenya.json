@@ -1,0 +1,86 @@
+{
+  "id": "growth-uk-oda-kenya",
+  "kind": "growth",
+  "origin": "authored",
+  "question": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
+  "searches": [
+    {
+      "query": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "United Kingdom",
+              "role": "from"
+            },
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
+  "asks": [
+    "Percentage change in ODA from the United Kingdom to Kenya, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "growth, not aggregate: the change between 2015 and 2022, not a total or average over the years"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "By what percentage did ODA from the United Kingdom to Kenya change between 2015 and 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "United Kingdom",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_059c40d3e1d7382947e791c71bc621cd"
+      },
+      {
+        "kind": "growth",
+        "id": "change",
+        "input_id": "oda",
+        "window_start": 2015,
+        "window_end": 2022
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "change"
+        ]
+      }
+    ]
+  }
+}

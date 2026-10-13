@@ -1,0 +1,153 @@
+{
+  "id": "sum-oda-fdi-ethiopia",
+  "kind": "sum_of",
+  "origin": "authored",
+  "question": "Add up the ODA Ethiopia received and the foreign direct investment it received in each year from 2015 to 2022.",
+  "searches": [
+    {
+      "query": "Add up the ODA Ethiopia received and the foreign direct investment it received in each year from 2015 to 2022.",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Ethiopia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        },
+        {
+          "variable": "foreign direct investment inflows",
+          "entities": [
+            {
+              "text": "Ethiopia"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        }
+      ]
+    }
+  ],
+  "brief": "Add up the ODA Ethiopia received and the foreign direct investment it received in each year from 2015 to 2022.",
+  "asks": [
+    "ODA plus foreign direct investment received by Ethiopia, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "sum_of, not join: the two inflows are added into one total each year, not set side by side"
+  },
+  "unit_asked": false,
+  "first_proposal_refusal": "combination_unasked",
+  "reference_payload": {
+    "question": "Add up the ODA Ethiopia received and the foreign direct investment it received in each year from 2015 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether the two flows are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "user",
+        "rationale": "The user chose to add them."
+      },
+      {
+        "slot": "fdi_source",
+        "description": "Which FDI series is added: inflows in US dollars or net inflows as a share of GDP.",
+        "options": [
+          "spec_d847046a088f39c0ddaa8852e818bd2b",
+          "spec_650443e8516e228ca140f57555cf7904"
+        ],
+        "chosen": "spec_d847046a088f39c0ddaa8852e818bd2b",
+        "resolved_by": "planner_default",
+        "rationale": "Only the US dollar series can be added to ODA; a share of GDP is a ratio.",
+        "fixes": []
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34",
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "oda_total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "fdi",
+        "measure": "foreign direct investment inflows",
+        "entities": [
+          {
+            "name": "Ethiopia"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_d847046a088f39c0ddaa8852e818bd2b",
+        "decision_ids": [
+          "fdi_source"
+        ]
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "left": {
+          "input_id": "oda_total"
+        },
+        "right": {
+          "input_id": "fdi"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

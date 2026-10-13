@@ -101,12 +101,16 @@
     "ask",
     "outputs"
   ],
+  "planner.plan.AskBreakdown": [
+    "ask",
+    "by"
+  ],
   "planner.plan.ComparisonRequirement": [
     "kind",
     "id",
     "decision_ids",
-    "left",
-    "right"
+    "minuend",
+    "subtrahend"
   ],
   "planner.plan.Coverage": [
     "on_missing"

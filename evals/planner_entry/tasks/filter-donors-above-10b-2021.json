@@ -1,0 +1,106 @@
+{
+  "id": "filter-donors-above-10b-2021",
+  "kind": "filter",
+  "origin": "authored",
+  "question": "Which donors gave more than 10 billion US dollars of ODA in 2021?",
+  "searches": [
+    {
+      "query": "Which donors gave more than 10 billion US dollars of ODA in 2021?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "time": "2021",
+          "unit": "US dollars",
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Which donors gave more than 10 billion US dollars of ODA in 2021?",
+  "asks": [
+    {
+      "text": "The donors that gave more than 10 billion US dollars of ODA in 2021",
+      "by": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "filter"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "filter"
+  ],
+  "neighbour": {
+    "kind": "rank",
+    "distinction": "filter, not rank: a threshold keeps every donor above 10 billion US dollars; no order or top N is asked"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "Which donors gave more than 10 billion US dollars of ODA in 2021?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "donor_scope",
+        "description": "Whether the answer gives each donor's ODA or one total for all donors.",
+        "options": [
+          "each donor",
+          "one total for all donors"
+        ],
+        "chosen": "each donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks which donors gave more than the threshold, so each donor keeps its own figure.",
+        "fixes": [
+          "across"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [],
+        "period": {
+          "start": 2021,
+          "end": 2021
+        },
+        "source_spec_id": "spec_287bd363576aa5502becc59511c5dd4a",
+        "across": [
+          "donor"
+        ],
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        },
+        "decision_ids": [
+          "donor_scope"
+        ]
+      },
+      {
+        "kind": "filter",
+        "id": "above_10b",
+        "input_id": "oda",
+        "predicates": [
+          {
+            "kind": "value_threshold",
+            "op": "gt",
+            "value": 10000000000.0
+          }
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "above_10b"
+        ]
+      }
+    ]
+  }
+}

@@ -207,12 +207,17 @@ def _growth(requirement: GrowthRequirement, discovered: Mapping[str, str]) -> Op
 
 
 def _compare(requirement: ComparisonRequirement, discovered: Mapping[str, str]) -> Operation:
+    """The comparison as `CompareOperation`, whose result is its `right` side minus its `left`.
+
+    analysis-mcp's `compare` subtracts the left slice from the right, so the
+    subtrahend goes on the left and the minuend on the right.
+    """
     del discovered
     return CompareOperation(
         id=requirement.id,
         requirement_id=requirement.id,
-        left=_side(requirement.left.input_id, requirement.left.entity),
-        right=_side(requirement.right.input_id, requirement.right.entity),
+        left=_side(requirement.subtrahend.input_id, requirement.subtrahend.entity),
+        right=_side(requirement.minuend.input_id, requirement.minuend.entity),
     )
 
 

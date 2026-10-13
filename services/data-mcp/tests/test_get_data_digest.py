@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from common.materialisation import FrameRef
 from data_mcp.frame_materialisation import DegradedReason, MaterialisationOutcome
-from data_mcp.get_data_digest import UnheldRegionSummary, render_get_data_digest
+from data_mcp.get_data_digest import BreakdownLevel, SummedFamily, render_get_data_digest
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
 
 
@@ -75,6 +75,8 @@ def _digest(
     *,
     statistics: list[dict[str, Any]] | None = None,
     statistics_fetch_failed: bool = False,
+    series_count: int | None = None,
+    trace: dict[str, Any] | None = None,
     **overrides: Any,
 ) -> str:
     """Render a digest for a manifest payload built from `overrides`.
@@ -85,10 +87,19 @@ def _digest(
     too (no statistics section at all, matching an old record or a mint that
     never resolved to any series); a list sets `series_count` to its length
     and, unless `statistics_fetch_failed`, feeds the parsed rows straight
-    through as `series_stats`.
+    through as `series_stats`. `series_count` overrides that length, and
+    `trace` the manifest's empty trace.
     """
     payload = _manifest_payload(**overrides)
-    payload["series_count"] = None if statistics is None else len(statistics)
+    payload["series_count"] = (
+        series_count
+        if series_count is not None
+        else None
+        if statistics is None
+        else len(statistics)
+    )
+    if trace is not None:
+        payload["trace"] = trace
     manifest = strip_manifest(payload)
     series_stats = (
         None
@@ -100,7 +111,6 @@ def _digest(
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         series_stats=series_stats,
         statistics_fetch_failed=statistics_fetch_failed,
     )
@@ -154,7 +164,6 @@ def test_acknowledgement_substitutes_a_resolved_label_for_a_dcid() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={"country/KEN": "Kenya"},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert "recipient Kenya" in digest
@@ -169,7 +178,6 @@ def test_acknowledgement_falls_back_to_the_raw_dcid_without_a_label() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert "recipient country/KEN" in digest
@@ -185,7 +193,6 @@ def test_acknowledgement_joins_multiple_dcids_under_one_role() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={"country/KEN": "Kenya", "country/UGA": "Uganda"},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert "recipient Kenya, Uganda" in digest
@@ -227,7 +234,6 @@ def test_acknowledgement_names_an_open_role_beside_the_bound_entities(
         frame_ref=_frame_ref(manifest),
         entity_labels={"country/NGA": "Nigeria"},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert digest.splitlines()[0] == (
@@ -243,7 +249,6 @@ def test_acknowledgement_omits_a_role_with_no_entities() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert "recipient" not in digest.splitlines()[0]
@@ -362,7 +367,6 @@ def test_dropped_role_note_names_the_role() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=["provider"],
-        unheld_regions=[],
     )
 
     assert "provider" in digest
@@ -377,7 +381,6 @@ def test_no_dropped_role_notes_when_the_list_is_empty() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert "no longer bound" not in digest
@@ -391,55 +394,9 @@ def test_multiple_dropped_roles_each_get_their_own_note() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=["provider", "donor"],
-        unheld_regions=[],
     )
 
     assert digest.count("no longer bound") == 2
-
-
-# Unheld-region notes
-
-
-def test_unheld_region_note_shows_all_names_under_the_cap() -> None:
-    manifest = strip_manifest(_manifest_payload())
-    region = UnheldRegionSummary(
-        region_name="Sub-Saharan Africa", unheld_names=["Chad", "Mali"], unheld_count=2
-    )
-
-    digest = render_get_data_digest(
-        manifest=manifest,
-        frame_ref=_frame_ref(manifest),
-        entity_labels={},
-        dropped_roles=[],
-        unheld_regions=[region],
-    )
-
-    assert "Sub-Saharan Africa" in digest
-    assert "Chad" in digest
-    assert "Mali" in digest
-    assert "2 member" in digest
-    assert "more" not in digest
-
-
-def test_unheld_region_note_caps_names_and_reports_the_remainder() -> None:
-    manifest = strip_manifest(_manifest_payload())
-    names = [f"Country{i}" for i in range(45)]
-    region = UnheldRegionSummary(region_name="A Continent", unheld_names=names, unheld_count=45)
-
-    digest = render_get_data_digest(
-        manifest=manifest,
-        frame_ref=_frame_ref(manifest),
-        entity_labels={},
-        dropped_roles=[],
-        unheld_regions=[region],
-    )
-
-    assert "45 member" in digest
-    assert "Country0" in digest
-    assert "Country1" in digest
-    assert "Country2" in digest
-    assert "Country3" not in digest
-    assert "42 more" in digest
 
 
 # Per-series statistics
@@ -486,6 +443,66 @@ def test_statistics_single_observation_series_reports_first_as_latest_and_omits_
     assert "first 133.7k (2015)" in digest
     assert "latest 133.7k (2015)" in digest
     assert "change over window" not in digest
+
+
+_IMF = {"unit": "Percent", "provenance": "provenance/IMFWorldEconomicOutlook"}
+_ZAMBIA = [{"role": "observationAbout", "ref": "country/ZMB"}]
+_ZAMBIA_REPORTED = _series(
+    stat_var="dcid:Debt",
+    entities=_ZAMBIA,
+    facet=_IMF,
+    observations=10,
+    first=(35.0, "2015"),
+    latest=(28.1, "2024"),
+    minimum=(28.1, "2024"),
+    maximum=(140.2, "2020"),
+    change=(-6.9, -20.0),
+)
+_ZAMBIA_ESTIMATED = _series(
+    stat_var="dcid:Debt",
+    entities=_ZAMBIA,
+    facet={**_IMF, "measurementMethod": "Estimated"},
+    observations=2,
+    first=(29.55, "2025"),
+    latest=(34.82, "2026"),
+    minimum=(29.55, "2025"),
+    maximum=(34.82, "2026"),
+    change=(5.27, 17.8),
+)
+_CONTINUED_TRACE = {
+    "continuations": [
+        {"axis": "measurementMethod", "method": "Estimated", "periods": ["2025", "2026"]}
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    "statistics",
+    [
+        pytest.param([_ZAMBIA_REPORTED, _ZAMBIA_ESTIMATED], id="reported-row-first"),
+        pytest.param([_ZAMBIA_ESTIMATED, _ZAMBIA_REPORTED], id="estimates-row-first"),
+    ],
+)
+def test_a_continued_series_renders_as_one_block_naming_its_estimates_years(
+    statistics: list[dict[str, Any]],
+) -> None:
+    """A frame Datasets continued with its source's estimates holds one series under two
+    `measurementMethod` values; two blocks would read as two series."""
+    digest = _digest(statistics=statistics, series_count=1, trace=_CONTINUED_TRACE)
+
+    assert digest.count("dcid:Debt · observationAbout country/ZMB") == 1
+    assert "first 35.0 (2015) · latest 28.1 (2024)" in digest
+    assert (
+        "  continued 2025 to 2026 by its source's Estimated values, part of this one series: "
+        "first 29.6 (2025) · latest 34.8 (2026)"
+    ) in digest
+
+
+def test_estimates_rows_without_a_continuation_render_as_their_own_series() -> None:
+    digest = _digest(statistics=[_ZAMBIA_REPORTED, _ZAMBIA_ESTIMATED])
+
+    assert digest.count("dcid:Debt · observationAbout country/ZMB") == 2
+    assert "continued" not in digest
 
 
 def test_statistics_absent_manifest_omits_the_block_but_renders_everything_else() -> None:
@@ -837,16 +854,27 @@ _STAT_VARS_SUMMED_WARNING: dict[str, Any] = {
 }
 
 
+_FAMILY = SummedFamily(ref=f"dcid:{_FAMILY_SPEC}", label=None, count=3)
+
+
 def _family_digest(
     *,
-    warnings: list[dict[str, Any]],
+    warnings: list[dict[str, Any]] | None = None,
+    summed: SummedFamily | None = _FAMILY,
     entities: dict[str, list[str]] | None = None,
     dimensions: list[dict[str, Any]] | None = None,
     series_entities: list[list[dict[str, str]]] | None = None,
+    citation_sources: list[dict[str, Any]] | None = None,
+    breakdown: BreakdownLevel | None = None,
 ) -> str:
-    """A described family's digest, each series labelled `dcid:<spec_id>`."""
+    """A described family's digest, each series labelled `dcid:<spec_id>`, rendered as
+    the sum `summed` describes."""
     payload = _manifest_payload(
-        spec_id=_FAMILY_SPEC, warnings=warnings, entities=entities, dimensions=dimensions
+        spec_id=_FAMILY_SPEC,
+        warnings=warnings,
+        entities=entities,
+        dimensions=dimensions,
+        citation_sources=citation_sources,
     )
     payload["definition"]["identity"]["shape"] = {"kind": "statvar_schema"}
     per_series = series_entities or [[{"role": "recipient", "ref": "country/KEN"}]]
@@ -856,13 +884,14 @@ def _family_digest(
         frame_ref=_frame_ref(manifest),
         entity_labels={"country/KEN": "Kenya"},
         dropped_roles=[],
-        unheld_regions=[],
         series_stats=[
             SeriesStatisticsModel.model_validate(
                 _series(stat_var=f"dcid:{_FAMILY_SPEC}", entities=series)
             )
             for series in per_series
         ],
+        summed=summed,
+        breakdown=breakdown,
     )
 
 
@@ -873,28 +902,27 @@ def test_a_summed_family_is_acknowledged_and_headed_as_its_total() -> None:
     )
 
     assert digest.splitlines()[0] == (
-        "Retrieved the requested StatVar family for recipient Kenya, "
+        "Retrieved the OECD DAC2a family for recipient Kenya, "
         "with its StatVars summed into one total series per recipient."
     )
     assert (
-        f"Summed total of the family [dcid:{_FAMILY_SPEC}] · recipient country/KEN · "
-        "unit dcid:USDollar\n"
+        "Summed total of the OECD DAC2a family · recipient country/KEN · unit dcid:USDollar\n"
     ) in digest
-    # The warning still names how many StatVars were summed.
+    # A stored version's warning still renders its message.
     assert f"Warning [stat_vars_summed] (info): {_STAT_VARS_SUMMED_WARNING['message']}" in digest
 
 
-@pytest.mark.parametrize("absent", [None, ""], ids=["null", "empty"])
-def test_a_summed_family_with_no_usable_label_is_named_by_its_ref(absent: str | None) -> None:
-    digest = _family_digest(warnings=[{**_STAT_VARS_SUMMED_WARNING, "stat_var_label": absent}])
+def test_an_unlabelled_family_citing_no_source_is_never_named_by_its_ref() -> None:
+    digest = _family_digest(citation_sources=[])
 
     assert digest.splitlines()[0].startswith("Retrieved the requested StatVar family for ")
-    assert f"Summed total of the family [dcid:{_FAMILY_SPEC}] · " in digest
+    assert "Summed total of the requested StatVar family · " in digest
+    assert f"[dcid:{_FAMILY_SPEC}]" not in digest
 
 
-def test_a_summed_family_is_named_by_the_label_its_warning_carries() -> None:
+def test_a_summed_family_is_named_by_its_label() -> None:
     digest = _family_digest(
-        warnings=[{**_STAT_VARS_SUMMED_WARNING, "stat_var_label": "French education grants"}],
+        summed=SummedFamily(ref=_FAMILY.ref, label="French education grants", count=3),
         dimensions=[{"label": "recipient", "count": 1, "axis": "destination"}],
     )
 
@@ -903,8 +931,7 @@ def test_a_summed_family_is_named_by_the_label_its_warning_carries() -> None:
         "with its StatVars summed into one total series per recipient."
     )
     assert (
-        "\n\nSummed total of the family French education grants · recipient country/KEN · "
-        "unit dcid:USDollar\n"
+        "\n\nSummed total of French education grants · recipient country/KEN · unit dcid:USDollar\n"
     ) in digest
     # The frame line still carries the spec_id the family's ref is built from.
     assert f"Frame: spec_id={_FAMILY_SPEC}" in digest
@@ -933,12 +960,44 @@ def test_a_summed_family_names_a_role_the_question_left_open() -> None:
     )
 
     assert digest.splitlines()[0] == (
-        "Retrieved the requested StatVar family for destination Kenya, "
+        "Retrieved the OECD DAC2a family for destination Kenya, "
         "with its StatVars summed into one total series per provider and recipient."
     )
-    assert (
-        digest.count(f"Summed total of the family [dcid:{_FAMILY_SPEC}] · financingProvider ") == 2
+    assert digest.count("Summed total of the OECD DAC2a family · financingProvider ") == 2
+
+
+def test_a_sector_breakdown_reads_per_entity_and_code() -> None:
+    # A breakdown keeps the code axis, so the frame holds a series per sector for
+    # each recipient; the code column is no entity of its own.
+    digest = _family_digest(
+        warnings=[_STAT_VARS_SUMMED_WARNING],
+        dimensions=[
+            {"label": "recipient", "count": 1, "axis": "destination"},
+            {"label": "stat_var_crsPurpose", "count": 2},
+            {"label": "years", "count": 10},
+        ],
+        series_entities=[
+            [
+                {"role": "recipient", "ref": "country/KEN"},
+                {"role": "stat_var_crsPurpose", "ref": sector},
+            ]
+            for sector in ("Social infrastructure and services", "Humanitarian aid")
+        ],
+        breakdown=BreakdownLevel(code_system="crsPurpose", level=0),
     )
+
+    assert digest.splitlines()[0] == (
+        "Retrieved the OECD DAC2a family for recipient Kenya, "
+        "with its StatVars summed into one series per recipient and crsPurpose code at level 0."
+    )
+    # dfo-apis computes the statistics from the broken-down frame, so each row is one
+    # sector's series and carries the code column among its entities.
+    for sector in ("Social infrastructure and services", "Humanitarian aid"):
+        assert (
+            f"Sum of the OECD DAC2a family within crsPurpose code {sector} · "
+            "recipient country/KEN · unit dcid:USDollar\n"
+        ) in digest
+    assert "Summed total of" not in digest
 
 
 def test_a_summed_subject_family_reads_per_entity() -> None:
@@ -960,7 +1019,7 @@ def test_a_summed_family_with_no_role_column_reads_per_entity() -> None:
     )
 
     assert digest.splitlines()[0] == (
-        "Retrieved the requested StatVar family, "
+        "Retrieved the OECD DAC2a family, "
         "with its StatVars summed into one total series per entity."
     )
 
@@ -995,8 +1054,8 @@ def test_the_summed_warning_takes_no_place_from_the_five_other_warnings() -> Non
     assert "more warning(s) not shown" not in digest
 
 
-def test_a_family_series_without_the_summed_warning_keeps_the_plain_digest() -> None:
-    digest = _family_digest(warnings=[])
+def test_an_unsummed_digest_heads_each_series_by_its_stat_var() -> None:
+    digest = _family_digest(summed=None)
 
     assert digest.splitlines()[0] == "Retrieved the requested data for recipient Kenya."
     assert f"\n\ndcid:{_FAMILY_SPEC} · recipient country/KEN · unit dcid:USDollar\n" in digest
@@ -1018,7 +1077,6 @@ def test_a_degraded_fetch_adds_a_note() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         degraded_frame=_degraded(attempts=3, reason="fetch"),
     )
 
@@ -1036,7 +1094,6 @@ def test_an_unconfirmed_store_write_says_the_artifact_was_fetched() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         degraded_frame=_degraded(attempts=1, reason="store_write"),
     )
 
@@ -1055,7 +1112,6 @@ def test_a_fetch_after_an_unanswered_store_read_does_not_claim_nothing_is_held()
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         degraded_frame=_degraded(attempts=2, reason="store_unchecked"),
     )
 
@@ -1072,7 +1128,6 @@ def test_degraded_fetch_zero_attempts_states_none_landed_rather_than_after_0() -
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         degraded_frame=_degraded(attempts=0, reason="fetch"),
     )
 
@@ -1089,7 +1144,6 @@ def test_no_degraded_frame_renders_no_note() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         degraded_frame=None,
     )
 
@@ -1108,14 +1162,12 @@ def test_ordinary_success_digest_is_unchanged_by_the_new_parameters() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
     with_explicit_none = render_get_data_digest(
         manifest=manifest,
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
         remint_persist_failed=False,
         degraded_frame=None,
     )
@@ -1137,7 +1189,6 @@ def test_acknowledgement_caps_entities_per_role_with_an_and_more_tail() -> None:
         frame_ref=_frame_ref(manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     for i in range(8):
@@ -1185,14 +1236,12 @@ def test_digest_length_does_not_track_frame_breadth() -> None:
         frame_ref=_frame_ref(lean_manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
     fat_digest = render_get_data_digest(
         manifest=fat_manifest,
         frame_ref=_frame_ref(fat_manifest),
         entity_labels={},
         dropped_roles=[],
-        unheld_regions=[],
     )
 
     assert abs(len(fat_digest) - len(lean_digest)) <= 10

@@ -49,6 +49,8 @@ AGENTS.md
 /evals/artifacts/
 # harness-studio-v1 run results (one JSON per run.py invocation)
 /evals/studio/.results/
+# harness-planner-entry-v1 runs (records and summary per run.py invocation)
+/evals/planner_entry/.results/
 # adk eval's own local run-history cache, written under whichever evals/agents/<suite>/ it ran against
 .adk/
 

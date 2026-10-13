@@ -19,32 +19,35 @@ from typing import Any
 import pytest
 from harness.generative import _EDIT_INSTRUCTION, GeminiEdit
 
+# The instruction as the model reads it, with its line wrapping folded.
+_EDIT_TEXT = " ".join(_EDIT_INSTRUCTION.split())
+
 
 def test_edit_instruction_states_the_window_grammar() -> None:
-    assert "window is an object of period labels" in _EDIT_INSTRUCTION
-    assert '{"start": "2000", "end": "2023"}' in _EDIT_INSTRUCTION
-    assert "Either side may be omitted" in _EDIT_INSTRUCTION
-    assert '"since 2000" is {"start": "2000"}' in _EDIT_INSTRUCTION
+    assert "window is an object of period labels" in _EDIT_TEXT
+    assert '{"start": "2000", "end": "2023"}' in _EDIT_TEXT
+    assert "A window of labels may leave out either side" in _EDIT_TEXT
+    assert '"Since 2000" is {"start": "2000"}' in _EDIT_TEXT
 
 
 def test_edit_instruction_updates_a_title_that_names_what_changed() -> None:
-    assert "A title that names something you change" in _EDIT_INSTRUCTION
-    assert '"... (2000-2023)"' in _EDIT_INSTRUCTION
-    assert "open side read from the frame's coverage" in _EDIT_INSTRUCTION
+    assert "A title that names something you change" in _EDIT_TEXT
+    assert '"... (2000-2023)"' in _EDIT_TEXT
+    assert "open side read from the frame's coverage" in _EDIT_TEXT
 
 
 def test_edit_instruction_states_the_relative_period_grammar() -> None:
-    assert '{"anchor": "latest", "offset": N}' in _EDIT_INSTRUCTION
-    assert '"The last three years" is {"start": {"anchor": "latest",' in _EDIT_INSTRUCTION
-    assert "A window with a\n  relative side states both sides" in _EDIT_INSTRUCTION
+    assert '{"anchor": "latest", "offset": N}' in _EDIT_TEXT
+    assert '"The last three years" is {"start": {"anchor": "latest",' in _EDIT_TEXT
+    assert "When either side is relative, state both sides" in _EDIT_TEXT
     assert (
-        '"Compare with\n  the previous year" is {"basis": [{"anchor": "latest", "offset": -1}'
-        in (_EDIT_INSTRUCTION)
+        '"Compare with the previous year" is {"basis": [{"anchor": "latest", "offset": -1}'
+        in _EDIT_TEXT
     )
     # Years a person names stay labels, in a window and in a change alike.
-    assert '"2015\n  to 2020" is {"start": "2015", "end": "2020"}' in _EDIT_INSTRUCTION
-    assert '"compare 2015 with 2020" is\n  {"basis": ["2015", "2020"]}' in _EDIT_INSTRUCTION
-    assert "its title names no\n  year and no year range" in _EDIT_INSTRUCTION
+    assert '"2015 to 2020" is {"start": "2015", "end": "2020"}' in _EDIT_TEXT
+    assert '"Compare 2015 with 2020" is {"basis": ["2015", "2020"]}' in _EDIT_TEXT
+    assert "Its title names no year and no year range" in _EDIT_TEXT
 
 
 class _FakeResponse:
@@ -57,9 +60,11 @@ class _FakeModels:
     def __init__(self, text: str) -> None:
         self._text = text
         self.contents: list[Any] = []
+        self.configs: list[Any] = []
 
     async def generate_content(self, **kwargs: Any) -> _FakeResponse:
         self.contents.append(kwargs["contents"])
+        self.configs.append(kwargs["config"])
         return _FakeResponse(self._text)
 
 
@@ -102,7 +107,7 @@ async def test_edit_passes_a_recreates_period_through_as_the_model_wrote_it(
         json.dumps({"text": "Done.", "patch_json": None, "recreate_json": json.dumps(recreate)})
     )
 
-    drafted = await GeminiEdit(model_name="test-model", client=client)(
+    drafted = await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client)(
         message="change the period",
         stored_intent={"type": "stat_card", "title": "Aid", "select": {"donor": "country/FRA"}},
         frame_view={"dimensions": [], "rolling": True},
@@ -111,3 +116,6 @@ async def test_edit_passes_a_recreates_period_through_as_the_model_wrote_it(
     assert drafted["recreate"] == recreate
     (content,) = client.aio.models.contents
     assert json.loads(content)["frame_view"]["rolling"] is True
+    # The call is bounded by the request's model-time budget, in milliseconds.
+    (config,) = client.aio.models.configs
+    assert config.http_options.timeout == 90_000

@@ -92,19 +92,19 @@
             "shape_id": "economicactivity_amount_measuredvalue_per_count_person",
             "label": "Healthcare expenditure per person",
             "population_type": {
-              "dcid": "EconomicActivity",
+              "ref": "EconomicActivity",
               "label": "EconomicActivity"
             },
             "measured_property": {
-              "dcid": "amount",
+              "ref": "amount",
               "label": "amount"
             },
             "stat_type": {
-              "dcid": "measuredValue",
+              "ref": "measuredValue",
               "label": "measuredValue"
             },
             "measurement_denominator": {
-              "dcid": "Count_Person",
+              "ref": "Count_Person",
               "label": "Total population"
             },
             "measurement_denominator_unresolved": false,
@@ -112,7 +112,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -120,7 +120,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "expenditureType",
+                  "ref": "expenditureType",
                   "label": "expenditureType"
                 },
                 "label": "expenditure type"
@@ -146,7 +146,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -155,7 +155,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "ExpenditureActivity",
+                    "ref": "ExpenditureActivity",
                     "label": "ExpenditureActivity"
                   },
                   "value_kind": "enum_value"
@@ -166,7 +166,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "expenditureType",
+                  "ref": "expenditureType",
                   "label": "expenditureType"
                 },
                 "label": "expenditure type"
@@ -175,7 +175,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "HealthcareExpenditure",
+                    "ref": "HealthcareExpenditure",
                     "label": "HealthcareExpenditure"
                   },
                   "value_kind": "enum_value"
@@ -1411,7 +1411,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -1420,7 +1420,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "ExpenditureActivity",
+                      "ref": "ExpenditureActivity",
                       "label": "ExpenditureActivity"
                     },
                     "value_kind": "enum_value"
@@ -1450,7 +1450,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "expenditureType",
+                  "ref": "expenditureType",
                   "label": "expenditureType"
                 },
                 "label": "expenditure type"
@@ -1459,7 +1459,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "HealthcareExpenditure",
+                      "ref": "HealthcareExpenditure",
                       "label": "HealthcareExpenditure"
                     },
                     "value_kind": "enum_value"
@@ -1494,7 +1494,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "dc/base/WorldDevelopmentIndicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
                       "label": "WorldDevelopmentIndicators"
                     },
                     "value_kind": "source"
@@ -1510,7 +1510,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "USDollar",
+                      "ref": "USDollar",
                       "label": "USDollar"
                     },
                     "value_kind": "enum_value"
@@ -1519,7 +1519,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "InternationalDollar",
+                      "ref": "InternationalDollar",
                       "label": "InternationalDollar"
                     },
                     "value_kind": "enum_value"
@@ -1599,7 +1599,7 @@
             "resolved_entities": [],
             "resolved_sources": [
               {
-                "dcid": "dc/base/WorldDevelopmentIndicators",
+                "ref": "dc/base/WorldDevelopmentIndicators",
                 "label": "WorldDevelopmentIndicators"
               }
             ],
@@ -1608,7 +1608,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "activitySource",
+                    "ref": "activitySource",
                     "label": "activitySource"
                   },
                   "label": "activity source"
@@ -1616,7 +1616,7 @@
                 "binding_kind": "value",
                 "refs": [
                   {
-                    "dcid": "ExpenditureActivity",
+                    "ref": "ExpenditureActivity",
                     "label": "ExpenditureActivity"
                   }
                 ],
@@ -1626,7 +1626,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "expenditureType",
+                    "ref": "expenditureType",
                     "label": "expenditureType"
                   },
                   "label": "expenditure type"
@@ -1634,7 +1634,7 @@
                 "binding_kind": "value",
                 "refs": [
                   {
-                    "dcid": "HealthcareExpenditure",
+                    "ref": "HealthcareExpenditure",
                     "label": "HealthcareExpenditure"
                   }
                 ],

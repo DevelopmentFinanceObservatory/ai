@@ -1,0 +1,71 @@
+{
+  "id": "series-zambia-debt-to-china",
+  "kind": "dataset",
+  "origin": "pilot",
+  "question": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
+  "searches": [
+    {
+      "query": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
+      "parts": [
+        {
+          "variable": "external debt stock",
+          "entities": [
+            {
+              "text": "China",
+              "role": "from"
+            },
+            {
+              "text": "Zambia",
+              "role": "to"
+            }
+          ],
+          "time": "2010 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
+  "asks": [
+    "Zambia's external debt stock owed to China, each year 2010 to 2022"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "acceptable_kinds": [
+    "dataset"
+  ],
+  "reference_payload": {
+    "question": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt stock",
+        "entities": [
+          {
+            "name": "China",
+            "role": "creditor"
+          },
+          {
+            "name": "Zambia",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt"
+        ]
+      }
+    ]
+  }
+}

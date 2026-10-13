@@ -22,8 +22,6 @@ from common.recipe import build_recipe
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.client import UpstreamClient
-from data_mcp.settings import Settings as DataMcpSettings
 from fastapi import FastAPI
 from harness.live_refresh import LiveRefresh
 from harness.recipe_replay import Pending, Refused, Replayed, replay_recipe
@@ -32,7 +30,7 @@ from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Setti
 from planner.workflow import ToolId
 
 from .live_refresh_support import CARD, LIVE_PRINCIPAL, RECORDED_RENDER, RecordedApis
-from .replay_support import FIRST, SECOND, SECOND_VALUES, SPEC, Upstream, pair
+from .replay_support import FIRST, SECOND, SECOND_VALUES, SPEC, Upstream, data_mcp_client, pair
 
 _KEPT = ["dcid:FRA", "dcid:GBR"]
 _REDRAWN = {"status": "redrawn", "render": RECORDED_RENDER}
@@ -163,9 +161,7 @@ async def harness(
 ) -> AsyncIterator[Harness]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(upstream.handler))
-    )
+    client_holder.set_client(data_mcp_client(upstream.handler))
     app = create_app(
         settings=Settings(mcp_api_token="test-token", live_refresh_principal=LIVE_PRINCIPAL)
     )

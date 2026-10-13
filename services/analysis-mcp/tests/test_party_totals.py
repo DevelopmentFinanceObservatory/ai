@@ -1,7 +1,7 @@
 """Party totals: `aggregate`, `rank`, `share_of` and `quotient_of` leave out the flow parties
 that total other parties, and record them as `party_total` exclusions.
 
-The frames carry `financingRecipient_kind` as `get_data(place_types=true)` registers it for a
+The frames carry `financingRecipient_party_kind` as `get_data(place_types=true)` registers it for a
 flow table: the kind dfo-apis serves for each party, `party`, `residual` or `total`, and
 `untyped` where it serves none.
 """
@@ -28,7 +28,7 @@ from dfo_frame_grammar import Frame
 
 _ODA = "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal"
 _RECIPIENT = "financingRecipient"
-_KINDS = f"{_RECIPIENT}_kind"
+_KINDS = f"{_RECIPIENT}_party_kind"
 _TYPES = f"{_RECIPIENT}_type"
 
 # France's 2022 ODA to a few of DAC2A's recipients, in USD millions: two countries, a

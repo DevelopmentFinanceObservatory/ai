@@ -66,6 +66,7 @@ _AGENTS_DIR = REPO_ROOT / "evals" / "agents"
 if str(_AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(_AGENTS_DIR))
 
+from data_mcp.node_lookup import described_variable_text  # noqa: E402
 from harness_translator_v1.discovery_stub import EvalSurface  # noqa: E402
 from harness_translator_v1.outcome_metric import matches_subset  # noqa: E402
 from planner.agent import build_planner_tools  # noqa: E402
@@ -93,7 +94,7 @@ from planner.plan import (  # noqa: E402
     ShareOfRequirement,
     inputs_of,
 )
-from planner.workflow import ArtifactKind, Binding, WorkflowStep  # noqa: E402
+from planner.workflow import ArtifactKind, Binding, ToolId, WorkflowStep  # noqa: E402
 from translator.mechanical import TranslatorCore  # noqa: E402
 from translator.referral import ReferralKind  # noqa: E402
 from translator.tool import build_translate, build_translator_core  # noqa: E402
@@ -234,8 +235,8 @@ def _build_operation(
         return CompareOperation(
             id=op_id,
             requirement_id=requirement.id,
-            left=side(requirement.left),
-            right=side(requirement.right),
+            left=side(requirement.subtrahend),
+            right=side(requirement.minuend),
         )
     if isinstance(requirement, ShareOfRequirement):
         return ShareOfOperation(
@@ -317,6 +318,25 @@ def _last_step(context: FakeToolContext) -> WorkflowStep:
 )
 async def test_a_mapping_cases_expected_outcome_is_reachable(case_id: str) -> None:
     await _propose_mapping_case(case_id)
+
+
+async def test_the_stubs_describe_answers_the_node_envelope_the_harness_reads() -> None:
+    surface = EvalSurface()
+    describe = ToolId(server="data-mcp", name="describe")
+
+    answer = await surface.call_tool(
+        tool=describe, arguments={"ids": ["DebtServicePaid", "country/KEN"]}
+    )
+
+    assert not answer.is_error
+    stat_var, country = (answer.structured_content or {})["nodes"]
+    assert (stat_var["kind"], country["kind"]) == ("stat_var", "country")
+    assert described_variable_text(stat_var) == "DebtServicePaid, as the graph defines it."
+    assert described_variable_text(country) is None
+
+    spec = await surface.call_tool(tool=describe, arguments={"ids": [f"spec_{'d' * 32}"]})
+    assert spec.is_error
+    assert (spec.structured_content or {})["code"] == "node_not_held"
 
 
 async def test_the_constant_price_referral_is_reachable() -> None:

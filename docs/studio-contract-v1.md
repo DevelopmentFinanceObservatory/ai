@@ -220,7 +220,7 @@ ignore comments; proxies see traffic. Heartbeats carry no `seq`.
 Two failure channels, by scope:
 
 - A **step-scoped** failure arrives as `activity.step` with
-  `status: "failed"` and the tool error's detail in `detail`; the run
+  `status: "failed"`; a failed tool call's step carries no `detail` (the tool error stays in the trace); the run
   continues where the plan allows, and `done` still arrives.
 - A **top-level `error` frame is stream-fatal**: `done` does not follow it.
   Branch on `error.retry`: `correct_and_retry` means a fixed call can work
@@ -232,8 +232,7 @@ vocabulary: the platform refusal codes the studio can surface, plus the
 studio-side `cancelled` and `capability_unavailable`. The platform's own
 grammar is a superset that keeps growing; codes the wire enum does not
 know are surfaced as `transient_unavailable` with the real reason in
-`detail`, and step-scoped refusals travel as prose in
-`activity.step.detail`.
+`detail`, and a step-scoped refusal shows as a failed `activity.step`.
 
 `/interrupt` and `/composition` on a `conversation_id` the store does not
 hold answer 404 `not_found`, `do_not_retry`, `pointer: "/conversation_id"`.
@@ -459,8 +458,6 @@ Fixture values that are samples, corrected here:
 
 ## Known gaps (upstream, named)
 
-- **`fact_summary.indicators` may be empty**: the platform serves no
-  indicator definition text. `attribution` counts still reflect the data.
 - **Some searches refuse** with `capability_unavailable` ("identity does
   not reproduce spec_id"), an upstream/spec-kit identity gap on specific
   spec ids (not arity-dependent), reported to ONE. The search step fails

@@ -512,10 +512,80 @@ def test_absolute_growth_digest_over_an_ordinal_input_states_no_change_at_zero()
     assert "no change" in digest
 
 
-def test_compare_digest_carries_the_identity_block() -> None:
+@pytest.mark.parametrize(
+    ("left_stat_vars", "right_stat_vars", "left_entities", "right_entities", "label"),
+    [
+        (
+            ("dcid:DebtService",),
+            ("dcid:Disbursements",),
+            {},
+            {},
+            "dcid:Disbursements minus dcid:DebtService",
+        ),
+        (
+            ("dcid:ODA",),
+            ("dcid:ODA",),
+            {"donor": "dcid:GBR", "recipient": "dcid:KEN"},
+            {"donor": "dcid:FRA", "recipient": "dcid:KEN"},
+            "dcid:ODA, dcid:FRA minus dcid:GBR",
+        ),
+        (
+            ("dcid:ODA",),
+            ("dcid:ODA",),
+            {"donor": "dcid:GBR", "recipient": "dcid:KEN"},
+            {"donor": "dcid:FRA", "recipient": "dcid:UGA"},
+            "difference in dcid:ODA",
+        ),
+        (
+            ("dcid:ODA",),
+            ("dcid:ODA",),
+            {"donor": "dcid:GBR"},
+            {"recipient": "dcid:KEN"},
+            "difference in dcid:ODA",
+        ),
+        (("dcid:ODA",), ("dcid:ODA",), {}, {}, "difference in dcid:ODA"),
+        (
+            ("dcid:A0", "dcid:A1", "dcid:A2"),
+            ("dcid:B0", "dcid:B1", "dcid:B2"),
+            {},
+            {},
+            "dcid:B0 and 2 more minus dcid:A0 and 2 more",
+        ),
+        (
+            ("dcid:A0", "dcid:A1", "dcid:A2"),
+            ("dcid:A0", "dcid:A1", "dcid:A2"),
+            {"donor": "dcid:GBR"},
+            {"donor": "dcid:FRA"},
+            "dcid:A0 and 2 more, dcid:FRA minus dcid:GBR",
+        ),
+    ],
+    ids=[
+        "two-variables",
+        "one-variable-two-entities",
+        "two-columns-differ",
+        "no-column-on-both-sides",
+        "one-variable",
+        "several-variables-per-side",
+        "several-variables-two-entities",
+    ],
+)
+def test_compare_digest_names_its_difference_and_carries_the_identity_block(
+    left_stat_vars: tuple[str, ...],
+    right_stat_vars: tuple[str, ...],
+    left_entities: dict[str, str],
+    right_entities: dict[str, str],
+    label: str,
+) -> None:
+    """The label line names the result's own StatVar right side minus left,
+    the order `delta` subtracts."""
     digest = render_compare_digest(
         result=CompareResult(
             frame=None,  # type: ignore[arg-type]
+            stat_var="dcid:ops_" + "a" * 32,
+            left_stat_vars=left_stat_vars,
+            right_stat_vars=right_stat_vars,
+            left_entities=left_entities,
+            right_entities=right_entities,
             left_resolved_unit="dcid:USDollar",
             right_resolved_unit="dcid:USDollar",
             left_facet_selections=(),
@@ -532,8 +602,6 @@ def test_compare_digest_carries_the_identity_block() -> None:
                     left_value=100.0,
                     right_value=110.0,
                     delta=10.0,
-                    left_stat_var="dcid:test_stat_var",
-                    right_stat_var="dcid:test_stat_var",
                 ),
             ),
         ),
@@ -541,6 +609,7 @@ def test_compare_digest_carries_the_identity_block() -> None:
         content_version="ocv_" + "b" * 32,
         execution_identity=_EI,
     )
+    assert f"stat_var dcid:ops_{'a' * 32}: {label}\n" in digest
     assert "frame reference: spec_id=ops_" + "a" * 32 in digest
     assert "content_version=ocv_" + "b" * 32 in digest
     assert "execution_identity: 0.1.0|1.0.0|0.1.0" in digest

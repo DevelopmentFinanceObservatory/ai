@@ -7,14 +7,9 @@ from analysis_mcp.artifact import Observation
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
+from analysis_mcp.steps import LeftOut, Step, VersionRef
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
-from common.materialisation import (
-    ComposedStatVar,
-    FrameRef,
-    composed_stat_vars_of,
-    decode_trace,
-    encode_trace,
-)
+from common.materialisation import FrameRef, decode_trace, encode_trace
 from pydantic import ValidationError
 
 SNAPSHOT_REF = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_" + "b" * 32}
@@ -197,24 +192,12 @@ def test_decode_trace_ignores_a_member_no_field_names() -> None:
     assert decoded == trace
 
 
-_PER_HEAD = ComposedStatVar(
-    stat_var="dcid:ops_" + "e" * 32,
-    relation="quotient",
-    first=("dcid:Amount_EconomicActivity_GrossDomesticProduction_Nominal",),
-    second=("dcid:Count_Person",),
-)
-
-
-def test_composed_stat_vars_round_trip_through_the_codec_and_the_common_accessor() -> None:
-    """`composed_stat_vars_of` is how presentation-mcp reads the field, so it
-    must find the list under the name `Trace` stores it by."""
-    trace = _minimal_trace().model_copy(update={"composed_stat_vars": (_PER_HEAD,)})
-
+def test_decode_trace_reads_a_record_stored_with_composed_stat_vars() -> None:
+    """A record stored while `Trace` carried `composed_stat_vars` decodes, without
+    the member."""
+    trace = _minimal_trace()
     record = encode_trace(trace)
-    decoded = decode_trace(record)
-
-    assert (record["kind"], record["kind_version"]) == ("analysis_mcp_trace", 1)
-    assert record["trace"]["composed_stat_vars"] == [
+    record["trace"]["composed_stat_vars"] = [
         {
             "stat_var": "dcid:ops_" + "e" * 32,
             "relation": "quotient",
@@ -222,14 +205,68 @@ def test_composed_stat_vars_round_trip_through_the_codec_and_the_common_accessor
             "second": ["dcid:Count_Person"],
         }
     ]
-    assert composed_stat_vars_of(decoded) == (_PER_HEAD,)
-
-
-def test_decode_trace_reads_a_record_stored_without_composed_stat_vars_as_none() -> None:
-    record = encode_trace(_minimal_trace())
-    del record["trace"]["composed_stat_vars"]
 
     decoded = decode_trace(record)
 
     assert isinstance(decoded, Trace)
-    assert composed_stat_vars_of(decoded) == ()
+    assert decoded == trace
+
+
+_QUOTIENT_STEP = Step(
+    id="ops_" + "e" * 32,
+    op="quotient",
+    inputs={
+        "numerator": VersionRef(id="spec_" + "a" * 32, content_version="cv_" + "b" * 32),
+        "denominator": VersionRef(id="ops_" + "f" * 32, content_version="ocv_" + "f" * 32),
+    },
+    policy="quotient_of_intersect_periods",
+    params={"numerator_by": ["recipient"]},
+    kept={"entities": 38, "periods": 15},
+    left_out=[LeftOut(reason="unmatched_key", count=9, of="entities")],
+    unit=None,
+)
+
+
+def test_steps_round_trip_through_the_codec_with_only_the_members_they_hold() -> None:
+    trace = _minimal_trace().model_copy(update={"steps": (_QUOTIENT_STEP,)})
+
+    record = encode_trace(trace)
+    decoded = decode_trace(record)
+
+    assert set(record["trace"]["steps"][0]) == {
+        "id",
+        "op",
+        "inputs",
+        "policy",
+        "params",
+        "kept",
+        "left_out",
+        "unit",
+    }
+    assert record["trace"]["steps"][0]["unit"] is None
+    assert decoded == trace
+
+
+def test_decode_trace_reads_a_record_stored_without_steps_as_none() -> None:
+    record = encode_trace(_minimal_trace())
+    del record["trace"]["steps"]
+
+    decoded = decode_trace(record)
+
+    assert isinstance(decoded, Trace)
+    assert decoded.steps == ()
+
+
+@pytest.mark.parametrize(
+    ("role", "accepted"),
+    [("financingProvider", True), ("financing_provider", False), ("FinancingProvider", False)],
+)
+def test_a_pooled_count_names_a_lower_camel_case_role(role: str, accepted: bool) -> None:
+    """The role pattern is the kit's, so a role dfo-apis' door would refuse is refused
+    here first."""
+    entry = {"reason": "party_total", "count": 3, "of": "pooled_entities", "role": role}
+    if accepted:
+        assert LeftOut.model_validate(entry).role == role
+    else:
+        with pytest.raises(ValidationError):
+            LeftOut.model_validate(entry)

@@ -1,221 +1,168 @@
-"""Node lookup seam: dcids to shaped node descriptions, via dfo-apis' Graph node door.
+"""Node lookup seam: dcids to node envelopes, via dfo-apis' `POST /api/graph/nodes`.
 
-`describe_nodes` resolves each dcid it's given to one of four node shapes, or
-notes it as a dcid this deployment's graph does not hold. The node door
-takes exactly one dcid per request -- there is no batch route -- so a dcid
-the graph does not hold arrives as a failure on its own request rather than
-as a field in a batch response. Only `node_not_held` (404) is partial in
-this way: any other failure on one dcid (a 503 from pool exhaustion, a 504,
-...) fails the whole call, even when every other dcid in the batch would
-have succeeded on its own.
+`describe_nodes` reads every dcid it is given through the node batch route, up to
+`_MAX_DCIDS_PER_REQUEST` per request, and validates each entry through the generated
+`data_mcp.graph_wire` models. An entry is one envelope per kind (`ref`, `label`, `kind`,
+`types`, `description`, `links`, `gaps`, `built_from` and the kind's block), or a
+`NotHeldEntry` for a dcid this deployment's graph does not hold. A failed request fails the
+whole call.
 
-Facet values per axis, processing level, and sources are not served by the
-node door today. `facets` and `sources` are typed permissively (`Any`,
-defaulting to `None`) rather than mirroring the wire's own `None` typing, so
-a later upstream population of either field doesn't break validation and
-refuse every StatVar lookup.
+`variable_text` is the line that stands for a variable in planner text: its `description`,
+else a line composed from its card's `definition`.
 
 Like `resolution.py`, this module returns plain data and never imports
-`data_mcp.tool_errors`; the calling tool owns the refusal grammar. The one
-exception this module does catch is an `UpstreamError` coded
-`node_not_held`, which becomes a `NotHeldNode` data outcome rather than
-propagating -- every other exception is left to propagate uncaught.
+`data_mcp.tool_errors`; the calling tool owns the refusal grammar, and every exception is
+left to propagate.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+import itertools
+from collections.abc import Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field
+import httpx2
+from pydantic import ValidationError
 
 from data_mcp.client import GRAPH_PREFIX
 from data_mcp.client_holder import get_client
-from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import (
+    AggregateNode,
+    CodeNode,
+    CodeSystemNode,
+    ContinentalUnionNode,
+    ContinentNode,
+    CountryNode,
+    DatasetNode,
+    GroupNode,
+    NodeRef,
+    NodesResponse,
+    NotHeldEntry,
+    OrganisationNode,
+    OtherNode,
+    PlaceOtherNode,
+    ProvenanceNode,
+    SourceNode,
+    StatVarNode,
+    SubregionNode,
+    UnitNode,
+    VariableDefinition,
+)
 
-_NODE_ROUTE_TEMPLATE = f"{GRAPH_PREFIX}/node/{{dcid}}"
+_NODES_ROUTE = f"{GRAPH_PREFIX}/nodes"
 
-# This service's own bound on concurrent node reads, not a published upstream
-# limit. The node door's own admission pool defaults to 4 concurrent
-# readers, non-blocking -- a request arriving with every slot held is
-# refused outright with a 503 rather than queued. An `entity` shape costs a
-# second, sequential read after the first completes, so one request holds at
-# most one slot at a time -- four concurrent requests demand four slots
-# against a pool of four, and the bound matches. Bounding this side's own
-# fan-out to the same number keeps an eight-dcid `describe` call from
-# driving that admission gate into 503s. A 503 from the gate is retryable,
-# and the client retries it before the batch can fail on it. This bound
-# cannot guarantee admission on its own, since the resolve door shares the
-# same executor.
-_MAX_CONCURRENT_NODE_READS = 4
+# The door's own published limit on `POST /api/graph/nodes`' `dcids` list
+# (`caps.max_node_batch_dcids`).
+_MAX_DCIDS_PER_REQUEST = 50
 
-# Applied to every model in this module, mirroring `manifest.py`'s own
-# reasoning: `forbid` would break every lookup the day upstream adds a
-# field, `allow` would forward an unreviewed field straight to the model,
-# and `ignore` does neither -- an unrecognised field is silently dropped.
-_UNSEEN_FIELDS_ARE_DROPPED = ConfigDict(extra="ignore")
+HeldNode = (
+    StatVarNode
+    | CodeSystemNode
+    | CodeNode
+    | GroupNode
+    | CountryNode
+    | ContinentNode
+    | SubregionNode
+    | ContinentalUnionNode
+    | PlaceOtherNode
+    | OrganisationNode
+    | AggregateNode
+    | UnitNode
+    | SourceNode
+    | DatasetNode
+    | ProvenanceNode
+    | OtherNode
+)
 
-
-class Freshness(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    release_frequency: str | None = None
-    refresh_schedule: str | None = None
-
-
-class ContainedInPlace(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    dcid: str
-    label: str | None = None
-
-
-class StatVarNode(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    shape: Literal["stat_var"]
-    dcid: str
-    # The node door types `label` (every shape) and `definition` as
-    # nullable; the UN System StatVars (`undata/sdg/*`, `undata/who/*`)
-    # arrive with a label and no definition.
-    label: str | None = None
-    definition: str | None = None
-    roles: list[str]
-    population_type: str | None = None
-    processing_level: str | None = None
-    # `Any`, not `None`: mirroring the wire's own permanently-`None` typing
-    # here would make this service fail validation -- and refuse every
-    # StatVar lookup with `upstream_response_unusable` -- the day upstream
-    # starts populating either field.
-    facets: Any = None
-    sources: Any = None
-
-
-class SourceNode(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    shape: Literal["source"]
-    dcid: str
-    label: str | None = None
-    license: str | None = None
-    license_type: str | None = None
-    description: str | None = None
-    url: str | None = None
-    freshness: Freshness
-
-
-class EntityNode(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    shape: Literal["entity"]
-    dcid: str
-    label: str | None = None
-    entity_type: str | None = None
-    contained_in: list[ContainedInPlace]
-
-
-class GenericNode(BaseModel):
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    shape: Literal["node"]
-    dcid: str
-    label: str | None = None
-    types: list[str]
-    properties: dict[str, list[str]]
-
-    @computed_field
-    @property
-    def is_classification_value(self) -> bool:
-        """True when every declared type is a classification enum, e.g. `GeographicalIndicatorEnum`.
-
-        A node like this labels a category a StatVar's schema can bind to. A
-        caller who read this dcid out of another tool's digest more likely
-        meant a place, dataset, or other entity.
-        """
-        return bool(self.types) and all(t.endswith("Enum") for t in self.types)
-
-
-NodeShape = Annotated[
-    StatVarNode | SourceNode | EntityNode | GenericNode, Field(discriminator="shape")
-]
-
-_NODE_SHAPE_ADAPTER: TypeAdapter[Any] = TypeAdapter(NodeShape)
-
-
-@dataclass(frozen=True, kw_only=True)
-class NotHeldNode:
-    """A dcid the node door itself resolved as well-formed, but does not hold."""
-
-    dcid: str
-
-
-NodeOutcome = StatVarNode | SourceNode | EntityNode | GenericNode | NotHeldNode
-
-
-def _outcome_from_response(payload: Any) -> StatVarNode | SourceNode | EntityNode | GenericNode:
-    """Validate one node door response body into its shape.
-
-    Raises:
-        pydantic.ValidationError: `payload`'s `shape` is not one of the four
-            this service recognises, or the body otherwise doesn't match the
-            shape it claims.
-    """
-    return _NODE_SHAPE_ADAPTER.validate_python(payload)
-
-
-async def _fetch_one(dcid: str, *, semaphore: asyncio.Semaphore) -> NodeOutcome:
-    client = get_client()
-    async with semaphore:
-        try:
-            response = await client.request(
-                "GET", f"{GRAPH_PREFIX}/node/{dcid}", route=_NODE_ROUTE_TEMPLATE
-            )
-        except UpstreamError as exc:
-            if exc.code == "node_not_held":
-                return NotHeldNode(dcid=dcid)
-            raise
-    node = _outcome_from_response(response.json())
-    if node.dcid != dcid:
-        # A shape-valid body describing a different node -- an upstream
-        # routing defect, a stale cache, a crossed response -- is not this
-        # dcid's answer. Raising here, rather than storing it under the
-        # dcid that was asked for, keeps the caller from rendering a wrong
-        # identity to the model as though it were the one requested.
-        raise ValueError(f"the node door returned dcid {node.dcid!r} for a request for {dcid!r}")
-    return node
+NodeOutcome = HeldNode | NotHeldEntry
 
 
 async def describe_nodes(dcids: Sequence[str]) -> dict[str, NodeOutcome]:
-    """Resolve every dcid in `dcids` to its node outcome, keyed by dcid.
+    """Read every dcid in `dcids` through the node batch route, keyed by dcid.
 
     Args:
-        dcids: The dcids to look up. Deduplicated order-preservingly before
-            dispatch, so a dcid repeated in the input costs one request, not
-            one per occurrence, and the returned mapping carries one entry
-            per unique dcid.
+        dcids: The dcids to look up. Deduplicated order-preservingly before dispatch, so
+            the returned mapping carries one entry per unique dcid.
 
     Returns:
-        dcid -> `NodeOutcome`: one of the four node shapes, or `NotHeldNode`
-        for a dcid the node door reports as not held.
+        dcid -> the node's envelope, or a `NotHeldEntry` for a dcid the graph does not hold.
 
     Raises:
-        UpstreamError: a request for one dcid failed with anything other
-            than `node_not_held` -- pool exhaustion, a transport failure, an
-            unmounted surface, and so on. Propagates the first such failure
-            in dcid order, however many requests failed, mirroring
-            `resolution.py`'s own rule: a caller sees exactly one exception.
-        pydantic.ValidationError: a 2xx body didn't match any of the four
-            node shapes this service recognises.
-        ValueError: a 2xx body validated but named a different dcid than
-            the one requested.
+        UpstreamError: a batch request failed. Propagates the first failure in dcid order,
+            mirroring `resolution.py`'s own rule: a caller sees exactly one exception.
+        pydantic.ValidationError: a 2xx body did not match the generated wire models.
+        ValueError: a 2xx body answered a different number of dcids, or an entry named a
+            different dcid than the one requested.
     """
     unique_dcids = list(dict.fromkeys(dcids))
     if not unique_dcids:
         return {}
-    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_NODE_READS)
-    results = await asyncio.gather(
-        *(_fetch_one(dcid, semaphore=semaphore) for dcid in unique_dcids),
+    client = get_client()
+    chunks = list(itertools.batched(unique_dcids, _MAX_DCIDS_PER_REQUEST, strict=False))
+    responses = await asyncio.gather(
+        *(
+            client.request("POST", _NODES_ROUTE, route=_NODES_ROUTE, json={"dcids": list(chunk)})
+            for chunk in chunks
+        ),
         return_exceptions=True,
     )
+    successful_responses: list[httpx2.Response] = []
+    for response in responses:
+        if isinstance(response, BaseException):
+            raise response
+        successful_responses.append(response)
+
     outcomes: dict[str, NodeOutcome] = {}
-    for dcid, result in zip(unique_dcids, results, strict=True):
-        if isinstance(result, BaseException):
-            raise result
-        outcomes[dcid] = result
+    for chunk, response in zip(chunks, successful_responses, strict=True):
+        entries = NodesResponse.model_validate(response.json()).nodes
+        # `strict=True` turns a length mismatch into a `ValueError` instead of attributing
+        # one dcid's entry to another.
+        for dcid, entry in zip(chunk, entries, strict=True):
+            if entry.ref != dcid:
+                # A body describing a different node is not this dcid's answer; storing it
+                # under the dcid asked for would show the model a wrong identity.
+                raise ValueError(
+                    f"the nodes route answered {entry.ref!r} for a request for {dcid!r}"
+                )
+            outcomes[dcid] = entry
     return outcomes
+
+
+def variable_text(node: StatVarNode) -> str | None:
+    """The line that stands for `node` in planner text: its `description`, else one line
+    composed from its definition; `None` when it has neither."""
+    return node.description or definition_line(node.stat_var.definition)
+
+
+def described_variable_text(entry: Mapping[str, object]) -> str | None:
+    """`variable_text` of one entry of a `describe` answer's `nodes`, which the tool dumps
+    from the envelopes `describe_nodes` returns; `None` for an entry that is no variable."""
+    try:
+        node = StatVarNode.model_validate(entry)
+    except ValidationError:
+        return None
+    return variable_text(node)
+
+
+def definition_line(definition: VariableDefinition) -> str | None:
+    """One plain line naming what a variable measures, from its card's definition.
+
+    `Measures <measured property> of <population type> as <measure>; <property> <value>.`
+    Each part takes its label, else its dcid, and a part the card does not name is left out.
+    `None` when the definition names no part.
+    """
+    subject = " of ".join(
+        _name(part)
+        for part in (definition.measured_property, definition.population_type)
+        if part is not None
+    )
+    if definition.measure is not None:
+        measure = definition.measure.label
+        subject = f"{subject} as {measure}" if subject else measure
+    clauses = [f"Measures {subject}"] if subject else []
+    clauses += [f"{_name(c.property)} {_name(c.value)}" for c in definition.constraints or ()]
+    return "; ".join(clauses) + "." if clauses else None
+
+
+def _name(ref: NodeRef) -> str:
+    return ref.label or ref.ref

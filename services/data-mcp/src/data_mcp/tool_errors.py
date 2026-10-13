@@ -15,9 +15,9 @@ with `code="spec_not_found"` from the definitions door, using the id it
 requested itself: `SpecNotFound`'s wire body carries that id only in
 free-text `detail`, not in any structural field, so it isn't recoverable
 generically from `UpstreamError` alone. `node_not_held` is never reached
-through `from_upstream_error` either: `data_mcp.node_lookup` converts the
-node door's own `node_not_held` refusal into a `NotHeldNode` data outcome
-before any exception reaches this module, so this code has no
+through `from_upstream_error` either: the node batch route answers an unheld
+dcid as a `not_held` entry, which `data_mcp.node_lookup` returns as data, so
+this code has no
 `_UPSTREAM_CODE_MAP` entry -- it is unreachable there. `operation_still_processing`
 is never reached through `from_upstream_error` either: its one source is
 `data_mcp.operations.resolve_operation_response`, when the call deadline ends its
@@ -69,7 +69,6 @@ class ToolErrorCode(StrEnum):
     UPSTREAM_VERSION_CHANGED = "upstream_version_changed"
     ENTITY_NOT_FOUND = "entity_not_found"
     ENTITY_AMBIGUOUS = "entity_ambiguous"
-    ENTITY_OUT_OF_SCOPE = "entity_out_of_scope"
     UPSTREAM_ERROR = "upstream_error"
     SERVICE_UNAVAILABLE = "service_unavailable"
     DEFINITION_NOT_HELD = "definition_not_held"
@@ -96,7 +95,6 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.UPSTREAM_VERSION_CHANGED: RetryMode.REFRESH_THEN_RETRY,
     ToolErrorCode.ENTITY_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ENTITY_AMBIGUOUS: RetryMode.CORRECT_AND_RETRY,
-    ToolErrorCode.ENTITY_OUT_OF_SCOPE: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.UPSTREAM_ERROR: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.SERVICE_UNAVAILABLE: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.DEFINITION_NOT_HELD: RetryMode.CORRECT_AND_RETRY,
@@ -118,6 +116,10 @@ if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
 # Five keeps `entity_ambiguous` payloads bounded without starving the model
 # of real choices.
 ENTITY_CANDIDATE_CAP = 5
+
+# The marker `entity_ambiguous` puts before each candidate's dcid, and that `get_data`
+# reads as "a dcid, not a name to resolve" in `scope.entities`.
+ENTITY_DCID_MARKER = "dcid:"
 
 # The ceilings `over_ceiling`'s `fix.ceiling_kind` can name, each by the unit
 # its `count` and `cap` measure. `_UPSTREAM_CEILING_KINDS` maps dfo-apis' own
@@ -152,7 +154,6 @@ class EntityCandidate:
     dcid: str
     label: str
     type: str
-    parent: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -410,29 +411,30 @@ class ToolRefusal:
         role: str,
         query: str,
         near_matches: Sequence[str],
-        not_held_entity_type: str | None = None,
+        not_held: bool = False,
+        memberless_kind: str | None = None,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # `not_held_entity_type` covers `data_mcp.resolution`'s `NotHeld`
-        # outcome: `query` resolved cleanly to a graph entity of that type,
-        # but this deployment's graph does not hold it — a fact
-        # `near_matches` alone can't carry, since `NotHeld` has none to
-        # offer. `not_held` makes that distinction machine-readable, the
-        # same way `had_near_matches` makes the near-miss/total-whiff
-        # distinction machine-readable, rather than leaving either implied
-        # by field absence a consumer has to interpret.
+        # `not_held` is `data_mcp.resolution`'s `NotHeld` outcome: `query` names a real
+        # entity, but this deployment's graph holds no node for it, so no data can bind it.
+        # `memberless_kind` is a group or region of that kind that resolved with no member
+        # country, so it scopes nothing. Both set `fix.not_held`, which makes "resolved, but
+        # unusable here" machine-readable the way `had_near_matches` makes the
+        # near-miss/total-whiff distinction readable, and `entity_type` names the kind where
+        # the door gave one; a `not_held` entity has none.
         near = list(near_matches)
-        if not_held_entity_type is not None:
+        if memberless_kind is not None:
             message = (
-                f"{query!r} resolved to a {not_held_entity_type} for {role}, but this "
-                "deployment's graph does not hold it -- distinct from matching nothing at all."
+                f"{query!r} as {role} resolved to a {memberless_kind} with no member "
+                "countries, so it names no entity to fetch data for."
             )
-            if not_held_entity_type == "geo.continent":
-                message += (
-                    " Binding the full set of continents by name approximates a world "
-                    "or global scope."
-                )
+        elif not_held:
+            message = (
+                f"{query!r} as {role} names a real place or organisation, but this "
+                "deployment's graph holds no node for it, so it has no data here -- "
+                "distinct from matching nothing at all."
+            )
         elif near:
             message = f"No match for {query!r} as {role}. Nearest: {near}."
         else:
@@ -441,10 +443,10 @@ class ToolRefusal:
             "role": role,
             "near_matches": near,
             "had_near_matches": bool(near),
-            "not_held": not_held_entity_type is not None,
+            "not_held": not_held or memberless_kind is not None,
         }
-        if not_held_entity_type is not None:
-            fix["entity_type"] = not_held_entity_type
+        if memberless_kind is not None:
+            fix["entity_type"] = memberless_kind
         return cls(
             code=ToolErrorCode.ENTITY_NOT_FOUND,
             message=message,
@@ -460,12 +462,10 @@ class ToolRefusal:
         role: str,
         query: str,
         candidates: Sequence[EntityCandidate],
-        truncated: bool = False,
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # `candidates` arrives here uncapped (`resolution.Ambiguous.candidates`, up to the
-        # resolve door's own 10), so `total` is the real count this refusal can see --
+        # `candidates` arrives here uncapped (`resolution.Ambiguous.candidates`), so `total` is the real count this refusal can see --
         # counted before `ENTITY_CANDIDATE_CAP` narrows what's actually shown. Interpolating
         # `len(capped)` here instead would state the capped count as if it were the true one:
         # a name matching nine held countries would tell the model "ambiguous among 5
@@ -473,60 +473,30 @@ class ToolRefusal:
         # the uncounted seventh.
         total = len(candidates)
         capped = list(candidates)[:ENTITY_CANDIDATE_CAP]
-        # True whenever this refusal's own candidate list is known incomplete, whether
-        # because `ENTITY_CANDIDATE_CAP` cut it here or because `truncated` says resolvekit's
-        # own list was already at its cap before it ever reached this door -- either way the
-        # model is picking from a list that may not include the entity it meant.
-        list_truncated = truncated or total > len(capped)
+        # True when `ENTITY_CANDIDATE_CAP` cut the list, so the model is picking from a list
+        # that may not include the entity it meant.
+        list_truncated = total > len(capped)
         shown = f"{len(capped)} of {total}" if len(capped) < total else str(len(capped))
-        # Each candidate's dcid rides beside its label in the message itself, not only in
-        # `fix["candidates"]`. A client that shows the model only `content` (an external
-        # caller with no `structuredContent` surface, see the module docstring) still needs
-        # the dcid to act on "Pick one by dcid and retry.".
-        named = [f"{c.label} ({c.dcid})" for c in capped]
+        # Each candidate's `entity`, its dcid behind `ENTITY_DCID_MARKER`, rides beside its
+        # label in the message itself, not only in `fix["candidates"]`: a client that shows the
+        # model only `content` (an external caller with no `structuredContent` surface, see the
+        # module docstring) still needs the exact string `get_data` takes in place of the name.
+        named = [f"{c.label} ({ENTITY_DCID_MARKER}{c.dcid})" for c in capped]
         return cls(
             code=ToolErrorCode.ENTITY_AMBIGUOUS,
             message=(
                 f"{query!r} as {role} is ambiguous among {shown} candidates: "
-                f"{named}. Pick one by dcid and retry."
+                f"{named}. Retry with the one meant in place of {query!r}, written as shown "
+                f"with its {ENTITY_DCID_MARKER} prefix."
             ),
             fix={
                 "role": role,
-                "candidates": [asdict(c) for c in capped],
+                "candidates": [
+                    {**asdict(c), "entity": f"{ENTITY_DCID_MARKER}{c.dcid}"} for c in capped
+                ],
                 "candidate_count": total,
                 "truncated": list_truncated,
             },
-            trace_id=trace_id,
-            capability_version=capability_version,
-        )
-
-    @classmethod
-    def entity_out_of_scope(
-        cls,
-        *,
-        role: str,
-        query: str,
-        entity_type: str,
-        dcid: str | None,
-        trace_id: str | None = None,
-        capability_version: str | None = None,
-    ) -> Self:
-        # `data_mcp.resolution`'s `OutOfScope` outcome covers a name that
-        # resolves to a real entity outside the resolve door's own
-        # `geo.country`/`geo.subregion`/`geo.continent` scope -- a
-        # continental union, an international organisation, or a Data
-        # Commons source, for example. The name matched something real,
-        # unlike an `entity_not_found` outcome. This door just never binds
-        # it as scope.
-        message = (
-            f"{query!r} resolved to a {entity_type} for {role}. Only countries, "
-            "subregions, and continents resolve for scope. Drop this entity or "
-            "replace it with a place."
-        )
-        return cls(
-            code=ToolErrorCode.ENTITY_OUT_OF_SCOPE,
-            message=message,
-            fix={"role": role, "query": query, "entity_type": entity_type, "dcid": dcid},
             trace_id=trace_id,
             capability_version=capability_version,
         )

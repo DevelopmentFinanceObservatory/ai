@@ -1,0 +1,183 @@
+{
+  "id": "rank-sectors-kenya",
+  "kind": "rank",
+  "origin": "pilot",
+  "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+  "searches": [
+    {
+      "query": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance by sector",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+  "asks": [
+    "The three sectors that received the most ODA in Kenya, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "rank"
+  ],
+  "reference_payload": {
+    "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "all_sectors",
+        "description": "Which sectors the ranking compares.",
+        "options": [
+          "every sector",
+          "a named list of sectors"
+        ],
+        "chosen": "every sector",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every member is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ],
+        "breakdown": {
+          "dimension": "sector",
+          "level": 0
+        },
+        "stat_vars": "separate"
+      },
+      {
+        "kind": "rank",
+        "id": "top_sectors",
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "sector",
+        "reduction": "sum",
+        "limit": 3,
+        "decision_ids": [
+          "all_sectors"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_sectors"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Total the donors within each sector and year first, then rank the sectors.",
+      "payload": {
+        "question": "Which three sectors received the most ODA in Kenya between 2015 and 2022?",
+        "answer_mode": "computed",
+        "decisions": [
+          {
+            "slot": "all_sectors",
+            "description": "Which sectors the ranking compares.",
+            "options": [
+              "every sector",
+              "a named list of sectors"
+            ],
+            "chosen": "every sector",
+            "resolved_by": "planner_default",
+            "rationale": "The question names no list, so every member is ranked.",
+            "fixes": [
+              "among"
+            ]
+          }
+        ],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "oda",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            },
+            "across": [
+              "donor"
+            ],
+            "breakdown": {
+              "dimension": "sector",
+              "level": 0
+            },
+            "stat_vars": "separate"
+          },
+          {
+            "kind": "aggregate",
+            "id": "by_sector",
+            "input_id": "oda",
+            "reduction": "sum",
+            "group_by": [
+              "period",
+              "breakdown"
+            ]
+          },
+          {
+            "kind": "rank",
+            "id": "top_sectors",
+            "input_id": "by_sector",
+            "direction": "highest_first",
+            "among": "population",
+            "axis": "sector",
+            "reduction": "sum",
+            "limit": 3,
+            "decision_ids": [
+              "all_sectors"
+            ]
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "top_sectors"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

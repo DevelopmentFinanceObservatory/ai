@@ -6,7 +6,8 @@ The `cv_` is minted from the output frame's `frame_sha256` alone, so it moves
 when any output bit moves. The result's own
 `content_version` (`ocv_`) is left unpinned: it hashes the op-spec, the
 input `cv_`s and the `ExecutionIdentity`, none of which an engine rewrite
-touches.
+touches. A stored frame is reused whenever that `ocv_` repeats, so a change
+that moves a pinned `cv_` below must also move `ENGINE_VERSION`.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from fastmcp.tools import ToolResult
 
 PINNED_FRAME_CONTENT_VERSIONS = {
     "aggregate": "cv_be5edeb0270097c62f272a8ff1e18996",
-    "compare": "cv_2a4a3d3492aa710ce332b50a4b293330",
+    "compare": "cv_912f1984e4ded1f173d413ee3cccf60b",
     "growth": "cv_efdffe291ba60fbc9c971a845a362aec",
     "rank": "cv_0b10a81e235a65529ef030eb8d43716e",
     "share_of": "cv_8cd749dd9481a54c5f8ac37607b2df83",

@@ -16,6 +16,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import (
     TIME_FORMS,
     SearchEntity,
+    SearchOperation,
     SearchPart,
     SearchSource,
     search,
@@ -136,6 +137,7 @@ async def test_search_with_neither_parts_nor_query_refuses_request_invalid() -> 
     result = await search()
 
     assert result.is_error
+    assert result.structured_content is not None
     assert result.structured_content["code"] == "request_invalid"
 
 
@@ -158,6 +160,82 @@ def test_to_wire_request_carries_open_roles_as_given() -> None:
     wire = to_wire_request(parts, raw_query=None)
 
     assert wire["input"]["parts"][0]["open_roles"] == ["creditor"]
+
+
+@pytest.mark.parametrize(
+    ("entities", "expected_entities"),
+    [
+        ([SearchEntity(text="Africa", members=True)], [{"text": "Africa", "members": True}]),
+        ([SearchEntity(text="Kenya")], [{"text": "Kenya"}]),
+    ],
+)
+def test_country_rankings_keep_the_scope_the_user_named(
+    entities: list[SearchEntity], expected_entities: list[dict[str, object]]
+) -> None:
+    wire = to_wire_request(
+        [
+            SearchPart(
+                variable="external debt",
+                entities=entities,
+                operations=[SearchOperation(verb="rank", phrase="top 5 countries", over="place")],
+            )
+        ],
+        raw_query=None,
+    )
+
+    part = wire["input"]["parts"][0]
+    assert part["entities"] == expected_entities
+    assert "open_roles" not in part
+
+
+@pytest.mark.parametrize(
+    ("operations", "expected"),
+    [
+        (None, None),
+        (
+            [SearchOperation(verb="rank", phrase="top 5 creditors", over="origin")],
+            [{"verb": "rank", "phrase": "top 5 creditors", "over": "origin"}],
+        ),
+        (
+            [SearchOperation(verb="forecast", phrase="to 2050", target_year=2050)],
+            [{"verb": "forecast", "phrase": "to 2050", "target_year": 2050}],
+        ),
+    ],
+)
+def test_to_wire_request_sends_operations_only_when_set(
+    operations: list[SearchOperation] | None, expected: list[dict[str, object]] | None
+) -> None:
+    wire = to_wire_request([SearchPart(variable="x", operations=operations)], raw_query=None)
+
+    assert wire["input"]["parts"][0].get("operations") == expected
+
+
+@pytest.mark.parametrize(
+    ("operation", "error_type"),
+    [
+        ({"verb": "rank", "phrase": "top 5", "order": "desc"}, "extra_forbidden"),
+        ({"verb": "sort", "phrase": "top 5"}, "literal_error"),
+        ({"verb": "rank", "phrase": "top 5", "over": "donor"}, "literal_error"),
+        ({"verb": "rank", "phrase": "top\n5"}, "value_error"),
+        ({"verb": "rank", "phrase": "   "}, "value_error"),
+        ({"verb": "rank", "phrase": "top 5", "target_year": 2050}, "value_error"),
+        ({"verb": "forecast", "phrase": "to 2300", "target_year": 2300}, "less_than_equal"),
+    ],
+)
+def test_an_operation_the_door_would_refuse_is_refused_locally(
+    operation: dict[str, object], error_type: str
+) -> None:
+    with pytest.raises(ValidationError) as refused:
+        SearchOperation.model_validate(operation)
+
+    assert [error["type"] for error in refused.value.errors()] == [error_type]
+
+
+def test_an_empty_operations_list_is_refused() -> None:
+    with pytest.raises(ValidationError) as refused:
+        SearchPart.model_validate({"variable": "x", "operations": []})
+
+    assert [error["type"] for error in refused.value.errors()] == ["too_short"]
 
 
 def test_to_wire_request_entity_with_no_role_omits_role_text() -> None:
@@ -225,6 +303,46 @@ def test_docstring_worked_example_validates_against_search_part() -> None:
     assert len(parts) == 2
     assert parts[0].entities is not None
     assert parts[0].entities[0].role == "to"
+
+
+def test_docstring_ranking_example_opens_the_creditor_side_and_ranks_it() -> None:
+    assert search.__doc__ is not None
+    match = re.search(
+        r"\"Who are Kenya's top 5 creditors\?\" is `(\{.*?\})`", search.__doc__, re.DOTALL
+    )
+    assert match is not None
+
+    part = SearchPart.model_validate(json.loads(match.group(1)))
+    wire = to_wire_request([part], raw_query="Who are Kenya's top 5 creditors?")
+
+    (wire_part,) = wire["input"]["parts"]
+    assert wire_part["open_roles"] == ["creditor"]
+    assert [operation["verb"] for operation in wire_part["operations"]] == ["rank"]
+
+
+def test_recipient_ranking_uses_destination_without_a_role_placeholder() -> None:
+    wire = to_wire_request(
+        [
+            SearchPart(
+                variable="ODA",
+                operations=[
+                    SearchOperation(
+                        verb="rank",
+                        phrase="top 5 recipients",
+                        over="destination",
+                    )
+                ],
+            )
+        ],
+        raw_query="What are the top 5 ODA recipients in the latest year?",
+    )
+
+    (wire_part,) = wire["input"]["parts"]
+    assert "entities" not in wire_part
+    assert "open_roles" not in wire_part
+    assert wire_part["operations"] == [
+        {"verb": "rank", "phrase": "top 5 recipients", "over": "destination"}
+    ]
 
 
 # End-to-end tool wiring of the result's three parts and is_error
@@ -551,7 +669,7 @@ async def test_a_catalogue_answer_returns_searchs_reading_with_no_parts_and_no_d
         "kind": "catalogue",
         "query_echo": {"entry_path": "parsed", "extract_skipped": False},
         "diagnostics": {"engine_build": "test", "trace_id": "trace-1", "warnings": []},
-        "scope": {"place": {"dcid": "country/KEN", "label": "Kenya"}},
+        "scope": {"place": {"ref": "country/KEN", "label": "Kenya"}},
     }
 
     result = await _call_search(_json_handler(200, body), [{"variable": "what data do you have"}])
@@ -563,7 +681,7 @@ async def test_a_catalogue_answer_returns_searchs_reading_with_no_parts_and_no_d
         "kind": "catalogue",
         "status": None,
         "parts": [],
-        "scope": {"place": {"dcid": "country/KEN", "label": "Kenya"}},
+        "scope": {"place": {"ref": "country/KEN", "label": "Kenya"}},
     }
 
 
@@ -600,3 +718,11 @@ async def test_search_retries_an_ambiguous_source_with_the_chosen_reference(excl
             "polarity": "exclude" if exclude else "include",
         }
     ]
+
+
+def test_to_wire_request_carries_source_code_verbatim() -> None:
+    parts = [SearchPart(variable="debt service", source_code="DT.TDS.DEGG.CD")]
+
+    wire = to_wire_request(parts, raw_query=None)
+
+    assert wire["input"]["parts"][0]["source_code"] == "DT.TDS.DEGG.CD"

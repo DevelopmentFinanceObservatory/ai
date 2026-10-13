@@ -80,6 +80,7 @@ from analysis_mcp.engine.common import (
 from analysis_mcp.engine.two_sided import (
     KeyPairs,
     KeyPeriods,
+    ResultCoverage,
     Side,
     SideSums,
     denominator_key_columns,
@@ -87,6 +88,7 @@ from analysis_mcp.engine.two_sided import (
     pair_periods,
     record_cells,
     record_unmatched_periods,
+    result_coverage,
     sum_side,
 )
 
@@ -209,7 +211,9 @@ class QuotientOfResult:
     zero denominator. `dropped_key_count` is their total, and with the keys
     in `period_quotients` they are every key the numerator holds.
     `zero_denominator_cells` are the matched cells left out, whether or not
-    their key has another row.
+    their key has another row. `coverage` counts the keys and periods the
+    result holds and the entities each period's denominator sums
+    (`analysis_mcp.engine.two_sided.ResultCoverage`).
 
     `numerator_only_periods` and `denominator_only_periods` are, for each
     key of a keyed call that has a row, the periods it holds on that side
@@ -241,6 +245,7 @@ class QuotientOfResult:
     zero_denominator_cells: tuple[ZeroDenominatorCell, ...] = ()
     numerator_only_periods: tuple[KeyPeriods, ...] = ()
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
+    coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
 
     @property
@@ -380,6 +385,7 @@ def run_quotient_of(
         )
 
     period_quotients: list[PeriodQuotient] = []
+    kept_cells: list[tuple[tuple[str, ...], str]] = []
     zero_denominator_cells: list[ZeroDenominatorCell] = []
     keys_without_shared_period: list[tuple[str, ...]] = []
     keys_with_zero_denominator: list[tuple[str, ...]] = []
@@ -406,6 +412,7 @@ def run_quotient_of(
                     )
                 )
                 continue
+            kept_cells.append((key, period))
             period_quotients.append(
                 PeriodQuotient(
                     time_period=period,
@@ -530,6 +537,9 @@ def run_quotient_of(
         ),
         denominator_only_periods=tuple(
             entry for entry in pairing.denominator_only_periods if entry[0] not in zero_keys
+        ),
+        coverage=result_coverage(
+            kept_cells, keyed=bool(numerator_by), denominator=denominator, pooled=pooled
         ),
         exclusions=exclusions,
     )

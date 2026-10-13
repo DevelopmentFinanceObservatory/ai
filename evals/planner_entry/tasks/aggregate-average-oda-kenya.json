@@ -1,0 +1,93 @@
+{
+  "id": "aggregate-average-oda-kenya",
+  "kind": "aggregate",
+  "origin": "authored",
+  "question": "What was the average annual ODA Kenya received from all donors between 2015 and 2022?",
+  "searches": [
+    {
+      "query": "What was the average annual ODA Kenya received from all donors between 2015 and 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "What was the average annual ODA Kenya received from all donors between 2015 and 2022?",
+  "asks": [
+    "Average annual ODA to Kenya from all donors, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "growth",
+    "distinction": "aggregate, not growth: an average over the years of the window, not the change across it"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "What was the average annual ODA Kenya received from all donors between 2015 and 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_3f7b3554eab4eda5544d04deec5fd71a",
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "yearly",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "average",
+        "input_id": "yearly",
+        "reduction": "mean",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "average"
+        ]
+      }
+    ]
+  }
+}

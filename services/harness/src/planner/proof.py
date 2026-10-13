@@ -79,7 +79,10 @@ def mismatches(
     `satisfied_by[<the requirement's corresponding input id>]`, the id of the
     operation that `compiler.compile` established carries out that upstream
     requirement, and a side's `entity` has to equal the requirement side's.
-    Those report as `input`, `left`, `right`, `numerator` or `denominator`.
+    Those report as `input`, `minuend`, `subtrahend`, `left`, `right`,
+    `numerator` or `denominator`. A comparison's `minuend` is its operation's
+    `right` and its `subtrahend` the operation's `left`, since analysis-mcp's
+    `compare` takes the right side minus the left.
 
     Args:
         requirement: What the operation is meant to carry out.
@@ -157,8 +160,8 @@ def mismatches(
         _bad_input("input", requirement.input_id, operation.input)
     elif isinstance(requirement, ComparisonRequirement):
         assert isinstance(operation, CompareOperation)
-        _bad_side("left", requirement.left, operation.left)
-        _bad_side("right", requirement.right, operation.right)
+        _bad_side("minuend", requirement.minuend, operation.right)
+        _bad_side("subtrahend", requirement.subtrahend, operation.left)
     elif isinstance(requirement, SumOfRequirement):
         assert isinstance(operation, SumOfOperation)
         _bad_side("left", requirement.left, operation.left)

@@ -43,10 +43,16 @@ def _content(**fields: Any) -> str:
 class _ModelCall:
     """One JSON-constrained generation. The genai client is built on first
     use: the server constructs keyless (tests, CI), and a missing key then
-    fails the first turn loudly."""
+    fails the first turn loudly.
 
-    def __init__(self, *, model_name: str, client: Client | None = None) -> None:
+    `timeout_s` bounds the call, genai's own retries included, as the HTTP
+    timeout of its request. The server passes the request's model-time budget
+    (`harness.settings.Settings.turn_model_time_s`).
+    """
+
+    def __init__(self, *, model_name: str, timeout_s: float, client: Client | None = None) -> None:
         self.model_name = model_name
+        self._timeout_ms = round(timeout_s * 1000)
         self._client = client
 
     def _resolved_client(self) -> Client:
@@ -65,6 +71,7 @@ class _ModelCall:
                 response_schema=schema,
                 response_mime_type="application/json",
                 temperature=_JSON_TEMPERATURE,
+                http_options=types.HttpOptions(timeout=self._timeout_ms),
             ),
         )
         log_usage(type(self).__name__, response.usage_metadata)
@@ -75,42 +82,43 @@ _EDIT_INSTRUCTION = """\
 You apply a user's edit to one canvas card. You are given the card's stored
 intent (type, title, select, frame_ref, window), a view of its frame's
 dimensions (with rolling: true when the frame's period is counted back from
-the latest data), and the user's instruction. The platform's rules, which are
-hard constraints:
-- A REVISION may change ONLY title and/or select. Emit patch_json for
-  title/selection edits: a JSON object literal (as a string) with only the
-  keys you change, e.g. {"title": "..."} or {"select": {...}}.
+the latest data), and the user's instruction. The platform's rules are hard
+constraints:
+- A revision may change ONLY title and select, together or alone. For title
+  or selection edits, emit patch_json, a JSON object literal (as a string)
+  with only the keys you change, e.g. {"title": "..."} or {"select": {...}}.
 - type, window, change, and frame_ref CANNOT be revised. For those edits
-  emit recreate_json instead: the FULL new intent as a JSON object literal
-  (type, title, select, optional window, optional change) -- keep every
-  field you are not changing identical to the stored intent. Never include
-  frame_ref; the caller pins it.
-- window is an object of period labels at the frame's grain, e.g.
-  {"start": "2000", "end": "2023"}. Either side may be omitted and runs to
-  the edge of the frame's coverage: "since 2000" is {"start": "2000"}.
+  emit recreate_json instead, the FULL new intent as a JSON object literal
+  (type, title, select, optional window, optional change). Keep every field
+  you are not changing identical to the stored intent. Do not include
+  frame_ref, because the caller pins it.
+- window is an object of period labels at the frame's grain, e.g. {"start":
+  "2000", "end": "2023"}. A window of labels may leave out either side,
+  which then runs to the edge of the frame's coverage. "Since 2000" is
+  {"start": "2000"}.
 - A period the user counts back from the latest data is a relative period,
-  {"anchor": "latest", "offset": N}: 0 is the latest period and -1 the one
-  before it. "The last three years" is {"start": {"anchor": "latest",
-  "offset": -2}, "end": {"anchor": "latest", "offset": 0}}. A window with a
-  relative side states both sides. Years the user names stay labels: "2015
-  to 2020" is {"start": "2015", "end": "2020"}.
-- change, on a stat_card only, compares two periods of its series:
-  {"basis": [from, to]}, each a label or a relative period. "Compare with
-  the previous year" is {"basis": [{"anchor": "latest", "offset": -1},
-  {"anchor": "latest", "offset": 0}]}; "compare 2015 with 2020" is
-  {"basis": ["2015", "2020"]}.
+  {"anchor": "latest", "offset": N}, where 0 is the latest period and -1 the
+  one before it. "The last three years" is {"start": {"anchor": "latest",
+  "offset": -2}, "end": {"anchor": "latest", "offset": 0}}. When either side
+  is relative, state both sides. Years the user names stay labels. "2015 to
+  2020" is {"start": "2015", "end": "2020"}.
+- Use change on a stat_card only. It compares two periods of the card's
+  series as {"basis": [from, to]}, each a label or a relative period.
+  "Compare with the previous year" is {"basis": [{"anchor": "latest",
+  "offset": -1}, {"anchor": "latest", "offset": 0}]}. "Compare 2015 with
+  2020" is {"basis": ["2015", "2020"]}.
 - A title that names something you change (a period, an entity, a chart
-  type) changes with it: "... (1960-2023)" shown since 2000 becomes
-  "... (2000-2023)", with an open side read from the frame's coverage.
-- A card whose window or change holds a relative period, or whose
-  frame_view says rolling: true, moves with the data: its title names no
-  year and no year range ("... over the last three years", never
-  "... (2021-2023)").
-- select values must come from the frame view; never invent dimension
+  type) changes with it. "... (1960-2023)" shown since 2000 becomes "...
+  (2000-2023)", with an open side read from the frame's coverage.
+- A card whose window or change holds a relative period, or whose frame_view
+  says rolling: true, moves with the data. Its title names no year and no
+  year range ("... over the last three years", not "... (2021-2023)").
+- select values must come from the frame view. Do not invent dimension
   values. If the user asks for data the frame does not hold, emit neither
   field and say so in text.
-Emit exactly one of patch_json / recreate_json (the other null), plus
-text: one plain sentence stating what you changed (or why you could not).
+Emit exactly one of patch_json and recreate_json, with the other null. Also
+emit text, one plain sentence stating what you changed (or why you could
+not).
 """
 
 _EDIT_SCHEMA = _schema(

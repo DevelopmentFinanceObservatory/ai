@@ -106,10 +106,12 @@ from analysis_mcp.engine.two_sided import (
     KeyPairs,
     KeyPeriods,
     NonFiniteCellError,
+    ResultCoverage,
     denominator_key_columns,
     divide_cell,
     pair_periods,
     record_unmatched_periods,
+    result_coverage,
     sum_side,
 )
 
@@ -283,7 +285,9 @@ class ShareOfResult:
     (`analysis_mcp.engine.two_sided.PeriodPairing`): `matched_periods` are
     the periods some key shares with its denominator group, and each side's
     coverage fraction counts the (key, period) cells it shares over those it
-    holds.
+    holds. `coverage` counts the keys and periods the result holds and the
+    entities each period's denominator sums
+    (`analysis_mcp.engine.two_sided.ResultCoverage`).
 
     `stat_var` labels every output row; `numerator_stat_var` and
     `denominator_stat_var` are the StatVars each side resolved to.
@@ -306,6 +310,7 @@ class ShareOfResult:
     period_shares: tuple[PeriodShare, ...]
     numerator_only_periods: tuple[KeyPeriods, ...] = ()
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
+    coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
 
 
@@ -613,6 +618,12 @@ def run_share_of(
         period_shares=tuple(period_shares),
         numerator_only_periods=pairing.numerator_only_periods,
         denominator_only_periods=pairing.denominator_only_periods,
+        coverage=result_coverage(
+            ((key, period) for key, shared in pairing.shared.items() for period in shared),
+            keyed=bool(numerator_by),
+            denominator=denominator,
+            pooled=pooled,
+        ),
         exclusions=record_unmatched_periods(
             combine_exclusions(numerator.exclusions, denominator.exclusions),
             pairing,

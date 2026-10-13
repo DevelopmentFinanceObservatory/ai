@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -381,9 +382,11 @@ def approved_plan(
     source: Callable[..., SelectedSource],
     real_schemas: list[ToolSchema],
 ) -> Callable[..., Plan]:
-    """Return a factory for an approved retrieve-then-aggregate plan."""
+    """Return a factory for an approved retrieve-then-aggregate plan, approved
+    now unless `approved_at` says when."""
 
     def _approved(**overrides: Any) -> Plan:
+        approved_at = overrides.pop("approved_at", datetime.now(UTC))
         dataset = overrides.pop("requirement", requirement())
         draft = Plan(
             question="How much does Kenya pay to service its debt each year?",
@@ -413,7 +416,9 @@ def approved_plan(
             discovered={"annual_debt_service": overrides.pop("source", source())},
         )
         assert compiled.workflow is not None, compiled.issues
-        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=approved_at
+        )
 
     return _approved
 
@@ -496,7 +501,9 @@ def two_source_plan(
             },
         )
         assert compiled.workflow is not None, compiled.issues
-        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=datetime.now(UTC)
+        )
 
     return _two_source
 
@@ -561,8 +568,8 @@ def two_input_plan(
                 derived = ComparisonRequirement(
                     id="combined",
                     decision_ids=["measure"],
-                    left=RequirementSide(input_id="annual_debt_service"),
-                    right=RequirementSide(input_id="annual_gdp"),
+                    minuend=RequirementSide(input_id="annual_gdp"),
+                    subtrahend=RequirementSide(input_id="annual_debt_service"),
                 )
                 operation = CompareOperation(
                     id="combined",
@@ -624,7 +631,9 @@ def two_input_plan(
             },
         )
         assert compiled.workflow is not None, compiled.issues
-        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=datetime.now(UTC)
+        )
 
     return _two_input
 

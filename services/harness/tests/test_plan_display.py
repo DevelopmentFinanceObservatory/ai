@@ -179,8 +179,8 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
     comparison_a = ComparisonRequirement(
         id="comparison_a",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="totals_a"),
-        right=RequirementSide(input_id="filtered_b"),
+        minuend=RequirementSide(input_id="filtered_b"),
+        subtrahend=RequirementSide(input_id="totals_a"),
     )
     sum_a = SumOfRequirement(
         id="sum_a",
@@ -487,7 +487,7 @@ def _one_requirement_compiled_plan(
         sources=[
             SelectedSource(
                 spec_id=_SPEC_A,
-                sentence="external debt service paid",
+                sentence=_SOURCE_SENTENCE,
                 has_data=True,
                 definition=definition,
                 **source_fields,
@@ -501,11 +501,15 @@ def _one_requirement_compiled_plan(
     return plan.with_translation(translation=translation, workflow=workflow)
 
 
+# What Search says the selected source holds, which the compiled card states.
+_SOURCE_SENTENCE = "External debt service paid by Kenya, 2015 to 2024"
+
+
 def test_a_selected_sources_definition_stays_out_of_the_dataset_sentence(
     decision: DecisionFactory,
 ) -> None:
     """A StatVar's `describe` definition is its constraint encoding, which a
-    user cannot read, so the readback names the retrieval alone."""
+    user cannot read, so the readback states Search's sentence for the source alone."""
     plan = _one_requirement_compiled_plan(
         decision, definition="md=PerCapita,mq=Nominal,mp=amount,pt=EconomicActivity"
     )
@@ -513,7 +517,7 @@ def test_a_selected_sources_definition_stays_out_of_the_dataset_sentence(
     rows = requirement_rows(plan)
 
     dataset_row = next(row for row in rows if row["id"] == "dataset_a")
-    assert dataset_row["sentence"] == "Retrieves external debt service paid for Kenya, 2015-2024."
+    assert dataset_row["sentence"] == f"{_SOURCE_SENTENCE}."
 
 
 def test_operation_rows_carries_id_kind_requirement_id_and_sentence(
@@ -1532,11 +1536,13 @@ _EVERY_COUNTRY = DatasetRequirement(
     id="health_spending",
     decision_ids=["measure"],
     measure="health spending per person",
-    across="country",
+    across=("country",),
     period=Period(start=2022, end=2022),
 )
 _COUNTRIES = OpenEntityAxis(column="observationAbout", member_count=193)
 _DONORS = OpenEntityAxis(column="origin", member_count=55)
+# Search's sentence for the health spending source, over every place it holds.
+_HEALTH_SOURCE_SENTENCE = "Current health expenditure per capita in 193 places, 2022."
 
 
 def _open_axis_rank_plan(
@@ -1627,7 +1633,7 @@ def _open_axis_rank_plan(
         sources=[
             SelectedSource(
                 spec_id=_SPEC_A,
-                sentence=dataset.measure,
+                sentence=_HEALTH_SOURCE_SENTENCE,
                 has_data=True,
                 **({"open_entity_axes": (_COUNTRIES,)} if source is None else source),
             )
@@ -1659,9 +1665,7 @@ def test_an_open_axis_rank_states_the_party_it_covers_on_every_row(
         "Rank countries by health spending per person",
     ]
     assert sentences == {
-        "health_spending": (
-            "Retrieves health spending per person for every place with data, 2022-2022."
-        ),
+        "health_spending": _HEALTH_SOURCE_SENTENCE,
         "kept": "Keeps rows where the place is a country.",
         "ranked": (
             "Ranks by health spending per person: ranks every country the source holds; "
@@ -1713,7 +1717,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
         id="gdp",
         decision_ids=["measure"],
         measure="GDP",
-        across="country",
+        across=("country",),
         period=Period(start=2023, end=2023),
     )
     share = ShareOfRequirement(
@@ -1750,7 +1754,7 @@ def test_an_open_axis_rank_states_how_many_donors_the_source_holds(
         decision_ids=["measure"],
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donors",
+        across=("donors",),
         period=Period(start=2015, end=2023),
     )
     kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
@@ -1759,11 +1763,19 @@ def test_an_open_axis_rank_states_how_many_donors_the_source_holds(
         dataset,
         axis="donors",
         reduction=Reduction.SUM,
-        source={"entities": (kenya,), "open_entity_axes": (_DONORS,)},
+        source={
+            "entities": (kenya,),
+            "open_entity_axes": (_DONORS,),
+            "measure_label": "gross disbursements (education)",
+        },
     )
 
+    labels = [row["label"] for row in step_rows(plan)]
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
+    # The retrieval's label names the source's measure and its 55 donors, not
+    # the planner's "education aid for every donor".
+    assert labels[0] == "Fetch gross disbursements (education) for Kenya and all 55 donors"
     assert sentences["ranked"] == (
         "Ranks by the total of education aid: ranks all 55 donors the source holds; "
         "the window is collapsed into one ranking."
@@ -1778,7 +1790,7 @@ def test_an_open_axis_rank_states_a_count_in_the_thousands_with_a_separator(
         decision_ids=["measure"],
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2022, end=2022),
     )
     kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
@@ -1796,13 +1808,43 @@ def test_an_open_axis_rank_states_a_count_in_the_thousands_with_a_separator(
     assert "ranks all 1,234 donors the source holds" in sentences["ranked"]
 
 
+def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
+    decision: DecisionFactory,
+) -> None:
+    # "Every donor by every recipient": the rank's axis is the donors, so the
+    # card states the 55 the source holds on `origin`, not the 140 recipients.
+    dataset = DatasetRequirement(
+        id="health_spending",
+        decision_ids=["measure"],
+        measure="education aid",
+        across=("recipient", "donor"),
+        period=Period(start=2022, end=2022),
+    )
+    recipients = OpenEntityAxis(column="destination", member_count=140)
+    plan = _open_axis_rank_plan(
+        decision,
+        dataset,
+        axis="donor",
+        reduction=Reduction.SUM,
+        source={"open_entity_axes": (recipients, _DONORS)},
+    )
+
+    labels = [row["label"] for row in step_rows(plan)]
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    # A source stating no measure label leaves the label the requirement's measure.
+    assert labels[0] == "Fetch education aid for all 140 recipients and all 55 donors"
+    assert "ranks all 55 donors the source holds" in sentences["ranked"]
+
+
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(
     decision: DecisionFactory,
 ) -> None:
-    # The card states a count only where `open_axis_for` matches the party to
-    # an open axis of the selected source. A source leaving its donors open
-    # holds no population of countries.
-    plan = _open_axis_rank_plan(decision, source={"open_entity_axes": (_DONORS,)})
+    # The card states a count only where `open_axes_for` matches the party to
+    # an open axis of the selected source. A source leaving both its donors
+    # and its recipients open holds no one population of countries.
+    recipients = OpenEntityAxis(column="destination", member_count=140)
+    plan = _open_axis_rank_plan(decision, source={"open_entity_axes": (recipients, _DONORS)})
 
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
@@ -1818,7 +1860,7 @@ def test_a_named_entity_beside_an_open_party_reads_as_both(decision: DecisionFac
         decision_ids=["measure"],
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2020, end=2022),
     )
     rank = RankRequirement(
@@ -1854,7 +1896,7 @@ def test_a_plural_party_reads_in_the_singular_after_every_and_for_one_kept(
         id="health_spending",
         decision_ids=["measure"],
         measure="health spending per person",
-        across="countries",
+        across=("countries",),
         period=Period(start=2022, end=2022),
     )
     keep = FilterRequirement(
@@ -1902,7 +1944,7 @@ def test_a_rank_over_a_named_role_keeps_the_named_entities_as_its_focus(
         decision_ids=["measure"],
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2020, end=2022),
     )
     rank = RankRequirement(
@@ -1998,9 +2040,7 @@ def test_the_dataset_sentence_states_how_a_family_is_read(
     rows = requirement_rows(plan)
 
     dataset_row = next(row for row in rows if row["id"] == "dataset_a")
-    assert dataset_row["sentence"] == (
-        f"Retrieves external debt service paid for Kenya, 2015-2024, {clause}."
-    )
+    assert dataset_row["sentence"] == (f"{_SOURCE_SENTENCE}. {clause[0].upper()}{clause[1:]}.")
 
 
 @pytest.mark.parametrize(
@@ -2017,7 +2057,7 @@ def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
         decision_ids=["measure"],
         measure="aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2024, end=2024),
         stat_vars=StatVarReading.SEPARATE,
         breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=level),
@@ -2069,8 +2109,8 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
     (dataset_row,) = [row for row in requirement_rows(plan) if row["id"] == "dataset_a"]
 
     assert dataset_row["sentence"] == (
-        "Retrieves external debt service paid for Kenya, 2015-2024, broken down by sector, "
-        "each code rolled up to the top level of its hierarchy."
+        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to the top level of "
+        "its hierarchy."
     )
 
 

@@ -1,0 +1,182 @@
+{
+  "id": "rank-bottom-five-african-oda-2021",
+  "kind": "rank",
+  "origin": "authored",
+  "question": "Which five African countries received the least ODA in 2021?",
+  "searches": [
+    {
+      "query": "Which five African countries received the least ODA in 2021?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Africa",
+              "role": "to",
+              "members": true
+            }
+          ],
+          "time": "2021"
+        }
+      ]
+    }
+  ],
+  "brief": "Which five African countries received the least ODA in 2021?",
+  "asks": [
+    "The five African countries that received the least ODA in 2021"
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "rank"
+  ],
+  "neighbour": {
+    "kind": "filter",
+    "distinction": "rank, not filter: the five lowest by order, with no threshold value given"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Which five African countries received the least ODA in 2021?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_african_country",
+        "description": "Which countries the ranking compares.",
+        "options": [
+          "every African country with data",
+          "a named list of African countries"
+        ],
+        "chosen": "every African country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks about African countries without naming any, so every one is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Africa",
+            "role": "recipient",
+            "members": true
+          }
+        ],
+        "period": {
+          "start": 2021,
+          "end": 2021
+        },
+        "source_spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d",
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "bottom_five",
+        "input_id": "oda",
+        "direction": "lowest_first",
+        "among": "population",
+        "axis": "recipient",
+        "reduction": "sum",
+        "limit": 5,
+        "decision_ids": [
+          "every_african_country"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "bottom_five"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Total each country over its donors first, then rank the totals.",
+      "payload": {
+        "question": "Which five African countries received the least ODA in 2021?",
+        "answer_mode": "computed",
+        "decisions": [
+          {
+            "slot": "every_african_country",
+            "description": "Which countries the ranking compares.",
+            "options": [
+              "every African country with data",
+              "a named list of African countries"
+            ],
+            "chosen": "every African country with data",
+            "resolved_by": "planner_default",
+            "rationale": "The question asks about African countries without naming any, so every one is ranked.",
+            "fixes": [
+              "among"
+            ]
+          }
+        ],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "oda",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "Africa",
+                "role": "recipient",
+                "members": true
+              }
+            ],
+            "period": {
+              "start": 2021,
+              "end": 2021
+            },
+            "source_spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d",
+            "across": [
+              "donor"
+            ]
+          },
+          {
+            "kind": "aggregate",
+            "id": "by_country",
+            "input_id": "oda",
+            "reduction": "sum",
+            "group_by": [
+              "entity",
+              "period"
+            ]
+          },
+          {
+            "kind": "rank",
+            "id": "bottom_five",
+            "input_id": "by_country",
+            "direction": "lowest_first",
+            "among": "population",
+            "axis": "recipient",
+            "limit": 5,
+            "decision_ids": [
+              "every_african_country"
+            ]
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "bottom_five"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

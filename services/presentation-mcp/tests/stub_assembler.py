@@ -41,7 +41,13 @@ def resolved_revision(member: str) -> dict[str, Any]:
     """A catalogue member's resolved envelope, dfo-spec-kit's
     `catalogue/fixtures/<member>/payload.json` at 6e9b6735, copied verbatim
     into `fixtures/resolved_revision/`. `<member>_composed_unit` names the
-    member's `payload_composed_unit.json` at bf584e3, copied the same way."""
+    member's `payload_composed_unit.json` at bf584e3, copied the same way.
+    `line_chart_description` and `note_narration_lineage` are
+    `line_chart/payload_description.json` and `note_narration/payload_lineage.json`
+    at 1f73bc6. `source_card_description` is `source_card` with lineage alone
+    in its provenance, the `description-source-card` description vector at
+    1f73bc6 as its `description`, and that description's source refs as its
+    `source_refs`."""
     path = _FIXTURES / "resolved_revision" / f"{member}.json"
     return json.loads(path.read_text(encoding="utf-8"))
 

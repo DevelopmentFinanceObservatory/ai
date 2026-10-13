@@ -93,7 +93,7 @@ _PER_SERIES_UNIT_FACET: dict[str, Any] = {"unit": {"basis": "bound", "selection"
 
 def _facet_option(dcid: str, label: str, *, value_kind: str = "enum_value") -> dict[str, Any]:
     """One `SlotOption`-shaped facet option value, keyed by dcid and label."""
-    return {"value": {"ref": {"dcid": dcid, "label": label}, "value_kind": value_kind}}
+    return {"value": {"ref": {"ref": dcid, "label": label}, "value_kind": value_kind}}
 
 
 # `facet_options`, populated on every definite spec below since dfo-apis serves it on
@@ -204,6 +204,7 @@ def _spec(
     facets: dict[str, Any] | None = None,
     facet_options: list[dict[str, Any]] | None = None,
     observations: dict[str, Any] | None = None,
+    source_codes: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """One resolved spec block: sentence, confidence, coverage, StatVars, entities, facets, facet options."""
     items = stat_vars if stat_vars is not None else []
@@ -211,7 +212,12 @@ def _spec(
         "rendered_sentence": sentence,
         "confidence": confidence,
         "coverage": coverage if coverage is not None else _BARE_COVERAGE,
-        "stat_vars": {"items": items, "member_count": len(items), "truncated": False},
+        "stat_vars": {
+            "items": items,
+            "member_count": len(items),
+            "truncated": False,
+            **({"source_codes": source_codes} if source_codes else {}),
+        },
         "entities": entities if entities is not None else [],
         "facets": facets if facets is not None else {},
         "facet_options": facet_options if facet_options is not None else [],
@@ -619,6 +625,27 @@ _DEFINITE_CASES: list[CorpusCase] = [
                 entities=_FRANCE_TOGO_ENTITIES,
                 facets=_BOUND_AND_DEFAULT_FACETS,
                 facet_options=_FACET_OPTIONS_FIVE_AXES_FIXTURE,
+            ),
+        ),
+    ),
+    CorpusCase(
+        id="definite_source_codes",
+        question=_DEFINITE_1_QUESTION,
+        parts=[_part(_BASE_SENTENCE)],
+        status="definite",
+        envelope=_single_part_envelope(
+            "definite",
+            variable_text=_BASE_SENTENCE,
+            spec=_spec(
+                spec_id="spec_source_codes",
+                sentence=_BASE_SENTENCE,
+                coverage=_EXACT_COVERAGE,
+                entities=_FRANCE_TOGO_ENTITIES,
+                facets=_BOUND_AND_DEFAULT_FACETS,
+                source_codes=[
+                    {"provenance": "oecd_dac_2a", "code": "DAC2A.1010"},
+                    {"provenance": "oecd_dac_2a", "code": "DAC2A.1020"},
+                ],
             ),
         ),
     ),

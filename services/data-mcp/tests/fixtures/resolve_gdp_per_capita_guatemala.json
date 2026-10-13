@@ -90,23 +90,23 @@
             "shape_id": "economicactivity_amount_measuredvalue_nominal_per_unresolved",
             "label": "Nominal gross domestic product per capita",
             "population_type": {
-              "dcid": "EconomicActivity",
+              "ref": "EconomicActivity",
               "label": "EconomicActivity"
             },
             "measured_property": {
-              "dcid": "amount",
+              "ref": "amount",
               "label": "amount"
             },
             "stat_type": {
-              "dcid": "measuredValue",
+              "ref": "measuredValue",
               "label": "measuredValue"
             },
             "measurement_qualifier": {
-              "dcid": "Nominal",
+              "ref": "Nominal",
               "label": "Nominal"
             },
             "measurement_denominator": {
-              "dcid": "PerCapita",
+              "ref": "PerCapita",
               "label": "PerCapita"
             },
             "measurement_denominator_unresolved": true,
@@ -114,7 +114,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -140,7 +140,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -149,7 +149,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "GrossDomesticProduction",
+                    "ref": "GrossDomesticProduction",
                     "label": "GrossDomesticProduction"
                   },
                   "value_kind": "enum_value"
@@ -165,7 +165,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "country/GTM",
+                    "ref": "country/GTM",
                     "label": "Guatemala"
                   },
                   "value_kind": "entity"
@@ -236,7 +236,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "activitySource",
+                  "ref": "activitySource",
                   "label": "activitySource"
                 },
                 "label": "activity source"
@@ -245,7 +245,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "GrossDomesticProduction",
+                      "ref": "GrossDomesticProduction",
                       "label": "GrossDomesticProduction"
                     },
                     "value_kind": "enum_value"
@@ -280,7 +280,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "dc/base/WorldDevelopmentIndicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
                       "label": "WorldDevelopmentIndicators"
                     },
                     "value_kind": "source"
@@ -296,7 +296,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "USDollar",
+                      "ref": "USDollar",
                       "label": "USDollar"
                     },
                     "value_kind": "enum_value"
@@ -367,13 +367,13 @@
           "trace": {
             "resolved_entities": [
               {
-                "dcid": "country/GTM",
+                "ref": "country/GTM",
                 "label": "Guatemala"
               }
             ],
             "resolved_sources": [
               {
-                "dcid": "dc/base/WorldDevelopmentIndicators",
+                "ref": "dc/base/WorldDevelopmentIndicators",
                 "label": "WorldDevelopmentIndicators"
               }
             ],
@@ -382,7 +382,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "activitySource",
+                    "ref": "activitySource",
                     "label": "activitySource"
                   },
                   "label": "activity source"
@@ -390,7 +390,7 @@
                 "binding_kind": "value",
                 "refs": [
                   {
-                    "dcid": "GrossDomesticProduction",
+                    "ref": "GrossDomesticProduction",
                     "label": "GrossDomesticProduction"
                   }
                 ],
@@ -404,7 +404,7 @@
                 "binding_kind": "value",
                 "refs": [
                   {
-                    "dcid": "country/GTM",
+                    "ref": "country/GTM",
                     "label": "Guatemala"
                   }
                 ],

@@ -37,6 +37,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, override
 
@@ -47,6 +48,8 @@ from google.adk.models.registry import LLMRegistry
 from google.genai import Client, errors, types
 from pydantic import ConfigDict, Field
 
+from harness.turn_budget import BoundedGemini
+
 logger = logging.getLogger(__name__)
 
 # How long a created cache lives. Storage is billed per hour, and one hour
@@ -54,7 +57,7 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_S = 3600
 
 # A cache with less than this left is replaced rather than handed out, so no
-# call (a sampled-thinking planner generation runs about 80 s) outlives it.
+# call outlives it.
 REFRESH_MARGIN_S = 300
 
 # How long a create may run before the calls waiting on it go uncached. A
@@ -223,8 +226,13 @@ def _against_cache(llm_request: LlmRequest, name: str) -> LlmRequest:
     return llm_request.model_copy(update={"config": config})
 
 
-class PrefixCachedGemini(Gemini):
-    """`Gemini` that sends each request against its prefix's shared cache."""
+class PrefixCachedGemini(BoundedGemini):
+    """`BoundedGemini` that sends each request against its prefix's shared cache.
+
+    The request budget (`harness.turn_budget`) bounds each request sent, a
+    resend after a gone cache included, and leaves the cache's lookup and
+    create outside its clock.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -253,18 +261,20 @@ class PrefixCachedGemini(Gemini):
     ) -> AsyncGenerator[LlmResponse]:
         cached = await self._cached(llm_request)
         if cached is None:
-            async for response in super().generate_content_async(llm_request, stream):
-                yield response
+            async with aclosing(super().generate_content_async(llm_request, stream)) as responses:
+                async for response in responses:
+                    yield response
             return
 
         key, name = cached
         delivered = False
         try:
-            async for response in super().generate_content_async(
-                _against_cache(llm_request, name), stream
-            ):
-                delivered = True
-                yield response
+            async with aclosing(
+                super().generate_content_async(_against_cache(llm_request, name), stream)
+            ) as responses:
+                async for response in responses:
+                    delivered = True
+                    yield response
             return
         except errors.ClientError as exc:
             # Streamed output that already reached the caller would repeat on
@@ -276,8 +286,9 @@ class PrefixCachedGemini(Gemini):
         self.prefix_cache.forget(key, name)
         cached = await self._cached(llm_request)
         request = llm_request if cached is None else _against_cache(llm_request, cached[1])
-        async for response in super().generate_content_async(request, stream):
-            yield response
+        async with aclosing(super().generate_content_async(request, stream)) as responses:
+            async for response in responses:
+                yield response
 
 
 __all__ = [

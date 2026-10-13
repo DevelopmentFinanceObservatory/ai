@@ -1,35 +1,16 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
-from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from planner.settings import (
     AGENT_THINKING_CONFIG,
-    DEFAULT_THINKING_CONFIG,
-    THINKING_SAMPLE_STATE_KEY,
     AgentSettings,
+    SchemaDelivery,
     drop_thought_parts,
-    override_thinking_on_sampled_turns,
 )
 
-_FIELDS = ("PLANNER_MODEL_NAME",)
-
-
-def _callback_context(*, state: dict) -> SimpleNamespace:
-    """The one attribute `override_thinking_on_sampled_turns` reads off a
-    real `CallbackContext` -- a stand-in the same way
-    `test_planner_seam.py`'s `fake_tool_context` is."""
-    return SimpleNamespace(session=SimpleNamespace(state=state))
-
-
-def _llm_request() -> LlmRequest:
-    """A request already carrying `AGENT_THINKING_CONFIG`, the shape
-    `BuiltInPlanner.apply_thinking_config` leaves it in before any
-    `before_model_callback` runs."""
-    return LlmRequest(config=types.GenerateContentConfig(thinking_config=AGENT_THINKING_CONFIG))
+_FIELDS = ("PLANNER_MODEL_NAME", "PLANNER_SCHEMA_DELIVERY")
 
 
 @pytest.fixture(autouse=True)
@@ -51,48 +32,17 @@ def test_reads_from_env(monkeypatch) -> None:
     assert AgentSettings().planner_model_name == "gemini-3.1-pro-preview"
 
 
+def test_schema_delivery_is_eager_unless_the_environment_says_compact(monkeypatch) -> None:
+    assert AgentSettings().planner_schema_delivery is SchemaDelivery.EAGER
+
+    monkeypatch.setenv("PLANNER_SCHEMA_DELIVERY", "compact")
+
+    assert AgentSettings().planner_schema_delivery is SchemaDelivery.COMPACT
+
+
 def test_agent_thinking_config_is_low_with_thoughts_on() -> None:
     assert AGENT_THINKING_CONFIG.thinking_level is types.ThinkingLevel.LOW
     assert AGENT_THINKING_CONFIG.include_thoughts is True
-
-
-def test_default_thinking_config_leaves_the_level_unset_with_thoughts_on() -> None:
-    assert DEFAULT_THINKING_CONFIG.thinking_level is None
-    assert DEFAULT_THINKING_CONFIG.include_thoughts is True
-
-
-def test_thinking_sample_rate_defaults_to_five_percent() -> None:
-    assert AgentSettings().thinking_sample_rate == 0.05
-
-
-def test_override_thinking_on_sampled_turns_swaps_the_config_when_sampled() -> None:
-    request = _llm_request()
-
-    result = override_thinking_on_sampled_turns(
-        _callback_context(state={THINKING_SAMPLE_STATE_KEY: True}), request
-    )
-
-    assert result is None
-    assert request.config.thinking_config == DEFAULT_THINKING_CONFIG
-
-
-def test_override_thinking_on_sampled_turns_leaves_the_config_when_not_sampled() -> None:
-    request = _llm_request()
-
-    result = override_thinking_on_sampled_turns(
-        _callback_context(state={THINKING_SAMPLE_STATE_KEY: False}), request
-    )
-
-    assert result is None
-    assert request.config.thinking_config == AGENT_THINKING_CONFIG
-
-
-def test_override_thinking_on_sampled_turns_defaults_to_unsampled_with_no_state() -> None:
-    request = _llm_request()
-
-    override_thinking_on_sampled_turns(_callback_context(state={}), request)
-
-    assert request.config.thinking_config == AGENT_THINKING_CONFIG
 
 
 def test_drop_thought_parts_removes_only_thought_marked_parts() -> None:

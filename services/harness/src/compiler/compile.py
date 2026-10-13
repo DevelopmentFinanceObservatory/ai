@@ -101,6 +101,8 @@ from compiler.evidence import (
     evidence_from_source,
     named_members,
     named_refs,
+    open_axes_for,
+    opens_place_axis,
     read_source_unit,
     read_unit_dcid,
 )
@@ -113,7 +115,13 @@ from compiler.rolling import (
     window_overlay,
     with_population,
 )
-from compiler.shapes import BREAKDOWN_CODE_SYSTEMS, ResolvedRole, ResolvedShape, shapes_for
+from compiler.shapes import (
+    BREAKDOWN_CODE_SYSTEMS,
+    ResolvedRole,
+    ResolvedShape,
+    shapes_for,
+    unsummable_axes,
+)
 from compiler.sources import (
     FamilyOverlap,
     entity_scopes_disjoint,
@@ -136,6 +144,7 @@ class CompileIssueCode(StrEnum):
     DANGLING_INPUT = "dangling_input"
     INPUT_IS_TERMINAL = "input_is_terminal"
     INPUT_SHAPE_UNSUPPORTED = "input_shape_unsupported"
+    LEVEL_FILTER_ON_FLOW_AXIS = "level_filter_on_flow_axis"
     RANK_AXIS_REQUIRED = "rank_axis_required"
     SHARE_AXIS_REQUIRED = "share_axis_required"
     SHARE_KEY_UNKNOWN = "share_key_unknown"
@@ -162,6 +171,7 @@ class CompileIssueCode(StrEnum):
     DEGENERATE_SIDES = "degenerate_sides"
     SUM_SIDES_OVERLAP = "sum_sides_overlap"
     SUM_OVERLAP_UNDECIDED = "sum_overlap_undecided"
+    FAMILY_UNSUMMABLE = "family_unsummable"
     SUM_UNITS_DIFFER = "sum_units_differ"
     SHARE_UNITS_DIFFER = "share_units_differ"
     FRAME_UNITS_DIFFER = "frame_units_differ"
@@ -343,6 +353,7 @@ class _Build:
         self._check_sources()
         self._check_requirements_meetable()
         self._build_shapes()
+        self._check_level_filters()
         self._check_operations()
         self._check_source_width()
         self._check_capabilities()
@@ -550,6 +561,7 @@ class _Build:
             )
             source = stat_var_reading(source, requested)
             self.sources[operation.id] = source
+            self._check_summable(operation, requirement, source)
             self._check_breakdown(operation, requirement, source)
             findings = check_evidence(requirement, evidence_from_source(source))
             for finding in errors(findings):
@@ -562,6 +574,30 @@ class _Build:
                     finding=finding.code,
                 )
             self.warnings.extend(f for f in findings if f not in errors(findings))
+
+    def _check_summable(
+        self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
+    ) -> None:
+        """Report a family read summed over an axis dfo-apis may not sum over.
+
+        `stat_var_reading` reads a family summed by the rule only when every
+        open axis is summable, but the plan may ask for `sum` over any family;
+        `get_data` would refuse that retrieval `rollup_not_summable`.
+        """
+        if source.stat_var_reading is not StatVarReading.SUM:
+            return
+        axes = unsummable_axes(source)
+        if not axes:
+            return
+        one_value = "one value for it" if len(axes) == 1 else "one value for each"
+        self._issue(
+            CompileIssueCode.FAMILY_UNSUMMABLE,
+            f"requirement {requirement.id!r} reads source {source.spec_id}'s family summed "
+            f"(stat_vars='sum'), but it cannot be summed over {', '.join(axes)}; read it "
+            f"separately (stat_vars='separate') or have the question name {one_value}",
+            operation_id=operation.id,
+            requirement_id=requirement.id,
+        )
 
     def _check_breakdown(
         self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
@@ -605,6 +641,50 @@ class _Build:
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
             self._issue(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, detail, operation_id=operation_id)
+
+    def _check_level_filters(self) -> None:
+        """Report `LEVEL_FILTER_ON_FLOW_AXIS` for a place-level filter whose places sit on a flow axis.
+
+        A requirement whose `across` names the place may keep one level with a
+        `PlaceLevel` filter, which reads `observationAbout_type`. Only a
+        source that leaves `observationAbout` open over several places mixes
+        levels (`compiler.evidence.opens_place_axis`). Where the place word
+        covers a flow axis instead (`compiler.evidence.open_axes_for`), as
+        IDS holds its debtors on `destination`, the axis holds parties,
+        whose kinds keep totals out of a sum or a rank, so the filter has no
+        level to keep and the planner drops it.
+        """
+        for operation in self.operations.values():
+            if not isinstance(operation, FilterOperation) or not keeps_one_level(
+                operation.predicates
+            ):
+                continue
+            retrieve = self.operations.get(self._through_filters(operation.input))
+            source = self.sources.get(retrieve.id) if retrieve is not None else None
+            requirement = (
+                self.requirements.get(retrieve.requirement_id) if retrieve is not None else None
+            )
+            if (
+                source is None
+                or not isinstance(requirement, DatasetRequirement)
+                or opens_place_axis(source.open_entity_axes)
+            ):
+                continue
+            axes = open_axes_for(requirement.across, source.open_entity_axes)
+            if isinstance(axes, str):
+                continue
+            for word, axis in zip(requirement.across, axes, strict=True):
+                if across_party(word) != "place" or axis.column == PLACE_ROLE:
+                    continue
+                self._issue(
+                    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS,
+                    f"source {source.spec_id} holds every {word!r} on its flow axis "
+                    f"{axis.column!r}, whose parties have no place level to keep, and party "
+                    "kinds already keep totals out of a sum or a rank; drop the place_level "
+                    "predicate",
+                    operation_id=operation.id,
+                    requirement_id=requirement.id,
+                )
 
     def _check_requirements_meetable(self) -> None:
         for requirement in self.requirements.values():
@@ -1021,7 +1101,7 @@ class _Build:
         mere presence.
 
         An open entity axis counts the members its source states, which
-        `compiler.evidence.open_axis_for` admits only when counted. No
+        `compiler.evidence.open_axes_for` admits only when counted. No
         filter narrows one: an `EntityIn` may only name the requirement's
         own entities, and none sits on an open axis.
         """
@@ -1057,7 +1137,7 @@ class _Build:
     def _states_across(self, op_id: str) -> bool:
         """Whether the dataset requirement `op_id`'s chain rests on states `across`."""
         requirement = self._requirement_upstream(op_id)
-        return requirement is not None and requirement.across is not None
+        return requirement is not None and bool(requirement.across)
 
     def _role_source(self, role: ResolvedRole) -> SelectedSource | None:
         """The source the retrieval of `role`'s own requirement selected."""

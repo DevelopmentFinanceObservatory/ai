@@ -125,19 +125,19 @@
             "shape_id": "financialflow_amount_measuredvalue_nominal_family_f096b1ba",
             "label": "gross disbursements (official development assistance)",
             "population_type": {
-              "dcid": "FinancialFlow",
+              "ref": "FinancialFlow",
               "label": "financial flow"
             },
             "measured_property": {
-              "dcid": "amount",
+              "ref": "amount",
               "label": "amount"
             },
             "stat_type": {
-              "dcid": "measuredValue",
+              "ref": "measuredValue",
               "label": "measuredValue"
             },
             "measurement_qualifier": {
-              "dcid": "Nominal",
+              "ref": "Nominal",
               "label": "Nominal"
             },
             "measurement_denominator_unresolved": false,
@@ -145,7 +145,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "dac2aAidType",
+                  "ref": "dac2aAidType",
                   "label": "DAC 2a aid type"
                 },
                 "label": "aid type"
@@ -153,7 +153,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "financialFlowType",
+                  "ref": "financialFlowType",
                   "label": "financial flow type"
                 },
                 "label": "financial flow type"
@@ -161,7 +161,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "nettingBasis",
+                  "ref": "nettingBasis",
                   "label": "netting basis"
                 },
                 "label": "netting basis"
@@ -169,7 +169,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "dacTypeOfFinance",
+                  "ref": "dacTypeOfFinance",
                   "label": "DAC type of finance"
                 },
                 "label": "dac type of finance"
@@ -202,7 +202,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "dac2aAidType",
+                  "ref": "dac2aAidType",
                   "label": "DAC 2a aid type"
                 },
                 "label": "aid type"
@@ -211,7 +211,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "DAC2aAidType206",
+                    "ref": "DAC2aAidType206",
                     "label": "official development assistance"
                   },
                   "value_kind": "enum_value"
@@ -223,7 +223,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "financialFlowType",
+                  "ref": "financialFlowType",
                   "label": "financial flow type"
                 },
                 "label": "financial flow type"
@@ -232,7 +232,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "Disbursement",
+                    "ref": "Disbursement",
                     "label": "disbursement"
                   },
                   "value_kind": "enum_value"
@@ -244,7 +244,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "nettingBasis",
+                  "ref": "nettingBasis",
                   "label": "netting basis"
                 },
                 "label": "netting basis"
@@ -253,7 +253,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "Gross",
+                    "ref": "Gross",
                     "label": "gross"
                   },
                   "value_kind": "enum_value"
@@ -265,7 +265,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "dacTypeOfFinance",
+                  "ref": "dacTypeOfFinance",
                   "label": "DAC type of finance"
                 },
                 "label": "dac type of finance"
@@ -284,7 +284,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "country/KEN",
+                    "ref": "country/KEN",
                     "label": "Kenya"
                   },
                   "value_kind": "entity"
@@ -442,7 +442,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "provenance/OECDDAC2A",
+                      "ref": "provenance/OECDDAC2A",
                       "label": "OECD DAC2A"
                     },
                     "value_kind": "source"
@@ -458,7 +458,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "CurrencyUSD",
+                      "ref": "CurrencyUSD",
                       "label": "US Dollar"
                     },
                     "value_kind": "enum_value"
@@ -537,35 +537,35 @@
                 {
                   "axis": "populationType",
                   "value": {
-                    "dcid": "FinancialFlow",
+                    "ref": "FinancialFlow",
                     "label": "financial flow"
                   }
                 },
                 {
                   "axis": "measuredProperty",
                   "value": {
-                    "dcid": "amount",
+                    "ref": "amount",
                     "label": "amount"
                   }
                 },
                 {
                   "axis": "measurementQualifier",
                   "value": {
-                    "dcid": "Nominal",
+                    "ref": "Nominal",
                     "label": "nominal"
                   }
                 },
                 {
                   "axis": "financialFlowType",
                   "value": {
-                    "dcid": "Disbursement",
+                    "ref": "Disbursement",
                     "label": "disbursement"
                   }
                 },
                 {
                   "axis": "nettingBasis",
                   "value": {
-                    "dcid": "Net",
+                    "ref": "Net",
                     "label": "net"
                   }
                 }
@@ -586,35 +586,35 @@
             {
               "axis": "populationType",
               "value": {
-                "dcid": "FinancialFlow",
+                "ref": "FinancialFlow",
                 "label": "financial flow"
               }
             },
             {
               "axis": "measuredProperty",
               "value": {
-                "dcid": "amount",
+                "ref": "amount",
                 "label": "amount"
               }
             },
             {
               "axis": "measurementQualifier",
               "value": {
-                "dcid": "Nominal",
+                "ref": "Nominal",
                 "label": "nominal"
               }
             },
             {
               "axis": "financialFlowType",
               "value": {
-                "dcid": "Disbursement",
+                "ref": "Disbursement",
                 "label": "disbursement"
               }
             },
             {
               "axis": "nettingBasis",
               "value": {
-                "dcid": "Gross",
+                "ref": "Gross",
                 "label": "gross"
               }
             }

@@ -337,7 +337,7 @@ def bound_role_keys(
     Every other verb's output role columns are the ones its arguments name,
     which the compiler predicted as `expected` in its own spelling; each is
     spelled the way `frame` spells it. A verb keeps each of those roles'
-    `{role}_type` and `{role}_kind` columns that its input carries
+    `{role}_type` and `{role}_party_kind` columns that its input carries
     (`analysis_mcp.engine.common.frame_keeping_role_types`), so the keys
     take them too when `input_role_keys` holds them. With neither known,
     `expected` stands as compiled.
@@ -402,7 +402,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 #   that side's StatVar, so its result holds two, or one when both sides
 #   carry the same StatVar under different units or facets.
 # - `filter` keeps a subset of its input's rows.
-# - `compare` writes the rows of its left side's slice, one per period.
+# - `compare` writes one series under its own StatVar, one row per period.
 # - `sum_of` writes one series under its own StatVar, one row per period.
 # - `quotient_of` refuses a side holding several and writes every row, one
 #   per key and period, under its own StatVar.
@@ -414,7 +414,7 @@ _MOST_STAT_VARS: Mapping[ToolId, Callable[[Mapping[str, JsonValue], int | None],
     _analysis("share_of"): _one_stat_var,
     _analysis("join"): _one_per_side,
     _analysis("filter"): _of_the_input,
-    _analysis("compare"): _of_the_input,
+    _analysis("compare"): _one_stat_var,
     _analysis("sum_of"): _one_stat_var,
     _analysis("quotient_of"): _one_stat_var,
 }

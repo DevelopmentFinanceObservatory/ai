@@ -28,6 +28,7 @@ from typing import Any, Literal, NamedTuple, cast
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency
 from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
 from planner.plan import (
     DatasetRequirement,
@@ -171,12 +172,23 @@ class RecordedIdentity(StrictModel):
 
 
 class PlanDecision(StrictModel):
-    """One decision: its slot, the option chosen, who settled it, and the first line of why."""
+    """One decision: its slot, the option chosen, who settled it, and the first line of why.
+
+    `source_spec_id` is the source a decision fixes (`DecisionFixes.source_spec_id`),
+    such as the measure the user picked, so a later turn reads who chose it;
+    left out when it fixes none.
+
+    A record ignores keys it does not declare, so a ledger record written by
+    a release that adds a field still loads in one that does not.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     slot: str
     chosen: str
     resolved_by: ResolvedBy
     rationale: str
+    source_spec_id: str | None = Field(default=None, exclude_if=lambda spec_id: spec_id is None)
 
 
 class PlanWarning(StrictModel):
@@ -222,8 +234,16 @@ class PlanRecord(StrictModel):
     `outputs` are the workflow's terminal step ids. `asks` are the outputs
     the user asked for, in the brief's order, each with the steps that
     answer it, its decline, or both. `declined` are the other parts of the
-    question the plan does not compute.
+    question the plan does not compute. `run_id` is the run of the run
+    ledger the plan executed as, left out when the plan admitted none, so a
+    later turn reads an `EXECUTING` record's status from that run
+    (`with_run_status`).
+
+    A record ignores keys it does not declare, so a ledger record written by
+    a release that adds a field still loads in one that does not.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     question: str
     status: PlanStatus
@@ -237,6 +257,7 @@ class PlanRecord(StrictModel):
     warnings: tuple[PlanWarning, ...]
     outputs: tuple[str, ...]
     steps: tuple[PlanStep, ...]
+    run_id: str | None = Field(default=None, exclude_if=lambda run_id: run_id is None)
 
     @classmethod
     def from_plan(
@@ -245,6 +266,7 @@ class PlanRecord(StrictModel):
         *,
         searched: Collection[str] = (),
         failed_step: str | None = None,
+        run_id: str | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
 
@@ -252,6 +274,7 @@ class PlanRecord(StrictModel):
             plan: A plan carrying a translation and a workflow.
             searched: Spec ids the turn's `search` calls returned.
             failed_step: The id of the step the run stopped at, if any.
+            run_id: The run the plan executed as, if the ledger admitted one.
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
@@ -281,6 +304,7 @@ class PlanRecord(StrictModel):
                     chosen=plan_display.with_source_names(decision.chosen, plan),
                     resolved_by=decision.resolved_by,
                     rationale=plan_display.with_source_names(_first_line(decision.rationale), plan),
+                    source_spec_id=decision.fixes.source_spec_id if decision.fixes else None,
                 )
                 for decision in plan_display.shown_decisions(plan)
             ),
@@ -296,7 +320,22 @@ class PlanRecord(StrictModel):
             ),
             outputs=tuple(workflow.terminal_steps),
             steps=steps,
+            run_id=run_id,
         )
+
+    def with_run_status(self, runs: Mapping[str, RunStatus]) -> PlanRecord:
+        """The record with an `EXECUTING` status replaced by its run's.
+
+        `runs` maps run ids to their status in the run ledger. A run that an
+        earlier turn left unfinished and a later one carried on finishes
+        after its record was written, so the ledger states it now
+        (`plan_status_of`). A record with another status, or whose run
+        `runs` does not hold, is returned as it is.
+        """
+        run = runs.get(self.run_id) if self.run_id is not None else None
+        if self.status is not PlanStatus.EXECUTING or run is None:
+            return self
+        return self.model_copy(update={"status": plan_status_of(run)})
 
     def digest_line(self) -> str:
         """The record as one line for the conversation digest.
@@ -455,6 +494,18 @@ class PlanRecord(StrictModel):
             yield f"- and {_count(folded, 'more step')}" if shown else f"- {_count(folded, 'step')}"
 
 
+def plan_status_of(status: RunStatus) -> PlanStatus:
+    """The plan status a record states for a run at `status`: `COMPLETED`
+    or `FAILED` once the run is, else `EXECUTING`."""
+    return _PLAN_STATUS_OF_RUN.get(status, PlanStatus.EXECUTING)
+
+
+_PLAN_STATUS_OF_RUN = {
+    RunStatus.COMPLETED: PlanStatus.COMPLETED,
+    RunStatus.FAILED: PlanStatus.FAILED,
+}
+
+
 # What `PlanRecord.render` sheds over budget, in order. Each try sheds one more.
 _SHED = (
     "fold_steps",
@@ -530,6 +581,11 @@ class FetchReading(StrictModel):
     refusal_code: str | None = None
 
 
+# The reading statuses whose own spec_id a search settled on: a `definite`
+# part, and a candidate or nearest series the orchestrator fetched (`chosen`).
+SETTLED_STATUSES = frozenset({"definite", "chosen"})
+
+
 class SearchReading(StrictModel):
     """One search part as the turn read it.
 
@@ -542,7 +598,11 @@ class SearchReading(StrictModel):
     `open_axes` and `recent_years` (newest first) are empty when the part
     did not state them. `roles` and `open_axes` are the series' own;
     `asked_roles` are the flow parties the search part asked for, each a
-    `planner.parties.PARTY_ROLES` word, empty when it named none. `refusal_code` is the reason code a `no_data`
+    `planner.parties.PARTY_ROLES` word, empty when it named none, and
+    `open_roles` those of them it asked to hold open, every member listed,
+    rather than name: each a `PARTY_ROLES` word, or the role column
+    (`origin`, `destination`) for a word that names a side of the flow
+    alone (`planner.parties.open_party`). `refusal_code` is the reason code a `no_data`
     part gave. `unbound_qualifiers` and `flagged_match` explain a
     `qualifier_not_bound` refusal: its rejected phrase and the broader match
     search left unused. `fetch` is what a later `fetch` of `spec_id` returned.
@@ -577,6 +637,7 @@ class SearchReading(StrictModel):
     roles: tuple[str, ...] = ()
     open_axes: tuple[OpenAxisReading, ...] = ()
     asked_roles: tuple[str, ...] = ()
+    open_roles: tuple[str, ...] = Field(default=(), exclude_if=lambda roles: not roles)
     recent_years: tuple[YearCount, ...] = ()
     refusal_code: str | None = None
     # Search may refuse a same-variable match rather than silently widen the
@@ -603,8 +664,8 @@ class SearchReading(StrictModel):
         """Read one `_part_summary` entry.
 
         Besides the keys `_part_summary` writes, reads the keys
-        `harness.tool_contracts.reading_facts` writes and `asked_roles`
-        (`harness.orchestrator_tools`) when present. A `no_data` part's
+        `harness.tool_contracts.reading_facts` writes and `asked_roles` and
+        `open_roles` (`harness.orchestrator_tools`) when present. A `no_data` part's
         `reason` is the reading's `refusal_code`, and `counted_as` and
         `alternatives` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -651,6 +712,7 @@ class SearchReading(StrictModel):
                 if isinstance(axis, Mapping) and axis.get("column")
             ),
             asked_roles=tuple(str(role) for role in part.get("asked_roles") or ()),
+            open_roles=tuple(str(role) for role in part.get("open_roles") or ()),
             recent_years=tuple(
                 YearCount.model_validate(year) for year in part.get("recent_years") or ()
             ),
@@ -871,7 +933,7 @@ class RenderedReadings(NamedTuple):
     text names them. `other_counts` are the spec_ids of the other ways of
     counting a reading's flow the text names (`measure_choice_text`). A pin
     of one is honoured through the measure choice of the reading that
-    offered it (`planner.agent._measure_choices`), so it needs no pin source
+    offered it (`submission.service.measure_choices`), so it needs no pin source
     of its own.
     """
 

@@ -15,6 +15,7 @@ import io
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,11 +37,10 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
-from data_mcp.settings import Settings as DataMcpSettings
+from executor.completion import ResultPublisher
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
 from harness.graph.answer import link_evidence_to_terminal_frames
@@ -99,7 +99,7 @@ from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 from translator.mechanical import build_translation
 
 from .canonical_versions import serve_canonical_frames, version_of
-from .replay_support import FakeApis
+from .replay_support import FakeApis, data_mcp_client
 from .resolved_revision import resolved_revision
 
 SPEC_ID = "spec_" + "5" * 32
@@ -119,6 +119,16 @@ IDENTITY: dict[str, Any] = {
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("DATA_MCP_URL", "ANALYSIS_MCP_URL", "PRESENTATION_MCP_URL", "DATABASE_URL", "PORT"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture
+async def publisher() -> AsyncIterator[ResultPublisher]:
+    """The completion gate's publisher as the deployed app has it,
+    `McpExecutor.publish_result`, publishing each derived frame with the recipe
+    the store's traces build to a fake dfo-apis."""
+    assembler = FakeApis().assembler()
+    yield McpExecutor(settings=Settings(), publish_frame=assembler.publish_frame).publish_result
+    await assembler.aclose()
 
 
 @pytest.fixture(autouse=True)
@@ -297,7 +307,9 @@ def _approved_plan(
         discovered={"annual_debt_service": source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
@@ -308,6 +320,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
     requirement: Callable[..., DatasetRequirement],
     derived_requirement: Callable[..., AggregateRequirement],
     _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
 ) -> None:
     async def fake_fetch(**_kwargs: Any) -> bytes:
         return _parquet_bytes()
@@ -321,9 +334,7 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
             return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
     async with running_lifespan(app):
@@ -340,7 +351,9 @@ async def test_an_approved_plan_runs_end_to_end_through_the_mounted_services(
         schemas = {schema.name: schema for schema in await surface.list_tools()}
         approved = _approved_plan(decision, requirement, derived_requirement, schemas)
 
-        finished, outcome = await execute_approved_plan(approved, surface=surface)
+        finished, outcome = await execute_approved_plan(
+            approved, surface=surface, publisher=publisher
+        )
 
     assert isinstance(outcome, Accepted), outcome
     assert finished.status is PlanStatus.COMPLETED
@@ -581,7 +594,9 @@ def _share_approved_plan(decision: Callable[..., Decision], schemas: dict[str, A
         discovered={"health_oda": health_source, "total_oda": total_source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_services(
@@ -590,6 +605,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
 ) -> None:
     """`retrieve(health) + retrieve(total) -> share_of(axis=donor) -> rank`, run
     through the real compiler and the real mounted services. France spends
@@ -614,9 +630,7 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         )
         return httpx2.Response(200, json=response)
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
     async with running_lifespan(app):
@@ -633,7 +647,9 @@ async def test_the_keyed_share_chain_runs_end_to_end_through_the_mounted_service
         schemas = {schema.name: schema for schema in await surface.list_tools()}
         approved = _share_approved_plan(decision, schemas)
 
-        finished, outcome = await execute_approved_plan(approved, surface=surface)
+        finished, outcome = await execute_approved_plan(
+            approved, surface=surface, publisher=publisher
+        )
 
     assert isinstance(outcome, Accepted), outcome
     assert finished.status is PlanStatus.COMPLETED
@@ -845,7 +861,9 @@ def _rank_approved_plan(decision: Callable[..., Decision], schemas: dict[str, An
         discovered={"aid_received": source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
@@ -854,6 +872,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
 ) -> None:
     """The motivating per-period-rank chain, over a fixture with a genuine
     hole (Uganda has no row in 2011), so each year's rank positions depend
@@ -877,9 +896,7 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
             return httpx2.Response(200, json=rank_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
     async with running_lifespan(app):
@@ -896,7 +913,9 @@ async def test_kenyas_rank_series_runs_end_to_end_through_the_mounted_services(
         schemas = {schema.name: schema for schema in await surface.list_tools()}
         approved = _rank_approved_plan(decision, schemas)
 
-        finished, outcome = await execute_approved_plan(approved, surface=surface)
+        finished, outcome = await execute_approved_plan(
+            approved, surface=surface, publisher=publisher
+        )
 
     assert isinstance(outcome, Accepted), outcome
     assert finished.status is PlanStatus.COMPLETED
@@ -1056,7 +1075,9 @@ def _top_donors_approved_plan(decision: Callable[..., Decision], schemas: dict[s
         discovered={"oda_disbursed": source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
@@ -1065,6 +1086,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
 ) -> None:
     """A planned `limit=3` reaches `rank` as an argument, so the stored frame
     holds the three highest donors at their measured amounts, and the three
@@ -1082,9 +1104,7 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
             return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
     async with running_lifespan(app):
@@ -1103,7 +1123,9 @@ async def test_a_top_three_rank_keeps_three_donors_and_reports_the_rest(
         assert approved.workflow is not None
         assert approved.workflow.steps[-1].args["limit"] == 3
 
-        finished, outcome = await execute_approved_plan(approved, surface=surface)
+        finished, outcome = await execute_approved_plan(
+            approved, surface=surface, publisher=publisher
+        )
         assert isinstance(outcome, Accepted), outcome
         stored_frame, stored_trace = await get_frame_store().get(outcome.results["top_three"])
 
@@ -1267,7 +1289,9 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
         discovered={"oda_disbursed": source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 class _CountingSurface:
@@ -1324,9 +1348,7 @@ def run_rolling_plan(
                 return httpx2.Response(200, json=mint_response)
             raise AssertionError(f"unexpected call to {request.url.path}")
 
-        client_holder.set_client(
-            UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-        )
+        client_holder.set_client(data_mcp_client(mint_handler))
         app = create_app(settings=Settings(mcp_api_token="test-token"))
         async with running_lifespan(app):
             surface = _CountingSurface(
@@ -1547,9 +1569,7 @@ async def studio(
         definition = {**mint_response["definition"], "identity": identity}
         return httpx2.Response(200, json={**mint_response, "definition": definition})
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     apis = FakeApis()
     assembler = apis.assembler()
     replays: list[Sequence[Mapping[str, Any]]] = []
@@ -1615,7 +1635,7 @@ async def studio(
         # `plan_done` lists a plan's final frames to the agent this way.
         described = await executor(tool="describe_frame", args={"frame_ref": run_frame})
         frames: dict[str, Any] = {}
-        register_frames(frames, [(run_frame, described["view"])])
+        register_frames(frames, [(run_frame, described["view"], run_frame)])
         tools = build_orchestrator_tools(resolver=_no_search, executor=executor)
         yield _Studio(
             tools={tool.__name__: tool for tool in tools},
@@ -1969,7 +1989,7 @@ def _top_countries_by_gdp_plan(decision: Callable[..., Decision], schemas: dict[
                 id="gdp",
                 decision_ids=["level"],
                 measure="GDP",
-                across="country",
+                across=("country",),
                 period=Period(start=2023, end=2023),
             ),
             FilterRequirement(
@@ -1991,7 +2011,9 @@ def _top_countries_by_gdp_plan(decision: Callable[..., Decision], schemas: dict[
         plan=draft, translation=translation, schemas=schemas, discovered={"gdp": source}
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
@@ -2000,6 +2022,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     mounted_mcp_transport: Callable[..., Any],
     decision: Callable[..., Decision],
     _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
 ) -> None:
     """The retrieval asks dfo-apis for each place's types, the filter keeps the
     places typed Country, and the top two are the two largest countries: Earth
@@ -2019,9 +2042,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
             return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
     async with running_lifespan(app):
@@ -2038,7 +2059,9 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
         schemas = {schema.name: schema for schema in await surface.list_tools()}
         approved = _top_countries_by_gdp_plan(decision, schemas)
 
-        finished, outcome = await execute_approved_plan(approved, surface=surface)
+        finished, outcome = await execute_approved_plan(
+            approved, surface=surface, publisher=publisher
+        )
         assert isinstance(outcome, Accepted), outcome
         stored_frame, _trace = await get_frame_store().get(outcome.results["top_two"])
 
@@ -2093,9 +2116,7 @@ def _serve_gdp_in_both_renderings(
     serve_canonical_frames(monkeypatch, fake_fetch)
     fetch_any = frame_materialisation._fetch_artifact_bytes
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", record_canonical)
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
     return fetched
 
 

@@ -1,0 +1,186 @@
+{
+  "id": "rank-external-debt-african-countries",
+  "kind": "rank",
+  "origin": "trace 92003631-c453-45ec-adcd-054185998823",
+  "question": "Compare external debt across every African country, all at once, 2020 to 2024",
+  "searches": [
+    {
+      "query": "Compare external debt across every African country, all at once, 2020 to 2024",
+      "parts": [
+        {
+          "time": "2020 to 2024",
+          "variable": "external debt",
+          "entities": [
+            {
+              "members": true,
+              "text": "Africa"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Compare external debt across every African country, all at once, 2020 to 2024",
+  "asks": [
+    "Comparison of external debt stocks across African countries from 2020 to 2024",
+    "Ranking of African countries by external debt in 2024"
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "filter",
+    "rank"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "rank, not comparison: 'compare' sets the countries' debt side by side and orders them, with no difference between two series asked for"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Compare external debt across every African country, all at once, 2020 to 2024",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_african_country",
+        "description": "Which countries the 2024 ranking compares.",
+        "options": [
+          "every African country with data",
+          "a named list of countries"
+        ],
+        "chosen": "every African country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for every African country, so every member is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt",
+        "entities": [
+          {
+            "name": "Africa",
+            "role": "debtor",
+            "members": true
+          }
+        ],
+        "period": {
+          "start": 2020,
+          "end": 2024
+        },
+        "source_spec_id": "spec_3c5902437015dbfe3f85f736548d2ab9"
+      },
+      {
+        "kind": "filter",
+        "id": "debt_2024",
+        "input_id": "debt",
+        "predicates": [
+          {
+            "kind": "period_threshold",
+            "op": "eq",
+            "year": 2024
+          }
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "ranking_2024",
+        "input_id": "debt_2024",
+        "direction": "highest_first",
+        "among": "population",
+        "decision_ids": [
+          "every_african_country"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "ranking_2024"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Rank every year on its own, which holds the 2024 ranking.",
+      "payload": {
+        "question": "Compare external debt across every African country, all at once, 2020 to 2024",
+        "answer_mode": "computed",
+        "decisions": [
+          {
+            "slot": "every_african_country",
+            "description": "Which countries the 2024 ranking compares.",
+            "options": [
+              "every African country with data",
+              "a named list of countries"
+            ],
+            "chosen": "every African country with data",
+            "resolved_by": "planner_default",
+            "rationale": "The question asks for every African country, so every member is ranked.",
+            "fixes": [
+              "among"
+            ]
+          }
+        ],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "debt",
+            "measure": "external debt",
+            "entities": [
+              {
+                "name": "Africa",
+                "role": "debtor",
+                "members": true
+              }
+            ],
+            "period": {
+              "start": 2020,
+              "end": 2024
+            },
+            "source_spec_id": "spec_3c5902437015dbfe3f85f736548d2ab9"
+          },
+          {
+            "kind": "rank",
+            "id": "ranking",
+            "input_id": "debt",
+            "direction": "highest_first",
+            "among": "population",
+            "per_period": true,
+            "decision_ids": [
+              "every_african_country"
+            ]
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "debt"
+            ]
+          },
+          {
+            "ask": 1,
+            "outputs": [
+              "ranking"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

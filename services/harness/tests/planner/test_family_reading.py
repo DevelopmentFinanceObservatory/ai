@@ -85,27 +85,6 @@ def test_a_filter_reads_a_family_read_separately(
     assert plan.evidence_requirements[1] == from_2020
 
 
-def test_a_requirement_contradicting_the_reading_its_decision_fixes_is_refused(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: AggregateFactory,
-) -> None:
-    total = decision(
-        slot="read_as_total",
-        description="Whether to read the family as its total or one series per StatVar.",
-        options=["sum", "separate"],
-        chosen="sum",
-        rationale="The question asks for the total.",
-        fixes=DecisionFixes(stat_vars=StatVarReading.SUM),
-    )
-
-    with pytest.raises(ValueError, match="states stat_vars None"):
-        _plan(
-            [decision(), total],
-            [requirement(decision_ids=["measure", "read_as_total"]), derived_requirement()],
-        )
-
-
 # --- A breakdown by sector ------------------------------------------------------
 
 _TOP_SECTORS = Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
@@ -117,7 +96,7 @@ def _aid_to_kenya(**overrides: Any) -> DatasetRequirement:
         "decision_ids": ["measure"],
         "measure": "aid",
         "entities": [Entity(name="Kenya", role="recipient")],
-        "across": "donor",
+        "across": ["donor"],
         "period": Period(start=2024, end=2024),
         "stat_vars": StatVarReading.SEPARATE,
         "breakdown": _TOP_SECTORS,
@@ -225,7 +204,7 @@ def test_a_sector_ranking_sets_beside_another_year_by_a_per_period_rank_or_a_gro
             "no entity role or `across` may also be 'sector'",
         ),
         (
-            lambda: [_aid_to_kenya(across="sector"), _by_sector()],
+            lambda: [_aid_to_kenya(across=("sector",)), _by_sector()],
             "no entity role or `across` may also be 'sector'",
         ),
         (

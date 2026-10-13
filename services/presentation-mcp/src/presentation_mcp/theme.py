@@ -198,9 +198,11 @@ THEME_CSS = Template("""
 
 /* The footer row. The accordion's trigger is the source line, and
    "Built with" sits at the right end of that line, clear of the details
-   that open below it. */
+   that open below it. A footer without the accordion keeps the line's
+   height, so the mark stays inside the card. */
 .dfo-chrome {
   position: relative;
+  min-height: calc(12px * 1.3);
 }
 
 .dfo-more .pf-accordion-trigger {

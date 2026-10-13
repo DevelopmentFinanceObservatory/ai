@@ -3,9 +3,8 @@
 `decision` and `requirement` build a valid `Decision` and `DatasetRequirement`
 with any field overridden, so a test that cares about one field states only
 that field. `pinning_decision` builds a `Decision`, resolved by the user by
-default, whose `fixes` states a pinned `source_spec_id`, the one every
-pinned-plan fixture needs since `plan._check_pin_rests_on_a_fixing_decision`
-compares the pin structurally, not against `resolved_by`. `derived_requirement` builds a valid
+default, whose `fixes` records a pinned `source_spec_id`, as a stored plan
+states it. `derived_requirement` builds a valid
 `AggregateRequirement` on top of `requirement`'s dataset, and `requirements`
 pairs the two into a plan's minimal, valid `evidence_requirements`. None of
 these are trivially constructible -- a `Decision`'s `chosen` value has to be
@@ -175,14 +174,10 @@ def decision() -> Callable[..., Decision]:
 def pinning_decision(decision: Callable[..., Decision]) -> Callable[..., Decision]:
     """Return a factory for a `Decision`, resolved by the user by default, that fixes a pinned `source_spec_id`.
 
-    A pinned `DatasetRequirement.source_spec_id` needs a cited decision whose
-    own `fixes.source_spec_id` names that same pin
-    (`plan._check_pin_rests_on_a_fixing_decision`); this states that binding
-    in one line, so every pinned-plan fixture does not restate it by hand.
-    `resolved_by` defaults to `USER` because most of this suite's pinned
-    plans model a user's own choice, but the validator itself does not
-    require it -- a `planner_default` decision that fixes the same
-    source_spec_id pins it just as well.
+    A pin needs no decision; this one records the pin in `fixes`, the way
+    a stored plan or `propose_plan`'s own measure decision states it.
+    A `DecisionDraft` never names `source_spec_id`, so `decision_drafts.drafts`
+    drops it.
     """
 
     def _pinning_decision(spec_id: SpecId, **overrides: Any) -> Decision:

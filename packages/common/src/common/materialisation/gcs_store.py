@@ -77,8 +77,15 @@ reads. It holds `frame_to_parquet_bytes`'s canonical Arrow layout, whose
 `unit` struct is `{ref, request, composed}` with `composed` a composed
 unit's JCS text. `frame_from_verified_parquet_bytes` reads it with
 `pq.read_table` and wraps the table with `Frame.from_table`, which checks
-the schema against the canonical frame schema and trusts the cells. An
-object that passes all four checks and still has another schema raises
+the schema against the canonical frame schema and trusts the cells.
+
+A flow table minted before dfo-apis renamed its party-kind column holds
+`{role}_kind` where a current mint holds `{role}_party_kind`. The bucket keeps
+such a frame with no age rule, and every reader looks the column up by its
+current name, so a read renames the legacy column once, after the
+content-version check (`_with_party_kind_columns`).
+
+An object that passes all four checks and still has another schema raises
 `FrameIntegrityError`.
 
 An object under an older prefix (`frames/v3/`, `frames/v2/`, `frames/v1/`,
@@ -157,7 +164,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, cast
 
 import pyarrow.parquet as pq
-from dfo_frame_grammar import FrameError
+from dfo_frame_grammar import Frame, FrameError
 from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
 from pydantic import ValidationError
@@ -182,10 +189,9 @@ from common.materialisation.store import (
     HeldFrame,
 )
 from common.materialisation.trace_codec import decode_trace, encode_trace
+from common.place_type import PARTY_ROLES, kind_column
 
 if TYPE_CHECKING:
-    from dfo_frame_grammar import Frame
-
     from common.materialisation.trace import StoredFrameTrace
 
 _PARQUET_CONTENT_TYPE = "application/octet-stream"
@@ -274,6 +280,29 @@ _LAYOUT = "v4"
 _FRAMES_PREFIX = f"frames/{_LAYOUT}"
 _MINT_RECORD_PREFIX = f"mints/{_LAYOUT}"
 _ANCHOR_RECORD_PREFIX = f"anchors/{_LAYOUT}"
+
+
+def _with_party_kind_columns(frame: Frame) -> Frame:
+    """`frame` with each flow party's `{role}_kind` column renamed `{role}_party_kind`.
+
+    Serves frames minted before the rename, which the bucket keeps with no age rule: the
+    old column is an unknown role to `publish_body` and invisible to the party-kind
+    checks of the analysis verbs. A frame holding no such column is returned as is. The
+    rename keeps the column order derived from the role keys and every row where it
+    was, since a party's kind follows from the party.
+
+    Raises:
+        FrameError: `schema_violation` when the renamed columns are not a derived frame
+            column order.
+    """
+    renames = {
+        f"{role}_kind": kind_column(role) for role in PARTY_ROLES if f"{role}_kind" in frame.columns
+    }
+    if not renames:
+        return frame
+    columns = tuple(renames.get(column, column) for column in frame.columns)
+    return Frame.from_table(columns=columns, table=frame.table.rename_columns(list(columns)))
+
 
 # The name of a frame's object. `FrameRef` decides whether the two ids are a frame's.
 _FRAME_OBJECT_NAME = re.compile(
@@ -571,7 +600,12 @@ class GcsMaterialisationStore:
                 raise FrameIntegrityError(
                     ref, reason="recomputed content_version does not match the expected value"
                 )
-        return frame
+        try:
+            return _with_party_kind_columns(frame)
+        except FrameError as exc:
+            raise FrameIntegrityError(
+                ref, reason=f"stored object's legacy party-kind column does not rename: {exc}"
+            ) from exc
 
     async def get_trace(self, ref: FrameRef) -> StoredFrameTrace | None:
         return await asyncio.to_thread(self._trace_of, ref)

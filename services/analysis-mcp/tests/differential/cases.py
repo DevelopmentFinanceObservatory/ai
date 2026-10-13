@@ -453,8 +453,8 @@ _CROSS_SIDE_CONVERTED_UNITS = (
 
 
 def compare_cases(rng: random.Random) -> list[Case]:
-    """`run_compare(left, right, left_entity=, right_entity=, left_pinned_unit=,
-    right_pinned_unit=)`. One frame spec means both sides read it."""
+    """`run_compare(left, right, stat_var=, left_entity=, right_entity=,
+    left_pinned_unit=, right_pinned_unit=)`. One frame spec means both sides read it."""
     cases = []
     two_donors = grid(rng, roles={"donor": DONORS[:2]}, periods=YEARS[:5], values="signed")
     left, right = {"donor": DONORS[0]}, {"donor": DONORS[1]}
@@ -584,6 +584,7 @@ def _compare_params(
     right_pin: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "stat_var": "dcid:ops_" + "d" * 32,
         "left_entity": dict(left),
         "right_entity": dict(right),
         "left_pinned_unit": left_pin,

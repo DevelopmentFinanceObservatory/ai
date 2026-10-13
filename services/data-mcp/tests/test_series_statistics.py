@@ -23,6 +23,7 @@ from data_mcp.series_statistics import (
     SERIES_STATISTICS_SCHEMA,
     SeriesStatisticsSchemaError,
     _get_bounded,
+    continuing_method,
     fetch_series_statistics,
     fetch_series_statistics_table,
     find_statistics_artifact,
@@ -262,7 +263,8 @@ async def test_fetch_series_statistics_decodes_every_row() -> None:
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=2,
+            expected_series=2,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
@@ -299,7 +301,8 @@ async def test_fetch_series_statistics_follows_the_links_redirect_without_creden
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=0,
+            expected_series=0,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
@@ -328,14 +331,15 @@ async def test_fetch_series_statistics_zero_rows() -> None:
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=0,
+            expected_series=0,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
     assert result == []
 
 
-async def test_fetch_series_statistics_with_no_expected_rows_skips_the_count_check() -> None:
+async def test_fetch_series_statistics_with_no_expected_series_skips_the_count_check() -> None:
     """A manifest that carries the artifact but no `series_count` has no count to
     promise; the digest and schema checks still run."""
     data = _parquet_bytes([_row(stat_var="dcid:VarA"), _row(stat_var="dcid:VarB")])
@@ -355,7 +359,8 @@ async def test_fetch_series_statistics_with_no_expected_rows_skips_the_count_che
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=None,
+            expected_series=None,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
@@ -388,7 +393,8 @@ async def test_fetch_series_statistics_refuses_a_body_over_the_advertised_size()
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=2,
+                expected_series=2,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -418,7 +424,8 @@ async def test_fetch_series_statistics_sends_accept_encoding_identity() -> None:
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=1,
+            expected_series=1,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
@@ -448,7 +455,8 @@ async def test_fetch_series_statistics_refuses_on_content_length_before_reading_
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -487,8 +495,10 @@ async def test_get_bounded_refuses_the_chunk_that_would_cross_max_bytes() -> Non
 # fetch_series_statistics -- artifact-digest mismatch refuses
 
 
-@pytest.mark.parametrize("expected_rows", [1, None])
-async def test_fetch_series_statistics_refuses_a_digest_mismatch(expected_rows: int | None) -> None:
+@pytest.mark.parametrize("expected_series", [1, None])
+async def test_fetch_series_statistics_refuses_a_digest_mismatch(
+    expected_series: int | None,
+) -> None:
     data = _parquet_bytes([_row()])
     manifest = _manifest(rendering={"statistics": "series"}, artifact_digest=_ARTIFACT_DIGEST)
     artifact = manifest.artifacts[0]
@@ -506,7 +516,8 @@ async def test_fetch_series_statistics_refuses_a_digest_mismatch(expected_rows: 
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=expected_rows,
+                expected_series=expected_series,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -533,7 +544,8 @@ async def test_fetch_series_statistics_refuses_a_wrong_schema_tag() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -557,7 +569,8 @@ async def test_fetch_series_statistics_refuses_a_missing_schema_tag() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -586,7 +599,8 @@ async def test_fetch_series_statistics_refuses_a_malformed_facet_cell() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=2,
+                expected_series=2,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -613,7 +627,8 @@ async def test_fetch_series_statistics_refuses_a_row_count_mismatch() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=3,
+                expected_series=3,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -645,7 +660,8 @@ async def test_fetch_series_statistics_checks_row_count_before_converting_rows()
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=3,
+                expected_series=3,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -682,7 +698,8 @@ async def test_fetch_series_statistics_never_decodes_columns_on_a_row_count_mism
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=3,
+                expected_series=3,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -707,7 +724,8 @@ async def test_fetch_series_statistics_raises_on_a_get_failure() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -731,7 +749,8 @@ async def test_fetch_series_statistics_raises_on_malformed_bytes() -> None:
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
             )
 
@@ -756,7 +775,8 @@ async def test_fetch_series_statistics_raises_timeout_when_signing_outruns_its_d
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
                 deadline=CallDeadline.after(0.05),
             )
@@ -779,7 +799,8 @@ async def test_fetch_series_statistics_raises_timeout_when_the_get_outruns_its_d
                 subject_id=_SPEC_ID,
                 content_version=_CONTENT_VERSION,
                 artifact=artifact,
-                expected_rows=1,
+                expected_series=1,
+                continuing=None,
                 transport=httpx2.MockTransport(get_handler),
                 deadline=CallDeadline.after(0.05),
             )
@@ -788,7 +809,9 @@ async def test_fetch_series_statistics_raises_timeout_when_the_get_outruns_its_d
 # fetch_series_statistics_table -- the checked Arrow table
 
 
-async def _fetch_table(data: bytes, *, expected_rows: int) -> pa.Table:
+async def _fetch_table(
+    data: bytes, *, expected_series: int, continuing: str | None = None
+) -> pa.Table:
     """`fetch_series_statistics_table` over `data`, served as the artifact's bytes."""
     digest = _digest_for(data)
     manifest = _manifest(rendering={"statistics": "series"}, artifact_digest=digest)
@@ -806,7 +829,8 @@ async def _fetch_table(data: bytes, *, expected_rows: int) -> pa.Table:
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=expected_rows,
+            expected_series=expected_series,
+            continuing=continuing,
             transport=httpx2.MockTransport(get_handler),
         )
 
@@ -823,7 +847,7 @@ def _with_column(data: bytes, name: str, column: pa.Array) -> bytes:
 async def test_the_table_carries_every_row_in_the_producers_schema() -> None:
     rows = [_row(stat_var="dcid:VarA"), _row(stat_var="dcid:VarB", change=None)]
 
-    table = await _fetch_table(_parquet_bytes(rows), expected_rows=2)
+    table = await _fetch_table(_parquet_bytes(rows), expected_series=2)
 
     assert table.schema.equals(SERIES_STATISTICS_ARROW_SCHEMA)
     assert table["stat_var"].to_pylist() == ["dcid:VarA", "dcid:VarB"]
@@ -835,7 +859,7 @@ async def test_the_table_accepts_a_column_its_type_can_hold() -> None:
     rows = [_row(observations=7)]
     data = _with_column(_parquet_bytes(rows), "observations", pa.array([7], pa.int32()))
 
-    table = await _fetch_table(data, expected_rows=1)
+    table = await _fetch_table(data, expected_series=1)
 
     assert table["observations"].to_pylist() == [7]
 
@@ -864,7 +888,7 @@ async def test_the_table_refuses_a_row_no_series_model_could_hold(
     data = _with_column(_parquet_bytes([_row()]), column, values)
 
     with pytest.raises(SeriesStatisticsSchemaError):
-        await _fetch_table(data, expected_rows=1)
+        await _fetch_table(data, expected_series=1)
 
 
 async def test_the_table_refuses_a_missing_column() -> None:
@@ -873,12 +897,12 @@ async def test_the_table_refuses_a_missing_column() -> None:
     pq.write_table(table.replace_schema_metadata({"dfo.schema": SERIES_STATISTICS_SCHEMA}), buf)
 
     with pytest.raises(SeriesStatisticsSchemaError):
-        await _fetch_table(buf.getvalue(), expected_rows=1)
+        await _fetch_table(buf.getvalue(), expected_series=1)
 
 
 async def test_a_table_built_from_models_reads_back_as_the_same_models() -> None:
     data = _parquet_bytes([_row(stat_var="dcid:VarA"), _row(stat_var="dcid:VarB", change=None)])
-    table = await _fetch_table(data, expected_rows=2)
+    table = await _fetch_table(data, expected_series=2)
     digest = _digest_for(data)
     artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
 
@@ -894,8 +918,110 @@ async def test_a_table_built_from_models_reads_back_as_the_same_models() -> None
             subject_id=_SPEC_ID,
             content_version=_CONTENT_VERSION,
             artifact=artifact,
-            expected_rows=2,
+            expected_series=2,
+            continuing=None,
             transport=httpx2.MockTransport(get_handler),
         )
 
     assert series_statistics_table(models).equals(table)
+
+
+# A continued series: a row for its reported method and a row for its estimates
+
+_IMF = {"unit": "Percent", "provenance": "provenance/IMFWorldEconomicOutlook"}
+_ZAMBIA = [{"role": "observationAbout", "ref": "country/ZMB"}]
+_REPORTED = _row(stat_var="dcid:Debt", entities=_ZAMBIA, facet=_IMF, observations=10)
+_ESTIMATED = _row(
+    stat_var="dcid:Debt",
+    entities=_ZAMBIA,
+    facet={**_IMF, "measurementMethod": "Estimated"},
+    observations=2,
+)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_series"),
+    [
+        pytest.param([_REPORTED, _ESTIMATED], 1, id="a-series-and-its-estimates-count-once"),
+        pytest.param(
+            [_REPORTED, _ESTIMATED, _row(stat_var="dcid:Other", entities=_ZAMBIA, facet=_IMF)],
+            2,
+            id="beside-an-uncontinued-series",
+        ),
+        pytest.param([_ESTIMATED], 1, id="estimates-continuing-no-row-are-a-series"),
+    ],
+)
+async def test_a_continued_series_rows_read_as_the_manifests_series(
+    rows: list[dict[str, Any]], expected_series: int
+) -> None:
+    """The series-statistics/1 file of a frame Datasets continued with its source's
+    estimates holds a row per method, and its manifest counts the series once."""
+    table = await _fetch_table(
+        _parquet_bytes(rows), expected_series=expected_series, continuing="Estimated"
+    )
+
+    assert table.num_rows == len(rows)
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_series", "continuing", "message"),
+    [
+        pytest.param(
+            [_REPORTED, _ESTIMATED], 1, None, "carries 2 row", id="no-continuation-on-the-manifest"
+        ),
+        pytest.param(
+            [_REPORTED, _ESTIMATED],
+            2,
+            "Estimated",
+            "holding 1 series",
+            id="more-series-than-the-file-holds",
+        ),
+        pytest.param(
+            [_REPORTED, {**_ESTIMATED, "stat_var": "dcid:Other"}],
+            1,
+            "Estimated",
+            "holding 2 series",
+            id="estimates-of-another-variable",
+        ),
+        pytest.param(
+            [_REPORTED, _ESTIMATED],
+            1,
+            "Provisional",
+            "holding 2 series",
+            id="another-continuing-method",
+        ),
+    ],
+)
+async def test_a_file_not_holding_the_manifests_series_refuses(
+    rows: list[dict[str, Any]], expected_series: int, continuing: str | None, message: str
+) -> None:
+    with pytest.raises(SeriesStatisticsSchemaError, match=message):
+        await _fetch_table(
+            _parquet_bytes(rows), expected_series=expected_series, continuing=continuing
+        )
+
+
+@pytest.mark.parametrize(
+    ("trace", "method"),
+    [
+        pytest.param(
+            {
+                "continuations": [
+                    {
+                        "axis": "measurementMethod",
+                        "method": "Estimated",
+                        "periods": ["2025", "2026"],
+                    }
+                ]
+            },
+            "Estimated",
+            id="continued",
+        ),
+        pytest.param({"continuations": []}, None, id="nothing-continued"),
+        pytest.param({}, None, id="no-continuations-member"),
+    ],
+)
+def test_continuing_method_reads_the_trace(trace: dict[str, Any], method: str | None) -> None:
+    manifest = _manifest(rendering={"statistics": "series"}).model_copy(update={"trace": trace})
+
+    assert continuing_method(manifest) == method

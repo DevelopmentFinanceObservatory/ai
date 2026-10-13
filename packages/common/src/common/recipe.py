@@ -91,6 +91,7 @@ from common.rolling import anchor_key, rolling_roots
 
 __all__ = [
     "RECIPE_SCHEMA_VERSION",
+    "AncestryReads",
     "RecipeAncestorMissingError",
     "RecipeAnchorError",
     "RecipeError",
@@ -104,6 +105,8 @@ __all__ = [
     "reached_roots",
     "recipe_anchor",
     "replay_key",
+    "root_mint_record",
+    "stored_trace",
 ]
 
 RECIPE_SCHEMA_VERSION = 1
@@ -388,12 +391,49 @@ async def recipe_anchor(
     }
 
 
+class AncestryReads:
+    """The stored traces of derived frames and the mint records of roots that
+    walks of the store read, each read once by its pair and kept for later
+    walks. `build_recipe` and `common.steps.assemble_steps` given one
+    `AncestryReads` read each ancestor's trace and each root's mint record once
+    between them. Only a read that succeeds is kept.
+
+    Args:
+        store: The store the traces and mint records are read from.
+        recover: Rebuilds the mint record of a root that has none. Without it
+            such a root fails the read.
+    """
+
+    def __init__(
+        self, *, store: MaterialisationStore, recover: RecoverMintRecord | None = None
+    ) -> None:
+        self._store = store
+        self._recover = recover
+        self._traces: dict[tuple[str, str], StoredFrameTrace] = {}
+        self._mint_records: dict[tuple[str, str], MintRecord] = {}
+
+    async def trace(self, ref: FrameRef) -> StoredFrameTrace:
+        """`stored_trace` of the derived frame `ref`."""
+        key = (ref.spec_id, ref.content_version)
+        if key not in self._traces:
+            self._traces[key] = await stored_trace(ref, store=self._store)
+        return self._traces[key]
+
+    async def mint_record(self, ref: FrameRef) -> MintRecord:
+        """`root_mint_record` of the root frame `ref`."""
+        key = (ref.spec_id, ref.content_version)
+        if key not in self._mint_records:
+            self._mint_records[key] = await root_mint_record(
+                ref, store=self._store, recover=self._recover
+            )
+        return self._mint_records[key]
+
+
 class _Walk:
     """One walk of the store from a derived frame to its roots."""
 
-    def __init__(self, *, store: MaterialisationStore, recover: RecoverMintRecord | None) -> None:
-        self._store = store
-        self._recover = recover
+    def __init__(self, *, reads: AncestryReads) -> None:
+        self._reads = reads
         self._nodes: dict[tuple[str, str], dict[str, Any]] = {}
         self.roots: list[MintRecord] = []
         # Each derived frame's `ExecutionIdentity.canonical_string()`, by pair.
@@ -412,23 +452,13 @@ class _Walk:
         return self._nodes[key]
 
     async def _root(self, ref: FrameRef) -> dict[str, Any]:
-        try:
-            record = await self._store.get_mint_record(ref)
-        except FrameIntegrityError as exc:
-            raise RecipeRootUnrecoverableError(ref, reason=exc.reason) from exc
-        if record is None:
-            if self._recover is None:
-                raise RecipeRootUnrecoverableError(ref, reason="no_mint_record")
-            try:
-                record = await self._recover(ref)
-            except MintRecordUnrecoverableError as exc:
-                raise RecipeRootUnrecoverableError(ref, reason=exc.reason) from exc
+        record = await self._reads.mint_record(ref)
         self.roots.append(record)
         return {"frame": _pair(ref), "root": len(self.roots) - 1}
 
     async def _derived(self, ref: FrameRef, *, trace: StoredFrameTrace | None) -> dict[str, Any]:
         if trace is None:
-            trace = await _stored_trace(ref, store=self._store)
+            trace = await self._reads.trace(ref)
         op_spec = _op_spec_of(ref, trace)
         self.execution_identities[(ref.spec_id, ref.content_version)] = _execution_identity_of(
             ref, trace
@@ -439,8 +469,37 @@ class _Walk:
         return {"frame": _pair(ref), "op_spec": op_spec, "inputs": inputs}
 
 
-async def _stored_trace(ref: FrameRef, *, store: MaterialisationStore) -> StoredFrameTrace:
-    """The trace the store holds for the derived frame `ref`."""
+async def root_mint_record(
+    ref: FrameRef, *, store: MaterialisationStore, recover: RecoverMintRecord | None
+) -> MintRecord:
+    """The mint record of the root frame `ref`: the store's, else the one
+    `recover` rebuilds.
+
+    Raises:
+        RecipeRootUnrecoverableError: The store's record fails its check, or
+            the store holds none and none was rebuilt.
+    """
+    try:
+        record = await store.get_mint_record(ref)
+    except FrameIntegrityError as exc:
+        raise RecipeRootUnrecoverableError(ref, reason=exc.reason) from exc
+    if record is not None:
+        return record
+    if recover is None:
+        raise RecipeRootUnrecoverableError(ref, reason="no_mint_record")
+    try:
+        return await recover(ref)
+    except MintRecordUnrecoverableError as exc:
+        raise RecipeRootUnrecoverableError(ref, reason=exc.reason) from exc
+
+
+async def stored_trace(ref: FrameRef, *, store: MaterialisationStore) -> StoredFrameTrace:
+    """The trace the store holds for the derived frame `ref`.
+
+    Raises:
+        RecipeAncestorMissingError: The store holds none, or it has expired.
+        RecipeTraceUnusableError: The stored object fails a store check.
+    """
     try:
         trace = await store.get_trace(ref)
     except FrameExpired as exc:
@@ -515,7 +574,7 @@ async def reached_roots(
             found[key] = current
             continue
         if held is None:
-            held = await _stored_trace(current, store=store)
+            held = await stored_trace(current, store=store)
         for slot, pair in _input_slots(_op_spec_of(current, held)):
             pending.append((_slot_ref(current, slot, pair), None))
     return [found[key] for key in sorted(found)]
@@ -528,6 +587,7 @@ async def build_recipe(
     trace: StoredFrameTrace | None = None,
     recover: RecoverMintRecord | None = None,
     root_options: StateRootOptions | None = None,
+    reads: AncestryReads | None = None,
 ) -> dict[str, Any]:
     """The recipe of the derived frame held under `ref`. See the module docstring.
 
@@ -541,6 +601,9 @@ async def build_recipe(
             a root fails the build.
         root_options: The `options` to state for each root, in place of its mint
             record's. They enter the root's entry in `roots` and the normal form.
+        reads: The reads of `store` to share with another walk of the same
+            ancestry, such as `common.steps.assemble_steps`. Its own `recover`
+            stands in for `recover`. Without it the build reads afresh.
 
     Raises:
         RecipeAncestorMissingError: The store holds no trace for `ref` or for a derived
@@ -552,7 +615,7 @@ async def build_recipe(
     """
     if ref.spec_id.startswith(_ROOT_SPEC_ID_PREFIX):
         raise ValueError(f"{ref.spec_id} names a root frame, which has no recipe")
-    walk = _Walk(store=store, recover=recover)
+    walk = _Walk(reads=reads or AncestryReads(store=store, recover=recover))
     tree = await walk.node(ref, trace=trace)
     roots = [record.model_dump(mode="json") for record in walk.roots]
     if root_options is not None:

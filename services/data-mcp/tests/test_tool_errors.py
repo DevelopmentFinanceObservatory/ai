@@ -1355,31 +1355,23 @@ def test_entity_not_found_distinguishes_not_held_from_no_match_by_field() -> Non
     """`not_held` must be readable as a field, not inferred from message prose."""
     no_match = ToolRefusal.entity_not_found(role="country", query="Qwerty", near_matches=[])
     not_held = ToolRefusal.entity_not_found(
-        role="country", query="Andorra", near_matches=[], not_held_entity_type="geo.country"
+        role="country", query="Andorra", near_matches=[], not_held=True
+    )
+    memberless = ToolRefusal.entity_not_found(
+        role="country", query="Micronesia", near_matches=[], memberless_kind="subregion"
     )
 
     assert no_match.fix["not_held"] is False
     assert "entity_type" not in no_match.fix
     assert not_held.fix["not_held"] is True
-    assert not_held.fix["entity_type"] == "geo.country"
-    assert "does not hold" in not_held.message
-
-
-def test_entity_not_found_names_the_continent_workaround_only_for_continents() -> None:
-    continent = ToolRefusal.entity_not_found(
-        role="recipient", query="World", near_matches=[], not_held_entity_type="geo.continent"
-    )
-    country = ToolRefusal.entity_not_found(
-        role="recipient", query="Andorra", near_matches=[], not_held_entity_type="geo.country"
-    )
-
-    assert "full set of continents" in continent.message
-    assert "full set of continents" not in country.message
+    assert "entity_type" not in not_held.fix
+    assert memberless.fix["not_held"] is True
+    assert memberless.fix["entity_type"] == "subregion"
 
 
 def test_entity_ambiguous_truncates_to_the_candidate_cap() -> None:
     candidates = [
-        EntityCandidate(dcid=f"dcid/{i}", label=f"Country {i}", type="Country", parent="Earth")
+        EntityCandidate(dcid=f"dcid/{i}", label=f"Country {i}", type="Country")
         for i in range(ENTITY_CANDIDATE_CAP + 3)
     ]
 
@@ -1394,8 +1386,7 @@ def test_entity_ambiguous_truncates_to_the_candidate_cap() -> None:
 
 def test_entity_ambiguous_names_the_real_pre_cap_count_in_the_message() -> None:
     candidates = [
-        EntityCandidate(dcid=f"dcid/{i}", label=f"Country {i}", type="Country", parent="")
-        for i in range(9)
+        EntityCandidate(dcid=f"dcid/{i}", label=f"Country {i}", type="Country") for i in range(9)
     ]
 
     refusal = ToolRefusal.entity_ambiguous(role="recipient", query="X", candidates=candidates)
@@ -1404,43 +1395,30 @@ def test_entity_ambiguous_names_the_real_pre_cap_count_in_the_message() -> None:
     assert refusal.fix["candidate_count"] == 9
 
 
-def test_entity_ambiguous_message_names_each_candidates_dcid_beside_its_label() -> None:
+def test_entity_ambiguous_names_each_candidate_as_the_marked_dcid_get_data_takes() -> None:
     """A client that shows the model only `content` (see `to_tool_result`) still needs
-    the dcid, not just the label, to act on "Pick one by dcid and retry."."""
+    the exact value to pass back, so the message carries each `fix` candidate's `entity`."""
     candidates = [
-        EntityCandidate(dcid="country/GEO", label="Georgia (country)", type="Country", parent=""),
-        EntityCandidate(dcid="usState/GA", label="Georgia", type="State", parent="country/USA"),
+        EntityCandidate(dcid="country/GEO", label="Georgia (country)", type="Country"),
+        EntityCandidate(dcid="GroupOfSeven", label="Group of Seven", type="group"),
     ]
 
-    refusal = ToolRefusal.entity_ambiguous(role="country", query="Georgia", candidates=candidates)
+    refusal = ToolRefusal.entity_ambiguous(role="country", query="G", candidates=candidates)
 
-    assert "Georgia (country) (country/GEO)" in refusal.message
-    assert "Georgia (usState/GA)" in refusal.message
+    entities = [c["entity"] for c in refusal.fix["candidates"]]
+    assert entities == ["dcid:country/GEO", "dcid:GroupOfSeven"]
+    assert [c["dcid"] for c in refusal.fix["candidates"]] == ["country/GEO", "GroupOfSeven"]
+    assert all(f"({entity})" in refusal.message for entity in entities)
 
 
-def test_entity_ambiguous_stays_untruncated_under_the_cap_with_no_door_truncation() -> None:
-    candidates = [EntityCandidate(dcid="dcid/1", label="Georgia", type="Country", parent="")]
+def test_entity_ambiguous_stays_untruncated_under_the_cap() -> None:
+    candidates = [EntityCandidate(dcid="dcid/1", label="Georgia", type="Country")]
 
     refusal = ToolRefusal.entity_ambiguous(role="recipient", query="Georgia", candidates=candidates)
 
     assert refusal.fix["truncated"] is False
     assert refusal.fix["candidate_count"] == 1
     assert "5 of" not in refusal.message
-
-
-def test_entity_ambiguous_marks_truncated_from_the_doors_own_flag_even_under_the_cap() -> None:
-    """`resolution.Ambiguous.truncated` means resolvekit's own list was already at its cap
-    before this door ever saw it -- true even when what reached this refusal fits under
-    `ENTITY_CANDIDATE_CAP`, so the local cap alone can't be the only source of `truncated`.
-    """
-    candidates = [EntityCandidate(dcid="dcid/1", label="Georgia", type="Country", parent="")]
-
-    refusal = ToolRefusal.entity_ambiguous(
-        role="recipient", query="Georgia", candidates=candidates, truncated=True
-    )
-
-    assert refusal.fix["truncated"] is True
-    assert refusal.fix["candidate_count"] == 1
 
 
 # 9b. `to_tool_result`'s `preamble` keyword.
@@ -1473,33 +1451,6 @@ def test_node_not_held_names_every_dcid_in_the_message_and_retries_correct_and_r
     assert "country/ZZZ" in refusal.message
     assert "country/YYY" in refusal.message
     assert refusal.fix == {"dcids": ["country/ZZZ", "country/YYY"]}
-
-
-# 9d. `entity_out_of_scope`.
-def test_entity_out_of_scope_names_the_entity_its_type_and_the_allowed_scope() -> None:
-    refusal = ToolRefusal.entity_out_of_scope(
-        role="donor", query="World Bank", entity_type="geo.organization", dcid="dc/s/WorldBank"
-    )
-
-    assert refusal.code == ToolErrorCode.ENTITY_OUT_OF_SCOPE
-    assert refusal.retry_mode == RetryMode.CORRECT_AND_RETRY
-    assert "World Bank" in refusal.message
-    assert "geo.organization" in refusal.message
-    assert "countries, subregions, and continents" in refusal.message
-    assert refusal.fix == {
-        "role": "donor",
-        "query": "World Bank",
-        "entity_type": "geo.organization",
-        "dcid": "dc/s/WorldBank",
-    }
-
-
-def test_entity_out_of_scope_carries_a_missing_dcid_as_none() -> None:
-    refusal = ToolRefusal.entity_out_of_scope(
-        role="recipient", query="African Union", entity_type="geo.continental_union", dcid=None
-    )
-
-    assert refusal.fix["dcid"] is None
 
 
 # 10. `service_unavailable` vs. `definition_not_held`: same "store" family,
@@ -1544,8 +1495,12 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             {"role", "near_matches", "had_near_matches", "not_held"},
         ),
         (
+            ToolRefusal.entity_not_found(role="country", query="x", near_matches=[], not_held=True),
+            {"role", "near_matches", "had_near_matches", "not_held"},
+        ),
+        (
             ToolRefusal.entity_not_found(
-                role="country", query="x", near_matches=[], not_held_entity_type="geo.country"
+                role="country", query="x", near_matches=[], memberless_kind="subregion"
             ),
             {"role", "near_matches", "had_near_matches", "not_held", "entity_type"},
         ),
@@ -1553,9 +1508,7 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
             ToolRefusal.entity_ambiguous(
                 role="country",
                 query="x",
-                candidates=[
-                    EntityCandidate(dcid="dcid/1", label="A", type="Country", parent="Earth")
-                ],
+                candidates=[EntityCandidate(dcid="dcid/1", label="A", type="Country")],
             ),
             {"role", "candidates", "candidate_count", "truncated"},
         ),
@@ -1590,12 +1543,6 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
         (
             ToolRefusal.node_not_held(dcids=["country/ZZZ"]),
             {"dcids"},
-        ),
-        (
-            ToolRefusal.entity_out_of_scope(
-                role="donor", query="World Bank", entity_type="geo.organization", dcid=None
-            ),
-            {"role", "query", "entity_type", "dcid"},
         ),
         (
             ToolRefusal.spec_not_exportable(detail="no member survives"),
@@ -1756,7 +1703,7 @@ def test_preamble_still_precedes_the_message_with_the_envelope_appended() -> Non
 
 # 13. A pin on the longest refusal text this server can produce, derived from the one
 # multiplicity cap `tool_errors.py` declares (`ENTITY_CANDIDATE_CAP`). `EntityCandidate`'s
-# own fields (dcid/label/type/parent) carry no length cap in this module, so the ceiling
+# own fields (dcid/label/type) carry no length cap in this module, so the ceiling
 # below assumes a worst-case field length rather than deriving one from an enforced bound,
 # documented here rather than left implicit, so a future growth in either the candidate cap
 # or this assumption updates the ceiling deliberately instead of the test silently going stale.
@@ -1769,7 +1716,6 @@ def test_entity_ambiguous_text_stays_under_a_byte_ceiling_derived_from_its_candi
             dcid="d" * _WORST_CASE_FIELD_CHARS,
             label="l" * _WORST_CASE_FIELD_CHARS,
             type="t" * _WORST_CASE_FIELD_CHARS,
-            parent="p" * _WORST_CASE_FIELD_CHARS,
         )
         for _ in range(ENTITY_CANDIDATE_CAP)
     ]
@@ -1782,8 +1728,8 @@ def test_entity_ambiguous_text_stays_under_a_byte_ceiling_derived_from_its_candi
     text = to_tool_result(refusal).content[0].text  # type: ignore[union-attr]
 
     # Each shown candidate contributes its label and dcid to the message (2 fields) and
-    # its full dataclass (4 fields) to `fix["candidates"]`'s JSON, 6 field-lengths per
-    # candidate, plus a 100-byte allowance per candidate for scaffolding (JSON keys,
+    # its full dataclass (3 fields) plus its marked `entity` (a dcid again) to
+    # `fix["candidates"]`'s JSON, 6 field-lengths per candidate, plus a 100-byte allowance per candidate for scaffolding (JSON keys,
     # quotes, braces, the message's " (...)," punctuation). `role`/`query` (2 more
     # field-lengths) and a fixed allowance for the rest of the message and envelope
     # (codes, keys, the surrounding sentences) round it out.

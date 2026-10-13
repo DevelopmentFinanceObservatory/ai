@@ -29,6 +29,18 @@ recipe on a refusal would leave the frame without one for good.
 A caller that has already built the recipe passes it to `publish_body_for`, which
 then sends that recipe or refuses: a frame such a caller publishes is of no use
 to it without one.
+
+The body also carries the frame's `steps` (`common.steps.assemble_steps`): the
+step record of each operation along its ancestry, with a `retrieve` step for each
+root. A frame with an ancestor whose stored trace holds no step, has left the
+store or fails a store check, or with a root that has no mint record, is
+published without the field, logged at warning with the pair, and dfo-apis
+records its steps as unknown. A step list over the door's byte bound sheds
+its coverage members, largest first, until it fits (`_shed_coverage`). An
+unusable stored step (`common.steps.StepRecordInvalidError`) or a step list
+over the door's bounds without coverage to shed refuses locally, and a list
+the door refuses fails the publish: the frame is never published without steps
+it has.
 """
 
 from __future__ import annotations
@@ -36,26 +48,24 @@ from __future__ import annotations
 import io
 import json
 import logging
-import re
-import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, NamedTuple
 
+import rfc8785
 from common.materialisation import (
-    ComposedStatVar,
     FrameExpired,
     FrameIntegrityError,
     FrameRef,
     FrameTooLarge,
     HeldFrame,
     StoredFrameTrace,
-    composed_stat_vars_of,
     get_store,
 )
 from common.place_type import enrichment_role
-from common.recipe import RecipeError, build_recipe
+from common.recipe import AncestryReads, RecipeError, build_recipe
 from common.row_budget import RowClaim, row_budget
+from common.steps import StepRecordInvalidError, assemble_steps
 from dfo_frame_grammar import (
     FACET_IDENTITY_COLUMNS,
     STAT_VAR_COLUMN,
@@ -76,6 +86,25 @@ logger = logging.getLogger(__name__)
 # accepts as a recipe. A larger one is left out of the body (`_recipe_or_none`), so
 # the door never refuses a frame for the size of its recipe.
 _RECIPE_CEILING_BYTES = 1_000_000
+
+# dfo-spec-kit's step bounds (`dfo_descriptions.MAX_STEPS` and `MAX_STEPS_BYTES`):
+# the most steps a served list holds, and the most bytes a list takes as JCS
+# (RFC 8785) UTF-8 JSON (`dfo_descriptions.steps_bytes`).
+_MAX_SERVED_STEPS = 64
+_MAX_STEPS_BYTES = 65_536
+
+# dfo-apis' `description.steps.MAX_CARD_STEPS`: the steps a card drawn from a
+# published frame serves after the frame's own, its selection and a stat card's
+# change.
+_MAX_CARD_STEPS = 2
+
+# dfo-apis' publish door's step bound (`description.steps.MAX_COMPUTED_STEPS`), so
+# that a card drawn from the frame serves at most `_MAX_SERVED_STEPS`.
+_MAX_STEPS = _MAX_SERVED_STEPS - _MAX_CARD_STEPS
+
+# The step members a list over `_MAX_STEPS_BYTES` sheds, in the order it sheds
+# them: a coverage member restates per entity or per period what `kept` counts.
+_COVERAGE_MEMBERS = ("entity_coverage", "period_coverage")
 
 # Every reserved column name `Frame.build` itself recognises -- everything
 # else in `frame.columns` is a role key. Mirrors
@@ -102,11 +131,12 @@ class PublishBodyNotBuildable(Exception):  # noqa: N818 -- named for what it rep
     anywhere, answer.
 
     `refuse_locally=True` means the store DOES hold the frame but this
-    process still cannot build a valid publish body from it: today, only a
-    stored trace naming no input content versions (a `Trace` predating that
-    field), or a corrupted/oversized stored object the store's own read-time
-    checks caught. dfo-apis' publish door would refuse the identical body on
-    every retry, so this refuses now instead of letting that repeat.
+    process still cannot build a valid publish body from it: a stored trace
+    naming no input content versions (a `Trace` predating that field), a
+    corrupted/oversized stored object the store's own read-time checks
+    caught, an unusable stored step among its ancestry, or a step list over
+    the door's bounds. dfo-apis' publish door would refuse the identical body
+    on every retry, so this refuses now instead of letting that repeat.
     """
 
     def __init__(self, *, refuse_locally: bool, message: str) -> None:
@@ -149,42 +179,6 @@ def _wire_row_slices(frame: Frame, *, left_out: Sequence[str]) -> Iterator[list[
         yield rows
 
 
-# The publish door's bounds on `composed_stat_vars`: entries in the list, side
-# refs across the whole list, characters in one ref, counted as written and
-# again after NFC, and the shape of a ref.
-_MAX_COMPOSED_STAT_VARS = 16
-_MAX_COMPOSED_SIDE_REFS = 64
-_MAX_COMPOSED_REF_CHARS = 200
-_COMPOSED_REF = re.compile(r"dcid:.")
-
-
-def _door_bound_broken(entries: Sequence[ComposedStatVar]) -> str | None:
-    """The name of the first bound of the publish door that `entries` breaks
-    as `composed_stat_vars`, or `None` when the door accepts the list."""
-    sides = [side for entry in entries for side in (entry.first, entry.second)]
-    refs = [entry.stat_var for entry in entries] + [ref for side in sides for ref in side]
-    position = {entry.stat_var: index for index, entry in enumerate(entries)}
-    broken = {
-        "entries": len(entries) > _MAX_COMPOSED_STAT_VARS,
-        "empty_side": not all(sides),
-        "side_refs": sum(map(len, sides)) > _MAX_COMPOSED_SIDE_REFS,
-        "ref_nul": any("\x00" in ref for ref in refs),
-        "ref_length": any(
-            max(len(ref), len(unicodedata.normalize("NFC", ref))) > _MAX_COMPOSED_REF_CHARS
-            for ref in refs
-        ),
-        "ref_shape": not all(_COMPOSED_REF.match(ref) for ref in refs),
-        "duplicate_stat_var": len(position) < len(entries),
-        # A side ref that names an entry names an earlier one.
-        "entry_order": any(
-            position.get(ref, -1) >= index
-            for index, entry in enumerate(entries)
-            for ref in (*entry.first, *entry.second)
-        ),
-    }
-    return next((bound for bound, is_broken in broken.items() if is_broken), None)
-
-
 def publish_body(
     frame: Frame,
     *,
@@ -192,7 +186,7 @@ def publish_body(
     content_version: str,
     input_content_versions: Sequence[str],
     recipe: Mapping[str, Any] | None = None,
-    composed_stat_vars: Sequence[ComposedStatVar] = (),
+    steps: Sequence[Mapping[str, Any]] | None = None,
 ) -> bytes:
     """The publish door's JSON body for `frame`, encoded as httpx encodes a
     `json=` body. `recipe` is sent as the body's `recipe` member, and `None`
@@ -209,14 +203,19 @@ def publish_body(
     "Africa / Continent". It is a function of its place column, so the
     published rows stay distinct.
 
-    `composed_stat_vars` is the body's last member, each entry written as
-    `{stat_var, relation, first, second}`. The member is left out when the
-    list is empty, and when the list breaks one of the door's bounds
-    (`_door_bound_broken`): the door would refuse the whole body, so the
-    frame publishes without the names those entries give its series, and
-    the bound is logged.
+    `steps` is the body's last member, and `None` leaves it out.
+
+    A step list over `_MAX_STEPS_BYTES` (`_steps_bytes`) is sent with
+    coverage members shed until it fits (`_shed_coverage`).
+
+    Raises:
+        PublishBodyNotBuildable: `steps` holds more than `_MAX_STEPS` steps,
+            takes more than `_MAX_STEPS_BYTES` with no coverage left, or holds
+            a value JCS cannot serialise, so the door would refuse the body.
+            `refuse_locally` is set.
     """
     encode = _ENCODER.encode
+    encoded_steps = None if steps is None else _checked_steps(steps, spec_id, content_version)
     roles = [name for name in frame.columns if name not in _RESERVED_COLUMNS]
     place_types = [role for role in roles if enrichment_role(role, roles=roles) is not None]
     role_keys = [role for role in roles if role not in place_types]
@@ -233,27 +232,82 @@ def publish_body(
     body.write(f'],"input_content_versions":{encode(list(input_content_versions))}'.encode())
     if recipe is not None:
         body.write(f',"recipe":{encode(recipe)}'.encode())
-    bound = _door_bound_broken(composed_stat_vars) if composed_stat_vars else None
-    if bound is not None:
-        logger.info(
-            "publishing %s/%s without composed_stat_vars: the list breaks the door's %s bound",
-            spec_id,
-            content_version,
-            bound,
-        )
-    elif composed_stat_vars:
-        entries = [
-            {
-                "stat_var": entry.stat_var,
-                "relation": entry.relation,
-                "first": list(entry.first),
-                "second": list(entry.second),
-            }
-            for entry in composed_stat_vars
-        ]
-        body.write(f',"composed_stat_vars":{encode(entries)}'.encode())
+    if encoded_steps is not None:
+        body.write(f',"steps":{encoded_steps}'.encode())
     body.write(b"}")
     return body.getvalue()
+
+
+def _checked_steps(steps: Sequence[Mapping[str, Any]], spec_id: str, content_version: str) -> str:
+    """`steps` encoded for the body, less the coverage members it sheds to fit
+    (`_shed_coverage`), or `PublishBodyNotBuildable` when the list breaks one
+    of the door's bounds or holds a value JCS cannot serialise, which the kit
+    refuses as `not_i_json`."""
+    if len(steps) > _MAX_STEPS:
+        broken = f"holds {len(steps)} steps, over the {_MAX_STEPS}-step bound"
+    else:
+        try:
+            size = _steps_bytes(steps)
+        except rfc8785.CanonicalizationError as exc:
+            broken = f"holds a value JCS cannot serialise: {exc}"
+        else:
+            fitted: Sequence[Mapping[str, Any]] = steps
+            if size > _MAX_STEPS_BYTES:
+                fitted, shed = _shed_coverage(steps, size=size)
+                size = _steps_bytes(fitted)
+                if shed and size <= _MAX_STEPS_BYTES:
+                    logger.info(
+                        "publishing %s/%s with %d coverage member(s) shed to fit the "
+                        "%d-byte step bound",
+                        spec_id,
+                        content_version,
+                        shed,
+                        _MAX_STEPS_BYTES,
+                    )
+            if size <= _MAX_STEPS_BYTES:
+                return _ENCODER.encode(list(fitted))
+            broken = f"takes {size} bytes as JCS, over the {_MAX_STEPS_BYTES}-byte bound"
+    raise PublishBodyNotBuildable(
+        refuse_locally=True,
+        message=f"the step list of {spec_id!r}/{content_version!r} {broken}",
+    )
+
+
+def _steps_bytes(steps: Sequence[Mapping[str, Any]]) -> int:
+    """The bytes `steps` take as JCS (RFC 8785) UTF-8 JSON, the measure the
+    kit's byte bound reads (`dfo_descriptions.steps_bytes`). JCS spells a number
+    as ECMAScript does, `1` for `1.0` and `10000000000000000` for `1e16`, so
+    Python's JSON spelling miscounts a list holding one."""
+    return len(rfc8785.dumps(list(steps)))
+
+
+def _shed_coverage(
+    steps: Sequence[Mapping[str, Any]], *, size: int
+) -> tuple[list[dict[str, Any]], int]:
+    """`steps`, which take `size` bytes (`_steps_bytes`), less the coverage
+    members it sheds to fit `_MAX_STEPS_BYTES`, with how many it shed.
+
+    The list sheds each step's `entity_coverage`, then each step's
+    `period_coverage`, the largest of a kind first, until it fits. No other
+    member is ever shed, so a list still over the bound with no coverage left
+    stays over it."""
+    fitted = [dict(step) for step in steps]
+    shed = 0
+    for member in _COVERAGE_MEMBERS:
+        # A member's bytes in its step: `"name":value` and the comma before it,
+        # since no step holds it alone.
+        sizes = {
+            index: len(rfc8785.dumps({member: step[member]})) - 1
+            for index, step in enumerate(fitted)
+            if member in step
+        }
+        for index in sorted(sizes, key=sizes.__getitem__, reverse=True):
+            if size <= _MAX_STEPS_BYTES:
+                return fitted, shed
+            del fitted[index][member]
+            size -= sizes[index]
+            shed += 1
+    return fitted, shed
 
 
 def _input_content_versions(trace: StoredFrameTrace) -> tuple[str, ...] | None:
@@ -319,6 +373,10 @@ async def publish_body_for(
     store and decodes no rows, so it needs no claim of its own. A `recipe` the
     caller passes is sent in its place, and one that encodes to more than
     `_RECIPE_CEILING_BYTES` refuses locally before the store is read.
+
+    The body carries the frame's steps when they can be assembled
+    (`_steps_or_none`), read from the store as the recipe is. An unusable stored
+    step, or a step list over the door's bounds, refuses locally.
     """
     try:
         ref = FrameRef(spec_id=spec_id, content_version=content_version)
@@ -377,12 +435,14 @@ def _encoded_bytes(recipe: Mapping[str, Any]) -> int:
     return len(_ENCODER.encode(recipe).encode())
 
 
-async def _recipe_or_none(ref: FrameRef, trace: StoredFrameTrace) -> dict[str, Any] | None:
-    """The recipe of the frame held under `ref`, whose stored trace is `trace`, or
-    `None` with a warning naming the pair when none can be built or it encodes to
-    more than `_RECIPE_CEILING_BYTES`."""
+async def _recipe_or_none(
+    ref: FrameRef, trace: StoredFrameTrace, *, reads: AncestryReads
+) -> dict[str, Any] | None:
+    """The recipe of the frame held under `ref`, whose stored trace is `trace`, read
+    through `reads`, or `None` with a warning naming the pair when none can be built
+    or it encodes to more than `_RECIPE_CEILING_BYTES`."""
     try:
-        recipe = await build_recipe(ref, store=get_store(), trace=trace)
+        recipe = await build_recipe(ref, store=get_store(), trace=trace, reads=reads)
     except RecipeError as exc:
         logger.warning(
             "publishing %s/%s without a recipe: %s", ref.spec_id, ref.content_version, exc
@@ -401,12 +461,42 @@ async def _recipe_or_none(ref: FrameRef, trace: StoredFrameTrace) -> dict[str, A
     return recipe
 
 
+async def _steps_or_none(
+    ref: FrameRef, trace: StoredFrameTrace, *, reads: AncestryReads
+) -> list[dict[str, Any]] | None:
+    """The step list of the frame held under `ref`, whose stored trace is `trace`,
+    read through `reads`, or `None` with a warning naming the pair when an ancestor stores no step, an
+    ancestor's trace has left the store or fails a store check, or a root has no
+    mint record.
+
+    Raises:
+        PublishBodyNotBuildable: A stored step on the walk is unusable
+            (`StepRecordInvalidError`). `refuse_locally` is set.
+    """
+    try:
+        steps = await assemble_steps(ref, store=get_store(), trace=trace, reads=reads)
+    except StepRecordInvalidError as exc:
+        raise PublishBodyNotBuildable(refuse_locally=True, message=str(exc)) from exc
+    except RecipeError as exc:
+        logger.warning("publishing %s/%s without steps: %s", ref.spec_id, ref.content_version, exc)
+        return None
+    if steps is None:
+        logger.warning(
+            "publishing %s/%s without steps: a frame it derives from stores no step",
+            ref.spec_id,
+            ref.content_version,
+        )
+    return steps
+
+
 async def _read_and_encode(
     held: HeldFrame, *, claim: RowClaim, ref: FrameRef, recipe: Mapping[str, Any] | None
 ) -> PublishBody:
     """`publish_body_for`'s read and encoding under `claim`. The decoded frame
     is dropped on return, so only the encoded body lives through the publish
-    request. `recipe` is the caller's, and `None` has one built from the store."""
+    request. `recipe` is the caller's, and `None` has one built from the store.
+    The recipe and the steps share one `AncestryReads`, so each ancestor's trace
+    and each root's mint record is read once."""
     spec_id, content_version = ref.spec_id, ref.content_version
     with _store_failures():
         frame, trace = await claim.hold_through(held.read(max_rows=claim.rows))
@@ -419,13 +509,14 @@ async def _read_and_encode(
                 "content versions in its own derivation trace, so it cannot be published"
             ),
         )
+    reads = AncestryReads(store=get_store())
     data = publish_body(
         frame,
         spec_id=spec_id,
         content_version=content_version,
         input_content_versions=input_content_versions,
-        recipe=await _recipe_or_none(ref, trace) if recipe is None else recipe,
-        composed_stat_vars=composed_stat_vars_of(trace),
+        recipe=await _recipe_or_none(ref, trace, reads=reads) if recipe is None else recipe,
+        steps=await _steps_or_none(ref, trace, reads=reads),
     )
     return PublishBody(data=data, rows=frame.table.num_rows, hold_through=claim.hold_through)
 

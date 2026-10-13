@@ -236,12 +236,12 @@ def test_dropped_scope_names_each_column_the_found_source_widens_or_drops(
         (
             {"entities": (_FRANCE, _GHANA, _KENYA), "groups": (_AFRICA,)},
             "recipient",
-            "name 'Africa' as recipient in `entities` and drop `across`",
+            "name 'Africa' as recipient in `entities` and drop 'recipient' from `across`",
         ),
         (
             {"entities": (_FRANCE, _GHANA)},
             "recipients",
-            "name 'Ghana' as recipient in `entities` and drop `across`",
+            "name 'Ghana' as recipient in `entities` and drop 'recipients' from `across`",
         ),
         ({"entities": (_FRANCE, _GHANA, _KENYA)}, "recipient", None),
         ({"entities": (_FRANCE,), "groups": (_AFRICA,)}, "country", None),

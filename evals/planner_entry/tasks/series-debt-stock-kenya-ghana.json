@@ -1,0 +1,77 @@
+{
+  "id": "series-debt-stock-kenya-ghana",
+  "kind": "dataset",
+  "origin": "authored",
+  "question": "What external debt stock did Kenya and Ghana hold in each year from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "What external debt stock did Kenya and Ghana hold in each year from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "external debt stock",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            },
+            {
+              "text": "Ghana",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "What external debt stock did Kenya and Ghana hold in each year from 2015 to 2022?",
+  "asks": [
+    "External debt stock of Kenya and Ghana, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "acceptable_kinds": [
+    "dataset"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "dataset, not comparison: two places of one measure are one series request; no difference is asked"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "What external debt stock did Kenya and Ghana hold in each year from 2015 to 2022?",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt stock",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "debtor"
+          },
+          {
+            "name": "Ghana",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_e4e722cbab1c9ebde4fda2a16f662386"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "debt"
+        ]
+      }
+    ]
+  }
+}

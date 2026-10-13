@@ -221,8 +221,6 @@ def _period_comparison(period: str, left: float, right: float) -> PeriodComparis
         left_value=left,
         right_value=right,
         delta=right - left,
-        left_stat_var="dcid:test_stat_var",
-        right_stat_var="dcid:test_stat_var",
     )
 
 
@@ -231,6 +229,11 @@ def _compare_result(
 ) -> CompareResult:
     defaults: dict[str, object] = {
         "frame": None,
+        "stat_var": "dcid:ops_" + "a" * 32,
+        "left_stat_vars": ("dcid:DebtService",),
+        "right_stat_vars": ("dcid:Disbursements",),
+        "left_entities": {},
+        "right_entities": {},
         "left_resolved_unit": "dcid:USDollar",
         "right_resolved_unit": "dcid:USDollar",
         "left_facet_selections": (),
@@ -255,6 +258,12 @@ def _compare_digest_kwargs(result: CompareResult) -> dict:
     }
 
 
+def _many_stat_vars(side: str) -> tuple[str, ...]:
+    """2,000 StatVar refs for one side, a family summed by its retrieval at
+    the scale of CRS's purpose codes."""
+    return tuple(f"dcid:{side}_stat_var_{index:04d}" for index in range(2000))
+
+
 def _period_comparisons(count: int) -> tuple[PeriodComparison, ...]:
     return tuple(_period_comparison(f"20{i:02d}", float(i), float(i) * 2) for i in range(count))
 
@@ -270,22 +279,43 @@ COMPARE_CASES: tuple[CorpusCase, ...] = (
         kwargs=_compare_digest_kwargs(_compare_result(_period_comparisons(25))),
         render=render_compare_digest,
     ),
+    CorpusCase(
+        id="compare_2000_stat_vars_per_side",
+        kwargs=_compare_digest_kwargs(
+            _compare_result(
+                _period_comparisons(1),
+                left_stat_vars=_many_stat_vars("left"),
+                right_stat_vars=_many_stat_vars("right"),
+            )
+        ),
+        render=render_compare_digest,
+    ),
 )
 
 
 # sum_of --------------------------------------------------------------------------
 
 
-def _sum_of_digest_kwargs(count: int, *, left_only: int = 0) -> dict:
+def _sum_of_digest_kwargs(
+    count: int,
+    *,
+    left_only: int = 0,
+    stat_vars: tuple[tuple[str, ...], tuple[str, ...]] | None = None,
+) -> dict:
     """`count` summed periods; the left side also offers `left_only` later
-    periods the right lacks, which the coverage line lists."""
+    periods the right lacks, which the coverage line lists. `stat_vars`
+    replaces each side's one StatVar."""
     periods = tuple(f"20{i:02d}" for i in range(count))
     left_periods = periods + tuple(f"21{i:02d}" for i in range(left_only))
+    left_stat_vars, right_stat_vars = stat_vars or (
+        ("dcid:test_stat_var_left",),
+        ("dcid:test_stat_var_right",),
+    )
     fields: dict[str, object] = {
         "frame": None,
         "stat_var": "dcid:ops_" + "a" * 32,
-        "left_stat_vars": ("dcid:test_stat_var_left",),
-        "right_stat_vars": ("dcid:test_stat_var_right",),
+        "left_stat_vars": left_stat_vars,
+        "right_stat_vars": right_stat_vars,
         "unit": "dcid:USDollar",
         "facet_selections": (),
         "left_facet_selections": (),
@@ -318,6 +348,13 @@ SUM_OF_CASES: tuple[CorpusCase, ...] = (
     CorpusCase(
         id="sum_of_capped_25_periods_25_left_only",
         kwargs=_sum_of_digest_kwargs(25, left_only=25),
+        render=render_sum_of_digest,
+    ),
+    CorpusCase(
+        id="sum_of_2000_stat_vars_per_side",
+        kwargs=_sum_of_digest_kwargs(
+            1, stat_vars=(_many_stat_vars("left"), _many_stat_vars("right"))
+        ),
         render=render_sum_of_digest,
     ),
 )

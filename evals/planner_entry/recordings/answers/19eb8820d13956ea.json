@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_9f3cb770bf5fee6473be88b666d5e60b",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_9f3cb770bf5fee6473be88b666d5e60b: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/KEN\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"ServicingPayment\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"financingResource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"guaranteeStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsConcessionality\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsCreditorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsDebtorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"includesIMFCredit\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"maturityBand\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"netOf\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_9f3cb770bf5fee6473be88b666d5e60b\"}"
+}

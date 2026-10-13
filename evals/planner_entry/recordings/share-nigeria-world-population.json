@@ -1,0 +1,2343 @@
+{
+  "answers": [
+    "10fa56f152ee8112",
+    "a33f85728b7f8fb2",
+    "e7e3c48d56e3d761",
+    "f279c775491b5692"
+  ],
+  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
+  "recorded_at": "2026-10-11T20:32:21+00:00",
+  "schema": 2,
+  "searches": [
+    {
+      "envelope": {
+        "diagnostics": {
+          "engine_build": "1f6ed6307bea979d38cc35c4e38e0da896c431ad",
+          "llm_usage": {
+            "cached_tokens": 0,
+            "input_tokens": 2900,
+            "output_tokens": 346
+          },
+          "timed_out": false,
+          "timing_ms": {
+            "total": 2181
+          },
+          "trace_id": "efe7480873ac4568959cd598cfaf1874",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "Nigeria"
+                }
+              ],
+              "operations": [],
+              "separate": true,
+              "sources": [],
+              "time_text": "2000 to 2023",
+              "variable_text": "population"
+            },
+            "separate": true,
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/NGA"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2023,
+                    "kind": "range",
+                    "start_year": 2000
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "count",
+                    "population_type": "Person",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "age"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "gender"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maritalStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "nativity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfBirth"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_ca8f2290c92fff4556cfd3acfa2ea121"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 24,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 24,
+                  "window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 24,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Nigeria",
+                    "ref": "country/NGA",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Bank Subnational Population",
+                            "ref": "dc/base/Subnational_Demographics_Stats"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Nigeria Statistics",
+                            "ref": "dc/base/NigeriaStatistics"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "measurementMethod",
+                    "options": [
+                      {
+                        "value": {
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Bank Subnational Population Estimates",
+                            "ref": "WorldBankSubnationalPopulationEstimate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "age",
+                  "maritalStatus",
+                  "gender",
+                  "placeOfBirth",
+                  "nativity",
+                  "employment",
+                  "employmentStatus"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Demographics",
+                  "ref": "dc/g/Demographics"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/NGA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2023,
+                          "kind": "range",
+                          "start_year": 2000
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_7f309bbd01ce0b5ba77dddd5f5b9cbab"
+                    },
+                    "stat_var": {
+                      "label": "Rate of Population Growth",
+                      "ref": "GrowthRate_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/NGA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2023,
+                          "kind": "range",
+                          "start_year": 2000
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "lifeExpectancy",
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_f83b262cb61a92192597fa1a5e945ec9"
+                    },
+                    "stat_var": {
+                      "label": "Life Expectancy",
+                      "ref": "LifeExpectancy_Person"
+                    }
+                  }
+                ],
+                "rendered_sentence": "Nigeria's total population, 2000 to 2023. World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Nigeria"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "total population"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:age",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "age",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:gender",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "gender",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maritalStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maritalStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nativity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nativity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfBirth",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfBirth",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2000 to 2023"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Total population",
+                  "measured_property": {
+                    "label": "count",
+                    "ref": "count"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 497,
+                  "population_type": {
+                    "label": "Person",
+                    "ref": "Person"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "person_count_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 85 Onwards",
+                            "ref": "Years85Onwards"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Female",
+                            "ref": "Female"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Male",
+                            "ref": "Male"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "BLS_Employed",
+                            "ref": "BLS_Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employed",
+                            "ref": "Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Nigeria",
+                          "ref": "country/NGA"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2023,
+                          "start_year": 2000
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2023",
+                    "start": "2000"
+                  },
+                  "member_count": 59,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Nigeria",
+                      "ref": "country/NGA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age",
+                        "property": {
+                          "label": "age",
+                          "ref": "age"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "marital status",
+                        "property": {
+                          "label": "maritalStatus",
+                          "ref": "maritalStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "gender",
+                        "property": {
+                          "label": "gender",
+                          "ref": "gender"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of birth",
+                        "property": {
+                          "label": "placeOfBirth",
+                          "ref": "placeOfBirth"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "nativity",
+                        "property": {
+                          "label": "nativity",
+                          "ref": "nativity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment",
+                        "property": {
+                          "label": "employment",
+                          "ref": "employment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment status",
+                        "property": {
+                          "label": "employmentStatus",
+                          "ref": "employmentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Nigeria",
+                          "ref": "country/NGA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_ca8f2290c92fff4556cfd3acfa2ea121"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 7,
+                "bind": 2,
+                "materialise": 171,
+                "options": 1,
+                "recall": 1,
+                "shape": 222
+              },
+              "total": 404
+            },
+            "variable_text": "population",
+            "warnings": []
+          },
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "World"
+                }
+              ],
+              "operations": [],
+              "separate": true,
+              "sources": [],
+              "time_text": "2000 to 2023",
+              "variable_text": "population"
+            },
+            "separate": true,
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "Earth"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2023,
+                    "kind": "range",
+                    "start_year": 2000
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "count",
+                    "population_type": "Person",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "age"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "gender"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maritalStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "nativity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfBirth"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_563ab9bd42153c484c9b4388e79e7b0f"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 24,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 24,
+                  "window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 24,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Place",
+                    "label": "World",
+                    "ref": "Earth",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "age",
+                  "maritalStatus",
+                  "gender",
+                  "placeOfBirth",
+                  "nativity",
+                  "employment",
+                  "employmentStatus"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Demographics",
+                  "ref": "dc/g/Demographics"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "Earth"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2023,
+                          "kind": "range",
+                          "start_year": 2000
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_be62d32511e7cc82a3d6ae025097ee1c"
+                    },
+                    "stat_var": {
+                      "label": "Rate of Population Growth",
+                      "ref": "GrowthRate_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "Earth"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2023,
+                          "kind": "range",
+                          "start_year": 2000
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "lifeExpectancy",
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_b2442a9d5081e14850897b1ec282df8a"
+                    },
+                    "stat_var": {
+                      "label": "Life Expectancy",
+                      "ref": "LifeExpectancy_Person"
+                    }
+                  }
+                ],
+                "rendered_sentence": "World's total population, 2000 to 2023. World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "World"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "total population"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:age",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "age",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:gender",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "gender",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maritalStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maritalStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nativity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nativity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfBirth",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfBirth",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2000 to 2023"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Total population",
+                  "measured_property": {
+                    "label": "count",
+                    "ref": "count"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 497,
+                  "population_type": {
+                    "label": "Person",
+                    "ref": "Person"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "person_count_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 15 Onwards",
+                            "ref": "Years15Onwards"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 18 To 24",
+                            "ref": "Years18To24"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 1 To 4",
+                            "ref": "Years1To4"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 25 To 34",
+                            "ref": "Years25To34"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 35 To 44",
+                            "ref": "Years35To44"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 45 To 54",
+                            "ref": "Years45To54"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 55 To 64",
+                            "ref": "Years55To64"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 65 To 74",
+                            "ref": "Years65To74"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 85 Onwards",
+                            "ref": "Years85Onwards"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 0 To 4",
+                            "ref": "Years0To4"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 18 Onwards",
+                            "ref": "Years18Onwards"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years UpTo 18",
+                            "ref": "YearsUpto18"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Divorced",
+                            "ref": "Divorced"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "NeverMarried",
+                            "ref": "NeverMarried"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Widowed",
+                            "ref": "Widowed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Female",
+                            "ref": "Female"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Male",
+                            "ref": "Male"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "ForeignBorn",
+                            "ref": "ForeignBorn"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "USC_Native",
+                            "ref": "USC_Native"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "BLS_Employed",
+                            "ref": "BLS_Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employed",
+                            "ref": "Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employed",
+                            "ref": "Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "World",
+                          "ref": "Earth"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2023,
+                          "start_year": 2000
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2023",
+                    "start": "2000"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2023,
+                    "start_year": 2000
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "World",
+                      "ref": "Earth"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age",
+                        "property": {
+                          "label": "age",
+                          "ref": "age"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "marital status",
+                        "property": {
+                          "label": "maritalStatus",
+                          "ref": "maritalStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "gender",
+                        "property": {
+                          "label": "gender",
+                          "ref": "gender"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of birth",
+                        "property": {
+                          "label": "placeOfBirth",
+                          "ref": "placeOfBirth"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "nativity",
+                        "property": {
+                          "label": "nativity",
+                          "ref": "nativity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment",
+                        "property": {
+                          "label": "employment",
+                          "ref": "employment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment status",
+                        "property": {
+                          "label": "employmentStatus",
+                          "ref": "employmentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "World",
+                          "ref": "Earth"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_563ab9bd42153c484c9b4388e79e7b0f"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 220,
+                "bind": 1292,
+                "materialise": 166,
+                "options": 1,
+                "recall": 1,
+                "shape": 84
+              },
+              "total": 1764
+            },
+            "variable_text": "population",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true,
+          "raw_query": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?"
+        },
+        "rendered_sentence": "Nigeria's and World's total population, 2000 to 2023. World Development Indicators.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Nigeria"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " and "
+          },
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "World"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [],
+            "text": "total population"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:age",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "age",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employment",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "employment",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employmentStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "employmentStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:gender",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "gender",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:maritalStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "maritalStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nativity",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "nativity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:placeOfBirth",
+            "entity_refs": [],
+            "kind": "slot",
+            "property_dcid": "placeOfBirth",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2000 to 2023"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Development Indicators"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "skills": {},
+        "status": "definite"
+      },
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "separate": true,
+          "time": "2000 to 2023",
+          "variable": "population"
+        },
+        {
+          "entities": [
+            {
+              "text": "World"
+            }
+          ],
+          "separate": true,
+          "time": "2000 to 2023",
+          "variable": "population"
+        }
+      ],
+      "question": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
+      "raw_text": false
+    }
+  ],
+  "task": "share-nigeria-world-population"
+}

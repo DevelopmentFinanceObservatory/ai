@@ -15,6 +15,10 @@ registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire, and
 this backstop complements the typed handling below rather than replacing
 it.
+
+The stored step (`_rank_step`) counts the entities the ranking keeps and
+how many of the window's periods each holds, with the flow parties and
+unit-less values it left out.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from analysis_mcp.engine.common import (
 from analysis_mcp.engine.rank import (
     RankAmbiguousEntityError,
     RankNoRowsInWindowError,
+    RankResult,
     run_rank,
 )
 from analysis_mcp.frame_ref_resolution import (
@@ -50,6 +55,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merged_time,
     read_derived_marker,
@@ -66,6 +72,15 @@ from analysis_mcp.op_spec import (
 )
 from analysis_mcp.rolling_tool import anchored_input
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import (
+    Step,
+    build_step,
+    caller_params,
+    entity_ref,
+    left_out_from_exclusions,
+    step_unit,
+    window_params,
+)
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -152,6 +167,35 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             group_key=exc.group_key, aggregation=exc.aggregation
         )
     return refusal
+
+
+def _rank_step(op_spec: RankOpSpec, result: RankResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the entities the
+    output keeps, in ranked order with how many of the window's periods each
+    holds, what it left out, and its unit. A ranking whose value is the rank
+    position has no unit, and one over a ratio names the ratio unit. The
+    params name the order `ascending` or `descending` and the window's
+    bounds `start` and `end`."""
+    params = window_params(caller_params(trace.execution_record.content))
+    params["order"] = "ascending" if params.pop("ascending") else "descending"
+    coverage = {
+        entity_rank.entity_key: (
+            entity_ref(entity_rank.entity_key),
+            entity_rank.period_count,
+            result.window_period_count,
+        )
+        for entity_rank in result.kept_ranks
+    }
+    return build_step(
+        op="rank",
+        trace=trace,
+        inputs={"input": op_spec.frame_ref},
+        params=params,
+        kept={"entities": len(coverage)},
+        left_out=left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
+        unit=None if result.ordinal else step_unit(result.resolved_unit, ratio=holds_ratio(trace)),
+        entity_coverage=coverage.values(),
+    )
 
 
 async def _resolve_measured_frame(
@@ -518,7 +562,7 @@ async def rank(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[input_trace],
+        step=_rank_step(op_spec, result, trace=output_trace),
         digest=lambda: render_rank_digest(
             rank_by=rank_by,
             result=result,

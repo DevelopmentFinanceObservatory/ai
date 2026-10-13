@@ -39,15 +39,15 @@ its sources in a canonical order of its own, and a case states which
 `spec_id`s were selected, not the order the compiler happens to put them
 in.
 
-A turn is also failed when the agent hedged: a reject case that also had
-`submit_plan` answer `ok` -- an agent cannot both record a rejection and
+A turn is also failed when the agent hedged: a reject case that also had a
+`propose_plan` declare a plan ready (its answer carries `summary`,
+`planner.agent.declare_ready`) -- an agent cannot both record a rejection and
 declare the same plan ready for the user's answer. A `translation` case hedges
 the same way -- a case expecting `ok` that also had a proposal's translation
 answer a referral, or a referral case that also had one answer `ok` -- since `_by_name` picks whichever response carries the stated
 outcome and would otherwise miss a second, contradicting proposal the model
 also made on the same turn (`_hedged`). A plan-proposal case has nothing to hedge
-against: `submit_plan` approves and executes nothing itself, so calling it
-alongside `propose_plan` is an ordinary turn, not a contradiction.
+against: declaring a plan ready approves and executes nothing itself.
 
 What ADK actually populates in `intermediate_data`
 ----------------------------------------------------
@@ -100,13 +100,18 @@ from google.adk.evaluation.eval_case import Invocation, get_all_tool_responses
 from google.adk.evaluation.eval_metrics import EvalMetric
 from google.adk.evaluation.evaluator import EvalStatus, EvaluationResult, PerInvocationResult
 from google.genai import types as genai_types
+from planner.tool_results import Outcome
+from submission.tool import TOOL_NAME as SUBMIT_ANALYSIS
+from submission.tool import SubmissionOutcome
 
 # The tools whose response a case may state an expectation on. A
 # `tool_responses` entry naming anything else is not an expectation this
 # metric scores -- `test_eval_sets.py` imports this to refuse such a turn.
-# `translation` is the verdict an accepted `propose_plan` returns under its own
+# `translation` is the verdict an accepted proposal returns under its own
 # `translation` key: `ok` or the referral translation stopped on. No tool of
-# that name exists; `_with_translations` reads it off `propose_plan`'s response.
+# that name exists; `_with_translations` reads it off the proposal's response.
+# A case names a proposal `propose_plan` under either schema delivery:
+# `_with_translations` lists a `submit_analysis` answer under that name.
 TRANSLATION = "translation"
 SCORED_TOOLS = (
     "propose_plan",
@@ -220,25 +225,43 @@ def _by_name(
     return (preferred or matching)[-1]
 
 
+# The `submit_analysis` outcomes of a plan the service recorded, which
+# `propose_plan` answers `ok`.
+_RECORDED = frozenset({SubmissionOutcome.RECORDED, SubmissionOutcome.READY_FOR_REVIEW})
+
+
 def _with_translations(
     responses: list[genai_types.FunctionResponse],
 ) -> list[genai_types.FunctionResponse]:
-    """`responses`, each `propose_plan` that carried a verdict followed by it as a `translation` response.
+    """`responses` as a case names them, each proposal's verdict following it as a `translation` response.
 
-    A proposal the planner refused ran no translation and carries no verdict,
-    so it adds nothing.
+    Both proposing tools answer through one submission service. A
+    `submit_analysis` answer is listed as `propose_plan`'s, its `recorded`
+    or `ready_for_review` read as the `ok` `propose_plan` answers, so one
+    case scores either schema delivery. A verdict is lifted from any
+    response carrying one, as `harness.planner_seam` reads it; a proposal
+    the planner refused ran no translation and adds nothing.
     """
     listed: list[genai_types.FunctionResponse] = []
-    for response in responses:
+    for response in map(_as_proposal, responses):
         listed.append(response)
-        verdict = (
-            response.response.get("translation")
-            if response.name == "propose_plan" and isinstance(response.response, dict)
-            else None
-        )
+        answer = response.response
+        verdict = answer.get("translation") if isinstance(answer, dict) else None
         if isinstance(verdict, dict):
             listed.append(genai_types.FunctionResponse(name=TRANSLATION, response=verdict))
     return listed
+
+
+def _as_proposal(response: genai_types.FunctionResponse) -> genai_types.FunctionResponse:
+    """`response`, a `submit_analysis` answer listed as `propose_plan`'s; any other unchanged."""
+    answer = response.response
+    if response.name != SUBMIT_ANALYSIS or not isinstance(answer, dict):
+        return response
+    outcome = answer.get("outcome")
+    return genai_types.FunctionResponse(
+        name="propose_plan",
+        response={**answer, "outcome": Outcome.OK.value if outcome in _RECORDED else outcome},
+    )
 
 
 def _is_referral(response: genai_types.FunctionResponse) -> bool:
@@ -255,6 +278,19 @@ def _answered_by(response: genai_types.FunctionResponse, name: str, *outcomes: s
     if response.name != name or not isinstance(response.response, dict):
         return False
     return response.response.get("outcome") in outcomes
+
+
+def _declared_ready(response: genai_types.FunctionResponse) -> bool:
+    """Whether `response` is a `propose_plan` answer that declared the plan ready.
+
+    `planner.agent.declare_ready` adds `summary` to the answer of a proposal
+    whose translation compiled and whose plan the gate let through.
+    """
+    return (
+        response.name == "propose_plan"
+        and isinstance(response.response, dict)
+        and "summary" in response.response
+    )
 
 
 def _stated_expectation(expected: Invocation) -> genai_types.FunctionResponse | None:
@@ -276,15 +312,13 @@ def _hedged(
     that also answered a referral (`_is_referral`); a referral case is
     hedged by a translation that also answered `ok`. A translation that
     answered with a problem names no `kind`, wrote nothing, and hedges
-    nothing. A reject case is hedged
-    by an accepted `submit_plan`: `submit_plan` answering `ok` declares the
-    plan ready for the user's answer, and an agent cannot both do that and
-    record a rejection on the same turn. A `submit_plan` the tool refused --
-    blocked by the very rejection it is paired with, among other reasons --
-    declared nothing and hedges nothing. A plan-proposal case has no hedge
-    to check: `submit_plan` approves nothing and executes nothing itself, so
-    calling it alongside `propose_plan` is the trajectory a plan's readiness
-    is keyed on, not a way to have it both ways.
+    nothing. A reject case is hedged by a `propose_plan` that declared a
+    plan ready (`_declared_ready`), and an agent cannot both do that and
+    record a rejection on the same turn. A proposal whose readiness the gate
+    refused -- blocked by the very rejection it is paired with, among other
+    reasons -- declared nothing and hedges nothing. A plan-proposal case has
+    no hedge to check: declaring a plan ready approves nothing and executes
+    nothing itself.
     """
     match expected.name:
         case "translation" if _outcome(expected) == "ok":
@@ -292,7 +326,7 @@ def _hedged(
         case "translation" if _is_referral(expected):
             return any(_answered_by(r, TRANSLATION, "ok") for r in actual_responses)
         case "reject_plan":
-            return any(_answered_by(r, "submit_plan", "ok") for r in actual_responses)
+            return any(_declared_ready(r) for r in actual_responses)
         case _:
             return False
 

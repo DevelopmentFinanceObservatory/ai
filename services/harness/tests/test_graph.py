@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
+from common.materialisation import FrameRef
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -30,7 +33,10 @@ from compiler.surface import (
     ToolSurface,
 )
 from data_mcp.server import mcp as data_mcp
+from dfo_frame_grammar.grammar import UnitRequest
 from executor.classify import ToolFailure
+from executor.completion import FramePublished
+from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
     Accepted,
     MethodChoiceNeeded,
@@ -46,7 +52,14 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow._errors import NodeInterruptedError
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
-from harness.chart_binding import LINE_CHART_MAX_VALUES, select_binding_ok
+from harness.chart_binding import (
+    LINE_CHART_MAX_VALUES,
+    TopMembers,
+    comparable_members,
+    over_cap_dimension,
+    select_binding_ok,
+    top_members,
+)
 from harness.graph import answer as answer_module
 from harness.graph.execute import (
     _failed_step,
@@ -54,15 +67,18 @@ from harness.graph.execute import (
     _replan_refusal,
     _start_relayed,
 )
-from harness.graph.plan_done import _frame_unavailable_reason
+from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
     APPROVE_INTERRUPT,
+    ORCHESTRATOR_FRAMES_KEY,
+    ORCHESTRATOR_KEPT_ASKS_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     GraphState,
     frame_id_for,
+    frame_store_ref,
 )
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
@@ -71,6 +87,7 @@ from harness.studio_translate import _node_name
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
+    ASKS_STATE_KEY,
     AggregateRequirement,
     DatasetRequirement,
     Decision,
@@ -89,6 +106,7 @@ from translator.discovery import PartFault, PartNotResolvedError
 
 from .orchestrator_fakes import (
     ScriptLlm,
+    approve_answer,
     create_request_input_response,
     handed_back,
     open_session,
@@ -221,7 +239,6 @@ def _plan_runner(
     then answers in plain text; `tool_surface` runs the approved plan."""
     return orchestrator_runner(
         plan_call(_BRIEF),
-        types.Part.from_text(text="Handed to the planner."),
         planner=planner,
         tool_surface=tool_surface,
         executor=executor or ScriptedExecutor(),
@@ -303,7 +320,7 @@ async def _approval_stream(surface: ToolSurface) -> Any:
     runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
     part = create_request_input_response(
-        APPROVE_INTERRUPT, {"result": {"approved": _output_of(events, "planner")["revision"]}}
+        APPROVE_INTERRUPT, {"result": approve_answer(_output_of(events, "planner")["revision"])}
     )
     return runner.run_async(
         user_id="u", session_id="s", new_message=types.Content(role="user", parts=[part])
@@ -410,17 +427,28 @@ def test_every_graph_state_field_has_a_default() -> None:
 # --- version-bound approval -----------------------------------------------------
 
 
-async def test_stale_version_approval_routes_to_amend() -> None:
-    """A wrong answer routes to amend; `ScriptedPlannerModel` redrafts the
-    same canned steps as the next version, bumping `version` and
-    `previous_version` the way any `PlannerModel` seam must."""
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        lambda revision: approve_answer("not-a-real-revision"),
+        lambda revision: {"approved": revision},
+        lambda revision: {"approved": revision, "at": "2026-10-01T09:30:00"},
+        lambda revision: {"approved": revision, "at": "yesterday"},
+    ],
+    ids=["stale_revision", "no_time", "time_without_offset", "unreadable_time"],
+)
+async def test_stale_version_approval_routes_to_amend(wrong: Callable[[str], Any]) -> None:
+    """A wrong answer, one naming another revision or stating no
+    timezone-aware approval time, routes to amend; `ScriptedPlannerModel`
+    redrafts the same canned steps as the next version, bumping `version`
+    and `previous_version` the way any `PlannerModel` seam must."""
     surface = _CallRecordingSurface(ScriptedSurface())
     runner, _ = _plan_runner(ScriptedPlannerModel(), tool_surface=surface)
     events = await _start(runner)
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     first = _output_of(events, "planner")
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": "not-a-real-revision"})
+    events = await _resume(runner, APPROVE_INTERRUPT, wrong(first["revision"]))
 
     # Wrong answer: nothing executed; the planner redrafted to version 2 and
     # a fresh approval interrupt is pending.
@@ -432,7 +460,7 @@ async def test_stale_version_approval_routes_to_amend() -> None:
     assert amended["status"] == "pending_approval"
     assert amended["revision"] != first["revision"]
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": amended["revision"]})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(amended["revision"]))
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert _output_of(events, "execute")["plan_version"] == 2
 
@@ -451,7 +479,7 @@ async def test_a_plan_approved_unchanged_opens_a_span_and_logs_the_facts(
     assert plan_payload["version"] == 1
 
     with caplog.at_level("INFO", logger="harness.graph.planning"):
-        events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_payload["revision"]})
+        events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_payload["revision"]))
 
     assert _output_of(events, "execute")["plan_version"] == 1
 
@@ -487,7 +515,7 @@ _FRAME_DO_NOT_RETRY = "this step's data view could not be prepared"
 def test_a_frame_unavailable_reason_reads_a_retry_mode_of_any_type(
     retry_mode: Any, reason: str
 ) -> None:
-    assert _frame_unavailable_reason({"retry_mode": retry_mode}) == reason
+    assert frame_unavailable_reason({"retry_mode": retry_mode}) == reason
 
 
 def _seam_plan_with_intermediate_step(*, schemas: list[ToolSchema]) -> PlannerPlan:
@@ -610,10 +638,10 @@ _CHANGE_REFUSAL = ToolCallResult(
 )
 
 
-def _intermediate_step_surface(real_schemas: list[ToolSchema]) -> FixtureSurface:
-    """get_data -> totals succeed; change (growth), the plan's one terminal
-    step, always refuses. A run against this surface completes two steps,
-    one of them intermediate, before exhausting the replan budget."""
+def _stopping_at_growth_surface(real_schemas: list[ToolSchema]) -> FixtureSurface:
+    """get_data and totals (aggregate) succeed; change (growth) always
+    refuses. A run against this surface completes a retrieval and a derived
+    step before exhausting the replan budget."""
     named = {schema.name: schema for schema in real_schemas}
     return FixtureSurface(
         schemas=[named["get_data"], named["aggregate"], named["growth"]],
@@ -627,34 +655,6 @@ def _intermediate_step_surface(real_schemas: list[ToolSchema]) -> FixtureSurface
             "growth": _CHANGE_REFUSAL,
         },
     )
-
-
-async def test_a_stopped_plan_hands_back_no_intermediate_steps_frame(
-    real_schemas: list[ToolSchema],
-) -> None:
-    """growth, the plan's one terminal step, fails past the replan budget,
-    leaving get_data's and totals' frames in `completed`. Neither is a final
-    step, so `plan_done` describes neither and hands the agent no frame to
-    chart: an intermediate frame never stands in for the plan's answer."""
-    plan = _seam_plan_with_intermediate_step(schemas=real_schemas)
-    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
-    executor = ScriptedExecutor()
-    runner, model = _plan_runner(
-        seam, tool_surface=_intermediate_step_surface(real_schemas), executor=executor
-    )
-    await _start(runner)
-
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
-    assert _pending_interrupt(events) == APPROVE_INTERRUPT
-    replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": replanned["revision"]})
-
-    executed = _output_of(events, "execute")
-    assert executed["failed_step"]["step_id"] == "change"
-    assert len(executed["frame_refs"]) == 2
-    assert executor.calls == []
-    _, body = handed_back(model)
-    assert body["frames"] == []
 
 
 def _seam_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> PlannerPlan:
@@ -767,6 +767,47 @@ def _seam_plan_with_two_terminal_steps(*, schemas: list[ToolSchema]) -> PlannerP
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
+@pytest.mark.parametrize(
+    "build_plan",
+    [
+        # totals feeds change, the one terminal step.
+        _seam_plan_with_intermediate_step,
+        # totals is a terminal step of its own, finished beside the failed change.
+        _seam_plan_with_two_terminal_steps,
+    ],
+    ids=["intermediate", "sibling_terminal"],
+)
+async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
+    real_schemas: list[ToolSchema], build_plan: Callable[..., PlannerPlan]
+) -> None:
+    """change fails past the replan budget, leaving get_data's and totals'
+    frames in `completed`. totals' derived frame is never published on a
+    stopped run, so neither its frame nor its digest reaches the agent,
+    whether totals fed change or was a terminal step of its own; the
+    retrieval's digest still does, and `plan_done` lists no frame to chart."""
+    plan = build_plan(schemas=real_schemas)
+    seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
+    executor = ScriptedExecutor()
+    runner, model = _plan_runner(
+        seam, tool_surface=_stopping_at_growth_surface(real_schemas), executor=executor
+    )
+    await _start(runner)
+
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
+    assert _pending_interrupt(events) == APPROVE_INTERRUPT
+    replanned = _output_of(events, "planner")
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
+
+    executed = _output_of(events, "execute")
+    assert executed["failed_step"]["step_id"] == "change"
+    assert [step["step_id"] for step in executed["frame_ref_steps"]] == ["get_data"]
+    assert executed["step_summaries"] == ["fetched"]
+    assert executor.calls == []
+    _, body = handed_back(model)
+    assert body["frames"] == []
+    assert body["step_summaries"] == ["fetched"]
+
+
 async def test_two_terminal_steps_both_come_back_to_the_agent(
     real_schemas: list[ToolSchema],
 ) -> None:
@@ -798,7 +839,7 @@ async def test_two_terminal_steps_both_come_back_to_the_agent(
     runner, model = _plan_runner(seam, tool_surface=surface, executor=executor)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     assert len(_output_of(events, "execute")["frame_refs"]) == 2
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "describe_frame"]
@@ -934,9 +975,8 @@ def test_select_binding_ok_counts_a_tables_cross_product_against_the_cap() -> No
     select = {"observationAbout": _countries(5), "stat_var": ["a", "b", "c", "d", "e"]}
     reason = select_binding_ok(type_="table", select=select, view={})
     assert reason is not None
-    assert reason["message"] == (
-        "table select expands to an estimated 25 series, over the platform's maximum of 24"
-    )
+    assert reason["code"] == "series_limit_exceeded"
+    assert "estimated 25 series" in reason["message"]
 
 
 def _counted_view(**total_counts: int) -> dict[str, Any]:
@@ -988,10 +1028,244 @@ def test_select_binding_ok_matches_dfo_apis_series_estimate(
     An unbound facet column counts 1 and a bound one counts its values."""
     reason = select_binding_ok(type_=type_, select=select, view=view)
     assert reason is not None
-    assert reason["message"] == (
+    assert reason["message"].startswith(
         f"{type_} select expands to an estimated {estimate} series, "
         "over the platform's maximum of 24"
     )
+
+
+def _provider_rows(values: dict[str, dict[str, float]], **extra: Any) -> list[dict[str, Any]]:
+    """Frame rows of aid to Kenya, one per provider and period."""
+    return [
+        {
+            "stat_var": "dcid:aid",
+            "financingProvider": provider,
+            "financingRecipient": "country/KEN",
+            "time_period": period,
+            "value": value,
+            "unit": "USDollar",
+            "provenance": "crs",
+            **extra,
+        }
+        for provider, by_period in values.items()
+        for period, value in by_period.items()
+    ]
+
+
+_SPARSE = {
+    "A": {"2023": 90.0, "2024": 10.0},
+    "B": {"2023": 1.0, "2024": 50.0},
+    "C": {"2023": 5.0, "2024": 30.0},
+    "D": {"2023": 99.0},
+}
+
+
+def test_top_members_ranks_a_bar_by_the_latest_period_highest_first() -> None:
+    """Over the cap, a bar chart compares the largest providers at the
+    latest period, highest first. A provider with no value that year is not
+    ranked but counts in the total."""
+    top = top_members(
+        rows=_provider_rows(_SPARSE),
+        select={"financingRecipient": "country/KEN"},
+        dimension="financingProvider",
+        limit=2,
+        own_latest=False,
+    )
+
+    assert top == TopMembers(members=["B", "C"], total=4, period="2024")
+
+
+def test_top_members_ranks_a_time_series_by_each_members_own_latest_value() -> None:
+    """A line chart or table ranks each provider by its own latest value, and
+    names no single period when those differ."""
+    top = top_members(
+        rows=_provider_rows(_SPARSE),
+        select={"financingRecipient": "country/KEN"},
+        dimension="financingProvider",
+        limit=2,
+        own_latest=True,
+    )
+
+    assert top == TopMembers(members=["D", "B"], total=4, period=None)
+
+
+def test_top_members_ranks_no_row_without_a_member() -> None:
+    """A row with no member names nothing a select could list."""
+    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}})
+    rows[1]["financingProvider"] = None
+
+    top = top_members(
+        rows=rows,
+        select={"financingRecipient": "country/KEN"},
+        dimension="financingProvider",
+        limit=5,
+        own_latest=False,
+    )
+
+    assert top == TopMembers(members=["A"], total=1, period="2024")
+
+
+def test_top_members_ranks_only_the_values_a_select_lists() -> None:
+    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}, "C": {"2024": 3.0}})
+
+    top = top_members(
+        rows=rows,
+        select={"financingProvider": ["A", "B"]},
+        dimension="financingProvider",
+        limit=5,
+        own_latest=False,
+    )
+
+    assert top == TopMembers(members=["B", "A"], total=2, period="2024")
+
+
+def test_top_members_matches_a_converted_unit_as_the_select_names_it() -> None:
+    """A stored frame holds a converted unit as a `UnitRequest`; a select
+    names it as dfo-apis's view does, `currency/prices/base_year`."""
+    unit = UnitRequest(currency="USD", prices="constant", base_year=2023)
+    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}}, unit=unit)
+
+    top = top_members(
+        rows=rows,
+        select={"unit": "USD/constant/2023"},
+        dimension="financingProvider",
+        limit=1,
+        own_latest=False,
+    )
+
+    assert top == TopMembers(members=["B"], total=2, period="2024")
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"unit": "EUR"},
+        {"unit": UnitRequest(currency="USD", prices="current")},
+        {"provenance": "other"},
+        {"measurementMethod": "imputed"},
+        {"stat_var": "dcid:other"},
+    ],
+)
+def test_top_members_ranks_nothing_across_unlike_values(other: dict[str, Any]) -> None:
+    """Rows that differ on any other coordinate, a unit, a source, a method
+    or a measure, are not one ranking, so nothing is picked, even when each
+    provider appears under one of them only."""
+    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}})
+    rows += _provider_rows({"C": {"2024": 3.0}}, **other)
+
+    assert (
+        top_members(
+            rows=rows,
+            select={"financingRecipient": "country/KEN"},
+            dimension="financingProvider",
+            limit=2,
+            own_latest=False,
+        )
+        is None
+    )
+
+
+def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
+    """A group total such as the G7, a residual and a party with no kind are
+    left out of a ranking of donors."""
+    cells = {
+        "DACOfficialDonors": "total",
+        "GroupOfSeven": "total",
+        "AfricaRegional": "residual",
+        "Unknown": "untyped",
+        "Germany": "party",
+        "Japan": "party",
+    }
+
+    assert comparable_members(cells, dimension="financingProvider") == {"Germany", "Japan"}
+
+
+def test_comparable_members_keeps_the_places_at_the_level_most_share() -> None:
+    """Among countries, a World Bank aggregate, a UN region, a continent and
+    an untyped place are left out; Hong Kong, typed Country among others,
+    stays."""
+    cells = {
+        "country/KEN": "Country",
+        "country/NGA": "Country",
+        "country/HKG": "AdministrativeArea1,Country",
+        "wb/LMY": "ProvisionalNode",
+        "undata-geo/G00201000": "UNGeoRegion",
+        "africa": "Continent",
+        "ida/total": "untyped",
+    }
+
+    assert comparable_members(cells, dimension="observationAbout") == {
+        "country/KEN",
+        "country/NGA",
+        "country/HKG",
+    }
+    assert comparable_members({"wb/LMY": "ProvisionalNode"}, dimension="observationAbout") == set()
+
+
+def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
+    view = _counted_view(stat_var=1, financingProvider=86, financingRecipient=1)
+    wide = _counted_view(stat_var=5, financingProvider=86, financingRecipient=1)
+
+    assert over_cap_dimension(select={}, view=view) == "financingProvider"
+    assert (
+        over_cap_dimension(select={"financingProvider": ["a", "b"], "stat_var": "x"}, view=wide)
+        == "financingProvider"
+    )
+    assert over_cap_dimension(select={}, view=wide) is None
+
+
+@pytest.mark.parametrize(
+    ("select", "view", "retry_mode", "named", "charts"),
+    [
+        pytest.param(
+            {},
+            _counted_view(stat_var=1, financingRecipient=6, financingProvider=51),
+            "correct_and_retry",
+            ["financingRecipient (6 values)", "financingProvider (51 values)"],
+            "each financingRecipient value is 6 charts, which fits",
+            id="smaller_fits_one_call",
+        ),
+        pytest.param(
+            {"financingRecipient": _countries(12)},
+            _counted_view(stat_var=1, financingRecipient=40, financingProvider=51),
+            "correct_and_retry",
+            ["financingRecipient (12 values)", "financingProvider (51 values)"],
+            "each financingRecipient value is 12 charts, more than the 8",
+            id="smaller_past_one_call",
+        ),
+        pytest.param(
+            {},
+            _counted_view(stat_var=2, financingRecipient=3, financingProvider=51),
+            "correct_and_retry",
+            ["stat_var (2 values)", "financingRecipient (3 values)", "financingProvider (51"],
+            "each combination of stat_var and financingRecipient values is 6 charts, which fits",
+            id="three_dimensions",
+        ),
+        pytest.param(
+            {},
+            _counted_view(stat_var=1, financingRecipient=1, financingProvider=51),
+            "do_not_retry",
+            [],
+            "",
+            id="one_dimension",
+        ),
+    ],
+)
+def test_a_select_over_the_cap_on_several_dimensions_is_told_what_draws(
+    select: dict[str, Any], view: dict[str, Any], retry_mode: str, named: list[str], charts: str
+) -> None:
+    """Where two or more dimensions multiply past the cap, the refusal names
+    each with the values it contributes, counts the charts that bind all but
+    the widest, and says whether one call draws them. One dimension over the
+    cap keeps the bare estimate: `make_charts` draws its largest members."""
+    refusal = select_binding_ok(type_="table", select=select, view=view)
+
+    assert refusal is not None
+    assert refusal["code"] == "series_limit_exceeded"
+    assert refusal["retry_mode"] == retry_mode
+    assert all(name in refusal["message"] for name in named)
+    assert charts in refusal["message"]
+    assert ("multiply" in refusal["message"]) == bool(named)
 
 
 def test_select_binding_ok_counts_an_unbound_dimension_at_its_total_count() -> None:
@@ -1060,7 +1334,7 @@ async def test_plan_amendment_lineage_is_real() -> None:
     """The plan carried through amend cycles is a valid `planner.plan.Plan`."""
     runner, _ = _plan_runner(ScriptedPlannerModel())
     await _start(runner)
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": 99})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(99))
 
     output = _output_of(events, "planner")
     plan_fields = {k: v for k, v in output.items() if k not in ("summary", "revision")}
@@ -1388,7 +1662,7 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     await _start(runner)
     _session_state(runner)["plan"] = json.dumps({"question": "kenya debt", "tool_calls": []})
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": 1})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(1))
 
     refused = _output_of(events, "planner")
     assert refused == {
@@ -1482,7 +1756,7 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
 
     # A wrong answer routes to amend, which redrafts -- an unrelated plan
     # that also happens to be version 1.
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": "not-a-real-revision"})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     amended = _output_of(events, "planner")
     assert amended["version"] == 1
@@ -1491,7 +1765,7 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
 
     # The first card's revision no longer names what's pending: superseded,
     # not approved -- nothing executes and a fresh approval is still pending.
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision_1})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
     assert executor.calls == []
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     assert _output_of(events, "planner")["revision"] == revision_2
@@ -1500,7 +1774,7 @@ async def test_an_approval_for_a_superseded_revision_routes_to_amend(
     # the gate is passed (no fresh approval interrupt), and the approved
     # workflow's steps ran through `execute_approved_plan` against the
     # tool surface: the executor only describes the final frame.
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision_2})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_2))
     assert _pending_interrupt(events) is None
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
     assert _output_of(events, "execute")["plan_version"] == 1
@@ -1535,7 +1809,7 @@ async def test_a_pending_plan_saved_at_the_base_revision_format_is_approved_unam
     # The session holds the plan exactly as it was saved.
     _session_state(runner)["plan"] = json.dumps(_BASE_FORMAT_PLAN["plan"])
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": _BASE_FORMAT_PLAN["revision"]})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(_BASE_FORMAT_PLAN["revision"]))
 
     assert _pending_interrupt(events) is None
     assert len(seam.calls) == 1
@@ -1551,11 +1825,21 @@ async def test_an_approved_plan_saved_at_the_base_revision_format_executes() -> 
     `Plan.start_execution` compares it with the revision computed now."""
     approved = PlannerPlan.model_validate(
         _BASE_FORMAT_PLAN["plan"]
-        | {"status": "approved", "approved_revision": _BASE_FORMAT_PLAN["revision"]}
+        | {
+            "status": "approved",
+            "approved_revision": _BASE_FORMAT_PLAN["revision"],
+            "approved_at": datetime.now(UTC),
+        }
     )
 
+    async def published(frame: FrameRef) -> FramePublished:
+        return FramePublished(replay_key="rpk_" + "e" * 64)
+
     finished, outcome = await execute_approved_plan(
-        approved, surface=ScriptedSurface(), fetch_series_stats=scripted_fetch_series_stats
+        approved,
+        surface=ScriptedSurface(),
+        publisher=published,
+        fetch_series_stats=scripted_fetch_series_stats,
     )
 
     assert isinstance(outcome, Accepted), outcome
@@ -1567,7 +1851,11 @@ async def test_a_saved_plan_whose_retrieval_posts_its_spec_id_alone_runs_as_save
     it, so the call is made as saved."""
     approved = PlannerPlan.model_validate(
         _BASE_FORMAT_PLAN["plan"]
-        | {"status": "approved", "approved_revision": _BASE_FORMAT_PLAN["revision"]}
+        | {
+            "status": "approved",
+            "approved_revision": _BASE_FORMAT_PLAN["revision"],
+            "approved_at": datetime.now(UTC),
+        }
     )
     surface = _CallRecordingSurface(ScriptedSurface())
 
@@ -1595,7 +1883,12 @@ async def test_an_approved_plan_compiled_against_an_older_get_data_is_refused_fo
     saved = _BASE_FORMAT_LIVE_PLAN["plan"]
     (retrieval,) = (s for s in saved["workflow"]["steps"] if s["tool"]["name"] == "get_data")
     approved = PlannerPlan.model_validate(
-        saved | {"status": "approved", "approved_revision": _BASE_FORMAT_LIVE_PLAN["revision"]}
+        saved
+        | {
+            "status": "approved",
+            "approved_revision": _BASE_FORMAT_LIVE_PLAN["revision"],
+            "approved_at": datetime.now(UTC),
+        }
     )
     surface = _CallRecordingSurface(_fixture_surface(real_schemas, analysis_tool="rank"))
 
@@ -1649,7 +1942,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     revision_1 = plan_revision(plan_v1)
     assert _output_of(events, "planner")["revision"] == revision_1
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": "not-a-real-revision"})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer("not-a-real-revision"))
 
     # Not a dead end: a fresh approval interrupt for the same, unmodified
     # plan comes back instead, carrying why the amendment did not land.
@@ -1669,7 +1962,7 @@ async def test_a_refused_amendment_still_offers_the_pending_version_for_approval
     # revision approves it -- the round-cap refusal cost the user their
     # amendment, not their already-drafted plan. The plan's own compiled
     # workflow runs it through to completion against the tool surface.
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision_1})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision_1))
     assert _pending_interrupt(events) is None
     approved = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
     assert approved.status is PlanStatus.COMPLETED
@@ -1692,7 +1985,7 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     assert [call[0] for call in surface.calls] == ["get_data", "aggregate"]
     assert [call["tool"] for call in executor.calls] == ["describe_frame"]
@@ -1742,7 +2035,9 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     own once read with extra columns, and dfo-apis serves only its manifest's pair.
     `execute` hands on the manifest's pair, so `plan_done` describes the series
     and registers it for charting, while the total reading it was given the
-    frame's own pair."""
+    frame's own pair. Each frame is registered with the pair the store holds
+    it under, which is the typed pair for the retrieval and its own pair for
+    the total."""
     plan = _seam_plan(schemas=real_schemas, terminal=("get_data", "totals"))
     seam = _Seam([{"plan": plan.model_dump(mode="json"), "summary": {}}])
     served = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -1762,7 +2057,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     runner, model = _plan_runner(seam, tool_surface=surface, executor=platform)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     (aggregate,) = [args for name, args in surface.calls if name == "aggregate"]
     assert aggregate["frame_ref"] == typed
@@ -1777,6 +2072,55 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
         frame_id_for(total),
     ]
     assert "frames_not_chartable" not in body
+    frames = _session_state(runner)[ORCHESTRATOR_FRAMES_KEY]
+    assert [(frame["ref"], frame["store_ref"]) for frame in frames.values()] == [
+        (served, typed),
+        (total, total),
+    ]
+
+
+_FINAL_RETRIEVAL = {"step_id": "get_data", "tool": "get_data"}
+
+
+@pytest.mark.parametrize(
+    ("state", "node_input"),
+    [
+        (
+            {},
+            {
+                "frame_refs": [REF_A],
+                "frame_ref_steps": [_FINAL_RETRIEVAL | {"is_final_step": True}],
+            },
+        ),
+        (
+            {
+                ASKS_STATE_KEY: ["Kenya's debt service"],
+                ORCHESTRATOR_KEPT_ASKS_KEY: {
+                    "0": {
+                        "steps": [_FINAL_RETRIEVAL | {"frame_ref": REF_A, "digest": "fetched"}],
+                        "totals": [],
+                    }
+                },
+            },
+            {"text": "no plan avoids the failure", "final": True},
+        ),
+    ],
+    ids=["execute-event", "kept-ask"],
+)
+async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
+    state: dict[str, Any], node_input: dict[str, Any]
+) -> None:
+    """A hand-back event or kept ask recorded without store pairs names each
+    frame by the pair dfo-apis serves alone. Its frame is registered without
+    a store pair, so the store is opened by the frame's own pair."""
+    ctx = SimpleNamespace(state=dict(state))
+    plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
+
+    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+
+    assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF_A): {"ref": REF_A, "view": {}}}
+    entry = ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]
+    assert frame_store_ref(entry) == REF_A
 
 
 async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
@@ -1794,7 +2138,7 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     runner, model = _plan_runner(seam, tool_surface=_fixture_surface(real_schemas))
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     assert _output_of(events, "execute")["stat_var_totals"] == [sentence]
     _, body = handed_back(model)
@@ -1814,7 +2158,7 @@ async def test_a_none_tool_surface_refuses_loudly_rather_than_executing_nothing(
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="no tool surface"):
-        await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
 
 async def test_a_rediscovery_outcome_replans_naming_the_requirement(
@@ -1840,7 +2184,7 @@ async def test_a_rediscovery_outcome_replans_naming_the_requirement(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # Replanned (MAX_REPLANS == 1 covers one round): a fresh approval is
     # pending rather than the turn closing on the first refusal.
@@ -1885,10 +2229,10 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
     replanned = _output_of(events, "planner")
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": replanned["revision"]})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(replanned["revision"]))
 
     assert _pending_interrupt(events) is None
     executed = _output_of(events, "execute")
@@ -1933,7 +2277,7 @@ async def test_a_stop_classified_refusal_closes_the_turn_without_spending_a_repl
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -1990,7 +2334,7 @@ async def test_a_member_cardinality_ceiling_closes_the_turn_without_replanning(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # No replan, no second approval: the turn closes on the first refusal.
     assert _pending_interrupt(events) is None
@@ -2044,7 +2388,7 @@ async def test_a_member_cardinality_ceilings_remedy_reaches_the_agent_in_the_han
     runner, model = _plan_runner(seam, tool_surface=surface)
     await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert _output_of(events, "execute")["failed_step"]["remedy"] == remedy
@@ -2072,7 +2416,7 @@ async def test_a_family_returned_unsummed_closes_the_turn_on_a_message_the_user_
     runner, model = _plan_runner(seam, tool_surface=surface)
     events = await _start(runner)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": plan_revision(plan)})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(plan_revision(plan)))
 
     assert _pending_interrupt(events) is None
     assert len(seam.calls) == 1
@@ -2123,7 +2467,7 @@ async def test_an_over_ceiling_rows_refusal_still_replans(
     events = await _start(runner)
     revision = plan_revision(plan)
 
-    events = await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+    events = await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
     # A method choice, not a dead end: the planner is asked again (the
     # scripted seam redrafts the same plan, so the version does not bump),
@@ -2162,7 +2506,7 @@ async def test_a_not_approved_outcome_raises_instead_of_replanning(
     revision = plan_revision(plan)
 
     with pytest.raises(RuntimeError, match="not_approved"):
-        await _resume(runner, APPROVE_INTERRUPT, {"approved": revision})
+        await _resume(runner, APPROVE_INTERRUPT, approve_answer(revision))
 
 
 def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> None:
@@ -2252,12 +2596,9 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "issues": [],
         "also_stopped": [],
     }
-    assert _failed_step(refused) == {
-        "step_id": "totals",
-        "tool": None,
-        "code": "empty_answer",
-        "message": "no rows matched",
-    }
+    failed = _failed_step(refused)
+    assert (failed["step_id"], failed["tool"], failed["code"]) == ("totals", None, "empty_answer")
+    assert "no rows matched" not in failed["message"]
 
     # A `STEP_REFUSED` stop carries the tool's own `ToolFailure` as
     # `payload` -- `_failed_step` reports its `code`/`message`, not
@@ -2347,6 +2688,23 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "source_unverified",
         "message": "the source states no provenance",
     }
+
+
+@pytest.mark.parametrize("kind", list(RefusalKind))
+def test_a_stop_no_tool_refused_reaches_the_orchestrator_by_its_kind_alone(
+    kind: RefusalKind,
+) -> None:
+    """A run's own stop carries the ledger's failure reason or an exception's
+    text in `detail`, which can name literal spec ids: the orchestrator is told
+    the stop's code and a sentence for its kind, never the detail."""
+    detail = f"the run failed before it came to an outcome: store {'ops_' + 'd' * 32} refused"
+    refused = Refused(revision="rev1", refusal=kind, detail=detail, run_id="run_1")
+
+    failed = _failed_step(refused)
+
+    assert failed["code"] == kind.value
+    assert failed["message"]
+    assert "ops_" not in json.dumps(failed)
 
 
 def test_replan_refusal_names_every_sibling_a_wave_surfaced() -> None:

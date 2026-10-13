@@ -1,0 +1,99 @@
+{
+  "id": "join-population-gdp-kenya",
+  "kind": "join",
+  "origin": "authored",
+  "question": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+  "searches": [
+    {
+      "query": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+      "parts": [
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "time": "2010 to 2022"
+        },
+        {
+          "variable": "GDP",
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "time": "2010 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+  "asks": [
+    "Kenya's population and GDP side by side, each year 2010 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "join"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "join"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "join, not quotient_of: two measures side by side; no per-person figure is asked"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "population",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Kenya"
+          }
+        ],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        },
+        "source_spec_id": "spec_0125be4f3501bdf69a020d8ba3bd69d6"
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Kenya"
+          }
+        ],
+        "period": {
+          "start": 2010,
+          "end": 2022
+        },
+        "source_spec_id": "spec_74372a7a2091a57bcc83aa73d1b3bf4a"
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "left_id": "population",
+        "right_id": "gdp"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ]
+  }
+}

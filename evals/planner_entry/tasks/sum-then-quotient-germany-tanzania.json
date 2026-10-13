@@ -1,0 +1,189 @@
+{
+  "id": "sum-then-quotient-germany-tanzania",
+  "kind": "sum_of",
+  "origin": "pilot",
+  "question": "How much ODA per person did Tanzania receive from Germany in each year from 2015 to 2021, counting both bilateral and imputed multilateral aid?",
+  "searches": [
+    {
+      "query": "How much ODA per person did Tanzania receive from Germany in each year from 2015 to 2021, counting both bilateral and imputed multilateral aid?",
+      "parts": [
+        {
+          "variable": "bilateral ODA",
+          "entities": [
+            {
+              "text": "Germany",
+              "role": "from"
+            },
+            {
+              "text": "Tanzania",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021",
+          "separate": true
+        },
+        {
+          "variable": "imputed multilateral ODA",
+          "entities": [
+            {
+              "text": "Germany",
+              "role": "from"
+            },
+            {
+              "text": "Tanzania",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021",
+          "separate": true
+        },
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "Tanzania"
+            }
+          ],
+          "time": "2015 to 2021"
+        }
+      ]
+    },
+    {
+      "query": "Germany's official development assistance to Tanzania, 2015 to 2021",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Germany",
+              "role": "from"
+            },
+            {
+              "text": "Tanzania",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021"
+        }
+      ]
+    }
+  ],
+  "brief": "How much ODA per person did Tanzania receive from Germany in each year from 2015 to 2021, counting both bilateral and imputed multilateral aid?",
+  "asks": [
+    "ODA per person Tanzania received from Germany, bilateral plus imputed multilateral, each year 2015 to 2021"
+  ],
+  "required_kinds": [
+    "dataset",
+    "sum_of",
+    "quotient_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "sum_of",
+    "quotient_of"
+  ],
+  "reference_payload": {
+    "question": "How much ODA per person did Tanzania receive from Germany in each year from 2015 to 2021, counting both bilateral and imputed multilateral aid?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether bilateral and imputed multilateral ODA are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "planner_default",
+        "rationale": "Both are OECD DAC2a tables, which the oda-dac2a skill says add up: a donor's imputed multilateral ODA is not in its bilateral flows."
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "bilateral",
+        "measure": "bilateral ODA",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          },
+          {
+            "name": "Tanzania",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "source_spec_id": "spec_60ebb3250cc64bcdd106f38ea5c8606e"
+      },
+      {
+        "kind": "dataset",
+        "id": "imputed",
+        "measure": "imputed multilateral ODA",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          },
+          {
+            "name": "Tanzania",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "source_spec_id": "spec_2e7cbde7d8bd9c32400bdc78ff965829"
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "left": {
+          "input_id": "bilateral"
+        },
+        "right": {
+          "input_id": "imputed"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "population",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Tanzania"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        }
+      },
+      {
+        "kind": "quotient_of",
+        "id": "per_head",
+        "numerator": {
+          "input_id": "total"
+        },
+        "denominator": {
+          "input_id": "population"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "per_head"
+        ]
+      }
+    ]
+  }
+}

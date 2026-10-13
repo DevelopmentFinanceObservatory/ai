@@ -1,11 +1,16 @@
 """Entity resolution seam: human-typed names to graph dcids, via dfo-apis' Graph door.
 
 `get_data`'s scope block carries entities as spoken text ("France", "Sub-Saharan Africa")
-keyed by role. `resolve_entities` turns that into structured outcomes -- one of six wire
-statuses, or a local validation failure -- without ever building a `ToolRefusal`. The
-calling tool owns that translation (`data_mcp.tool_errors`), which keeps that module the
-sole owner of the refusal grammar; this module returns plain data, never imports it, and
-never catches `UpstreamError`.
+keyed by role. `resolve_entities` posts them to `POST /api/graph/resolve` with the group and
+region members inline (`expand: ["members"]`), validates the answer through the generated
+`data_mcp.graph_wire` models, and turns each of the four wire statuses (`resolved`,
+`ambiguous`, `not_found`, `not_held`) or a local validation failure into a structured
+outcome. Organisations, aggregates, places below a country and membership groups resolve
+alongside countries, continents and subregions.
+
+The calling tool owns the translation into refusals (`data_mcp.tool_errors`), which keeps
+that module the sole owner of the refusal grammar; this module returns plain data, never
+imports it, and never catches `UpstreamError`.
 """
 
 from __future__ import annotations
@@ -14,12 +19,12 @@ import asyncio
 import itertools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import httpx2
 
 from data_mcp.client import GRAPH_PREFIX
 from data_mcp.client_holder import get_client
+from data_mcp.graph_wire import EntityRef, ResolveResponse, ResolveResult
 
 _RESOLVE_ROUTE = f"{GRAPH_PREFIX}/resolve"
 
@@ -39,38 +44,23 @@ class ResolvedEntity:
 
 @dataclass(frozen=True, kw_only=True)
 class RegionMember:
-    """One member of a resolved region that this deployment's graph holds."""
+    """One member of a resolved group or region, under the default `countries` projection."""
 
     dcid: str
     name: str
 
 
 @dataclass(frozen=True, kw_only=True)
-class UnheldRegionMember:
-    """One member resolvekit named for a region that this deployment's graph does not hold.
-
-    Carries no `dcid` -- the wire's `members_not_held` entries never do, since there is
-    nothing held to point one at. Carries no `entity_type` either -- nothing downstream
-    reads it; a caller only ever names an unheld member by `name`.
-    """
-
-    name: str
-
-
-@dataclass(frozen=True, kw_only=True)
 class ResolvedRegion:
-    """Resolution status `resolved_region`: the name maps to a region with a held member.
+    """Resolution status `resolved` for a group or a region the membership policy holds.
 
-    `members` is what a caller can actually use as scope entities. `members_not_held` can
-    run past 40 entries for a large region (a continent's worth of unheld countries); it
-    exists so a caller can tell a partial region apart from a complete one, not to be
-    resolved further.
+    `members` is what a caller can use as scope entities: the policy's countries that belong
+    to the United Nations today.
     """
 
     name: str
     entity_type: str
     members: list[RegionMember]
-    members_not_held: list[UnheldRegionMember]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,7 +70,6 @@ class AmbiguousCandidate:
     dcid: str
     name: str
     entity_type: str
-    parent: str | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -88,15 +77,14 @@ class Ambiguous:
     """Resolution status `ambiguous`: more than one graph entity matches the name."""
 
     candidates: list[AmbiguousCandidate]
-    truncated: bool
 
 
 @dataclass(frozen=True, kw_only=True)
 class NearMatch:
     """One near-miss the door offers alongside a `not_found` name.
 
-    Carries only `name` -- nothing downstream reads a near match's `entity_type`, `dcid`,
-    or `confidence`; the refusal grammar surfaces `name` alone as a "did you mean" hint.
+    Carries only `name`: the refusal grammar surfaces it alone as a "did you mean" hint, and
+    the door marks near matches as hints for a person that a program should pick none of.
     """
 
     name: str
@@ -104,13 +92,11 @@ class NearMatch:
 
 @dataclass(frozen=True, kw_only=True)
 class NotFound:
-    """Resolution status `not_found`: nothing in the graph matches the name.
+    """Resolution status `not_found`: no candidate of the requested kinds matches the name.
 
     `near_matches` carries a distinction the wire status alone collapses: non-empty means
-    the name is probably a misspelling of one of these; empty means resolvekit found nothing
-    close at all, e.g. an organisation name like "World Health Organization" -- the door only
-    ever matches {geo.country, geo.subregion, geo.continent}, and there is no near-miss to
-    offer for a name outside that space.
+    the name is probably a misspelling of one of these; empty means the door found nothing
+    close at all.
     """
 
     near_matches: list[NearMatch]
@@ -118,26 +104,12 @@ class NotFound:
 
 @dataclass(frozen=True, kw_only=True)
 class NotHeld:
-    """Resolution status `not_held`: resolvekit resolved the name, but this deployment's
-    graph does not hold it -- a fact distinct from "matched nothing".
+    """Resolution status `not_held`: the resolver named a real entity, but this deployment's
+    graph does not hold it -- a fact distinct from "matched nothing". The door names no kind
+    for it.
     """
 
     name: str
-    entity_type: str
-
-
-@dataclass(frozen=True, kw_only=True)
-class OutOfScope:
-    """Resolution status `out_of_scope`: the name resolves to a real entity that lies
-    outside the door's `geo.country`/`geo.subregion`/`geo.continent` scope -- a
-    continental union, an international organisation, or a Data Commons source, for
-    example. `entity_type` is resolvekit's own tag for it. `dcid` is populated only when
-    this deployment's graph holds the entity, and `None` when it does not.
-    """
-
-    name: str
-    entity_type: str
-    dcid: str | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -152,55 +124,56 @@ class InvalidName:
     reason: str
 
 
-ResolutionOutcome = (
-    ResolvedEntity | ResolvedRegion | Ambiguous | NotFound | NotHeld | OutOfScope | InvalidName
-)
+ResolutionOutcome = ResolvedEntity | ResolvedRegion | Ambiguous | NotFound | NotHeld | InvalidName
 
 
-def _outcome_from_result(result: Mapping[str, Any], text: str) -> ResolutionOutcome:
-    """Translate one wire result (one of six `status` variants) for `text` into a `ResolutionOutcome`.
+def _outcome_from_result(result: ResolveResult) -> ResolutionOutcome:
+    """Translate one wire result into a `ResolutionOutcome`.
 
-    The wire is dfo-apis's `graph_api.resolve_models`. A region's and a group's members are
-    both graph nodes the door read, so both map to `ResolvedRegion` with nothing unheld.
+    A group or a region resolves with its members inline, since the request expands them,
+    and maps to `ResolvedRegion`. A region the membership policy does not hold carries no
+    members and maps to `ResolvedEntity`, like any other entity.
+
+    Raises:
+        ValueError: the result lacks a field its status sets, or its inline members do not
+            add up to its `member_count`.
     """
-    status = result["status"]
-    if status == "resolved":
-        entity = result["entity"]
-        return ResolvedEntity(
-            dcid=entity["dcid"], name=entity["name"], entity_type=entity["entity_type"]
-        )
-    if status in ("resolved_region", "resolved_group"):
-        # A region is its own node. A group may have none, and is then named by its text.
-        node = result["region"] if status == "resolved_region" else result["entity"]
-        return ResolvedRegion(
-            name=node["name"] if node is not None else text,
-            entity_type=node["entity_type"] if node is not None else "group",
-            members=[RegionMember(dcid=m["dcid"], name=m["name"]) for m in result["members"]],
-            members_not_held=[],
-        )
-    if status == "ambiguous":
-        return Ambiguous(
-            candidates=[
-                AmbiguousCandidate(
-                    dcid=c["dcid"],
-                    name=c["name"],
-                    entity_type=c["entity_type"],
-                    parent=c.get("parent"),
-                )
-                for c in result["candidates"]
-            ],
-            truncated=result.get("truncated", False),
-        )
-    if status == "not_found":
-        return NotFound(near_matches=[NearMatch(name=name) for name in result["near_matches"]])
-    if status == "not_held":
-        # The door names no type for an entity it does not hold.
-        return NotHeld(name=result["name"], entity_type="entity")
-    if status == "out_of_scope":
-        return OutOfScope(
-            name=result["name"], entity_type=result["entity_type"], dcid=result.get("dcid")
-        )
-    raise ValueError(f"unrecognised resolution status {status!r}")
+    match result.status:
+        case "resolved":
+            entity = _entity(result)
+            if entity.kind is None:
+                raise ValueError(f"resolved entity {entity.ref!r} carries no kind")
+            if result.members is None:
+                return ResolvedEntity(dcid=entity.ref, name=entity.label, entity_type=entity.kind)
+            if isinstance(result.members, str) or len(result.members) != result.member_count:
+                raise ValueError(f"{entity.ref!r} did not carry all its members inline")
+            return ResolvedRegion(
+                name=entity.label,
+                entity_type=entity.kind,
+                members=[RegionMember(dcid=m.ref, name=m.label or m.ref) for m in result.members],
+            )
+        case "ambiguous":
+            return Ambiguous(
+                candidates=[
+                    AmbiguousCandidate(dcid=c.ref, name=c.label, entity_type=c.kind or "entity")
+                    for c in _present(result.candidates, "candidates")
+                ]
+            )
+        case "not_found":
+            near_matches = _present(result.near_matches, "near_matches")
+            return NotFound(near_matches=[NearMatch(name=m.label) for m in near_matches])
+        case "not_held":
+            return NotHeld(name=_entity(result).label)
+
+
+def _entity(result: ResolveResult) -> EntityRef:
+    return _present(result.entity, "entity")
+
+
+def _present[T](value: T | None, field: str) -> T:
+    if value is None:
+        raise ValueError(f"a {field!r} result carries no {field}")
+    return value
 
 
 def _invalid_reason(stripped: str) -> str | None:
@@ -258,7 +231,10 @@ async def resolve_entities(
         responses = await asyncio.gather(
             *(
                 client.request(
-                    "POST", _RESOLVE_ROUTE, route=_RESOLVE_ROUTE, json={"texts": list(chunk)}
+                    "POST",
+                    _RESOLVE_ROUTE,
+                    route=_RESOLVE_ROUTE,
+                    json={"texts": list(chunk), "expand": ["members"]},
                 )
                 for chunk in chunks
             ),
@@ -274,12 +250,12 @@ async def resolve_entities(
                 raise response
             successful_responses.append(response)
         for chunk, response in zip(chunks, successful_responses, strict=True):
-            results = response.json()["results"]
+            results = ResolveResponse.model_validate(response.json()).results
             # `strict=True` turns a length mismatch into an immediate `ValueError` rather
             # than a silently truncated or misaligned zip -- the one failure mode that
             # would attribute one name's result to another.
             for stripped, result in zip(chunk, results, strict=True):
-                outcomes_by_stripped[stripped] = _outcome_from_result(result, stripped)
+                outcomes_by_stripped[stripped] = _outcome_from_result(result)
 
     resolved: dict[str, dict[str, ResolutionOutcome]] = {}
     for role, names in scope.items():

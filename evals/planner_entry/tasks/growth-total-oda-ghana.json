@@ -1,0 +1,87 @@
+{
+  "id": "growth-total-oda-ghana",
+  "kind": "growth",
+  "origin": "pilot",
+  "question": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+  "searches": [
+    {
+      "query": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Ghana",
+              "role": "to"
+            }
+          ],
+          "time": "2012 to 2021"
+        }
+      ]
+    }
+  ],
+  "brief": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+  "asks": [
+    "Percentage change in total ODA to Ghana from all donors, 2012 to 2021"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "growth"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "growth"
+  ],
+  "reference_payload": {
+    "question": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Ghana",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2012,
+          "end": 2021
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "growth",
+        "id": "growth",
+        "input_id": "total",
+        "window_start": 2012,
+        "window_end": 2021
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "growth"
+        ]
+      }
+    ]
+  }
+}

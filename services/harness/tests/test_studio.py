@@ -23,12 +23,14 @@ import asyncio
 import copy
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import harness.graph.execute as execute_module
 import harness.studio as studio_module
 import harness.studio_state as studio_state_module
 import httpx2
@@ -55,6 +57,7 @@ from data_mcp.server import mcp as data_mcp
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.adk.events import Event, EventActions
+from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import BaseSessionService, InMemorySessionService
 from google.genai import types
 from harness.conversation import current_conversation_id
@@ -70,6 +73,7 @@ from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedSurface
+from harness.sentences import SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
@@ -86,6 +90,7 @@ from harness.studio_state import (
 )
 from harness.studio_translate import _RecordingExecutor, _stream_fatal
 from harness.tool_contracts import ResolverError
+from harness.turn_budget import bounded
 from harness.turn_records import SearchReading
 from harness.wire import (
     MAX_SEED_SPEC_BYTES,
@@ -174,7 +179,6 @@ COMPONENT = {
         "component_id": "cmp_01test0001",
         "revision": 1,
         "series": [{"id": "ken", "label": "Kenya", "point_count": 9}],
-        "indicators": [{"id": "IND.1", "name": "Aid", "description": "Aid flows."}],
         "attribution": {
             "label": "Test source · 1 indicator",
             "source_count": 1,
@@ -345,7 +349,7 @@ def _card(
 def _plan(brief: str = "q with forks", *after: types.Part) -> tuple[types.Part, ...]:
     """A turn that hands `brief` to the planner and pauses on its plan;
     `after` is what the agent does once an approved plan is handed back."""
-    return (plan_call(brief), _text("Handed to the planner."), *after)
+    return (plan_call(brief), *after)
 
 
 def _charts_the_plan() -> tuple[types.Part, ...]:
@@ -365,7 +369,6 @@ def _ask(*options: str) -> tuple[types.Part, ...]:
             question="Which reading?",
             options=[{"label": option} for option in options or ("A", "B")],
         ),
-        _text("Asked."),
     )
 
 
@@ -556,6 +559,37 @@ async def test_a_definite_turn_streams_steps_text_and_done() -> None:
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
+async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route makes the request's budget current, and a model call past
+    its cap answers the cap's sentence (`harness.turn_budget.bounded`)
+    without asking the model: the sentence is the turn's final message."""
+    original = ScriptLlm.generate_content_async
+
+    async def bounded_script(
+        self: ScriptLlm, llm_request: Any, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse]:
+        async for response in bounded(lambda: original(self, llm_request, stream), stream=stream):
+            yield response
+
+    monkeypatch.setattr(ScriptLlm, "generate_content_async", bounded_script)
+    app = _app(
+        fetch_call(SPEC_A),
+        _text("never sent"),
+        executor=ScriptedExecutor(_card_results()[:2], strict=True),
+        settings=Settings(turn_model_calls_max=1),
+    )
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    assert len(_model(app).requests) == 1
+    assert _frame(frames, "message.complete")["text"] == refusal_sentence(
+        {"code": SeamCode.TURN_MODEL_CALLS_SPENT}
+    )
+    assert _events(frames)[-1] == "done"
+
+
 async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line() -> None:
     """Each chart of one `make_charts` call is its own write and its own
     Activity line: a refused write fails its line while the turn completes,
@@ -585,7 +619,7 @@ async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line
     ]
     assert [line["status"] for line in lines] == ["complete", "failed"]
     assert lines[0]["produced"] == {"component_id": "cmp_01test0001", "revision": 1}
-    assert "period dimension" in lines[1]["detail"]
+    assert "detail" not in lines[1]
     (created,) = [f for f in frames if f["event"] == "component.created"]
     assert created["component_id"] == "cmp_01test0001"
     assert created["created_from"]["step_id"] == lines[0]["step_id"]
@@ -604,8 +638,8 @@ async def test_a_planner_run_shows_working_on_a_plan_and_not_the_seams_late_repo
     class ProgressPlanner(ScriptedPlanner):
         async def __call__(self, *, on_progress: Any = None, **kwargs: Any) -> dict[str, Any]:
             if on_progress is not None:
+                on_progress({"agent": "dfo_planner", "tools": ["get_skill"]})
                 on_progress({"agent": "dfo_planner", "tools": ["propose_plan"]})
-                on_progress({"agent": "dfo_planner", "tools": ["submit_plan"]})
             return await super().__call__(**kwargs)
 
     app = _app(*_plan(), planner=ProgressPlanner(real_schemas))
@@ -1153,7 +1187,7 @@ async def test_a_polled_get_data_step_updates_one_activity_line_until_it_complet
     assert [(status, detail) for _, _, status, detail in get_data] == [
         ("running", _POLLING),
         ("running", _RECEIVED),
-        ("complete", "scripted get_data result"),
+        ("complete", "64 observations \u00b7 World Development Indicators"),
     ]
     assert len({step_id for step_id, *_ in get_data}) == 1
     plan_lines = {step_id for step_id, tool, *_ in steps if tool in ("get_data", "aggregate")}
@@ -1200,15 +1234,10 @@ class _BusySurface(ScriptedSurface):
 
 
 @pytest.mark.parametrize(
-    ("surface", "failed_detail"),
-    [
-        (_PollsThenHangsSurface(), "transport_failed: step 'retrieve' ran past its 0.2s budget"),
-        (_BusySurface(), "service_unavailable: the dataset service is busy"),
-    ],
-    ids=["mid-call", "retry-delay"],
+    "surface", [_PollsThenHangsSurface(), _BusySurface()], ids=["mid-call", "retry-delay"]
 )
 async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
-    monkeypatch: pytest.MonkeyPatch, surface: ToolSurface, failed_detail: str
+    monkeypatch: pytest.MonkeyPatch, surface: ToolSurface
 ) -> None:
     """A step whose budget runs out mid-call, or during a retry's delay,
     streamed `running` frames and never returned a result. Its line still
@@ -1227,7 +1256,7 @@ async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
     assert len({frame["step_id"] for frame in get_data}) == 1
     assert {frame["status"] for frame in get_data[:-1]} == {"running"}
     assert get_data[-1]["status"] == "failed"
-    assert get_data[-1]["detail"].startswith(failed_detail)
+    assert "detail" not in get_data[-1]
     assert get_data[-1]["duration_ms"] is not None
     assert second.index(get_data[-1]) < _events(second).index("plan.proposed")
 
@@ -1283,9 +1312,9 @@ async def test_a_stop_closes_the_activity_lines_its_stream_left_running() -> Non
         event="activity.step",
         seq=1,
         step_id="s1",
-        label="planner: submit_plan",
+        label="planner: propose_plan",
         status=StepStatus.RUNNING,
-        tool="submit_plan",
+        tool="propose_plan",
         duration_ms=5,
     )
 
@@ -2244,6 +2273,98 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     assert reloaded is not None
     assert len(reloaded.approvals) == 1
     assert plan["interrupt_id"] not in reloaded.pending
+
+
+class _CallingSurface(ScriptedSurface):
+    """`ScriptedSurface`, recording the name of every tool it is called with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        self.calls.append(tool.name)
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+async def test_a_retried_approval_is_dated_by_its_first_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A's resume of a plan approval answered at T dies before its run is
+    admitted. B's retry of the same answer a day and an hour later carries
+    the plan approved as of T on, so its run is refused as expired and
+    nothing is dispatched."""
+    answered = datetime.now(UTC) - timedelta(hours=25)
+
+    class _AnsweredThen(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return answered.astimezone(tz)
+
+    entered = asyncio.Event()
+
+    async def _dies_before_admission(plan: PlannerPlan, **kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    approved_at: list[datetime] = []
+    approve = PlannerPlan.approve
+
+    def _recording_approve(self: PlannerPlan, *, at: datetime) -> PlannerPlan:
+        approved_at.append(at)
+        return approve(self, at=at)
+
+    monkeypatch.setattr(PlannerPlan, "approve", _recording_approve)
+    clock = [1_000.0]
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    app_a = _app(
+        *_plan(), tool_surface=ScriptedSurface(), session_service=session_service, store=store_a
+    )
+
+    async with _client(app_a) as client_a:
+        first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        with monkeypatch.context() as patched:
+            patched.setattr(studio_module, "datetime", _AnsweredThen)
+            patched.setattr(execute_module, "execute_approved_plan", _dies_before_admission)
+            resume = asyncio.ensure_future(
+                _stream(
+                    client_a,
+                    "/api/studio/interrupt",
+                    _interrupt_body(plan["interrupt_id"], "approve"),
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+            cancel = await client_a.post(
+                "/api/studio/cancel",
+                json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+                headers=AUTH,
+            )
+            assert cancel.status_code == 204
+            assert _events(await asyncio.wait_for(resume, timeout=5))[-1] == "error"
+
+    surface = _CallingSurface()
+    app_b = _app(tool_surface=surface, session_service=session_service, store=store_b)
+    async with _client(app_b) as client_b:
+        clock[0] += studio_state_module.SEGMENT_TTL_S + 1  # A's segment has expired
+        await _stream(
+            client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    assert approved_at == [answered]
+    assert surface.calls == []
+    reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
+    assert reloaded is not None
+    assert [record.at for record in reloaded.approvals] == [answered]
 
 
 async def test_a_different_answer_after_a_crashed_resume_expires_is_refused(
@@ -3246,6 +3367,10 @@ async def test_a_patch_naming_a_create_only_field_is_refused_before_any_write() 
     assert _frame(frames, "message.complete")["text"] == (
         "The edit was refused: 'type' is create-only and cannot be revised."
     )
+    # The closing message says why; the step shows the failure alone.
+    step = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "e2")
+    assert step["status"] == "failed"
+    assert "detail" not in step
     assert "component.created" not in _events(frames)
     assert [c["tool"] for c in executor.calls].count("write_component") == 1
 
@@ -5301,7 +5426,9 @@ async def test_a_single_reference_seed_spec_runs_the_question_and_shows_it_was_n
         if frame["event"] == "activity.step" and frame["status"] == "failed"
     ]
     assert failed["label"] == "Receive the datasets from Search"
-    assert failed["detail"].startswith("seed_reference_unused: seed_spec holds one")
+    assert failed["detail"] == (
+        "The datasets from Search could not be used, so the answer starts from your question"
+    )
 
 
 async def test_a_seed_past_the_size_cap_fails_its_step_and_the_turn_answers_the_question(
@@ -5315,8 +5442,7 @@ async def test_a_seed_past_the_size_cap_fails_its_step_and_the_turn_answers_the_
     steps = [frame for frame in frames if frame["event"] == "activity.step"]
     (failed,) = [step for step in steps if step["status"] == "failed"]
     assert failed["label"] == "Receive the datasets from Search"
-    assert failed["detail"].startswith("seed_invalid: seed 0 cannot be used")
-    assert "-byte cap on one seed" in failed["detail"]
+    assert failed["detail"] == "This Search result was left out"
     assert await definition_store.get(_SEED_SPEC, schema_version=1) is None
     assert _events(frames)[-1] == "done"
 
@@ -5401,7 +5527,7 @@ async def test_a_seeded_turn_s_session_keeps_only_what_the_seed_node_reads_of_ea
         for frame in frames
         if frame["event"] == "activity.step" and frame["status"] == "failed"
     ]
-    assert failed["detail"] == f"seed_invalid: {refused['refused']['detail']}"
+    assert failed["detail"] == "This Search result was left out"
     assert _events(frames)[-1] == "done"
 
 
@@ -5425,26 +5551,12 @@ def _malformed_seed(
 
 
 @pytest.mark.parametrize(
-    ("malformed", "refused"),
+    "malformed",
     [
-        (
-            _malformed_seed(identity={**_SEED_IDENTITY, "requested_window": "x"}),
-            "seed_dropped: seed 0 is left out: Search no longer resolves it (request_invalid)",
-        ),
-        (
-            _malformed_seed(
-                identity={**_SEED_IDENTITY, "count": 2**70}, spec_id="spec_" + "0" * 32
-            ),
-            "seed_invalid: seed 0 cannot be used",
-        ),
-        (
-            _malformed_seed(identity={**_SEED_IDENTITY, "entities": ["country/KEN"]}),
-            "seed_dropped: seed 0 is left out: Search no longer resolves it (request_invalid)",
-        ),
-        (
-            _malformed_seed(identity={**_SEED_IDENTITY, "shape": "statvar_schema"}),
-            "seed_dropped: seed 0 is left out: Search no longer resolves it (request_invalid)",
-        ),
+        _malformed_seed(identity={**_SEED_IDENTITY, "requested_window": "x"}),
+        _malformed_seed(identity={**_SEED_IDENTITY, "count": 2**70}, spec_id="spec_" + "0" * 32),
+        _malformed_seed(identity={**_SEED_IDENTITY, "entities": ["country/KEN"]}),
+        _malformed_seed(identity={**_SEED_IDENTITY, "shape": "statvar_schema"}),
     ],
     ids=[
         "requested-window-a-string",
@@ -5454,10 +5566,10 @@ def _malformed_seed(
     ],
 )
 async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_other_is_kept(
-    definition_store: InMemoryDefinitionStore, malformed: dict[str, Any], refused: str
+    definition_store: InMemoryDefinitionStore, malformed: dict[str, Any]
 ) -> None:
     """A seed the harness cannot read is refused as it is taken; one whose
-    identity Search refuses is dropped with Search's reason."""
+    identity Search refuses is dropped."""
     search = CannedSearch()
     body = _seeded_turn_body("top 5 donors for education aid")
     body["seed_spec"].insert(0, malformed)
@@ -5468,7 +5580,7 @@ async def test_a_seed_the_harness_or_search_cannot_take_fails_its_step_and_the_o
     steps = [frame for frame in frames if frame["event"] == "activity.step"]
     (failed,) = [step for step in steps if step["status"] == "failed"]
     assert failed["label"] == "Receive the datasets from Search"
-    assert failed["detail"].startswith(refused)
+    assert failed["detail"] == "This Search result was left out"
     malformed_spec_id = malformed["spec"]["spec_id"]
     assert await definition_store.get(malformed_spec_id, schema_version=1) is None
     assert await definition_store.get(_SEED_SPEC, schema_version=1) is not None

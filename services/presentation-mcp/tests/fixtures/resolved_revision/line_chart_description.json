@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.10.0",
+  "component_id": "cmp_Ab3dE5gH7k",
+  "revision": 2,
+  "provenance": {
+    "inputs": [
+      {
+        "spec_id": "spec_91d7345eec81a029629938b3d0ffd775",
+        "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c"
+      }
+    ],
+    "execution_ref": "rpk_3c9e0f7a52d14b86a0e1f2c4d6b8a9e7",
+    "generated_at": "2026-09-28T09:14:00Z",
+    "refreshed_from": null
+  },
+  "description": {
+    "describes": {
+      "kind": "card_revision",
+      "component_id": "cmp_Ab3dE5gH7k",
+      "revision": 2
+    },
+    "title": "Gross disbursements to Nigeria for health, 2010 to 2024",
+    "about": {
+      "drawn": {
+        "dimensions": [
+          {
+            "property": {
+              "ref": "crsPurpose",
+              "label": "sector"
+            },
+            "count": 3,
+            "of": 19
+          }
+        ],
+        "series": 3,
+        "period": {
+          "start": "2010",
+          "end": "2024",
+          "grain": "year"
+        }
+      },
+      "unit": {
+        "ref": "CurrencyUSD",
+        "label": "US dollars",
+        "prices": "current"
+      }
+    },
+    "sources": [
+      {
+        "ref": "provenance/OECDCreditorReportingSystem",
+        "label": "OECD Creditor Reporting System (CRS)",
+        "publisher": "OECD",
+        "licence": "OECD Terms and Conditions",
+        "series": 3,
+        "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem"
+      }
+    ],
+    "freshness": {
+      "latest_period": "2024",
+      "series_reaching_it": 2,
+      "estimated_values": null,
+      "provisional_values": null
+    },
+    "steps": [
+      {
+        "id": "s1",
+        "op": "select",
+        "input": {
+          "id": "spec_91d7345eec81a029629938b3d0ffd775",
+          "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c",
+          "label": "Gross disbursements to Nigeria for health",
+          "at_mint": true
+        },
+        "policy": "card_selection",
+        "params": {
+          "coordinates": {
+            "crsPurpose": [
+              "CRSPurposeCode12220",
+              "CRSPurposeCode12110",
+              "CRSPurposeCode12250"
+            ]
+          },
+          "window": {
+            "start": "2010",
+            "end": "2024"
+          }
+        },
+        "kept": {
+          "series": 3
+        },
+        "text": "Drew 3 series of gross disbursements to Nigeria for health, 2010 to 2024."
+      }
+    ],
+    "caveats": [
+      {
+        "kind": "provisional",
+        "periods": [
+          "2024"
+        ],
+        "series": [
+          {
+            "ref": "CRSPurposeCode12250",
+            "label": "infectious disease control"
+          }
+        ],
+        "text": "Values of infectious disease control in 2024 are provisional."
+      }
+    ],
+    "cite": {
+      "title": "Gross disbursements to Nigeria for health",
+      "text": "OECD Creditor Reporting System (CRS) via ONE DFO, retrieved 2026-09-28",
+      "component_id": "cmp_Ab3dE5gH7k",
+      "revision": 2,
+      "id": "spec_91d7345eec81a029629938b3d0ffd775",
+      "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c",
+      "retrieved": "2026-09-28",
+      "data": "/api/datasets/spec_91d7345eec81a029629938b3d0ffd775/cv_b785befb9f87471de96eb31cd7c56f5c"
+    },
+    "gaps": [
+      "freshness.estimated_values",
+      "freshness.provisional_values"
+    ],
+    "built_from": {
+      "facts_schema": 1,
+      "vocabulary": "voc_5e1d9a3c7b2f8e64"
+    }
+  },
+  "component": {
+    "type": "line_chart",
+    "title": {
+      "text": "Gross disbursements to Nigeria for health, 2010 to 2024",
+      "authorship": "model"
+    },
+    "series": [
+      {
+        "id": "nga_health_basic_care",
+        "label": "Basic health care",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "current"
+        },
+        "source_ref": "provenance/OECDCreditorReportingSystem",
+        "points": [
+          {
+            "period": "2010",
+            "value": 212.4
+          },
+          {
+            "period": "2011",
+            "value": 198.7
+          },
+          {
+            "period": "2012",
+            "value": 240.1
+          },
+          {
+            "period": "2013",
+            "value": 251.3
+          },
+          {
+            "period": "2014",
+            "value": 263.0
+          },
+          {
+            "period": "2015",
+            "value": 270.8
+          },
+          {
+            "period": "2016",
+            "value": 281.5
+          },
+          {
+            "period": "2017",
+            "value": 296.2
+          },
+          {
+            "period": "2018",
+            "value": 288.4
+          },
+          {
+            "period": "2019",
+            "value": 301.7
+          },
+          {
+            "period": "2020",
+            "value": 344.9
+          },
+          {
+            "period": "2021",
+            "value": 362.3
+          },
+          {
+            "period": "2022",
+            "value": 355.0
+          },
+          {
+            "period": "2023",
+            "value": 371.6
+          },
+          {
+            "period": "2024",
+            "status": "missing"
+          }
+        ]
+      },
+      {
+        "id": "nga_health_policy",
+        "label": "Health policy and administrative management",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "current"
+        },
+        "source_ref": "provenance/OECDCreditorReportingSystem",
+        "points": [
+          {
+            "period": "2010",
+            "value": 88.1
+          },
+          {
+            "period": "2011",
+            "value": 92.4
+          },
+          {
+            "period": "2012",
+            "value": 97.0
+          },
+          {
+            "period": "2013",
+            "value": 101.8
+          },
+          {
+            "period": "2014",
+            "value": 99.5
+          },
+          {
+            "period": "2015",
+            "value": 104.2
+          },
+          {
+            "period": "2016",
+            "value": 110.6
+          },
+          {
+            "period": "2017",
+            "value": 115.3
+          },
+          {
+            "period": "2018",
+            "value": 112.9
+          },
+          {
+            "period": "2019",
+            "value": 118.4
+          },
+          {
+            "period": "2020",
+            "value": 131.0
+          },
+          {
+            "period": "2021",
+            "value": 136.7
+          },
+          {
+            "period": "2022",
+            "value": 129.8
+          },
+          {
+            "period": "2023",
+            "value": 140.3
+          },
+          {
+            "period": "2024",
+            "value": 146.5
+          }
+        ]
+      },
+      {
+        "id": "nga_infectious_disease",
+        "label": "Infectious disease control",
+        "unit": {
+          "currency": "USD",
+          "magnitude": "millions",
+          "prices": "current"
+        },
+        "source_ref": "provenance/OECDCreditorReportingSystem",
+        "points": [
+          {
+            "period": "2010",
+            "value": 301.6
+          },
+          {
+            "period": "2011",
+            "value": 315.2
+          },
+          {
+            "period": "2012",
+            "value": 322.8
+          },
+          {
+            "period": "2013",
+            "value": 340.1
+          },
+          {
+            "period": "2014",
+            "value": 352.7
+          },
+          {
+            "period": "2015",
+            "value": 361.4
+          },
+          {
+            "period": "2016",
+            "value": 349.9
+          },
+          {
+            "period": "2017",
+            "value": 366.0
+          },
+          {
+            "period": "2018",
+            "value": 372.5
+          },
+          {
+            "period": "2019",
+            "value": 380.8
+          },
+          {
+            "period": "2020",
+            "value": 412.3
+          },
+          {
+            "period": "2021",
+            "value": 428.9
+          },
+          {
+            "period": "2022",
+            "value": 419.4
+          },
+          {
+            "period": "2023",
+            "value": 433.0
+          },
+          {
+            "period": "2024",
+            "value": 441.7
+          }
+        ]
+      }
+    ],
+    "x_axis": {
+      "window": {
+        "start": "2010",
+        "end": "2024"
+      }
+    },
+    "y_axis": {
+      "label": "Gross disbursements",
+      "scale": "linear",
+      "range": {
+        "min": 0,
+        "max": 500
+      }
+    }
+  }
+}

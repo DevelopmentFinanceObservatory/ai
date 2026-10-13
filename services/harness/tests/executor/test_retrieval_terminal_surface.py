@@ -14,6 +14,7 @@ frame.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from common.materialisation import FrameRef
@@ -71,7 +72,9 @@ def _retrieval_terminal_plan(
     assert compiled.workflow is not None, compiled.issues
     (step,) = compiled.workflow.steps
     assert step.tool.name == "get_data"
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_retrieval_terminal_plan_links_its_own_frame(

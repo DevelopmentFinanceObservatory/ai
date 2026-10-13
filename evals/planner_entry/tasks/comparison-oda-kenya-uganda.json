@@ -1,0 +1,198 @@
+{
+  "id": "comparison-oda-kenya-uganda",
+  "kind": "comparison",
+  "origin": "authored",
+  "question": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            },
+            {
+              "text": "Uganda",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
+  "asks": [
+    "How much more ODA Kenya received than Uganda, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "comparison"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "comparison",
+    "filter"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "comparison, not join: the question asks for the difference between Kenya's and Uganda's totals"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "Uganda",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "by_country",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "comparison",
+        "id": "gap",
+        "minuend": {
+          "input_id": "by_country",
+          "entity": "Kenya"
+        },
+        "subtrahend": {
+          "input_id": "by_country",
+          "entity": "Uganda"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "gap"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Keep each country with a filter after totalling its donors, then take the difference.",
+      "payload": {
+        "question": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
+        "answer_mode": "computed",
+        "decisions": [],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "oda",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              },
+              {
+                "name": "Uganda",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            },
+            "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
+            "across": [
+              "donor"
+            ]
+          },
+          {
+            "kind": "aggregate",
+            "id": "by_country",
+            "input_id": "oda",
+            "reduction": "sum",
+            "group_by": [
+              "entity",
+              "period"
+            ]
+          },
+          {
+            "kind": "filter",
+            "id": "kenya",
+            "input_id": "by_country",
+            "predicates": [
+              {
+                "kind": "entity_in",
+                "names": [
+                  "Kenya"
+                ],
+                "role": "recipient"
+              }
+            ]
+          },
+          {
+            "kind": "filter",
+            "id": "uganda",
+            "input_id": "by_country",
+            "predicates": [
+              {
+                "kind": "entity_in",
+                "names": [
+                  "Uganda"
+                ],
+                "role": "recipient"
+              }
+            ]
+          },
+          {
+            "kind": "comparison",
+            "id": "gap",
+            "minuend": {
+              "input_id": "kenya"
+            },
+            "subtrahend": {
+              "input_id": "uganda"
+            }
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "gap"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

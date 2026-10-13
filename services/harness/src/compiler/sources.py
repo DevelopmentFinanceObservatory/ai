@@ -79,6 +79,14 @@ class PartWarning(StrictModel):
     spec_id: str | None = None
 
 
+# The `no_data` reasons (`NoDataReason` in dfo-apis' `search.models.vocab`)
+# that refuse a `source_code` itself, whatever dataset is pinned to the
+# requirement stating it.
+SOURCE_CODE_REFUSALS = frozenset(
+    {"source_code_shares_variable", "source_code_not_held", "source_code_ambiguous"}
+)
+
+
 class DiscoveryOutcome(StrictModel):
     """One `search` call's answer: its status, the sources it names, and why.
 
@@ -204,7 +212,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     size and digest of the binding its `shape` states, entities and the named
     sets it binds, the measure it elected and the others it offers, the entity
     axes it leaves open, unit (or that it varies per series), provenance and
-    its account, the
+    its account, the publisher codes it is exactly (`exact_codes`), the
     axes its family varies along -- and the identity document of its
     `definition` sidecar when the envelope carries one. A `shape` without
     `member_count` or `member_digest` leaves them `None`, and a
@@ -251,6 +259,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             provenance_ref=_text(provenance.get("ref")),
             provenance_label=_text(provenance.get("label")),
             provenance_account=_text(provenance.get("account")),
+            exact_codes=_exact_codes(stat_vars),
             coverage_kind=coverage_kind,
             coverage_window=(
                 _window(_mapping(coverage.get("window")))
@@ -265,6 +274,20 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
         # pydantic's ValidationError is a ValueError too, so one clause covers
         # a malformed field and a missing one alike.
         raise ValueError(f"the spec block is not usable as a source: {exc}") from exc
+
+
+def _exact_codes(stat_vars: Mapping[str, object]) -> tuple[str, ...]:
+    """The publisher codes `resolved.stat_vars.source_codes` states with `exact` true, stripped and upper-cased, in wire order.
+
+    Only a JSON `true` counts: an entry without `exact`, or with any other
+    value, proves nothing about the dataset.
+    """
+    codes = (
+        _text(entry.get("code"))
+        for entry in _sequence(stat_vars.get("source_codes"))
+        if entry.get("exact") is True
+    )
+    return tuple(dict.fromkeys(code.strip().upper() for code in codes if code and code.strip()))
 
 
 def _count(value: object) -> int | None:
@@ -294,7 +317,7 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     unresolved = set(_strings(resolved.get("unresolved_slots")))
     axes: list[OpenAxis] = []
     for slot in _sequence(resolved.get("slots")):
-        prop = _text(_mapping(_mapping(slot.get("key")).get("property")).get("dcid"))
+        prop = _text(_mapping(_mapping(slot.get("key")).get("property")).get("ref"))
         if prop is None or prop in inapplicable:
             continue
         binding_kind = _mapping(slot.get("binding")).get("kind")
@@ -327,7 +350,7 @@ def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | N
         return None
     codes: dict[str, tuple[str, ...] | None] = {}
     for slot in slots:
-        prop = _text(_mapping(_mapping(slot.get("key")).get("property")).get("dcid"))
+        prop = _text(_mapping(_mapping(slot.get("key")).get("property")).get("ref"))
         binding = _mapping(slot.get("binding"))
         if prop is None or binding.get("kind") == "unbound":
             continue
@@ -339,8 +362,8 @@ def _slot_codes(resolved: Mapping[str, object]) -> dict[str, tuple[str, ...] | N
             case _:
                 return None
         added = _sequence_of_any(_mapping(slot.get("expansion")).get("added"))
-        refs = [_text(_mapping(_mapping(value).get("ref")).get("dcid")) for value in values]
-        refs += [_text(_mapping(code).get("dcid")) for code in added]
+        refs = [_text(_mapping(_mapping(value).get("ref")).get("ref")) for value in values]
+        refs += [_text(_mapping(code).get("ref")) for code in added]
         if not values or None in refs:
             return None
         if binding.get("kind") == "set" and not added:
@@ -620,7 +643,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                 ResolvedGroup(
                     role=role,
                     label=label,
-                    ref=_text(group.get("dcid")),
+                    ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
                 )
             )
@@ -652,6 +675,58 @@ def _elected_measure(resolved: Mapping[str, object]) -> ElectedMeasure | None:
                 )
             )
     return ElectedMeasure(label=label, alternatives=tuple(alternatives))
+
+
+def measure_named_by_query(block: Mapping[str, object]) -> bool:
+    """Whether the query's own words chose the measure a spec block's search elected.
+
+    They did when, for each other count of the flow the block offers
+    (`ElectedMeasure.other_counts`, the options
+    `submission.service.measure_choices` offers), every measure axis on
+    which that count's `measure_axis_values` differ from the block's own
+    has its `resolved.trace.slot_filters` entries all of provenance
+    `text_recognized`. An axis both counts agree on does not matter, so
+    "gross ODA" names gross over net though the engine elected the flow
+    type. A block stating no measure, no other count or no axis values, an
+    offered count stating no axis values, and a differing axis with no
+    filter or another provenance (`measure_elected`, `declared_default`,
+    `binder`) mean the words did not name it.
+    """
+    resolved = _mapping(block.get("resolved"))
+    elected = _elected_measure(resolved)
+    offered = {alternative.spec_id for alternative in elected.other_counts()} if elected else set()
+    ours = _axis_values(resolved.get("measure_axis_values"))
+    if not offered or not ours:
+        return False
+    provenances: dict[str, set[object]] = {}
+    for entry in _sequence(_mapping(resolved.get("trace")).get("slot_filters")):
+        axis = _text(_mapping(_mapping(entry.get("key")).get("property")).get("ref"))
+        if axis is not None:
+            provenances.setdefault(axis, set()).add(entry.get("provenance"))
+    named = {axis for axis, found in provenances.items() if found == {_TEXT_RECOGNIZED}}
+    for alternative in _sequence(resolved.get("alternative_measures")):
+        if _text(_mapping(alternative.get("definition")).get("spec_id")) not in offered:
+            continue
+        theirs = _axis_values(alternative.get("measure_axis_values"))
+        differing = {
+            axis for axis in ours.keys() | theirs.keys() if ours.get(axis) != theirs.get(axis)
+        }
+        if not theirs or not differing <= named:
+            return False
+    return True
+
+
+# The slot filter provenance of a value the query's own text named.
+_TEXT_RECOGNIZED = "text_recognized"
+
+
+def _axis_values(values: object) -> dict[str, str | None]:
+    """A `measure_axis_values` list as the value dcid on each axis property."""
+    return {
+        axis: _text(_mapping(entry.get("value")).get("ref"))
+        for entry in _sequence(values)
+        if (axis := _text(entry.get("axis"))) is not None
+    }
 
 
 def block_groups(block: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
@@ -742,7 +817,7 @@ def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     and a server that predates the field refuses it.
     """
     return {
-        group.role: {"label": group.label, **({"dcid": group.ref} if group.ref else {})}
+        group.role: {"label": group.label, **({"ref": group.ref} if group.ref else {})}
         for group in groups
     }
 

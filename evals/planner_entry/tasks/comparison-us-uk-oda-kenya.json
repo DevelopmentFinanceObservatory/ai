@@ -1,0 +1,179 @@
+{
+  "id": "comparison-us-uk-oda-kenya",
+  "kind": "comparison",
+  "origin": "pilot",
+  "question": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "United States",
+              "role": "from"
+            },
+            {
+              "text": "United Kingdom",
+              "role": "from"
+            },
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
+  "asks": [
+    "How much more ODA the United States gave Kenya than the United Kingdom, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "comparison"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "comparison",
+    "filter"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "comparison, not join: the question asks for the difference between two series"
+  },
+  "reference_payload": {
+    "question": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          },
+          {
+            "name": "United Kingdom",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        }
+      },
+      {
+        "kind": "comparison",
+        "id": "gap",
+        "minuend": {
+          "input_id": "oda",
+          "entity": "United States"
+        },
+        "subtrahend": {
+          "input_id": "oda",
+          "entity": "United Kingdom"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "gap"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": [
+    {
+      "description": "Keep each donor with a filter, then take the difference.",
+      "payload": {
+        "question": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
+        "answer_mode": "computed",
+        "decisions": [],
+        "evidence_requirements": [
+          {
+            "kind": "dataset",
+            "id": "oda",
+            "measure": "ODA",
+            "entities": [
+              {
+                "name": "United States",
+                "role": "donor"
+              },
+              {
+                "name": "United Kingdom",
+                "role": "donor"
+              },
+              {
+                "name": "Kenya",
+                "role": "recipient"
+              }
+            ],
+            "period": {
+              "start": 2015,
+              "end": 2022
+            }
+          },
+          {
+            "kind": "filter",
+            "id": "us",
+            "input_id": "oda",
+            "predicates": [
+              {
+                "kind": "entity_in",
+                "names": [
+                  "United States"
+                ],
+                "role": "donor"
+              }
+            ]
+          },
+          {
+            "kind": "filter",
+            "id": "uk",
+            "input_id": "oda",
+            "predicates": [
+              {
+                "kind": "entity_in",
+                "names": [
+                  "United Kingdom"
+                ],
+                "role": "donor"
+              }
+            ]
+          },
+          {
+            "kind": "comparison",
+            "id": "gap",
+            "minuend": {
+              "input_id": "us"
+            },
+            "subtrahend": {
+              "input_id": "uk"
+            }
+          }
+        ],
+        "answered": [
+          {
+            "ask": 0,
+            "outputs": [
+              "gap"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

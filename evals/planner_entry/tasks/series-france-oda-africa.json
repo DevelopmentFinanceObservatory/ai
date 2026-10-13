@@ -1,0 +1,76 @@
+{
+  "id": "series-france-oda-africa",
+  "kind": "dataset",
+  "origin": "trace db91fef8-5ae8-413a-9ed1-abd9c762e6d7",
+  "question": "France\u2019s aid to Africa",
+  "searches": [
+    {
+      "query": "France's aid to Africa",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "France",
+              "role": "from"
+            },
+            {
+              "role": "to",
+              "text": "Africa"
+            }
+          ],
+          "variable": "aid"
+        }
+      ]
+    }
+  ],
+  "brief": "France's gross disbursements of official development assistance to Africa from 1960 to 2024 in current US dollars",
+  "asks": [
+    "Total official development assistance gross disbursements from France to Africa over time"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "acceptable_kinds": [
+    "dataset"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "Africa named alone is one recipient with its own DAC2a series, so nothing is summed over African countries"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "France's gross disbursements of official development assistance to Africa from 1960 to 2024 in current US dollars",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "official development assistance",
+        "entities": [
+          {
+            "name": "France",
+            "role": "donor"
+          },
+          {
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "source_spec_id": "spec_6d9bab4a9969ec00852be157db22c342"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "oda"
+        ]
+      }
+    ]
+  }
+}

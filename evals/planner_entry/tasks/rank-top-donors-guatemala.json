@@ -1,0 +1,116 @@
+{
+  "id": "rank-top-donors-guatemala",
+  "kind": "rank",
+  "origin": "trace 1b14f519-a045-430d-b2e3-d1137b56fee0",
+  "question": "who are the top donors to Guatemala",
+  "searches": [
+    {
+      "query": "who are the top donors to Guatemala",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Guatemala",
+              "role": "to"
+            }
+          ],
+          "variable": "official development assistance"
+        }
+      ]
+    }
+  ],
+  "brief": "who are the top donors to Guatemala",
+  "asks": [
+    "The top donors to Guatemala"
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "rank, not aggregate: the donors are ordered by their totals, and an aggregate over the donors would sum them away"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "who are the top donors to Guatemala",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "top_n",
+        "description": "How many donors the ranking keeps.",
+        "options": [
+          "5",
+          "10"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no number; ten is the usual list of top donors.",
+        "fixes": [
+          "limit"
+        ]
+      },
+      {
+        "slot": "every_donor",
+        "description": "Which donors the ranking compares.",
+        "options": [
+          "every donor",
+          "a named list of donors"
+        ],
+        "chosen": "every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every donor is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Guatemala",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_33cb98907aab7a3d7d9936b7020d84ec"
+      },
+      {
+        "kind": "rank",
+        "id": "top_donors",
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "limit": 10,
+        "decision_ids": [
+          "top_n",
+          "every_donor"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_donors"
+        ]
+      }
+    ]
+  }
+}

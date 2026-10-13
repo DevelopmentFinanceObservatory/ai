@@ -266,8 +266,8 @@ def _spec_ref_labels(spec: Mapping[str, Any]) -> dict[str, str]:
     for axis_options in resolved.get("facet_options") or []:
         for option in axis_options.get("options") or []:
             ref = (option.get("value") or {}).get("ref") or {}
-            if ref.get("dcid") and ref.get("label"):
-                labels[ref["dcid"]] = ref["label"]
+            if ref.get("ref") and ref.get("label"):
+                labels[ref["ref"]] = ref["label"]
     return labels
 
 
@@ -496,7 +496,31 @@ def _measure(spec: Mapping[str, Any]) -> dict[str, Any]:
     axes = _varying_axes(resolved)
     if axes:
         facts["varies_by"] = axes
+    if codes := source_codes(spec):
+        facts["source_codes"] = codes
     return facts
+
+
+def source_codes(spec: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The publisher codes of the family `spec` answers, as `{"code", "source"}` entries in wire order.
+
+    The codes are `resolved.stat_vars.source_codes`, each a code and the
+    provenance dcid that issues it. `source` is the label of the provenance
+    the spec binds (`resolved.facets.provenance`) when that is the code's
+    provenance, and is left out otherwise, so the code stands alone. Empty
+    when Search states no codes.
+    """
+    resolved = spec.get("resolved") or {}
+    bound = (resolved.get("facets") or {}).get("provenance") or {}
+    ref, label = bound.get("ref"), bound.get("label")
+    codes: list[dict[str, str]] = []
+    for entry in (resolved.get("stat_vars") or {}).get("source_codes") or []:
+        code = entry.get("code") if isinstance(entry, Mapping) else None
+        if not isinstance(code, str) or not code:
+            continue
+        named = isinstance(ref, str) and entry.get("provenance") == ref and label
+        codes.append({"code": code, "source": label} if named else {"code": code})
+    return codes
 
 
 def _varying_axes(resolved: Mapping[str, Any]) -> list[str]:
@@ -507,7 +531,7 @@ def _varying_axes(resolved: Mapping[str, Any]) -> list[str]:
         if not isinstance(slot, Mapping):
             continue
         key = slot.get("key") or {}
-        prop = (key.get("property") or {}).get("dcid")
+        prop = (key.get("property") or {}).get("ref")
         if not isinstance(prop, str) or prop in inapplicable:
             continue
         binding = slot.get("binding") or {}
@@ -522,7 +546,9 @@ def _measure_line(spec: Mapping[str, Any]) -> str | None:
 
     For example "Measure: gross disbursements · 3,687 StatVars varying by
     sector, instrument." A count Search states as a floor reads "at least".
-    No line when Search states neither a label nor a count.
+    The family's publisher codes close the line, the source's label once
+    before its codes, as "Source codes: World Bank IDS DT.TDS.DEGG.CD,
+    DT.TDS.DEGG.KD". No line when Search states none of these.
     """
     facts = _measure(spec)
     pieces: list[str] = []
@@ -536,6 +562,12 @@ def _measure_line(spec: Mapping[str, Any]) -> str | None:
         if "varies_by" in facts:
             counted += f" varying by {', '.join(facts['varies_by'])}"
         pieces.append(counted)
+    if "source_codes" in facts:
+        by_source: dict[str, list[str]] = {}
+        for code in facts["source_codes"]:
+            by_source.setdefault(code.get("source", ""), []).append(code["code"])
+        named = (f"{source} {', '.join(codes)}".strip() for source, codes in by_source.items())
+        pieces.append(f"Source codes: {', '.join(named)}")
     if not pieces:
         return None
     return f"{' · '.join(pieces)}."
@@ -657,7 +689,7 @@ def _facet_axis_line(axis_options: Mapping[str, Any]) -> str | None:
 
 def _facet_option_label(option: Mapping[str, Any]) -> str | None:
     ref = (option.get("value") or {}).get("ref") or {}
-    dcid = ref.get("dcid")
+    dcid = ref.get("ref")
     label = ref.get("label")
     if dcid and label:
         return f"{dcid} ({label})"
@@ -794,11 +826,11 @@ def _answer_kind(envelope: Mapping[str, Any]) -> str:
 
 
 def _scope_place(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
-    """A catalogue or declined answer's confirmed country, `{dcid, label}`, or `None`."""
+    """A catalogue or declined answer's confirmed country, `{ref, label}`, or `None`."""
     place = (envelope.get("scope") or {}).get("place")
-    if not isinstance(place, Mapping) or not place.get("dcid"):
+    if not isinstance(place, Mapping) or not place.get("ref"):
         return None
-    return {"dcid": place["dcid"], "label": place.get("label") or place["dcid"]}
+    return {"ref": place["ref"], "label": place.get("label") or place["ref"]}
 
 
 def _render_answer_kind(envelope: Mapping[str, Any], kind: str) -> str:

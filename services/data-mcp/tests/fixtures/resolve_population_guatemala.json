@@ -147,15 +147,15 @@
             "shape_id": "person_count_measuredvalue",
             "label": "Total population",
             "population_type": {
-              "dcid": "Person",
+              "ref": "Person",
               "label": "Person"
             },
             "measured_property": {
-              "dcid": "count",
+              "ref": "count",
               "label": "count"
             },
             "stat_type": {
-              "dcid": "measuredValue",
+              "ref": "measuredValue",
               "label": "measuredValue"
             },
             "measurement_denominator_unresolved": false,
@@ -163,7 +163,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "age",
+                  "ref": "age",
                   "label": "age"
                 },
                 "label": "age"
@@ -171,7 +171,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "nativity",
+                  "ref": "nativity",
                   "label": "nativity"
                 },
                 "label": "nativity"
@@ -179,7 +179,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "employment",
+                  "ref": "employment",
                   "label": "employment"
                 },
                 "label": "employment"
@@ -187,7 +187,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "race",
+                  "ref": "race",
                   "label": "race"
                 },
                 "label": "race"
@@ -195,7 +195,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "placeOfResidenceClassification",
+                  "ref": "placeOfResidenceClassification",
                   "label": "placeOfResidenceClassification"
                 },
                 "label": "place of residence classification"
@@ -203,7 +203,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "religion",
+                  "ref": "religion",
                   "label": "religion"
                 },
                 "label": "religion"
@@ -211,7 +211,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "literacyStatus",
+                  "ref": "literacyStatus",
                   "label": "literacyStatus"
                 },
                 "label": "literacy status"
@@ -219,7 +219,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "gender",
+                  "ref": "gender",
                   "label": "gender"
                 },
                 "label": "gender"
@@ -227,7 +227,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "residenceType",
+                  "ref": "residenceType",
                   "label": "residenceType"
                 },
                 "label": "residence type"
@@ -235,7 +235,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "educationalAttainment",
+                  "ref": "educationalAttainment",
                   "label": "educationalAttainment"
                 },
                 "label": "educational attainment"
@@ -243,7 +243,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "placeOfBirth",
+                  "ref": "placeOfBirth",
                   "label": "placeOfBirth"
                 },
                 "label": "place of birth"
@@ -251,7 +251,7 @@
               {
                 "axis": "how",
                 "property": {
-                  "dcid": "armedForcesStatus",
+                  "ref": "armedForcesStatus",
                   "label": "armedForcesStatus"
                 },
                 "label": "armed forces status"
@@ -277,7 +277,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "age",
+                  "ref": "age",
                   "label": "age"
                 },
                 "label": "age"
@@ -290,7 +290,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "nativity",
+                  "ref": "nativity",
                   "label": "nativity"
                 },
                 "label": "nativity"
@@ -303,7 +303,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "employment",
+                  "ref": "employment",
                   "label": "employment"
                 },
                 "label": "employment"
@@ -316,7 +316,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "race",
+                  "ref": "race",
                   "label": "race"
                 },
                 "label": "race"
@@ -329,7 +329,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "placeOfResidenceClassification",
+                  "ref": "placeOfResidenceClassification",
                   "label": "placeOfResidenceClassification"
                 },
                 "label": "place of residence classification"
@@ -342,7 +342,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "religion",
+                  "ref": "religion",
                   "label": "religion"
                 },
                 "label": "religion"
@@ -355,7 +355,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "literacyStatus",
+                  "ref": "literacyStatus",
                   "label": "literacyStatus"
                 },
                 "label": "literacy status"
@@ -368,7 +368,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "gender",
+                  "ref": "gender",
                   "label": "gender"
                 },
                 "label": "gender"
@@ -381,7 +381,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "residenceType",
+                  "ref": "residenceType",
                   "label": "residenceType"
                 },
                 "label": "residence type"
@@ -394,7 +394,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "educationalAttainment",
+                  "ref": "educationalAttainment",
                   "label": "educationalAttainment"
                 },
                 "label": "educational attainment"
@@ -407,7 +407,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "placeOfBirth",
+                  "ref": "placeOfBirth",
                   "label": "placeOfBirth"
                 },
                 "label": "place of birth"
@@ -420,7 +420,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "armedForcesStatus",
+                  "ref": "armedForcesStatus",
                   "label": "armedForcesStatus"
                 },
                 "label": "armed forces status"
@@ -438,7 +438,7 @@
                 "kind": "value",
                 "value": {
                   "ref": {
-                    "dcid": "country/GTM",
+                    "ref": "country/GTM",
                     "label": "Guatemala"
                   },
                   "value_kind": "entity"
@@ -530,7 +530,7 @@
               "key": {
                 "axis": "how",
                 "property": {
-                  "dcid": "placeOfResidenceClassification",
+                  "ref": "placeOfResidenceClassification",
                   "label": "placeOfResidenceClassification"
                 },
                 "label": "place of residence classification"
@@ -539,7 +539,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "Urban",
+                      "ref": "Urban",
                       "label": "Urban"
                     },
                     "value_kind": "enum_value"
@@ -575,7 +575,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "dc/base/WorldDevelopmentIndicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
                       "label": "WorldDevelopmentIndicators"
                     },
                     "value_kind": "source"
@@ -584,7 +584,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "dc/base/Subnational_Demographics_Stats",
+                      "ref": "dc/base/Subnational_Demographics_Stats",
                       "label": "Subnational_Demographics_Stats"
                     },
                     "value_kind": "source"
@@ -593,7 +593,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "dc/base/WikidataPopulation",
+                      "ref": "dc/base/WikidataPopulation",
                       "label": "WikidataPopulation"
                     },
                     "value_kind": "source"
@@ -609,7 +609,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "WorldBankSubnationalPopulationEstimate",
+                      "ref": "WorldBankSubnationalPopulationEstimate",
                       "label": "World Bank Subnational Population Estimates."
                     },
                     "value_kind": "enum_value"
@@ -618,7 +618,7 @@
                 {
                   "value": {
                     "ref": {
-                      "dcid": "WikidataPopulation",
+                      "ref": "WikidataPopulation",
                       "label": "WikidataPopulation"
                     },
                     "value_kind": "enum_value"
@@ -777,21 +777,21 @@
           "trace": {
             "resolved_entities": [
               {
-                "dcid": "country/GTM",
+                "ref": "country/GTM",
                 "label": "Guatemala"
               }
             ],
             "resolved_sources": [
               {
-                "dcid": "dc/base/WorldDevelopmentIndicators",
+                "ref": "dc/base/WorldDevelopmentIndicators",
                 "label": "WorldDevelopmentIndicators"
               },
               {
-                "dcid": "dc/base/WikidataPopulation",
+                "ref": "dc/base/WikidataPopulation",
                 "label": "WikidataPopulation"
               },
               {
-                "dcid": "dc/base/Subnational_Demographics_Stats",
+                "ref": "dc/base/Subnational_Demographics_Stats",
                 "label": "Subnational_Demographics_Stats"
               }
             ],
@@ -800,7 +800,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "age",
+                    "ref": "age",
                     "label": "age"
                   },
                   "label": "age"
@@ -813,7 +813,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "nativity",
+                    "ref": "nativity",
                     "label": "nativity"
                   },
                   "label": "nativity"
@@ -826,7 +826,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "employment",
+                    "ref": "employment",
                     "label": "employment"
                   },
                   "label": "employment"
@@ -839,7 +839,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "race",
+                    "ref": "race",
                     "label": "race"
                   },
                   "label": "race"
@@ -852,7 +852,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "placeOfResidenceClassification",
+                    "ref": "placeOfResidenceClassification",
                     "label": "placeOfResidenceClassification"
                   },
                   "label": "place of residence classification"
@@ -865,7 +865,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "religion",
+                    "ref": "religion",
                     "label": "religion"
                   },
                   "label": "religion"
@@ -878,7 +878,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "literacyStatus",
+                    "ref": "literacyStatus",
                     "label": "literacyStatus"
                   },
                   "label": "literacy status"
@@ -891,7 +891,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "gender",
+                    "ref": "gender",
                     "label": "gender"
                   },
                   "label": "gender"
@@ -904,7 +904,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "residenceType",
+                    "ref": "residenceType",
                     "label": "residenceType"
                   },
                   "label": "residence type"
@@ -917,7 +917,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "educationalAttainment",
+                    "ref": "educationalAttainment",
                     "label": "educationalAttainment"
                   },
                   "label": "educational attainment"
@@ -930,7 +930,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "placeOfBirth",
+                    "ref": "placeOfBirth",
                     "label": "placeOfBirth"
                   },
                   "label": "place of birth"
@@ -943,7 +943,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "armedForcesStatus",
+                    "ref": "armedForcesStatus",
                     "label": "armedForcesStatus"
                   },
                   "label": "armed forces status"
@@ -960,7 +960,7 @@
                 "binding_kind": "value",
                 "refs": [
                   {
-                    "dcid": "country/GTM",
+                    "ref": "country/GTM",
                     "label": "Guatemala"
                   }
                 ],

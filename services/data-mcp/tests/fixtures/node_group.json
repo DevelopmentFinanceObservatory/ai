@@ -1,0 +1,52 @@
+{
+  "ref": "GroupOfSeven",
+  "label": "Group of Seven",
+  "types": [],
+  "description": null,
+  "links": {
+    "members": "/api/graph/node/GroupOfSeven/members?relation=members&projection=countries"
+  },
+  "gaps": [
+    "group.projections.institutions"
+  ],
+  "built_from": {
+    "code_index": "952a221e6d43254927fcb75abbf12ce7ba03285fbfeef7d9913e2ddcf49f904c",
+    "membership": "resolvekit 0.1.12, data 2026.06"
+  },
+  "kind": "group",
+  "group": {
+    "authority": {
+      "name": "resolvekit curated membership",
+      "version": "resolvekit 0.1.12, data 2026.06"
+    },
+    "as_of": null,
+    "effective_date": "1976-01-01",
+    "projections": [
+      {
+        "projection": "countries",
+        "count": 7,
+        "complete": true
+      },
+      {
+        "projection": "other_states",
+        "count": 0,
+        "complete": true
+      },
+      {
+        "projection": "territories",
+        "count": 0,
+        "complete": true
+      },
+      {
+        "projection": "former_states",
+        "count": 0,
+        "complete": true
+      },
+      {
+        "projection": "institutions",
+        "count": null,
+        "complete": false
+      }
+    ]
+  }
+}

@@ -303,7 +303,7 @@ TURN_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "activity_steps": None,
     "step_tools": None,
     "elicitation": frozenset({"min_options", "allow_free_text", "skippable"}),
-    "plan": frozenset({"min_steps", "min_version", "max_version"}),
+    "plan": frozenset({"min_steps", "min_version", "max_version", "operations_contain"}),
     "no_plan": None,
 }
 # The `expect` keys whose value is a list of strings the turn's closing text is
@@ -338,18 +338,19 @@ def check_expect_keys(turn: dict[str, Any], *, label: str) -> list[str]:
                 for sub in rules
                 if sub not in known[key]
             )
-    for key in _STRING_LIST_EXPECT_KEYS:
-        if key not in turn.get("expect", {}):
-            continue
-        needles = turn["expect"][key]
+    expect = turn.get("expect", {})
+    lists = {key: expect[key] for key in _STRING_LIST_EXPECT_KEYS if key in expect}
+    if isinstance(expect.get("plan"), dict) and "operations_contain" in expect["plan"]:
+        lists["plan.operations_contain"] = expect["plan"]["operations_contain"]
+    violations.extend(
+        f"{label}: expect.{key} must be a non-empty list of non-empty strings"
+        for key, needles in lists.items()
         if not (
             isinstance(needles, list)
             and needles
             and all(isinstance(needle, str) and needle for needle in needles)
-        ):
-            violations.append(
-                f"{label}: expect.{key} must be a non-empty list of non-empty strings"
-            )
+        )
+    )
     return violations
 
 
@@ -484,6 +485,7 @@ def _check_turn_expectations(
                 violations.append(
                     f"{label}: plan has {len(plans[0]['steps'])} steps, expected >= {rules['min_steps']}"
                 )
+            violations.extend(_operations_missing(plans, rules, label=label))
             top_version = max(p["version"] for p in plans)
             if rules.get("min_version") and top_version < rules["min_version"]:
                 violations.append(
@@ -494,6 +496,50 @@ def _check_turn_expectations(
                     f"{label}: plan reached version {top_version}, expected <= {rules['max_version']}"
                 )
     return violations
+
+
+def _operations_missing(
+    plans: list[dict[str, Any]], rules: dict[str, Any], *, label: str
+) -> list[str]:
+    """Each `plan.operations_contain` string the turn's highest-version plan
+    never says of an ask it answers, matched case-insensitively.
+
+    The words are those of the operations an undeclined ask lists in
+    `answered_by` (`_party_words`). Step labels, requirement ids and every
+    other sentence are left out, because they repeat the planner's own words
+    for what was asked, whatever the plan keeps.
+    """
+    needles = rules.get("operations_contain") or []
+    last = max(plans, key=lambda plan: plan["version"])
+    operations = {op.get("id"): op for op in last.get("operations") or []}
+    answering = [
+        operations.get(op_id) or {}
+        for ask in last.get("asks") or []
+        if ask.get("declined") is None
+        for op_id in ask.get("answered_by") or []
+    ]
+    said = " ".join(_party_words(op) for op in answering).lower()
+    return [
+        f"{label}: the operations answering the plan's asks never say {needle!r}"
+        for needle in needles
+        if needle.lower() not in said
+    ]
+
+
+def _party_words(operation: dict[str, Any]) -> str:
+    """The words of `operation`'s sentence that name the parties it keeps.
+
+    A retrieve's sentence is Search's account of what its source holds,
+    and a rank's names its population after its last colon
+    (`harness.plan_display`). Any other sentence, and a rank's opening,
+    restates the planner's `measure` and names no party.
+    """
+    sentence = operation.get("sentence") or ""
+    if operation.get("kind") == "retrieve":
+        return sentence
+    if operation.get("kind") == "rank":
+        return sentence.rpartition(": ")[2]
+    return ""
 
 
 def _check_mutation(turn: dict[str, Any], result: dict[str, Any], *, label: str) -> list[str]:

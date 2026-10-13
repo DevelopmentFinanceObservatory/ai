@@ -828,6 +828,65 @@ def _struct_composed_unit_table(frame: Frame) -> pa.Table:
     )
 
 
+def _flow_frame(*, kind_suffix: str) -> Frame:
+    """Two recipients and a total, each party's kind in `financingProvider{kind_suffix}`
+    and `financingRecipient{kind_suffix}`."""
+    provider_kind, recipient_kind = (f"{role}{kind_suffix}" for role in _FLOW_ROLES)
+    return Frame.build(
+        role_keys=[*_FLOW_ROLES, provider_kind, recipient_kind],
+        rows=[
+            {
+                "stat_var": "dcid:X",
+                "financingProvider": "dcid:country/FRA",
+                "financingRecipient": recipient,
+                provider_kind: "party",
+                recipient_kind: kind,
+                "time_period": "2022",
+                "value": value,
+                "unit": "dcid:USDollar",
+            }
+            for recipient, kind, value in [
+                ("dcid:country/MAR", "party", 600.0),
+                ("dcid:country/IND", "party", 400.0),
+                ("dcid:DACAfrica", "total", 5400.0),
+            ]
+        ],
+    )
+
+
+_FLOW_ROLES = ("financingProvider", "financingRecipient")
+
+
+async def test_get_renames_a_legacy_kind_column_to_the_party_kind_column() -> None:
+    """A flow frame minted before the rename reads as the frame a current mint of the same
+    rows builds, and the content-version check sees the stored column."""
+    client = _FakeStorageClient()
+    ref = _ref()
+    legacy = _flow_frame(kind_suffix="_kind")
+    current = _flow_frame(kind_suffix="_party_kind")
+    assert legacy.columns != current.columns
+    checked: list[tuple[str, ...]] = []
+
+    def derive_content_version(frame: Frame) -> str:
+        checked.append(frame.columns)
+        return ref.content_version
+
+    store = GcsMaterialisationStore(
+        bucket_name=_BUCKET,
+        client=client,
+        verify_content_version_on_read=True,
+        derive_content_version=derive_content_version,
+    )
+    _store_table(client, _object_name(ref, prefix=_WRITTEN_PREFIX), legacy.table, ref)
+
+    result = await store.get(ref)
+
+    assert result is not None
+    assert checked == [legacy.columns]
+    assert result[0] == current
+    assert canonical_frame_bytes(result[0]) == canonical_frame_bytes(current)
+
+
 async def test_put_writes_the_canonical_table_under_the_v4_prefix_and_get_reads_it_back() -> None:
     client = _FakeStorageClient()
     store = GcsMaterialisationStore(bucket_name=_BUCKET, client=client)
