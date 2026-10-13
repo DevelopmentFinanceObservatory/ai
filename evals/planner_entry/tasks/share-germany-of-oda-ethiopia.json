@@ -54,6 +54,7 @@
     "distinction": "share_of, not quotient_of: Germany's ODA is a part of all ODA to Ethiopia, both in one unit"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What share of all ODA to Ethiopia came from Germany in each year from 2015 to 2022?",
     "answer_mode": "computed",

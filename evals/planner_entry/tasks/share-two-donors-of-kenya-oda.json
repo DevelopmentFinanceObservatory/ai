@@ -42,7 +42,10 @@
   ],
   "brief": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
   "asks": [
-    "Share of Kenya's ODA from the United States and the United Kingdom together, 2015 to 2022"
+    {
+      "text": "Share of Kenya's ODA from the United States and the United Kingdom together, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -54,6 +57,7 @@
     "sum_of",
     "share_of"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
     "answer_mode": "computed",

@@ -7,7 +7,7 @@ scripted model in place of the planner's. So a change to the planner's rules, th
 seam's brief or the orchestrator's search storage that leaves a reference plan
 refused, or a recording that no longer replays or lacks a first-year read the
 planner can make, fails here rather than in a paid run. No model, no network. The
-full-set test takes about 20 s: it runs one scripted entry for each of the 62 tasks'
+full-set test takes about 20 s: it runs one scripted entry for each of the 68 tasks'
 plans, and one more per task for the datasets its seam shows the planner.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
@@ -31,6 +31,7 @@ import pytest
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
+from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
 EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "planner_entry"
@@ -79,12 +80,23 @@ def _required_kind_unused(task: Any) -> dict[str, Any]:
     }
 
 
+def _years_misdeclared(task: Any) -> dict[str, Any]:
+    del task
+    return {"period_reduction": "none"}
+
+
+def _ask_unmarked(task: Any) -> dict[str, Any]:
+    return {"asks": [ask.text for ask in task.asks]}
+
+
 @pytest.mark.parametrize(
     ("change", "fault"),
     [
         (_search_reworded, "RecordingMismatchError"),
         (_ask_unanswered, "not accepted"),
         (_required_kind_unused, "lacks required kinds ['join']"),
+        (_years_misdeclared, "period_reduction is none, but the plan's is across_years"),
+        (_ask_unmarked, "not accepted: invalid_input/period_reduction_unstated"),
     ],
 )
 async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
@@ -96,6 +108,18 @@ async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
     faults = await validate.check_task(broken)
 
     assert any(fault in line for line in faults), faults
+
+
+def test_a_task_states_its_period_reduction_in_the_closed_vocabulary() -> None:
+    task = next(task for task in entry.load_tasks() if task.id == "aggregate-total-oda-kenya")
+
+    with pytest.raises(ValidationError) as refused:
+        entry.Task.model_validate({**task.model_dump(), "period_reduction": "one_year"})
+    with pytest.raises(ValidationError) as missing:
+        entry.Task.model_validate(task.model_dump(exclude={"period_reduction"}))
+
+    assert [error["type"] for error in refused.value.errors()] == ["enum"]
+    assert [error["type"] for error in missing.value.errors()] == ["missing"]
 
 
 def _tamper_answer(directory: Path, name: str) -> None:
@@ -273,6 +297,92 @@ async def test_a_record_credits_the_proposal_that_recorded_the_plan_and_an_ask_l
     assert (record["stop_reason"], record["first_proposal"]["outcome"]) == (stop, first)
 
 
+def _summing_years(payload: dict[str, Any]) -> dict[str, Any]:
+    """`payload` with every `aggregate` leaving `period` out of its `group_by`."""
+    requirements = [
+        {**requirement, "group_by": ["entity"]}
+        if requirement["kind"] == "aggregate"
+        else requirement
+        for requirement in payload["evidence_requirements"]
+    ]
+    return {**payload, "evidence_requirements": requirements}
+
+
+_COVERAGE_BRIEF = "aggregate-total-education-oda-kenya-coverage-brief"
+
+
+# Each task's reference plan, proposed after the same plan summing its years when
+# `summed_first`: the asks the plan holds as marked, what the record says of the first
+# proposal and of the accepted plan's years, and what the same record reads as without
+# the fields a record written before the mark existed lacks.
+@pytest.mark.parametrize(
+    ("task_id", "summed_first", "marked", "first_code", "reductions", "reduction", "unmarked"),
+    [
+        (
+            "aggregate-total-oda-kenya",
+            False,
+            [0],
+            None,
+            [{"step": "total", "start": 2015, "end": 2022, "refused": False}],
+            "across_years",
+            "unstated",
+        ),
+        ("rank-top-donors-malawi", False, [], None, [], "none", "none"),
+        (_COVERAGE_BRIEF, True, [], "period_reduction_unstated", [], "none", "none"),
+    ],
+)
+async def test_a_record_says_what_the_accepted_plan_does_with_its_years(
+    task_id: str,
+    summed_first: bool,
+    marked: list[int],
+    first_code: str | None,
+    reductions: list[dict[str, Any]],
+    reduction: str,
+    unmarked: str,
+) -> None:
+    entry.quiet_logs()
+    task = next(task for task in entry.load_tasks() if task.id == task_id)
+    payloads = [_summing_years(task.reference_payload)] if summed_first else []
+    payloads.append(dict(task.reference_payload))
+    model = validate.ScriptedLlm(script=[[("propose_plan", payload)] for payload in payloads])
+
+    run = await entry.run_entry(
+        task, entry.load_recording(task.id), prefix_cache=None, model=model, timeout_s=60.0
+    )
+    record = entry.entry_record(
+        task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
+    )
+
+    assert record["stop_reason"] == "accepted"
+    assert record["plan"]["asks_across_years"] == marked
+    assert record["first_proposal"]["code"] == first_code
+    assert record["period_reductions"] == reductions
+    assert record["period_reduction"] == reduction
+    assert entry.record_period_reduction(_before_the_mark(record)) == unmarked
+
+
+def _before_the_mark(record: dict[str, Any]) -> dict[str, Any]:
+    """`record` as a run before asks carried `across_years` wrote it: no reading of the
+    plan's years, and a plan with no ask marked."""
+    kept = {k: v for k, v in record.items() if not k.startswith("period_reduction")}
+    return {**kept, "plan": {k: v for k, v in record["plan"].items() if k != "asks_across_years"}}
+
+
+def test_an_unmarked_ask_digests_as_it_did_before_asks_carried_the_mark() -> None:
+    task = next(task for task in entry.load_tasks() if task.id == "rank-donor-each-year-kenya")
+    marked = entry.Task.model_validate(
+        {**task.model_dump(), "asks": [{**task.asks[0].model_dump(), "across_years": True}]}
+    )
+    recording = {"searches": [], "tools": {}}
+
+    # The pinned digest is the one `inputs_digest` gave this task over this recording
+    # before asks carried the mark.
+    assert entry.inputs_digest(task, recording) == (
+        "dcda82f03fa9c004ffacfc14bc3fe4c66255aed890f6155ca84d79c395465afe"
+    )
+    assert entry.inputs_digest(marked, recording) != entry.inputs_digest(task, recording)
+
+
 def _record(
     arm: str,
     task: str,
@@ -288,10 +398,20 @@ def _record(
     misses: tuple[str, ...] = (),
     finished: bool = True,
     closed: str | None = None,
+    years: str | None = None,
+    plan: dict[str, Any] | None = None,
+    proposals: int = 1,
 ) -> dict[str, Any]:
+    """One run's record. `years` is the accepted plan's period reduction. A record given
+    none keeps none, as one written before records kept it, and is read from `plan`,
+    the accepted plan it holds. The last of several `proposals` is accepted."""
     outcome, code = first
     tokens = (100, 50, 10, 0) if finished else (None, None, None, None)
+    accepted = {"outcome": "ok", "code": None, "message": "", "kinds": kinds, "args": {}}
+    kept = {} if years is None else {"period_reduction": years}
     return {
+        **kept,
+        "plan": plan,
         "arm": arm,
         "task": task,
         "rep": rep,
@@ -303,7 +423,8 @@ def _record(
         "stop_reason": stop,
         "plan_kinds": kinds if stop == "accepted" else None,
         "proposals": [
-            {"outcome": outcome, "code": code, "message": "", "kinds": kinds, "args": {}}
+            {"outcome": outcome, "code": code, "message": "", "kinds": kinds, "args": {}},
+            *([accepted] * (proposals - 1)),
         ],
         "first_proposal": {"outcome": outcome, "code": code},
         "calls": [
@@ -419,6 +540,64 @@ def test_the_summary_pairs_by_task_and_leaves_out_what_it_cannot_vouch_for() -> 
     # whose arm runs all errored, is no kind-pass task lost, and the task whose inputs
     # changed between the arms, worse in every arm run, pairs nothing.
     assert fired == {"First-proposal": False, "Kind": False, "p90": True, "More": True}
+
+
+async def test_the_summary_holds_each_accepted_plan_to_its_tasks_years() -> None:
+    entry.quiet_logs()
+    tasks = {task.id: task for task in entry.load_tasks()}
+    top, total, series = "rank-top-donors-malawi", "aggregate-total-oda-kenya", "series-gdp-ghana"
+    summed, ranked = ["aggregate", "dataset"], ["dataset", "rank"]
+    # The plan a record keeps for the coverage brief: its years summed, which
+    # `propose_plan` accepts only with the ask marked, and no ask marked in it.
+    brief = tasks[_COVERAGE_BRIEF]
+    asked = entry.Task.model_validate(
+        {**brief.model_dump(), "asks": [{**brief.asks[0].model_dump(), "across_years": True}]}
+    )
+    payload = _summing_years(brief.reference_payload)
+    run = await entry.run_entry(
+        asked,
+        entry.load_recording(brief.id),
+        prefix_cache=None,
+        model=validate.ScriptedLlm(script=[[("propose_plan", payload)]]),
+        timeout_s=60.0,
+    )
+    assert run.probe.plan is not None
+    before = run.probe.plan.model_dump(mode="json", exclude={"asks_across_years"})
+    refused = ("invalid_input", "period_reduction_unstated")
+    records = [
+        # Refused for its years, then accepted keeping them.
+        _record("arm", brief.id, 1, kinds=summed, first=refused, years="none", proposals=2),
+        _record("arm", brief.id, 2, kinds=summed, years="none"),
+        # A ranking of every year summed, which only a revision without the rule accepts.
+        _record("arm", top, 1, kinds=ranked, years="unstated"),
+        _record("arm", top, 2, kinds=ranked, years="none"),
+        # A marked ask: one total, and a plan that kept the years the task sums.
+        _record("arm", total, 1, kinds=summed, years="across_years"),
+        _record("arm", total, 2, kinds=summed, years="none"),
+        _record("arm", series, 1, kinds=["dataset"], years="none"),
+        _record("arm", series, 2, kinds=["dataset"], first=("refused", None), stop="no_plan"),
+        # Records that keep no reading: one read from its plan, one whose plan `Plan`
+        # refuses to validate, which is not read.
+        _record("baseline", brief.id, 1, kinds=summed, plan=before),
+        _record("baseline", brief.id, 2, kinds=summed, plan={**before, "answered": 1}),
+    ]
+
+    report, machine = summarise.build_report(
+        records, [tasks[t] for t in (brief.id, top, total, series)], arm="arm", baseline="baseline"
+    )
+
+    arm, baseline = machine["arms"]["arm"], machine["arms"]["baseline"]
+    assert (arm["years_expected"], arm["years_read"]) == (5, 7)
+    assert (arm["unmarked_reducing"], arm["unmarked_accepted"]) == (1, 5)
+    assert arm["period_first_refusals"] == 1
+    assert (arm["rule_tasks"], arm["rule_accepted"], arm["rule_runs"]) == (2, 4, 4)
+    assert arm["rule_mean_rounds"] == pytest.approx(5 / 4)
+    assert (baseline["years_expected"], baseline["years_read"]) == (0, 1)
+    assert (baseline["unmarked_reducing"], baseline["unmarked_accepted"]) == (1, 1)
+    assert (baseline["rule_accepted"], baseline["rule_runs"]) == (2, 2)
+    rows = {line.split(" | ")[0].strip("| "): line.split(" | ")[-1] for line in report.splitlines()}
+    assert rows[top] == "2/2, 2/2, 1/2 |"
+    assert rows[series] == "1/2, 2/2, 1/1 |"
 
 
 def test_the_summary_refuses_an_arm_run_under_two_experiments() -> None:

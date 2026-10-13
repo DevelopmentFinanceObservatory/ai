@@ -48,6 +48,7 @@
     "kind": "comparison",
     "distinction": "quotient_of or share_of, not comparison: 'relative to' divides debt service by GDP, and no difference is asked for"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What was Ghana's external debt service relative to its GDP in each year from 2012 to 2021?",
     "answer_mode": "computed",

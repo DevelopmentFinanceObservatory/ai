@@ -58,11 +58,13 @@ from planner.parties import (
 from planner.plan import (
     MAX_DECISION_OPTIONS,
     MAX_DECLINES,
+    MAX_GROUP_BY,
     MAX_OPTION_CHARS,
     MAX_PLAN_ASKS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
+    AggregateRequirement,
     AnswerMode,
     AskAnswer,
     AskRoleDroppedError,
@@ -77,6 +79,7 @@ from planner.plan import (
     FullHistory,
     PinSource,
     Plan,
+    RankRequirement,
     RecordedDefinition,
     ResolvedBy,
     SessionState,
@@ -84,6 +87,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WindowedPin,
+    amendment_entry,
     bound_fixes,
     cut_user_text,
     dataset_roots,
@@ -95,6 +99,7 @@ from planner.plan import (
     is_search_pin,
     load_ask_breakdowns,
     load_asks,
+    load_asks_across_years,
     load_optional_declines,
     load_plan,
     load_plan_rounds,
@@ -109,11 +114,13 @@ from planner.plan import (
     search_pin_slot,
     settle_decisions,
     shown_identity,
+    unstated_period_reductions,
     unstated_result_scopes,
     windowed_pin,
     windowed_pins,
 )
 from planner.records import (
+    GroupBy,
     Identifier,
     OpenPeriodFault,
     ResolvedSourceMention,
@@ -406,6 +413,7 @@ def admit(
                 declined=patch.declined,
                 asks=load_asks(view.state),
                 ask_breakdowns=load_ask_breakdowns(view.state),
+                asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
             )
         elif question is None or answer_mode is None:
@@ -431,6 +439,7 @@ def admit(
                 declined=patch.declined,
                 asks=load_asks(view.state),
                 ask_breakdowns=load_ask_breakdowns(view.state),
+                asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
             )
         stated = plan
@@ -1694,9 +1703,11 @@ def _unrecordable(
     decline no `unsupported` answer earned (`_decline_unearned`, against
     `previous`, the plan it amends), for a decline of a party a source this
     turn holds open (`_breakdown_decline_unearned`, against `stated`), for a decline every `unsupported`
-    answer this turn requires (`_decline_missing`), and for a result given
+    answer this turn requires (`_decline_missing`), for a result given
     per member of a party nobody named that no decision states
-    (`_result_scope_unstated`).
+    (`_result_scope_unstated`), and for a step reducing across years for a
+    result no ask across years asks for (`_period_reduction_unstated`,
+    against `stated` and `previous`).
     """
     if not plan.evidence_requirements:
         return _nothing_to_plan(plan, view) or _invalid_plan(
@@ -1713,6 +1724,7 @@ def _unrecordable(
         or _breakdown_decline_unearned(stated, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
+        or _period_reduction_unstated(stated, view, previous=previous)
     )
 
 
@@ -1759,6 +1771,131 @@ def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:
                 for gap in gaps
             ]
         },
+    )
+
+
+def _period_reduction_unstated(
+    plan: Plan, view: SessionView, *, previous: Plan | None
+) -> dict[str, object] | None:
+    """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
+
+    The rule is `planner.plan.unstated_period_reductions`, read with whether
+    the planner's entry opened with the user's amendment
+    (`planner.plan.amendment_entry`) and with `previous`, the plan this call
+    amends. For each such step the refusal names the step, the result
+    computed from it and the asks that result answers, and the years
+    reduced, and says those asks do not ask for one figure over them. When
+    another result computed from the step answers an ask across years, the
+    step is asked for, and the refusal points at the unmarked asks. Each is
+    answered by a result of its own that keeps the years or reads one year,
+    or, for a result answering no ask, the result is listed under an ask
+    across years or removed. Otherwise it gives two ways to settle the step,
+    keep the years (`_keep_the_years`) or read one year, and in an amendment
+    entry a third, a decision the user made in their amendment. `detail.gaps` holds
+    one entry per step, in the order the rule finds them.
+    """
+    amended = amendment_entry(view.state)
+    gaps = unstated_period_reductions(plan, amendment_entry=amended, previous=previous)
+    if not gaps:
+        return None
+    steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    sentences = []
+    for gap in gaps:
+        start, end = gap.years.start, gap.years.end
+        years = f"the years from {start} to the newest" if gap.follows_newest else f"{start}-{end}"
+        step = repr(gap.step_id)
+        output = repr(gap.output_id)
+        result = "which" if gap.output_id == gap.step_id else f"and {output}, computed from it,"
+        if gap.asks:
+            answers = " and ".join(f"ask {ask} ({plan.asks[ask]!r})" for ask in gap.asks)
+            unasked = (
+                "That ask is not marked (across years) and does not ask"
+                if len(gap.asks) == 1
+                else "Those asks are not marked (across years) and do not ask"
+            ) + " for one figure over those years"
+        else:
+            answers = "no ask"
+            unasked = "No ask asks for that figure"
+        reducing = steps[gap.step_id]
+        if gap.asked_across and gap.asks:
+            listed = "that ask's" if len(gap.asks) == 1 else "each of those asks'"
+            remedies = (
+                f"{step} also feeds an ask marked (across years), so keep it as it is. Answer "
+                f"{answers} with a result of its own that keeps the years or reads one year, "
+                f"and take {output} out of {listed} `answered` outputs."
+            )
+        elif gap.asked_across:
+            remedies = (
+                f"{step} also feeds an ask marked (across years), so keep it as it is and list "
+                f"{output} in `answered` under an ask marked (across years) that it answers, "
+                "or remove it."
+            )
+        elif isinstance(reducing, RankRequirement):
+            fixed = (
+                " with `rolling` unset or naming both at one offset" if gap.follows_newest else ""
+            )
+            remedies = (
+                f"To keep the years, set `per_period` to true on {step}. To read one year, set "
+                f"`window_start` and `window_end` on {step} to that year{fixed}."
+            )
+            if amended:
+                remedies += (
+                    f" If the user's change to the plan asks for one ranking over {years}, state "
+                    f"`window_start` {start} and `window_end` {end} on {step} and cite on it a "
+                    "decision resolved by `user` whose `fixes` names `window_start` and "
+                    "`window_end`."
+                )
+        else:
+            assert isinstance(reducing, AggregateRequirement)
+            fixed = " with `period_end_open` unset" if gap.follows_newest else ""
+            remedies = (
+                f"To keep the years, {_keep_the_years(reducing)}. To read one year, narrow the "
+                f"`period` of {gap.dataset_id!r} to that year{fixed} and cite on "
+                f"{gap.dataset_id!r} a decision whose `fixes` names `period`."
+            )
+            if amended:
+                remedies += (
+                    f" If the user's change to the plan asks for one figure over {years}, cite "
+                    f"on {step} a decision resolved by `user` whose `fixes` names `group_by`."
+                )
+        sentences.append(
+            f"{step} reduces {years} to one figure, {result} answers {answers}. {unasked}. "
+            f"{remedies}"
+        )
+    return problem(
+        ProblemCode.PERIOD_REDUCTION_UNSTATED,
+        " ".join(sentences),
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "gaps": [
+                {
+                    "requirement_id": gap.step_id,
+                    "output_id": gap.output_id,
+                    "asks": list(gap.asks),
+                    "years": {"start": gap.years.start, "end": gap.years.end},
+                    "follows_newest": gap.follows_newest,
+                    "dataset_requirement_id": gap.dataset_id,
+                }
+                for gap in gaps
+            ]
+        },
+    )
+
+
+def _keep_the_years(aggregate: AggregateRequirement) -> str:
+    """How `aggregate`, whose `group_by` lacks `period`, keeps the years, as its refusal says it.
+
+    It adds `period` while the group names fewer than `MAX_GROUP_BY`
+    columns. At the cap it groups by `entity` and `breakdown`, and `entity`
+    already keeps a breakdown's codes, so `period` takes `breakdown`'s place.
+    """
+    step = repr(aggregate.id)
+    if len(aggregate.group_by) < MAX_GROUP_BY:
+        return f"add `period` to the `group_by` of {step}"
+    assert set(aggregate.group_by) == {GroupBy.ENTITY, GroupBy.BREAKDOWN}
+    return (
+        f"group {step} by `entity` and `period`: `entity` keeps the breakdown's codes too, "
+        "and a group names two columns at most"
     )
 
 

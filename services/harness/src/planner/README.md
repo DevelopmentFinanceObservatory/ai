@@ -98,7 +98,8 @@ window analysis-mcp computes `(value_end - value_start) / value_start` over;
 adds two single-series results at each period both report, leaving out a
 period only one reports; `RankRequirement`
 orders every entity, and keeps the top or bottom N when it states `limit`,
-reducing an input that spans several years to one value each first; `ShareOfRequirement` divides one
+reading one year when `window_start` and `window_end` state the same year and
+reducing an input that spans several years to one value each first otherwise; `ShareOfRequirement` divides one
 requirement's result by another's, period by period, when the two sources declare one unit
 or both declare none; `QuotientRequirement` divides one measure by another
 at each period both report, in the unit the two compose, either as one figure
@@ -116,6 +117,23 @@ of a dataset the planner was shown, a series the orchestrator fetched
 included, is honoured from its block or its identity on record with no
 search. A referral names the candidates' `spec_id`s, since pinning one is
 how a `source_ambiguous` referral is settled.
+`propose_plan` refuses a step that turns more than one year into one figure
+per entity unless every ask its result answers is marked `(across years)`
+(`period_reduction_unstated`, `planner.plan.unstated_period_reductions`). Such
+a step is an `AggregateRequirement` whose `group_by` leaves out `period`, or a
+`RankRequirement` with a `reduction` and `per_period` unset whose window keeps
+more than one year. The orchestrator sets the mark on an ask from the user's
+words, the plan holds the marked asks' numbers as `asks_across_years`, and the
+planner reads the mark beside the ask in its message. Every answering result
+computed from the step, the step included, answers at least one ask, and each
+ask it answers carries the mark. A plan with no asks admits no such step. An
+aggregate that keeps `period` in its `group_by`, a rank stating `per_period`,
+and a rank whose `window_start` and `window_end` state the same year reduce no
+years. In an entry the user's amendment at the approval card opened, the step
+is also admitted when it cites a decision resolved by `user` whose `fixes`
+names `group_by`, for an aggregate, or `window_start` and `window_end`, for a
+rank, and a later entry keeps a step the previous plan states unchanged with
+the same decision.
 `propose_plan` refuses a `SumOfRequirement` adding two datasets unless
 it cites a decision resolved by `user` (`combination_unasked`): whether two
 datasets add up without counting a flow twice, as ODA loans count in both

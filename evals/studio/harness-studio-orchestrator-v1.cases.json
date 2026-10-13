@@ -1142,6 +1142,204 @@
       ]
     },
     {
+      "id": "orchestrator-live-a-ranking-with-no-period-named-ranks-one-year",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Which providers give the most?",
+          "seed_spec": [
+            {
+              "spec": {
+                "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "FinancialFlow",
+                      "measured_property": "amount",
+                      "stat_type": "measuredValue",
+                      "measurement_qualifier": "Nominal"
+                    },
+                    "slots": [
+                      {
+                        "property": "crsCooperationModality",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsPurpose",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSPurposeCode110"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFinance",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFlow",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSTypeOfFlow10"
+                        }
+                      },
+                      {
+                        "property": "financialFlowType",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Disbursement"
+                        }
+                      },
+                      {
+                        "property": "nettingBasis",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Net"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "destination": [
+                        "country/KEN"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                },
+                "resolved": {
+                  "rendered_sentence": "Net ODA disbursements to Kenya from 55 providers for education, 1990 to 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS)."
+                }
+              },
+              "operations": []
+            }
+          ],
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "receive_seeds"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "ranking-reads-one-year",
+          "property": "The user named no period, and 1990 to 2024 is only the span of years the dataset they brought holds. The plan card and the closing message rank the providers for one year. A ranking by a total over 1990 to 2024 is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-total-with-no-period-named-keeps-the-years",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "What is the total across all providers?",
+          "seed_spec": [
+            {
+              "spec": {
+                "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "FinancialFlow",
+                      "measured_property": "amount",
+                      "stat_type": "measuredValue",
+                      "measurement_qualifier": "Nominal"
+                    },
+                    "slots": [
+                      {
+                        "property": "crsCooperationModality",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsPurpose",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSPurposeCode110"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFinance",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFlow",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSTypeOfFlow10"
+                        }
+                      },
+                      {
+                        "property": "financialFlowType",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Disbursement"
+                        }
+                      },
+                      {
+                        "property": "nettingBasis",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Net"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "destination": [
+                        "country/KEN"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                },
+                "resolved": {
+                  "rendered_sentence": "Net ODA disbursements to Kenya from 55 providers for education, 1990 to 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS)."
+                }
+              },
+              "operations": []
+            }
+          ],
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "receive_seeds"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "total-across-providers-is-given-for-each-year-or-one-stated-year",
+          "property": "The user named no period, and 1990 to 2024 is only the span of years the dataset they brought holds. The result is a total across all providers for each year, or for one year the answer states as the year chosen, and no single figure summed over 1990 to 2024 is given as the answer. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
       "id": "orchestrator-live-a-period-outside-the-data-is-a-recorded-decision",
       "modes": [
         "live"

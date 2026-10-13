@@ -111,6 +111,7 @@ from google.genai import types
 from planner.agent import PROPOSE_PLAN
 from planner.operations import OperationKind
 from planner.plan import (
+    AMENDMENT_ENTRY_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
@@ -128,10 +129,12 @@ from planner.plan import (
     discovery_time_left,
     load_ask_breakdowns,
     load_asks,
+    load_asks_across_years,
     load_plan,
     load_plan_rounds,
     pin_sources,
     record_unsupported,
+    save_amendment_entry,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
@@ -505,6 +508,11 @@ class PlannerSeam:
             # an entry on the resume path, and the refer-and-repropose loop
             # `MAX_PLAN_ROUNDS` bounds would run unbounded for the rest of it.
             save_plan_rounds(cast(SessionState, ctx.session.state), 0)
+            # Whether the user's own words open this entry, which
+            # `propose_plan` reads to honour a decision they make in them
+            # (`planner.plan.unstated_period_reductions`). `_message` renders
+            # the amendment on the same test.
+            save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)
@@ -593,6 +601,7 @@ class PlannerSeam:
                 ledger=ledger,
                 asks=load_asks(cast(SessionState, ctx.session.state)),
                 ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
+                asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
             )
             submitted, plan, refused = await self._propose(
                 ctx=ctx, message=message, on_progress=on_progress
@@ -684,11 +693,17 @@ class PlannerSeam:
         # guards a direct caller of this seam's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY` and
-        # `COMPILE_FAILURES_STATE_KEY` too. The declines an ask-the-user resume
-        # still owes or may make, and the failures it may repeat, are this
+        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
+        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
+        # The declines an ask-the-user resume still owes or may make, the
+        # failures it may repeat, and the amendment that opened it are this
         # entry's own.
-        for key in (UNSUPPORTED_STATE_KEY, OPTIONAL_DECLINES_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
+        for key in (
+            UNSUPPORTED_STATE_KEY,
+            OPTIONAL_DECLINES_STATE_KEY,
+            COMPILE_FAILURES_STATE_KEY,
+            AMENDMENT_ENTRY_STATE_KEY,
+        ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
 
@@ -1150,6 +1165,7 @@ class PlannerSeam:
         ledger: RenderedReadings = _NO_READINGS,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
+        asks_across_years: Sequence[int] = (),
     ) -> str:
         """The message for one `_propose` call.
 
@@ -1168,7 +1184,8 @@ class PlannerSeam:
         being changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
-        each with the parties `ask_breakdowns` says it breaks down by.
+        each with the parties `ask_breakdowns` says it breaks down by and
+        marked when `asks_across_years` numbers it.
 
         See the module docstring for why a continuing call needs no more
         than this: `ctx.run_node` shares the graph's own session, so the
@@ -1217,7 +1234,7 @@ class PlannerSeam:
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
-                _asks_section(asks, ask_breakdowns),
+                _asks_section(asks, ask_breakdowns, asks_across_years),
                 ask,
             ]
         )
@@ -1263,17 +1280,26 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     )
 
 
-def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) -> str:
+def _asks_section(
+    asks: Sequence[str],
+    breakdowns: Sequence[AskBreakdown] = (),
+    across_years: Sequence[int] = (),
+) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
 
     An ask in `breakdowns` names the parties it breaks down by, and the
     section then states the rule `planner.plan.Plan` holds its answer to.
+    An ask in `across_years` is marked as one figure over its years taken
+    together, and the section then says no other ask is.
     """
     if not asks:
         return ""
     by = {breakdown.ask: breakdown.by for breakdown in breakdowns}
     lines = "".join(
-        f"{number}. {ask}" + (f" (by {', '.join(by[number])})" if number in by else "") + "\n"
+        f"{number}. {ask}"
+        + (f" (by {', '.join(by[number])})" if number in by else "")
+        + (" (across years)" if number in across_years else "")
+        + "\n"
         for number, ask in enumerate(asks)
     )
     rule = (
@@ -1292,6 +1318,12 @@ def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) 
         if by
         else ""
     )
+    if across_years:
+        rule += (
+            "An ask marked (across years) asks for one figure, or one ranking, over its "
+            "years taken together. No other ask does: its answer keeps each year or reads "
+            "one year.\n"
+        )
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
         "`answered`, or, when an `unsupported` answer earned its decline (see `declined`), "

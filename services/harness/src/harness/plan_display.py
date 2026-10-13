@@ -811,8 +811,14 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
             else None
         ),
     )
-    per_period_text = per_period_phrase(
-        requirement.per_period, limited=requirement.limit is not None
+    # A one-year window holds one row per entity, so it has nothing to collapse.
+    one_year = requirement.window_start is not None and (
+        requirement.window_start == requirement.window_end
+    )
+    per_period_text = (
+        f"ranks {requirement.window_start}{_following(requirement.rolling)}"
+        if one_year and not requirement.per_period
+        else per_period_phrase(requirement.per_period, limited=requirement.limit is not None)
     )
     sentence = f"Ranks by {_ranked_value(requirement, plan)}: {among_text}; {per_period_text}"
     if requirement.limit is None:

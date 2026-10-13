@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.search_tool import SearchSource
 from planner.operations import (
@@ -794,6 +795,26 @@ def test_dataset_entities_must_be_unique_by_name_and_role(requirement: Requireme
         )
 
 
+def test_a_rank_window_may_be_one_year_and_refuses_an_end_before_its_start() -> None:
+    fields: dict[str, Any] = {
+        "id": "ranked",
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "window_start": 2020,
+    }
+    requirement_fields = fields | {"decision_ids": ["measure"], "input_id": "debt"}
+    operation_fields = fields | {"requirement_id": "ranked", "input": "debt"}
+    last_year = RollingWindow(
+        window_start=RelativePeriod(offset=0), window_end=RelativePeriod(offset=0)
+    )
+
+    for model, stated in ((RankRequirement, requirement_fields), (RankOperation, operation_fields)):
+        one_year = model(**stated, window_end=2020, rolling=last_year)
+        assert (one_year.window_start, one_year.window_end) == (2020, 2020)
+        with pytest.raises(ValidationError, match="ends before it starts"):
+            model(**stated, window_end=2019)
+
+
 def test_growth_window_must_end_after_it_starts() -> None:
     with pytest.raises(ValidationError, match="must end after it starts"):
         GrowthRequirement(
@@ -1409,7 +1430,10 @@ def test_a_rank_window_spanning_several_years_states_a_reduction(
 ) -> None:
     dataset = requirement()
 
-    with pytest.raises(ValidationError, match="over 2016-2018 with no reduction"):
+    with pytest.raises(
+        ValidationError,
+        match=r"over 2016-2018 with no reduction.*window_start and window_end to that year",
+    ):
         _plan(
             _population_decision(decision),
             evidence_requirements=[dataset, _rank(dataset.id, window_start=2016, window_end=2018)],
@@ -1422,6 +1446,9 @@ def test_a_rank_window_spanning_several_years_states_a_reduction(
         pytest.param(Period(start=2024, end=2024), None, id="one-year-input"),
         pytest.param(
             Period(start=2015, end=2024), Period(start=2024, end=2030), id="window-keeps-one-year"
+        ),
+        pytest.param(
+            Period(start=2015, end=2024), Period(start=2020, end=2020), id="window-is-one-year"
         ),
     ],
 )
@@ -2896,9 +2923,7 @@ def test_a_growth_over_a_limited_per_period_rank_fails_naming_the_order_that_wor
         _plan(_population_decision(decision), evidence_requirements=[dataset, rank, growth])
 
 
-_RANK_THE_SOURCE_REDUCED = (
-    "rank the source once, with the reduction, the limit and per_period=false"
-)
+_RANK_THE_SOURCE_ONCE = "rank the source once with the limit and per_period=false instead"
 
 
 @pytest.mark.parametrize(
@@ -2929,7 +2954,7 @@ def test_an_aggregate_over_a_limited_per_period_rank_fails_only_by_entity_alone(
     requirements = [dataset, rank, totals]
 
     if refused:
-        with pytest.raises(ValidationError, match=_RANK_THE_SOURCE_REDUCED):
+        with pytest.raises(ValidationError, match=_RANK_THE_SOURCE_ONCE):
             _plan(_population_decision(decision), evidence_requirements=requirements)
     else:
         plan = _plan(_population_decision(decision), evidence_requirements=requirements)
@@ -3156,7 +3181,7 @@ def test_a_year_filter_that_leaves_one_year_of_a_limited_rank_clears_its_cut(
     requirements = [dataset, rank, recent, totals]
 
     if refused:
-        with pytest.raises(ValidationError, match=_RANK_THE_SOURCE_REDUCED):
+        with pytest.raises(ValidationError, match=_RANK_THE_SOURCE_ONCE):
             _plan(_population_decision(decision), evidence_requirements=requirements)
         # The plan the refusal advises, over the same years of the source.
         years = FilterRequirement(
@@ -4918,6 +4943,7 @@ def _creditor_plan(
     group_by: tuple[GroupBy, ...] | None = None,
     declined: tuple[Decline, ...] = (),
     breakdowns: tuple[AskBreakdown, ...] = (AskBreakdown(ask=0, by=("creditor",)),),
+    across_years: tuple[int, ...] = (),
 ) -> Plan:
     """A by-creditor plan: debt service across `across`, answered by a rank on `axis` or an
     aggregate grouping by `group_by` when either is given, else by the dataset itself."""
@@ -4958,6 +4984,7 @@ def _creditor_plan(
         evidence_requirements=requirements,
         asks=_BY_CREDITOR_ASKS,
         ask_breakdowns=breakdowns,
+        asks_across_years=across_years,
         answered=[AskAnswer(ask=0, outputs=(requirements[-1].id,))],
         declined=declined,
     )
@@ -5170,3 +5197,31 @@ def test_an_amendment_under_the_same_asks_keeps_their_breakdowns(
 
     assert plan.amend(question="q").ask_breakdowns == plan.ask_breakdowns
     assert plan.amend(asks=_BY_CREDITOR_ASKS, answered=plan.answered).ask_breakdowns == ()
+
+
+def test_an_ask_across_years_enters_the_revision_once_set_and_survives_an_amendment(
+    decision: DecisionFactory,
+) -> None:
+    plan = _creditor_plan(decision, ("creditor",))
+    across = _creditor_plan(decision, ("creditor",), across_years=(0,))
+
+    assert "asks_across_years" not in revision_content(plan)
+    assert revision_content(across)["asks_across_years"] == [0]
+    assert plan_revision(across) != plan_revision(plan)
+    assert across.amend(question="q").asks_across_years == (0,)
+    assert across.amend(asks=_BY_CREDITOR_ASKS, answered=across.answered).asks_across_years == ()
+    amended = across.amend(
+        asks=_BY_CREDITOR_ASKS,
+        asks_across_years=(0,),
+        ask_breakdowns=across.ask_breakdowns,
+        answered=across.answered,
+    )
+    assert amended.asks_across_years == (0,)
+
+
+@pytest.mark.parametrize("numbers", [(1,), (0, 0)], ids=["unlisted-ask", "ask-twice"])
+def test_an_ask_across_years_names_a_listed_ask_once(
+    decision: DecisionFactory, numbers: tuple[int, ...]
+) -> None:
+    with pytest.raises(ValidationError, match="across years"):
+        _creditor_plan(decision, ("creditor",), across_years=numbers)

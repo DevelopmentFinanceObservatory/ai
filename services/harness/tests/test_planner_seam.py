@@ -79,6 +79,7 @@ from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     CUT_MARKER,
     MAX_PLAN_ROUNDS,
@@ -100,6 +101,7 @@ from planner.plan import (
     ResolvedBy,
     SessionState,
     Unit,
+    amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
     discovery_time_left,
@@ -1843,6 +1845,27 @@ async def test_a_continuing_amend_call_shows_the_other_count_and_the_plan_pins_i
     assert measure.options == ("gross disbursements", "net disbursements")
     assert measure.chosen == "net disbursements"
     assert measure.slot in pinned.decision_ids
+
+
+async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
+    """An entry carrying the user's amendment says so in state, for `propose_plan`
+    to honour a decision they make in it. The next entry without one, a replan
+    here, clears it, and a resume inside an entry keeps what the entry recorded."""
+    harness = _SeamHarness()
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["Planned."] * 4)
+    recorded = []
+
+    await harness.run(seam, question="kenya debt", readings=[])
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], amendment="one total")
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], resume_inputs={"ask": {}})
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC))
+    recorded.append(amendment_entry(await harness.state()))
+
+    assert recorded == [False, True, True, False]
 
 
 async def test_an_amendment_still_works_through_the_seam(
@@ -3895,7 +3918,13 @@ async def test_a_first_year_that_cannot_be_read_refuses_saying_the_read_failed(
     }
 
 
-async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by() -> None:
+_ACROSS_YEARS_RULE = "An ask marked (across years) asks for one figure, or one ranking"
+
+
+@pytest.mark.parametrize("across_years", [[], [0, 1]], ids=["none", "marked"])
+async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
+    across_years: list[int],
+) -> None:
     seam = _seam()
     llm = ScriptedPlannerLlm(script=["Planned."])
     seam._agent.model = llm
@@ -3904,13 +3933,24 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by() -> 
         state={
             ASKS_STATE_KEY: asks,
             ASK_BREAKDOWNS_STATE_KEY: [AskBreakdown(ask=1, by=("creditor",)).model_dump()],
+            ASKS_ACROSS_YEARS_STATE_KEY: across_years,
         }
     )
 
     await harness.run(seam, question="debt service by creditor", readings=[])
 
     prompt = _prompt_text(llm.captured_requests[0])
-    assert "0. the total\n1. Debt service by creditor (by creditor)\n" in prompt
+    if across_years:
+        assert (
+            "0. the total (across years)\n1. Debt service by creditor (by creditor) (across years)\n"
+            in prompt
+        )
+        assert _ACROSS_YEARS_RULE in prompt
+        assert "No other ask does: its answer keeps each year or reads one year." in prompt
+    else:
+        assert "0. the total\n1. Debt service by creditor (by creditor)\n" in prompt
+        assert "(across years)" not in prompt
+        assert _ACROSS_YEARS_RULE not in prompt
     assert (
         "'breakdown_not_kept' when the source this ask's answer pins cannot hold the party open"
         in prompt

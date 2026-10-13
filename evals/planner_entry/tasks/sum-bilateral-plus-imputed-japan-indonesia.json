@@ -75,6 +75,7 @@
     "kind": "aggregate",
     "distinction": "sum_of, not aggregate: two different sources are added, where aggregate totals several entities of one series"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
     "answer_mode": "computed",

@@ -102,6 +102,7 @@ from planner.shapes import (
     FrameShape,
     RoleDimension,
     ShapeVerb,
+    TimeLabel,
     aggregated,
     compared,
     filtered,
@@ -139,6 +140,13 @@ PLAN_ROUNDS_STATE_KEY = "planner:rounds"
 # Cleared with `PLAN_ROUNDS_STATE_KEY` when an entry starts, so an
 # ask-the-user resume inside one entry keeps it.
 UNSUPPORTED_STATE_KEY = "planner:unsupported"
+
+# The session-state slot saying whether the planner's current entry opened
+# with the user's own amendment of the plan at the approval card.
+# `harness.planner_seam.PlannerSeam` writes it with `PLAN_ROUNDS_STATE_KEY`
+# when an entry starts, so an ask-the-user resume inside one entry keeps it.
+# Unset, the entry carries no amendment.
+AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
@@ -197,6 +205,13 @@ ASKS_STATE_KEY = "orchestrator:asks"
 # onto every plan it records beside the asks. Unset, no ask breaks down by a
 # party.
 ASK_BREAKDOWNS_STATE_KEY = "orchestrator:ask_breakdowns"
+
+# The session-state slot holding the numbers of the asks the user put to one
+# figure, or one ranking, over several years taken together, as a JSON list of
+# ints (`load_asks_across_years`). `plan_start` writes it beside
+# `ASKS_STATE_KEY`, and `propose_plan` copies it onto every plan it records
+# beside the asks. Unset, no ask is across years.
+ASKS_ACROSS_YEARS_STATE_KEY = "orchestrator:asks_across_years"
 
 # How many plans one entry into the planner may propose -- a first draft and
 # three more, whether each patches the recorded plan or restarts. Each proposal
@@ -939,7 +954,8 @@ class AggregateRequirement(TaggedModel):
         description=(
             "Which columns to group by before reducing: period, entity (the roles of the "
             "entities named, plus a breakdown's codes when the input has them; an `across` "
-            "party is summed), breakdown (its codes alone), or two of them."
+            "party is summed), breakdown (its codes alone), or two of them. Without period, "
+            "the years reduce to one figure per group."
         ),
     )
 
@@ -1119,10 +1135,18 @@ class RankRequirement(TaggedModel):
         ),
     )
     window_start: Year | None = Field(
-        default=None, description="The year this rank's window starts, when it is windowed."
+        default=None,
+        description=(
+            "The year this rank's window starts, when it is windowed. The same year as "
+            "`window_end` ranks that one year."
+        ),
     )
     window_end: Year | None = Field(
-        default=None, description="The year this rank's window ends, when it is windowed."
+        default=None,
+        description=(
+            "The year this rank's window ends, when it is windowed. The same year as "
+            "`window_start` ranks that one year."
+        ),
     )
     per_period: bool = Field(
         default=False,
@@ -1150,10 +1174,10 @@ class RankRequirement(TaggedModel):
         if (
             self.window_start is not None
             and self.window_end is not None
-            and self.window_end <= self.window_start
+            and self.window_end < self.window_start
         ):
             raise ValueError(
-                f"rank window must end after it starts; got {self.window_start}-{self.window_end}"
+                f"rank window ends before it starts; got {self.window_start}-{self.window_end}"
             )
         return self
 
@@ -1748,6 +1772,15 @@ def _check_asks_keep_their_parties(
         raise AskRoleDroppedError(asks=asks, dropped=dropped, together=together)
 
 
+def _check_asks_across_years(asks: Sequence[str], numbers: Sequence[int]) -> None:
+    """Reject a plan whose across-years asks name an ask the brief does not list, or one twice."""
+    if unlisted := sorted(set(numbers) - set(range(len(asks)))):
+        raise ValueError(
+            f"the brief lists {len(asks)} asks; no ask {unlisted!r} to put across years"
+        )
+    _reject_repeats([str(number) for number in numbers], what="ask across years")
+
+
 # How a calculation reading a comparison or a join is named to the user.
 _READER_PHRASES = {
     "aggregate": "a total or other summary",
@@ -2148,7 +2181,9 @@ def _rank_reduction_reason(
     if years is not None and years.end > years.start:
         return (
             f"{requirement.id!r} ranks entities over {years.start}-{years.end} with no "
-            "reduction, so no entity has a single value to rank on; state a reduction"
+            "reduction, so no entity has a single value to rank on; to rank one year set "
+            "window_start and window_end to that year, or, only for an ask marked (across "
+            "years), state a reduction to combine the years"
         )
     return None
 
@@ -2659,6 +2694,14 @@ class Plan(StrictModel):
         max_length=MAX_PLAN_ASKS,
         description="The parties each ask breaks its answer down by, for the asks that name any.",
     )
+    asks_across_years: Annotated[tuple[int, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_ASKS,
+        description=(
+            "The numbers of the asks the user put to one figure, or one ranking, over "
+            "several years taken together."
+        ),
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -2769,6 +2812,7 @@ class Plan(StrictModel):
             self.declined,
             self.evidence_requirements,
         )
+        _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self
 
@@ -2874,6 +2918,7 @@ class Plan(StrictModel):
         declined: Sequence[Decline] = (),
         asks: Sequence[str] | None = None,
         ask_breakdowns: Sequence[AskBreakdown] = (),
+        asks_across_years: Sequence[int] = (),
         answered: Sequence[AskAnswer] = (),
     ) -> Plan:
         """Return a new, incremented-version `Plan` with a patch applied.
@@ -2922,6 +2967,9 @@ class Plan(StrictModel):
                 for the new list from scratch.
             ask_breakdowns: The parties each of `asks` breaks down by, read
                 with `asks`: omitted with them, the plan keeps its own.
+            asks_across_years: The numbers of the asks of `asks` put to one
+                figure over several years, read with `asks` as
+                `ask_breakdowns` is.
             answered: The answers this patch adds or replaces, keyed by
                 `ask`. One replaces whatever accounted for its ask before,
                 a decline included.
@@ -2934,6 +2982,7 @@ class Plan(StrictModel):
                 state.
         """
         breakdowns = self.ask_breakdowns if asks is None else tuple(ask_breakdowns)
+        across_years = self.asks_across_years if asks is None else tuple(asks_across_years)
         asks = self.asks if asks is None else tuple(asks)
         return Plan.model_validate(
             {
@@ -2952,6 +3001,7 @@ class Plan(StrictModel):
                 ),
                 "asks": asks,
                 "ask_breakdowns": breakdowns,
+                "asks_across_years": across_years,
                 "translation": None,
                 "workflow": None,
                 "version": self.version + 1,
@@ -3187,6 +3237,287 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
                 continue
             gaps.append(ResultScopeGap(output_id, ask, role.role, dataset.id))
     return gaps
+
+
+class PeriodReductionGap(NamedTuple):
+    """A step that turns several years into one figure for a result no ask across years asks for.
+
+    `step_id` is the reducing step and `years` the years it reduces, which
+    reach every later year when `follows_newest` is set (`_years_reduced`).
+    `output_id` is the first answering result computed from it
+    (`answering_results`) that answers an ask `plan.asks_across_years` does
+    not number, or answers no ask, and `asks` the numbers of those asks,
+    empty when it answers none. `asked_across` says another answering
+    result computed from the step answers an ask across years, so the step
+    itself is asked for. `dataset_id` is the first dataset requirement the
+    step rests on.
+    """
+
+    step_id: str
+    output_id: str
+    asks: tuple[int, ...]
+    years: Period
+    follows_newest: bool
+    asked_across: bool
+    dataset_id: str
+
+
+def unstated_period_reductions(
+    plan: Plan, *, amendment_entry: bool = False, previous: Plan | None = None
+) -> list[PeriodReductionGap]:
+    """Each step of `plan` that reduces across years for a result no ask across years asks for.
+
+    A dataset requirement's `period` is the window of the search that found
+    its source, which for a question naming no years is every year the
+    source holds. An `aggregate` whose `group_by` lacks `period`, or a `rank`
+    with a `reduction` and `per_period` unset, turns the years of its input
+    into one figure per entity (`_years_reduced`). Such a step passes when
+    every answering result computed from it (`answering_results`), the step
+    included, answers at least one ask and every ask it answers is one
+    `plan.asks_across_years` numbers: the asks the orchestrator, which holds
+    the user's words, marked as one figure over several years. A result
+    that answers no ask, a step no answering result is computed from, and a
+    plan with no asks license nothing.
+
+    A user who amends the plan at the approval card speaks to the planner,
+    and no ask changes. In such an entry (`amendment_entry`,
+    `AMENDMENT_ENTRY_STATE_KEY`) a step also passes when it cites a decision
+    resolved by `user` that states the reduction
+    (`_user_period_decisions`). In any other entry such a step passes when
+    `previous`, the plan the call amends, held the licence for it
+    (`_licence_carried`): a replan that narrows the years keeps the total
+    the user asked for.
+
+    Requires a plan whose requirements already validated.
+    """
+    requirements_by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    decisions = {decision.slot: decision for decision in plan.decisions}
+    shapes = _build_shapes(requirements_by_id)
+    across_years = set(plan.asks_across_years)
+    asks_of: dict[str, list[int]] = {output: [] for output in answering_results(plan)}
+    for answer in plan.answered:
+        for output in answer.outputs:
+            asks_of[output].append(answer.ask)
+    carried: _Carried | None = None
+    if previous is not None and not amendment_entry:
+        carried_steps = {
+            requirement.id: requirement for requirement in previous.evidence_requirements
+        }
+        carried = _Carried(
+            steps=carried_steps,
+            shapes=_build_shapes(carried_steps),
+            decisions={decision.slot: decision for decision in previous.decisions},
+        )
+    gaps: list[PeriodReductionGap] = []
+    for step in plan.evidence_requirements:
+        reduced = _years_reduced(step, shapes, requirements_by_id)
+        if reduced is None:
+            continue
+        years, follows_newest = reduced
+        stated = _user_period_decisions(step, decisions)
+        if stated and (
+            amendment_entry or (carried is not None and _licence_carried(step, stated, carried))
+        ):
+            continue
+        computed = [
+            output for output in asks_of if step.id in _upstream(output, requirements_by_id)
+        ] or [step.id]
+        offending: tuple[str, tuple[int, ...]] | None = None
+        asked_across = False
+        for output_id in computed:
+            asks = asks_of.get(output_id, ())
+            unmarked = tuple(ask for ask in asks if ask not in across_years)
+            if unmarked or not asks:
+                offending = offending or (output_id, unmarked)
+            if any(ask in across_years for ask in asks):
+                asked_across = True
+        if offending is not None:
+            gaps.append(
+                PeriodReductionGap(
+                    step_id=step.id,
+                    output_id=offending[0],
+                    asks=offending[1],
+                    years=years,
+                    follows_newest=follows_newest,
+                    asked_across=asked_across,
+                    dataset_id=shapes[step.id].roots[0],
+                )
+            )
+    return gaps
+
+
+class _Carried(NamedTuple):
+    """The plan a call amends, as `_licence_carried` reads it: its steps, their shapes and its decisions, by id and slot."""
+
+    steps: Mapping[str, EvidenceRequirement]
+    shapes: Mapping[str, FrameShape]
+    decisions: Mapping[str, Decision]
+
+
+def _licence_carried(
+    step: EvidenceRequirement,
+    stated: Mapping[str, Decision],
+    previous: _Carried,
+) -> bool:
+    """Whether `previous` held the licence `stated`, the `user` decisions `step` cites, gives it.
+
+    The step of the same id in `previous` reduced years itself
+    (`_years_reduced`), with the same `reduction`, citing those same
+    decisions, so the user's decision licensed it there. Its years and
+    what sits under it may have changed since, as when a replan after a failed run
+    narrows them. A decision cited where no years were reduced, over one
+    year say, licensed nothing to carry, and a user who asked for one total
+    did not ask for a maximum.
+    """
+    before = previous.steps.get(step.id)
+    return (
+        isinstance(step, AggregateRequirement | RankRequirement)
+        and isinstance(before, AggregateRequirement | RankRequirement)
+        and type(before) is type(step)
+        and before.reduction == step.reduction
+        and _user_period_decisions(before, previous.decisions) == stated
+        and _years_reduced(before, previous.shapes, previous.steps) is not None
+    )
+
+
+def _years_reduced(
+    requirement: EvidenceRequirement,
+    shapes_by_id: Mapping[str, FrameShape],
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> tuple[Period, bool] | None:
+    """The years `requirement` turns into one figure per entity, and whether they reach every later year; `None` when it reduces none.
+
+    An `aggregate` that groups by `period`, and a `rank` that is
+    `per_period` or states no `reduction`, keep the years. The input holds
+    years per entity when its rows are labelled with the years they were
+    observed in (`TimeLabel.OBSERVATION`). Every `planner.shapes`
+    transform keeps that reading: a step that collapses the years labels its
+    rows a `SPAN`, one that picks a year per entity labels them `PICKED`,
+    each two-sided verb takes the narrower label of its sides and the years
+    both cover, and a filter or a window that leaves one year narrows
+    `period` to it. `FrameShape.one_row_per_entity` answers whether a rank
+    needs a reduction, and is set on a `sum_of` holding a series of years.
+
+    The step reduces several years when its input's `period`, once the
+    rank's own window is applied (`shapes.windowed_years`), covers more than
+    one, or when the end of those years follows the newest data and the
+    start does not (`_moving_ends`): one year then becomes several once
+    newer data exists. A window stays one year when both ends are fixed and
+    equal, or both follow the newest data at one offset.
+    """
+    window: Period | None = None
+    window_moves = (False, False)
+    if isinstance(requirement, AggregateRequirement):
+        if GroupBy.PERIOD in requirement.group_by:
+            return None
+    elif isinstance(requirement, RankRequirement):
+        if requirement.reduction is None or requirement.per_period:
+            return None
+        if requirement.window_start is not None and requirement.window_end is not None:
+            window = Period(start=requirement.window_start, end=requirement.window_end)
+            window_moves = _window_moves(requirement.rolling)
+    else:
+        return None
+    input_shape = shapes_by_id[requirement.input_id]
+    years = windowed_years(input_shape.period, window)
+    if input_shape.time is not TimeLabel.OBSERVATION or years is None:
+        return None
+    start_moves, end_moves = _within(
+        _moving_ends(requirement.input_id, requirements_by_id), window_moves, window is not None
+    )
+    follows_newest = end_moves and not start_moves
+    if years.end > years.start or follows_newest:
+        return years, follows_newest
+    return None
+
+
+def _window_moves(rolling: RollingWindow | None) -> tuple[bool, bool]:
+    """Which ends of a window `rolling` makes follow the newest data: start, end."""
+    if rolling is None:
+        return False, False
+    return rolling.window_start is not None, rolling.window_end is not None
+
+
+def _within(
+    frame: tuple[bool, bool], bounds: tuple[bool, bool], bounded: bool
+) -> tuple[bool, bool]:
+    """Which ends of `frame`'s years follow the newest data once `bounds` cut them.
+
+    The cut keeps the later start and the earlier end. A start follows when
+    either does, since a moving start passes a fixed one. An end follows
+    only when both do, since a fixed end caps a moving one. Unbounded, the
+    frame keeps its own.
+    """
+    if not bounded:
+        return frame
+    return frame[0] or bounds[0], frame[1] and bounds[1]
+
+
+def _moving_ends(
+    requirement_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> tuple[bool, bool]:
+    """Which ends of the years `requirement_id`'s result holds follow the newest data: start, end.
+
+    A dataset requirement stating `period_end_open` has its end follow.
+    A filter's year thresholds and a rank's or a growth's window cut the
+    years their input holds (`_within`): a threshold or a window end stated
+    with `rolling` follows, and one stated without is fixed. A step reading
+    two inputs holds the years both cover, cut the same way. Every other
+    step holds its input's years.
+    """
+    requirement = requirements_by_id[requirement_id]
+    if isinstance(requirement, DatasetRequirement):
+        return False, requirement.period_end_open
+    inputs = inputs_of(requirement)
+    ends = _moving_ends(inputs[0], requirements_by_id)
+    for other in inputs[1:]:
+        ends = _within(ends, _moving_ends(other, requirements_by_id), True)
+    if isinstance(requirement, RankRequirement | GrowthRequirement):
+        bounded = requirement.window_start is not None
+        return _within(ends, _window_moves(requirement.rolling), bounded)
+    if isinstance(requirement, FilterRequirement):
+        for predicate in requirement.predicates:
+            if not isinstance(predicate, PeriodThreshold) or predicate.op == "ne":
+                continue
+            moves = predicate.rolling is not None
+            starts = predicate.op in ("gt", "gte", "eq")
+            ending = predicate.op in ("lt", "lte", "eq")
+            ends = (
+                ends[0] or (starts and moves),
+                ends[1] and not (ending and not moves),
+            )
+    return ends
+
+
+def _user_period_decisions(
+    requirement: EvidenceRequirement, decisions: Mapping[str, Decision]
+) -> dict[str, Decision]:
+    """The decisions `requirement` cites that are resolved by `user` and state one figure over its years, by slot.
+
+    `requirement` is a step `_years_reduced` finds years under. For an
+    `aggregate` such a decision's `fixes` names `group_by`, the field that
+    leaves `period` out. For a `rank` it names both `window_start` and
+    `window_end`, the years ranked as one. A cited decision fixes the values
+    the requirement states (`_check_requirements_honour_their_decisions`),
+    and `settle_decisions` drops a field the requirement leaves unset, so
+    the rank states its window. A `reduction` decision says how the years
+    combine and a `period` decision which years are retrieved; neither says
+    they become one figure. A slot `decisions` does not hold states nothing.
+    """
+    stated: dict[str, Decision] = {}
+    for slot in requirement.decision_ids:
+        decision = decisions.get(slot)
+        if decision is None or decision.resolved_by is not ResolvedBy.USER:
+            continue
+        fixes = decision.fixes
+        if fixes is None:
+            continue
+        if isinstance(requirement, AggregateRequirement):
+            if fixes.group_by is not None:
+                stated[slot] = decision
+        elif fixes.window_start is not None and fixes.window_end is not None:
+            stated[slot] = decision
+    return stated
 
 
 def _upstream(
@@ -3630,6 +3961,11 @@ def load_ask_breakdowns(state: SessionState) -> tuple[AskBreakdown, ...]:
     )
 
 
+def load_asks_across_years(state: SessionState) -> tuple[int, ...]:
+    """Return the ask numbers session `state` holds across years (`ASKS_ACROSS_YEARS_STATE_KEY`); empty when none are."""
+    return tuple(state.get(ASKS_ACROSS_YEARS_STATE_KEY) or ())
+
+
 def stored_plan(raw: str | None, *, state_key: str) -> Plan | None:
     """The plan `raw` holds, the text stored under `state_key`; `None` when it holds none.
 
@@ -3667,6 +4003,16 @@ def load_plan_rounds(state: SessionState) -> int:
 def save_plan_rounds(state: SessionState, rounds: int) -> None:
     """Record `rounds` as the number of plans the planner has proposed in its current entry."""
     state[PLAN_ROUNDS_STATE_KEY] = rounds
+
+
+def amendment_entry(state: SessionState) -> bool:
+    """Whether the planner's current entry opened with the user's amendment (`AMENDMENT_ENTRY_STATE_KEY`)."""
+    return bool(state.get(AMENDMENT_ENTRY_STATE_KEY))
+
+
+def save_amendment_entry(state: SessionState, amended: bool) -> None:
+    """Record whether the planner's current entry opened with the user's amendment of the plan."""
+    state[AMENDMENT_ENTRY_STATE_KEY] = amended
 
 
 def load_unsupported(state: SessionState) -> frozenset[UnsupportedOperation]:

@@ -934,7 +934,9 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
             "aggregate grouping by entity keeps the parties the requirement names apart and "
             f"sums its open {open_roles!r} away, and this input names no entity, so the group "
             "keeps nothing; group by period alone to total every member per year, or rank "
-            "with a reduction to set each member's total beside the others"
+            "the members to set each one's figure beside the others: over one year with "
+            "window_start and window_end on that year, or, only for an ask marked (across "
+            "years), with a reduction over the years taken together"
         )
     if by_breakdown and not any(role.breakdown for role in shape.roles):
         return (
@@ -992,8 +994,10 @@ def _rejects_aggregate(
     if shape.cut_per_period and by_entity and not by_period:
         return (
             f"an aggregate by entity totals each entity's series, and {_CUT_PER_PERIOD}; "
-            "rank the source once, with the reduction, the limit and per_period=false, which "
-            "reduces each entity's whole series before the limit applies"
+            "rank the source once with the limit and per_period=false instead, over one year "
+            "with window_start and window_end on that year, or, only for an ask marked (across "
+            "years), with the reduction, which reduces each entity's whole series before the "
+            "limit applies"
         )
     return None
 

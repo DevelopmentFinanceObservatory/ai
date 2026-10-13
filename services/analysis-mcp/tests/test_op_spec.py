@@ -593,6 +593,10 @@ def test_the_ordering_rule_still_reads_a_rolling_windows_literals() -> None:
     fields = {"window_start": "2024", "window_end": "2019"}
     with pytest.raises(ValidationError):
         GrowthOpSpec(frame_ref=SNAPSHOT_REF, rolling=_rolling(window_end=LATEST), **fields)
+    # A rank reads one year through a window that starts and ends on it.
+    if fields["window_start"] == fields["window_end"]:
+        _rank(rolling=_rolling(window_end=LATEST), **fields)
+        return
     with pytest.raises(ValidationError):
         _rank(rolling=_rolling(window_end=LATEST), **fields)
 

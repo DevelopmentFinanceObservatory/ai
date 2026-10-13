@@ -3213,6 +3213,27 @@ async def test_plan_names_the_parties_of_a_side_the_search_held_open_by_its_colu
     assert pending_action(ctx.state) is None
 
 
+async def test_plan_carries_the_asks_put_across_years_by_number():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    recorded = tools["plan"](
+        "Total debt service between 2015 and 2022",
+        [
+            {"text": "Debt service by creditor", "by": ["creditor"]},
+            {"text": "The total between 2015 and 2022", "over": ["creditor"], "across_years": True},
+        ],
+        ctx,
+    )
+
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="Total debt service between 2015 and 2022",
+        asks=["Debt service by creditor", "The total between 2015 and 2022"],
+        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+        asks_across_years=[1],
+    )
+
+
 async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():
     tools, ctx = await _searched(_BY_CREDITOR)
 

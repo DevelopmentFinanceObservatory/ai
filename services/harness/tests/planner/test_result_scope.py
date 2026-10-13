@@ -160,6 +160,7 @@ def _requirements(variant: str) -> list[EvidenceRequirement]:
                 among=RankAmong.POPULATION,
                 axis="donor",
                 reduction=Reduction.SUM,
+                per_period=True,
             ),
         ],
         "share-per-donor": [

@@ -44,6 +44,7 @@
     "kind": "aggregate",
     "distinction": "who led in each year is a rank per period; collapsing the window into donor totals answers a different question"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which donor gave Kenya the most ODA in each year from 2018 to 2022?",
     "answer_mode": "computed",
