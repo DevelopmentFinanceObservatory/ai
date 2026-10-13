@@ -1336,3 +1336,82 @@ def test_restating_an_older_decision_under_another_slot_does_not_make_it_the_ame
     result = _propose(ctx, [_aid(), _total(decision_ids=("every_year",))], [again])
 
     _refused(result, _gap(years=EVERY_YEAR))
+
+
+_FIVE_BACK = RelativePeriod(offset=-5)
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("steps", "decisions"),
+    [
+        pytest.param(
+            [
+                FilterRequirement(
+                    id="kept",
+                    input_id="aid",
+                    predicates=(PeriodThreshold(op="gte", year=2019, rolling=_FIVE_BACK),),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            id="a-filter-from-five-years-back",
+        ),
+        pytest.param(
+            [
+                _ranked(
+                    window_start=2019,
+                    window_end=2024,
+                    rolling=RollingWindow(window_start=_FIVE_BACK, window_end=_NEWEST),
+                )
+            ],
+            [POPULATION],
+            id="a-window-rolling-at-both-ends-five-years-apart",
+        ),
+        pytest.param(
+            [
+                _ranked(
+                    window_start=2019,
+                    window_end=2030,
+                    rolling=RollingWindow(window_start=_FIVE_BACK),
+                )
+            ],
+            [POPULATION],
+            id="a-window-rolling-at-its-start-to-a-fixed-year",
+        ),
+    ],
+)
+def test_a_start_trailing_the_newest_year_reaches_back_before_the_stated_period(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement], decisions: list[Decision]
+) -> None:
+    """The plan states 2024 alone, and a start that follows the newest data has
+    the dataset retrieved from its first year: 2019 to 2024 reach the step."""
+    ctx = _context(pins=_SHOWN_OPEN)
+
+    result = _propose(ctx, [_open(period=ONE_YEAR_ONLY), *steps], [decision(), *decisions])
+
+    _refused(result, _gap(years=Period(start=2019, end=2024)))
+    assert "reduces 2019-2024 to one figure" in result["message"]
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_following_start_behind_a_fixed_one_keeps_no_year_from_becoming_several(
+    decision: Callable[..., Decision],
+) -> None:
+    """From 2024 on, and from five years back of the newest: 2024 alone today,
+    2024 and 2025 next year, since the fixed year is the later start until 2029."""
+    kept = FilterRequirement(
+        id="kept",
+        input_id="aid",
+        predicates=(
+            PeriodThreshold(op="gte", year=2024),
+            PeriodThreshold(op="gte", year=2019, rolling=_FIVE_BACK),
+        ),
+    )
+    ctx = _context(pins=_SHOWN_OPEN)
+
+    result = _propose(
+        ctx, [_open(period=ONE_YEAR_ONLY), kept, _total(input_id="kept")], [decision()]
+    )
+
+    _refused(result, _gap(years=ONE_YEAR_ONLY) | {"follows_newest": True})

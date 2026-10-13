@@ -3426,14 +3426,16 @@ def _years_reduced(
     `period` to it. `FrameShape.one_row_per_entity` answers whether a rank
     needs a reduction, and is set on a `sum_of` holding a series of years.
 
-    The step reduces several years when its input's `period`, once the
-    rank's own window is applied (`shapes.windowed_years`), covers more than
-    one, or when it rests on a dataset retrieved with no end year, newer
-    data can add years after the one they end in today, and the start does
-    not follow it (`_year_ends`): one year then becomes several once newer
-    data exists. A window stays one year
-    when both ends are fixed and equal, or both follow the newest data at
-    one offset.
+    The years are the input's `period` once the rank's own window is
+    applied (`shapes.windowed_years`), from an earlier first year when a
+    start that follows the newest data reaches back before the dataset's
+    stated period (`_year_ends`). The step reduces several years when they
+    cover more than one, or when it rests on a dataset retrieved with no
+    end year and newer data can add years after the one they end in today:
+    one year then becomes several once newer data exists. They stay one
+    year when the last year is fixed there, or when the first year follows
+    the newest data with it, which a window does with both ends at one
+    offset.
     """
     window: Period | None = None
     if isinstance(requirement, AggregateRequirement):
@@ -3453,62 +3455,78 @@ def _years_reduced(
     ends = _year_ends(requirement.input_id, requirements_by_id)
     if isinstance(requirement, RankRequirement):
         ends = ends.within(_window_ends(requirement))
+    if ends.first is not None and ends.first < years.start:
+        years = Period(start=ends.first, end=years.end)
     open_ended = any(
         isinstance(root := requirements_by_id[root_id], DatasetRequirement) and root.period_end_open
         for root_id in input_shape.roots
     )
     follows_newest = (
-        open_ended and not ends.start_follows and (ends.until is None or ends.until > years.end)
+        open_ended
+        and ends.following_first != years.start
+        and (ends.until is None or ends.until > years.end)
     )
     if years.end > years.start or follows_newest:
         return _YearsReduced(years, follows_newest, ends.until if follows_newest else None)
     return None
 
 
-class _YearEnds(NamedTuple):
-    """How the years a frame holds move as newer data arrives.
+def _later(first: int | None, second: int | None) -> int | None:
+    """The later of two first years, `None` standing for no bound."""
+    if first is None or second is None:
+        return first if second is None else second
+    return max(first, second)
 
-    `start_follows` says the first year follows the newest data. `until`
-    is the last year the frame can come to hold: the year its years end in
-    today for a frame retrieved over fixed years, a later one where a bound
-    is the first thing to stop an open-ended retrieval, and `None` when
-    nothing stops it.
+
+class _YearEnds(NamedTuple):
+    """The years a frame holds, and how they move as newer data arrives.
+
+    `first` is the first year it holds today, `None` for a dataset read from
+    the first year it holds with nothing above it setting one.
+    `following_first` is the latest first year a bound that follows the
+    newest data sets, `None` when none does: the frame's first year moves
+    with the newest data when it is `first`. `until` is the last year the
+    frame can come to hold: the year its years end in today for a frame
+    retrieved over fixed years, a later one where a bound is the first thing
+    to stop an open-ended retrieval, and `None` when nothing stops it.
     """
 
-    start_follows: bool
+    first: int | None
+    following_first: int | None
     until: int | None
 
     def within(self, bounds: _YearEnds) -> _YearEnds:
         """These years once `bounds` cut them, keeping the later start and the earlier end.
 
-        A start follows when either does, since a moving start passes a
-        fixed one. The end reaches the earlier of the two last years: a
-        fixed last year does not stop a moving end until newer data
-        reaches it.
+        The end reaches the earlier of the two last years: a fixed last
+        year does not stop a moving end until newer data reaches it.
         """
         stops = [year for year in (self.until, bounds.until) if year is not None]
         return _YearEnds(
-            start_follows=self.start_follows or bounds.start_follows,
+            first=_later(self.first, bounds.first),
+            following_first=_later(self.following_first, bounds.following_first),
             until=min(stops, default=None),
         )
 
 
 # Bounds that cut nothing.
-_UNBOUNDED = _YearEnds(start_follows=False, until=None)
+_UNBOUNDED = _YearEnds(first=None, following_first=None, until=None)
 
 
 def _window_ends(requirement: RankRequirement | GrowthRequirement) -> _YearEnds:
     """The bounds `requirement`'s window sets on the years it reads; `_UNBOUNDED` with no window.
 
-    An end stated with `rolling` follows the newest data. A fixed
-    `window_end` lets the years reach that year and no further.
+    A start or an end stated with `rolling` follows the newest data. A
+    fixed `window_end` lets the years reach that year and no further.
     """
     if requirement.window_start is None or requirement.window_end is None:
         return _UNBOUNDED
     rolling = requirement.rolling
+    rolls_at_its_start = rolling is not None and rolling.window_start is not None
     rolls_at_its_end = rolling is not None and rolling.window_end is not None
     return _YearEnds(
-        start_follows=rolling is not None and rolling.window_start is not None,
+        first=requirement.window_start,
+        following_first=requirement.window_start if rolls_at_its_start else None,
         until=None if rolls_at_its_end else requirement.window_end,
     )
 
@@ -3516,16 +3534,20 @@ def _window_ends(requirement: RankRequirement | GrowthRequirement) -> _YearEnds:
 def _threshold_ends(predicate: PeriodThreshold) -> _YearEnds:
     """The bounds a filter's year threshold sets on the years it reads.
 
-    `gt`, `gte` and `eq` set the first year, which follows the newest data
-    when the threshold is `rolling`. `lt`, `lte` and `eq` set the last: a
-    rolling one follows, and a fixed one lets the years reach it, the year
-    before for `lt`, and no further. `ne` removes a year and bounds neither
-    end.
+    `gt`, `gte` and `eq` set the first year, the year after for `gt`, which
+    follows the newest data when the threshold is `rolling`. `lt`, `lte`
+    and `eq` set the last: a rolling one follows, and a fixed one lets the
+    years reach it, the year before for `lt`, and no further. `ne` removes
+    a year and bounds neither end.
     """
     fixed = predicate.rolling is None
+    first = None
+    if predicate.op in ("gt", "gte", "eq"):
+        first = predicate.year + 1 if predicate.op == "gt" else predicate.year
     last = predicate.year - 1 if predicate.op == "lt" else predicate.year
     return _YearEnds(
-        start_follows=predicate.op in ("gt", "gte", "eq") and not fixed,
+        first=first,
+        following_first=None if fixed else first,
         until=last if predicate.op in ("lt", "lte", "eq") and fixed else None,
     )
 
@@ -3533,19 +3555,27 @@ def _threshold_ends(predicate: PeriodThreshold) -> _YearEnds:
 def _year_ends(
     requirement_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
 ) -> _YearEnds:
-    """How the years `requirement_id`'s result holds move as newer data arrives.
+    """The years `requirement_id`'s result holds, and how they move as newer data arrives.
 
     A dataset requirement holds its `period`, and with `period_end_open`
-    every later year too. A filter's year thresholds (`_threshold_ends`)
-    and a rank's or a growth's window (`_window_ends`) cut the years their
-    input holds (`_YearEnds.within`). A step reading two inputs holds the
-    years both cover, cut the same way. Every other step holds its input's
-    years.
+    every later year too. One that a start following the newest data reads
+    (`rolls_from_its_start` among its `rolling_readers`) is retrieved from
+    the first year the dataset holds (`submission.service._open_window`), so
+    its stated first year bounds nothing. A filter's year thresholds
+    (`_threshold_ends`) and a rank's or a growth's window (`_window_ends`)
+    cut the years their input holds (`_YearEnds.within`). A step reading two
+    inputs holds the years both cover, cut the same way. Every other step
+    holds its input's years.
     """
     requirement = requirements_by_id[requirement_id]
     if isinstance(requirement, DatasetRequirement):
+        whole_history = requirement.period_end_open and any(
+            rolls_from_its_start(reader)
+            for reader in rolling_readers(requirements_by_id, requirement_id)
+        )
         return _YearEnds(
-            start_follows=False,
+            first=None if whole_history else requirement.period.start,
+            following_first=None,
             until=None if requirement.period_end_open else requirement.period.end,
         )
     inputs = inputs_of(requirement)
