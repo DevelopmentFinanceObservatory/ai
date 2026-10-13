@@ -28,8 +28,10 @@ reads its own block from Search's answer for that definition
 refused as `capability_unavailable` this turn is refused without a call. A
 `get_data` call that does not complete, through a transport failure or an MCP
 error, is a refusal the model may retry, as an unreachable skill read is.
-Each tool's calls per turn are capped (`harness.graph.state.BUDGETS`). The download surface
-fetches one dataset and never plans.
+Each tool's calls per turn are capped (`harness.graph.state.BUDGETS`), except
+`make_charts`' calls that draw nothing, which are capped per frame arrival: a
+fetch or plan hand-back that adds a frame clears their count. The download
+surface fetches one dataset and never plans.
 
 Every tool validates the model's arguments against its annotations before its
 body runs (`_validated_arguments`), so a malformed argument comes back to the
@@ -789,8 +791,8 @@ def _charts_spent(tool_context: ToolContext) -> dict[str, Any] | None:
     if failed >= budgets["make_charts_failed"]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
-            f"make_charts has drawn nothing in {failed} call(s) this turn, the limit for calls "
-            f"that draw nothing. {_ANSWER_NOW}",
+            f"make_charts has drawn nothing in {failed} call(s) since a frame last arrived, "
+            f"the limit for calls that draw nothing. {_ANSWER_NOW}",
         )
     return None
 
@@ -1572,17 +1574,12 @@ def build_orchestrator_tools(
                 described.append((ref, view.get("view") or {}, store_ref))
             else:
                 unavailable.append((view.get("refusal") or {}).get("message") or "not described")
-        frames = dict(tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {})
         found = {
             "spec_id": spec_id,
             "summary": data.get("summary"),
             **_period_note_entry(data),
-            "frames": register_frames(frames, described),
+            "frames": register_frames(tool_context.state, described, fetch_args=args),
         }
-        # make_charts asks the same retrieval again for its members' kinds.
-        for entry in found["frames"]:
-            frames[entry["frame"]]["fetch_args"] = args
-        tool_context.state[ORCHESTRATOR_FRAMES_KEY] = frames
         if unavailable:
             found["frames_unavailable"] = unavailable
         else:

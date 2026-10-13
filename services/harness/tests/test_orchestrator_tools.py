@@ -41,6 +41,7 @@ from harness.chart_binding import (
     empty_select_refusal,
 )
 from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
+from harness.graph.plan_done import HandBack
 from harness.graph.state import (
     BUDGETS,
     ORCHESTRATOR_CALLS_KEY,
@@ -1683,6 +1684,65 @@ async def test_make_charts_stops_after_its_cap_of_calls_that_drew_nothing():
     assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
     assert "charts" not in spent
     assert _writes(executor) == writes
+
+
+class ScopedFrameExecutor(FakeExecutor):
+    """Serves `scoped_ref` for a fetch with a scope, as a narrower retrieval
+    states its own frame."""
+
+    def __init__(self, scoped_ref: dict[str, Any]) -> None:
+        super().__init__()
+        self.scoped_ref = scoped_ref
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data" and "scope" in args:
+            self.calls.append((tool, args))
+            return {"outcome": "ok", "frame_refs": [self.scoped_ref], "summary": "8 observations"}
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+REF_NARROW = {"spec_id": SPEC_LIFE, "content_version": "cv_2"}
+
+
+async def _fetched(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A fetch with a different scope, whose `get_data` states `ref`."""
+    window = {"kind": "range", "start_year": 2015, "end_year": 2020}
+    await tools["fetch"](SPEC_LIFE, ctx, scope={"window": window})
+
+
+async def _handed_back(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A plan's hand-back of `ref`, listed as `plan_done` lists it."""
+    hand_back = HandBack(executor)
+    await hand_back.describe(ref, tool="aggregate", store_ref=None)
+    hand_back.listing(ctx.state, None)
+
+
+@pytest.mark.parametrize("arrive", [_fetched, _handed_back], ids=["fetch", "hand_back"])
+@pytest.mark.parametrize(
+    ("arriving", "draws"), [(REF_NARROW, True), (REF, False)], ids=["new_frame", "held_frame"]
+)
+async def test_make_charts_draws_a_frame_that_arrived_after_its_cap_of_calls_that_drew_nothing(
+    arrive, arriving, draws
+):
+    """A frame registered after the calls that drew nothing clears their
+    count; a registration of a frame already held leaves it spent."""
+    executor = ScopedFrameExecutor(scoped_ref=arriving)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    for _ in range(BUDGETS["make_charts_failed"]):
+        failed = await tools["make_charts"](_one_chart("f999999"), ctx)
+        assert "error" in failed["charts"][0]
+    spent = await tools["make_charts"](_one_chart(frame_id_for(REF)), ctx)
+    assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+
+    await arrive(tools, ctx, executor, arriving)
+    charted = await tools["make_charts"](_one_chart(frame_id_for(arriving)), ctx)
+
+    if draws:
+        assert "holds" in charted["charts"][0]
+    else:
+        assert _stated(charted) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+    assert _writes(executor) == int(draws)
 
 
 @pytest.mark.parametrize(
