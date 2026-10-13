@@ -428,8 +428,8 @@ def test_rolling_steps_one_step_reads_together_stand_on_one_period_over_both_dat
     gap_req = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="newest", entity="Kenya"),
-        right=RequirementSide(input_id="gdp_newest", entity="Kenya"),
+        minuend=RequirementSide(input_id="gdp_newest", entity="Kenya"),
+        subtrahend=RequirementSide(input_id="newest", entity="Kenya"),
     )
     gap = CompareOperation(
         id="gap",
@@ -482,8 +482,8 @@ def test_a_later_verbs_entity_binding_narrows_the_side_it_reads(
     gap_req = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="newest", entity="Kenya"),
-        right=RequirementSide(input_id="newest", entity="Ghana"),
+        minuend=RequirementSide(input_id="newest", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="newest", entity="Kenya"),
     )
     gap = CompareOperation(
         id="gap",
@@ -519,7 +519,7 @@ def test_a_place_level_filter_holds_the_population_to_that_level(
         id="health",
         decision_ids=["measure"],
         measure="health spending per person",
-        across="country",
+        across=("country",),
         period=Period(start=2015, end=2024),
         period_end_open=True,
     )
@@ -630,8 +630,8 @@ def test_chains_that_keep_no_series_of_a_retrieval_leave_no_population(
     gap_req = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="newest", entity="Ghana"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
+        subtrahend=RequirementSide(input_id="newest", entity="Ghana"),
     )
     gap = CompareOperation(
         id="gap",

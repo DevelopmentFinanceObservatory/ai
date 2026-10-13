@@ -22,8 +22,11 @@ Four tools, built by `build_planner_tools()` and wired into an `LlmAgent` by
 | ------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `adk_request_input` | Asks the user to choose among a referral's candidates or a refusal's options, suspending the turn until they answer |
 | `propose_plan`      | Records a drafted plan as a `DRAFT`. Called again for every revision                                                |
-| `reject_plan`       | Marks the current plan `REJECTED`, which blocks `submit_plan` until a new version                                   |
-| `submit_plan`       | Declares the current plan's compiled workflow ready for the user's answer                                           |
+| `reject_plan`       | Marks the current plan `REJECTED`, which blocks a declaration of readiness until a new version                      |
+
+A `propose_plan` whose translation compiles declares the plan ready for the
+user's answer in code (`declare_ready`), adds the approval summary to its
+answer under `summary`, and ends the planner's run, so no model call follows.
 
 The planner reaches the translator directly. `create_planner_agent` takes
 `translator.tool`'s `build_translate` function as `translate`, which
@@ -91,7 +94,7 @@ calculation the plan needs is a derived requirement stated in plan vocabulary:
 or a breakdown's codes alone); `GrowthRequirement` states a
 window analysis-mcp computes `(value_end - value_start) / value_start` over;
 `ComparisonRequirement` takes the difference between two requirements' results
-at each common period and answers the question outright; `SumOfRequirement`
+(`minuend` minus `subtrahend`) at each common period and answers the question outright; `SumOfRequirement`
 adds two single-series results at each period both report, leaving out a
 period only one reports; `RankRequirement`
 orders every entity, and keeps the top or bottom N when it states `limit`,
@@ -107,22 +110,13 @@ the rows that satisfy every one of a conjunction of predicates: a value or
 year threshold, an `EntityIn` naming entities, or a `PlaceLevel` keeping one
 level of place. A dataset
 requirement may pin `source_spec_id` to the exact dataset definition
-discovery is to use when it found several, after which discovery has to find
-that definition and nothing else; a requirement carrying the pin has to cite
-a decision whose `fixes` names `source_spec_id`.
-A referral still names the candidates' `spec_id`s, since pinning one is
-how a `source_ambiguous` referral is settled: what holds the pin to a
-decision is the plan's own rule, not withholding the id. Who resolved that
-decision -- the user or `planner_default` -- is not this validator's to
-check; `resolved_by=user` is model-self-reported, so `Plan`'s own
-validators cannot verify it, having no session to read. `propose_plan`
-checks it instead, against what the user chose: every spec_id the user
-picked answering the planner's `adk_request_input` tool call (read from the
-session's event history, and not merely one it offered). A
-`resolved_by=user` source pin naming anything else -- never offered, offered
-but not chosen, or offered with no answer on record yet -- is refused there,
-before a plan carrying it ever reaches this validator.
-`propose_plan` also refuses a `SumOfRequirement` adding two datasets unless
+discovery is to use, after which discovery has to find that definition and
+nothing else. A pin needs no decision, since the requirement states it. A pin
+of a dataset the planner was shown, a series the orchestrator fetched
+included, is honoured from its block or its identity on record with no
+search. A referral names the candidates' `spec_id`s, since pinning one is
+how a `source_ambiguous` referral is settled.
+`propose_plan` refuses a `SumOfRequirement` adding two datasets unless
 it cites a decision resolved by `user` (`combination_unasked`): whether two
 datasets add up without counting a flow twice, as ODA loans count in both
 aid and debt flows, is the user's to settle. Tables of a provider's flows,
@@ -187,18 +181,24 @@ per-head figure or "divide one by the other". An `axis` or a
 `denominator_axis` names a role its side's entities state, or `'country'` for
 places that state none.
 
-A dataset requirement whose `across` names the place party, such as
-`'country'`, names no place (`planner.plan.names_no_place`). Its retrieval holds
-every place with data at every level: the world, regions, World Bank groups,
-countries and their subdivisions, or the countries alone when dfo-apis cannot
-list them all. A rank, an aggregate that does not group by entity, a
-`share_of` and a `quotient_of` over it are refused until a filter with a `PlaceLevel` predicate
-keeps one level, named by its Data Commons type (`PlaceType`: `Country`,
-`Continent`, `AdministrativeArea1` and the rest). That filter reads the
-requirement directly or through other filters, and states one level. The
-rule lives in `planner.shapes.rejects` (`FrameShape.mixed_levels` and
-`place_typed`), so the plan and the compiled workflow are held to it alike,
-and analysis-mcp refuses the same calls at run time as `place_levels_mixed`.
+A dataset requirement whose `across` states the place party, such as
+`'country'`, names no place (`planner.plan.names_no_place`). When its source
+leaves `observationAbout` open, the retrieval holds every place with data at
+every level: the world, regions, World Bank groups, countries and their
+subdivisions, or the countries alone when dfo-apis cannot list them all. A rank,
+an aggregate that does not group by entity, a `share_of` and a `quotient_of`
+over it are refused until a filter with a `PlaceLevel` predicate keeps one
+level, named by its Data Commons type (`PlaceType`: `Country`, `Continent`,
+`AdministrativeArea1` and the rest). That filter reads the requirement directly
+or through other filters, and states one level. The rule lives in
+`planner.shapes.rejects` (`FrameShape.mixed_levels` and `place_typed`). The plan
+permits the filter, since it cannot know which axis the word covers, and the
+compiler demands it from the selected source
+(`compiler.evidence.opens_place_axis`); analysis-mcp refuses the same calls at
+run time as `place_levels_mixed`. Where the word covers a flow axis instead, as
+IDS holds its debtors on `destination`, the axis holds parties whose kinds keep
+totals out of a sum or a rank, and the compiler refuses a level filter there as
+`level_filter_on_flow_axis`.
 The planner's instruction tells it to take the level the question names,
 choose `Country` as its own default when the question names none and reads
 as a comparison of countries, and ask the user when the question's word
@@ -230,33 +230,27 @@ caller none of that surface.
 Eleven properties: the first three gate submission, the rest keep `Plan` state
 consistent.
 
-**Submission requires a compiled plan.** `submit_plan` refuses a plan that is
-still a `DRAFT` or carries no workflow, as `workflow_missing` with
-`action.call == "propose_plan"`, which translates the plan it records. A draft states what to do rather than what
-to run, so declaring one ready would put nothing real in front of the user. A
-pending referral is checked first and refused the same way, as
-`referral_pending`, with the referral itself in `detail`. Its `action.call` is
-`adk_request_input` for an `unsupported_ask` or `requirement_unmeetable`
-referral the user has not answered, and `propose_plan` for every other case: a
-referral has to be settled, with the user where the planner cannot choose, and
-the plan re-proposed before anything compiled is submitted. A stale version (the
-plan was amended since this one was reviewed) is `version_stale`, with the
-current and given versions in `detail`.
+**Submission requires a compiled plan.** `declare_ready` declares nothing for
+a plan that is still a `DRAFT` or carries no workflow, answering
+`workflow_missing` under `submission` with `action.call == "propose_plan"`. A
+draft states what to do rather than what to run, so declaring one ready would
+put nothing real in front of the user. A pending referral is checked first and
+refused the same way, as `referral_pending`, with the referral itself in
+`detail`. Its `action.call` is `adk_request_input` for an `unsupported_ask` or
+`requirement_unmeetable` referral the user has not answered, and
+`propose_plan` for every other case.
 
-**Rejection blocks submission.** After `reject_plan`, `submit_plan` answers
-`plan_rejected`, with `action.call == "propose_plan"`. The planner's own tools
-stay callable, so `propose_plan` with `amends_version` naming the rejected
-version amends the lineage into a fresh `DRAFT` version, which is how a user
-revises after declining.
+**Rejection blocks submission.** A rejected plan answers `plan_rejected`, with
+`action.call == "propose_plan"`. The planner's own tools stay callable, so
+`propose_plan` with `amends_version` naming the rejected version amends the
+lineage into a fresh `DRAFT` version, which is how a user revises after
+declining.
 
-**Submission is version-bound.** `submit_plan` takes the version being
-submitted and refuses any value other than the current one, so a plan amended
-after review cannot be declared ready on the strength of the old look at it.
-`submit_plan` approves nothing and gates nothing itself: it reports the
-version, revision and summary of whatever the current plan already is, and
-calling it again with the same version reports the same thing again. Approving
-the revision it reports, and running what an approved plan compiles to, is the
-harness workflow's business.
+**Submission is bound to the plan on record.** `declare_ready` reads the plan
+the proposal just recorded and translated, so the summary's version and
+revision are that plan's. It approves nothing and gates nothing itself.
+Approving the revision it reports, and running what an approved plan compiles
+to, is the harness workflow's business.
 
 **The planner never writes `PENDING_APPROVAL`.** It writes `DRAFT` when it
 proposes and `REJECTED` when the user declines. The status that says a plan is
@@ -275,7 +269,11 @@ proposal supersedes whatever the translator referred back about the version it
 replaces. For an `unsupported_ask` or `requirement_unmeetable` referral,
 `propose_plan` refuses until the user has answered an `adk_request_input` call
 made after the referral, since a patch replaces a requirement whole and would
-otherwise drop what the referral names. A `requirement_unmeetable` referral
+otherwise drop what the referral names. Under `harness.planner_seam` that ask
+is made in code for a referral the user decides that carries candidates (a
+`requirement_unmeetable` marked `source_mismatch`, or a `source_name_ambiguous`),
+led by the referral's sentence from `harness.sentences`, so no model turn
+composes it. A `requirement_unmeetable` referral
 marked `source_mismatch` offers the sources discovery found in place of the
 source the requirement states. A requirement the next proposal pins to the one
 the user picked, answering an ask raised after the referral, drops its stated
@@ -320,9 +318,8 @@ because ADK's argument preprocessing falls back to raw dicts for a whole list
 when any one item fails, and skips conversion entirely for a value that isn't a
 list. Either would otherwise build a `Plan` from unvalidated data. A plan states
 at least one requirement, and the plan-level rules (unique slots and ids, every
-citation naming a decision, every decision cited, a decision's `fixes` agreeing
-with the requirements citing it, a pinned source citing a decision that fixes it,
-and a rank that collapses its input) come back from `propose_plan` as
+citation naming a decision, every decision cited, and a rank that collapses its
+input) come back from `propose_plan` as
 `invalid_plan`, carrying the validator's own message and, for a malformed list,
 the pydantic errors in
 `detail`.
@@ -343,19 +340,34 @@ the way down, and a rank whose chain still spans several years has to state a
 reduction, since an entity with more than one row has no single value to
 rank.
 
-**A decision and the requirement citing it have to agree.** A decision's
-`chosen` is prose, so citation on its own enforces reference rather than
-relevance: a requirement could name a period, unit or measure that contradicts
-the very decision it rests on and both would validate. `Decision.fixes` states
-the same choice in the requirement's own vocabulary (period, unit, entities,
-measure, source), and every field it sets is compared with the citing dataset
-requirement's own. A field it leaves unset is not compared, so a decision says
-only as much as it means to. The model writes a decision to `propose_plan` as a
-`DecisionDraft`, whose `fixes` lists field names only.
-`settle_decisions` reads each value off the requirements citing the decision,
-and refuses a named field no citing requirement states (`fix_unstated`) or one
-they state differently (`fix_disagrees`). The decision `propose_plan` writes
-for a pin a search settled on is dropped once no requirement cites it.
+**A decision names what it settles, and the requirement citing it states the value.**
+The model writes a decision to `propose_plan` as a `DecisionDraft`, whose
+`fixes` lists field names only (period, unit, entities, measure, or a
+calculation field). `settle_decisions` reads each value off the requirements
+citing the decision and leaves out a field none of them states or that they
+state differently, so a value lives once, on the requirement, and nothing is
+refused for it. `Plan` holds every requirement citing a decision to each value
+its `fixes` states, `source_spec_id` aside (`fix_disagreements`). The plan
+record says whether the planner assumed a period, and the answer says a summed
+reading was the user's. A rank's `among='population'` and a `share_of`'s
+`denominator_scope='pooled'` each cite a decision whose `fixes` states the
+claim. Code writes `fixes.source_spec_id`.
+`propose_plan` sets it on the measure decision it writes for a pin of a measure
+a settled source offers (`_measure_decisions`) and moves it with the pin. A
+decision the plan being amended records goes once a patch leaves no requirement
+citing it (`_uncited_carried_decisions`); one the patch itself states has to be
+cited. A patch moving a value a carried decision fixes drops a planner's
+decision with its citations, unless another requirement citing it still rests
+on it, which is refused as `shared_decision_contradicted`
+(`_contradicted_carried_decisions`). Until the user says something after the
+plan was recorded (an answer, an amendment, a message, or a new turn:
+`planner.agent._user_spoke_since_recorded`), each of their decisions stands as
+they made it (`_user_decision_refused`). A patch removing one or leaving no
+requirement citing it is refused as `user_decision_dropped`, and one changing
+its `chosen`, `resolved_by` or `fixes`, or citing it from a requirement that
+states another value, as `user_decision_contradicted`. Both point at
+`adk_request_input`. Once the user has spoken, their decisions go the way a
+planner's do.
 
 **A period can follow the newest data.** A growth, a rank and a period threshold
 state their years as the plan read them, and a `rolling` field beside the years
@@ -372,7 +384,7 @@ the dataset holds (`planner.plan.full_history`, read from a Search answer over
 no window). Search answers a question that names years over those years, so
 when no answer on record is over no window `propose_plan` reads the pinned
 identity over no window itself, with one `resolve_definition` call through the
-planner's tool surface (`_read_full_history`), and holds the answer in session
+planner's tool surface (`read_full_history`), and holds the answer in session
 state for the turn (`planner.plan.full_histories`). That window is read for
 its first year and never retrieved. An unpinned requirement whose start is
 fixed stays unpinned, and the translator searches for it from that year on.

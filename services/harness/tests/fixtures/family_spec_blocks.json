@@ -71,7 +71,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsCooperationModality",
+                    "ref": "crsCooperationModality",
                     "label": "CRS cooperation modality"
                   },
                   "label": "modality"
@@ -85,7 +85,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsPurpose",
+                    "ref": "crsPurpose",
                     "label": "CRS purpose"
                   },
                   "label": "sector"
@@ -94,7 +94,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "CRSPurposeCode110",
+                      "ref": "CRSPurposeCode110",
                       "label": "education"
                     },
                     "value_kind": "enum_value"
@@ -103,79 +103,79 @@
                 "expansion": {
                   "added": [
                     {
-                      "dcid": "CRSPurposeCode111",
+                      "ref": "CRSPurposeCode111",
                       "label": "unspecified-level education"
                     },
                     {
-                      "dcid": "CRSPurposeCode112",
+                      "ref": "CRSPurposeCode112",
                       "label": "basic education"
                     },
                     {
-                      "dcid": "CRSPurposeCode113",
+                      "ref": "CRSPurposeCode113",
                       "label": "upper secondary education"
                     },
                     {
-                      "dcid": "CRSPurposeCode114",
+                      "ref": "CRSPurposeCode114",
                       "label": "post-secondary education"
                     },
                     {
-                      "dcid": "CRSPurposeCode11110",
+                      "ref": "CRSPurposeCode11110",
                       "label": "education policy and administrative management"
                     },
                     {
-                      "dcid": "CRSPurposeCode11120",
+                      "ref": "CRSPurposeCode11120",
                       "label": "education facility and training"
                     },
                     {
-                      "dcid": "CRSPurposeCode11130",
+                      "ref": "CRSPurposeCode11130",
                       "label": "teacher training"
                     },
                     {
-                      "dcid": "CRSPurposeCode11182",
+                      "ref": "CRSPurposeCode11182",
                       "label": "educational research"
                     },
                     {
-                      "dcid": "CRSPurposeCode11220",
+                      "ref": "CRSPurposeCode11220",
                       "label": "primary education"
                     },
                     {
-                      "dcid": "CRSPurposeCode11230",
+                      "ref": "CRSPurposeCode11230",
                       "label": "basic life skills for adults"
                     },
                     {
-                      "dcid": "CRSPurposeCode11231",
+                      "ref": "CRSPurposeCode11231",
                       "label": "basic life skills for youth"
                     },
                     {
-                      "dcid": "CRSPurposeCode11232",
+                      "ref": "CRSPurposeCode11232",
                       "label": "primary education equivalent for adults"
                     },
                     {
-                      "dcid": "CRSPurposeCode11240",
+                      "ref": "CRSPurposeCode11240",
                       "label": "early childhood education"
                     },
                     {
-                      "dcid": "CRSPurposeCode11250",
+                      "ref": "CRSPurposeCode11250",
                       "label": "school feeding"
                     },
                     {
-                      "dcid": "CRSPurposeCode11260",
+                      "ref": "CRSPurposeCode11260",
                       "label": "lower secondary education"
                     },
                     {
-                      "dcid": "CRSPurposeCode11320",
+                      "ref": "CRSPurposeCode11320",
                       "label": "upper secondary schooling"
                     },
                     {
-                      "dcid": "CRSPurposeCode11330",
+                      "ref": "CRSPurposeCode11330",
                       "label": "vocational training"
                     },
                     {
-                      "dcid": "CRSPurposeCode11420",
+                      "ref": "CRSPurposeCode11420",
                       "label": "higher education"
                     },
                     {
-                      "dcid": "CRSPurposeCode11430",
+                      "ref": "CRSPurposeCode11430",
                       "label": "advanced technical and managerial training"
                     }
                   ]
@@ -186,7 +186,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFinance",
+                    "ref": "crsTypeOfFinance",
                     "label": "CRS type of finance"
                   },
                   "label": "instrument"
@@ -195,7 +195,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "CRSTypeOfFinance100",
+                      "ref": "CRSTypeOfFinance100",
                       "label": "grant"
                     },
                     "value_kind": "enum_value"
@@ -204,19 +204,19 @@
                 "expansion": {
                   "added": [
                     {
-                      "dcid": "CRSTypeOfFinance110",
+                      "ref": "CRSTypeOfFinance110",
                       "label": "standard grant"
                     },
                     {
-                      "dcid": "CRSTypeOfFinance210",
+                      "ref": "CRSTypeOfFinance210",
                       "label": "interest subsidy"
                     },
                     {
-                      "dcid": "CRSTypeOfFinance310",
+                      "ref": "CRSTypeOfFinance310",
                       "label": "capital subscription on deposit basis"
                     },
                     {
-                      "dcid": "CRSTypeOfFinance311",
+                      "ref": "CRSTypeOfFinance311",
                       "label": "capital subscription on encashment basis"
                     }
                   ]
@@ -227,7 +227,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFlow",
+                    "ref": "crsTypeOfFlow",
                     "label": "CRS type of flow"
                   },
                   "label": "flow"
@@ -236,7 +236,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "CRSTypeOfFlow10",
+                      "ref": "CRSTypeOfFlow10",
                       "label": "official development assistance"
                     },
                     "value_kind": "enum_value"
@@ -248,7 +248,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "financialFlowType",
+                    "ref": "financialFlowType",
                     "label": "financial flow type"
                   },
                   "label": "financial flow type"
@@ -257,7 +257,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "Disbursement",
+                      "ref": "Disbursement",
                       "label": "disbursement"
                     },
                     "value_kind": "enum_value"
@@ -408,7 +408,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsCooperationModality",
+                    "ref": "crsCooperationModality",
                     "label": "CRS cooperation modality"
                   },
                   "label": "modality"
@@ -422,7 +422,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsPurpose",
+                    "ref": "crsPurpose",
                     "label": "CRS purpose"
                   },
                   "label": "sector"
@@ -436,7 +436,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFinance",
+                    "ref": "crsTypeOfFinance",
                     "label": "CRS type of finance"
                   },
                   "label": "instrument"
@@ -450,7 +450,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFlow",
+                    "ref": "crsTypeOfFlow",
                     "label": "CRS type of flow"
                   },
                   "label": "flow"
@@ -459,7 +459,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "CRSTypeOfFlow10",
+                      "ref": "CRSTypeOfFlow10",
                       "label": "official development assistance"
                     },
                     "value_kind": "enum_value"
@@ -471,7 +471,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "financialObligationType",
+                    "ref": "financialObligationType",
                     "label": "financial obligation type"
                   },
                   "label": "financial obligation type"
@@ -480,7 +480,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "Commitment",
+                      "ref": "Commitment",
                       "label": "commitment"
                     },
                     "value_kind": "enum_value"
@@ -650,7 +650,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsCooperationModality",
+                    "ref": "crsCooperationModality",
                     "label": "CRS cooperation modality"
                   },
                   "label": "modality"
@@ -664,7 +664,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsPurpose",
+                    "ref": "crsPurpose",
                     "label": "CRS purpose"
                   },
                   "label": "sector"
@@ -678,7 +678,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFinance",
+                    "ref": "crsTypeOfFinance",
                     "label": "CRS type of finance"
                   },
                   "label": "instrument"
@@ -692,7 +692,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "crsTypeOfFlow",
+                    "ref": "crsTypeOfFlow",
                     "label": "CRS type of flow"
                   },
                   "label": "flow"
@@ -701,7 +701,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "CRSTypeOfFlow10",
+                      "ref": "CRSTypeOfFlow10",
                       "label": "official development assistance"
                     },
                     "value_kind": "enum_value"
@@ -713,7 +713,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "financialFlowType",
+                    "ref": "financialFlowType",
                     "label": "financial flow type"
                   },
                   "label": "financial flow type"
@@ -722,7 +722,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "Disbursement",
+                      "ref": "Disbursement",
                       "label": "disbursement"
                     },
                     "value_kind": "enum_value"
@@ -734,7 +734,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "nettingBasis",
+                    "ref": "nettingBasis",
                     "label": "netting basis"
                   },
                   "label": "netting basis"
@@ -743,7 +743,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "Gross",
+                      "ref": "Gross",
                       "label": "gross"
                     },
                     "value_kind": "enum_value"
@@ -755,7 +755,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "dac2aAidType",
+                    "ref": "dac2aAidType",
                     "label": "DAC 2a aid type"
                   },
                   "label": "aid type"
@@ -774,7 +774,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "country/KEN",
+                      "ref": "country/KEN",
                       "label": "Kenya"
                     },
                     "value_kind": "entity"
@@ -916,7 +916,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "gender",
+                    "ref": "gender",
                     "label": "gender"
                   },
                   "label": "gender"
@@ -926,14 +926,14 @@
                   "values": [
                     {
                       "ref": {
-                        "dcid": "Male",
+                        "ref": "Male",
                         "label": "Male"
                       },
                       "value_kind": "enum_value"
                     },
                     {
                       "ref": {
-                        "dcid": "Female",
+                        "ref": "Female",
                         "label": "Female"
                       },
                       "value_kind": "enum_value"
@@ -946,7 +946,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "age",
+                    "ref": "age",
                     "label": "age"
                   },
                   "label": "age"
@@ -960,7 +960,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "placeOfResidenceClassification",
+                    "ref": "placeOfResidenceClassification",
                     "label": "placeOfResidenceClassification"
                   },
                   "label": "place of residence classification"
@@ -974,7 +974,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "maritalStatus",
+                    "ref": "maritalStatus",
                     "label": "maritalStatus"
                   },
                   "label": "marital status"
@@ -993,7 +993,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "country/NGA",
+                      "ref": "country/NGA",
                       "label": "Nigeria"
                     },
                     "value_kind": "entity"
@@ -1099,7 +1099,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "gender",
+                    "ref": "gender",
                     "label": "gender"
                   },
                   "label": "gender"
@@ -1118,7 +1118,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "country/GHA",
+                      "ref": "country/GHA",
                       "label": "Ghana"
                     },
                     "value_kind": "entity"
@@ -1258,7 +1258,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "age",
+                    "ref": "age",
                     "label": "age"
                   },
                   "label": "age"
@@ -1272,7 +1272,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "maritalStatus",
+                    "ref": "maritalStatus",
                     "label": "maritalStatus"
                   },
                   "label": "marital status"
@@ -1286,7 +1286,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "gender",
+                    "ref": "gender",
                     "label": "gender"
                   },
                   "label": "gender"
@@ -1300,7 +1300,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "placeOfBirth",
+                    "ref": "placeOfBirth",
                     "label": "placeOfBirth"
                   },
                   "label": "place of birth"
@@ -1314,7 +1314,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "nativity",
+                    "ref": "nativity",
                     "label": "nativity"
                   },
                   "label": "nativity"
@@ -1328,7 +1328,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "employment",
+                    "ref": "employment",
                     "label": "employment"
                   },
                   "label": "employment"
@@ -1342,7 +1342,7 @@
                 "key": {
                   "axis": "how",
                   "property": {
-                    "dcid": "employmentStatus",
+                    "ref": "employmentStatus",
                     "label": "employmentStatus"
                   },
                   "label": "employment status"
@@ -1361,7 +1361,7 @@
                   "kind": "value",
                   "value": {
                     "ref": {
-                      "dcid": "country/KEN",
+                      "ref": "country/KEN",
                       "label": "Kenya"
                     },
                     "value_kind": "entity"
@@ -1480,7 +1480,7 @@
                     "key": {
                       "axis": "how",
                       "property": {
-                        "dcid": "age",
+                        "ref": "age",
                         "label": "age"
                       },
                       "label": "age"
@@ -1489,7 +1489,7 @@
                       "kind": "value",
                       "value": {
                         "ref": {
-                          "dcid": "SDG_AgeEnum_Y15T24",
+                          "ref": "SDG_AgeEnum_Y15T24",
                           "label": "15 to 24 years old"
                         },
                         "value_kind": "enum_value"
@@ -1501,7 +1501,7 @@
                     "key": {
                       "axis": "how",
                       "property": {
-                        "dcid": "sdg_sex",
+                        "ref": "sdg_sex",
                         "label": "sdg_sex"
                       },
                       "label": "sdg sex"
@@ -1520,7 +1520,7 @@
                       "kind": "value",
                       "value": {
                         "ref": {
-                          "dcid": "country/ESP",
+                          "ref": "country/ESP",
                           "label": "Spain"
                         },
                         "value_kind": "entity"
@@ -1624,7 +1624,7 @@
                     "key": {
                       "axis": "how",
                       "property": {
-                        "dcid": "age",
+                        "ref": "age",
                         "label": "age"
                       },
                       "label": "age"
@@ -1633,7 +1633,7 @@
                       "kind": "value",
                       "value": {
                         "ref": {
-                          "dcid": "SDG_AgeEnum_Y15T24",
+                          "ref": "SDG_AgeEnum_Y15T24",
                           "label": "15 to 24 years old"
                         },
                         "value_kind": "enum_value"
@@ -1645,7 +1645,7 @@
                     "key": {
                       "axis": "how",
                       "property": {
-                        "dcid": "sdg_sex",
+                        "ref": "sdg_sex",
                         "label": "sdg_sex"
                       },
                       "label": "sdg sex"
@@ -1664,7 +1664,7 @@
                       "kind": "value",
                       "value": {
                         "ref": {
-                          "dcid": "country/ESP",
+                          "ref": "country/ESP",
                           "label": "Spain"
                         },
                         "value_kind": "entity"

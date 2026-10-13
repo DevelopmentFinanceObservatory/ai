@@ -21,7 +21,11 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from google.adk.events import Event
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.studio_state import ConversationState, StudioStore
+from harness.studio_translate import _RecordingExecutor, _Translator
 
 from .orchestrator_fakes import (
     CannedSearch,
@@ -105,6 +109,27 @@ def _search_answer(**reading: Any) -> dict[str, Any]:
     }
 
 
+def _direct_answer(**answer: Any) -> dict[str, Any]:
+    response = {"name": "submit_analysis", "response": answer}
+    return {
+        "kind": "request",
+        "agent": "orchestrator",
+        "system": "",
+        "contents": [{"role": "user", "parts": [{"function_response": response}]}],
+    }
+
+
+COMPLETED = {
+    "outcome": "completed",
+    "run": {"run_id": "run_1", "status": "completed"},
+    "frames": [{"frame": "f1", "view": {}}],
+}
+UNVERIFIED = {
+    "outcome": "needs_fields",
+    "errors": [{"field": "spec_id", "code": "unverified_source", "message": "m"}],
+}
+
+
 def _closing(text: str) -> list[dict[str, Any]]:
     return [{"event": "message.complete", "seq": 0, "text": text}, {"event": "done", "seq": 1}]
 
@@ -116,6 +141,16 @@ def _plan_call(*asks: str) -> dict[str, Any]:
         "agent": "orchestrator",
         "system": "",
         "contents": [{"role": "model", "parts": [call]}],
+    }
+
+
+def _proposal(tool: str, **translation: Any) -> dict[str, Any]:
+    """A planner call whose accepted proposal carries `translation`."""
+    return {
+        "kind": "call",
+        "layer": "planner",
+        "tool": tool,
+        "response": {"outcome": "ok", "translation": {"outcome": "invalid_input", **translation}},
     }
 
 
@@ -268,6 +303,32 @@ TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
             True,
         ),
         ("every_ask_accounted_for", _card(), [_plan_call(), _hand_back()], True),
+        # Either proposing tool's translation counts.
+        *(
+            (
+                "translation_stops_on_a_repeated_failure",
+                [],
+                [_proposal(tool), _proposal(tool, repeated=True), *after],
+                bool(after),
+            )
+            for tool in ("propose_plan", "submit_analysis")
+            for after in ([], [_proposal(tool)])
+        ),
+        ("direct_run_completed", [], [_direct_answer(**COMPLETED)], False),
+        # A run still publishing, a run with no frame, a plan card, or no call at all.
+        (
+            "direct_run_completed",
+            [],
+            [_direct_answer(**{**COMPLETED, "run": {"run_id": "run_1", "status": "pending"}})],
+            True,
+        ),
+        ("direct_run_completed", [], [_direct_answer(**{**COMPLETED, "frames": []})], True),
+        ("direct_run_completed", _card(ANSWERED), [_direct_answer(**COMPLETED)], True),
+        ("direct_run_completed", [], [_request("orchestrator", "x")], True),
+        ("unverified_source_refused", [], [_direct_answer(**UNVERIFIED)], False),
+        ("unverified_source_refused", [], [_direct_answer(**UNVERIFIED), _step(SPEC)], True),
+        ("unverified_source_refused", [], [_direct_answer(**COMPLETED)], True),
+        ("unverified_source_refused", [], [_request("orchestrator", "x")], True),
     ],
 )
 def test_a_request_check_fails_exactly_when_its_property_is_broken(
@@ -752,6 +813,34 @@ def test_chart_points_ground_only_citations_of_four_or_more_figures() -> None:
         assert _ungrounded(frames, f"It reached {value:.2f} billion.") != []
 
 
+async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no tool call expected, got {tool}")
+
+
+def test_a_count_explain_dfo_read_grounds_the_reply_that_quotes_it() -> None:
+    """The counts reach the reply only through the model, so the translator's
+    `explain_dfo` step carries them for the grounding check to read."""
+    counts = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
+    translator = _Translator(
+        conversation=ConversationState(conversation_id="c1"),
+        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+    )
+    call = types.FunctionCall(id="call_1", name="explain_dfo", args={})
+    read = types.FunctionResponse(
+        id="call_1", name="explain_dfo", response={"explainer": "DFO is", "counts": counts}
+    )
+    frames = [
+        frame.model_dump(mode="json")
+        for part in (types.Part(function_call=call), types.Part(function_response=read))
+        for frame in translator.translate(
+            Event(author="dfo_orchestrator", content=types.Content(parts=[part]))
+        )
+    ]
+
+    assert _ungrounded(frames, "DFO holds 108,905 indicators in 92 datasets.") == []
+    assert _ungrounded(frames, "DFO holds 108,906 indicators.") != []
+
+
 def test_an_unknown_expect_key_is_reported_as_a_violation() -> None:
     run = _load("run")
 
@@ -841,16 +930,16 @@ def test_a_message_expectation_with_no_message_frame_fails() -> None:
 
 
 @pytest.mark.parametrize("value", ["withheld", [], [""], [3], None])
-def test_a_malformed_message_expectation_is_reported(value: object) -> None:
+@pytest.mark.parametrize("key", ["message_contains", "plan.operations_contain"])
+def test_a_malformed_text_list_expectation_is_reported(value: object, key: str) -> None:
     run = _load("run")
+    expect: dict[str, Any] = {"message_contains": value}
+    if key == "plan.operations_contain":
+        expect = {"plan": {"operations_contain": value}}
 
-    violations = run.check_expect_keys(
-        {"message": "q", "expect": {"message_contains": value}}, label="t"
-    )
+    violations = run.check_expect_keys({"message": "q", "expect": expect}, label="t")
 
-    assert violations == [
-        "t: expect.message_contains must be a non-empty list of non-empty strings"
-    ]
+    assert violations == [f"t: expect.{key} must be a non-empty list of non-empty strings"]
 
 
 def test_a_mutate_that_returns_no_manifest_fails_a_block_expectation() -> None:
@@ -863,3 +952,127 @@ def test_a_mutate_that_returns_no_manifest_fails_a_block_expectation() -> None:
     violations = run._check_mutation(turn, refused, label="t")
 
     assert any("no manifest" in v for v in violations)
+
+
+# The source sentence of each plan recorded for "general government debt
+# service by creditor for 2031" on the deployment: version 2 pinned the
+# recipient-only financial flow, version 3 the aggregate. Neither plan kept
+# the creditors.
+_PROD_CREDITOR_SENTENCES = [
+    "Financial flow to 134 recipients for general government in 2031. Current US dollars "
+    "\u00b7 World Bank International Debt Statistics (IDS).",
+    "External debt service of 134 debtors for public or publicly guaranteed for general "
+    "government in 2031. Current US dollars \u00b7 World Bank International Debt Statistics "
+    "(IDS).",
+]
+
+
+_BY_CREDITOR_SOURCE = (
+    "External debt service of 134 debtors owed to 97 creditors for general government in 2031."
+)
+_RANKS_CREDITORS = (
+    "Ranks by the total of general government debt service by creditor: ranks all 97 "
+    "creditors the source holds; the window is collapsed into one ranking."
+)
+# An aggregate's sentence restates the planner's measure, which carries the user's words.
+_SUMS_CREDITORS_AWAY = (
+    "The total of general government debt service by creditor, grouped by period."
+)
+
+
+def _creditor_plan_frame(
+    version: int, *operations: tuple[str, str], declined: str | None = None
+) -> dict[str, Any]:
+    """A plan card for the by-creditor question whose operations are `(kind, sentence)`
+    in order, its one ask answered by the last. The step label repeats the user's
+    "by creditor", as the planner's own words do."""
+    ops = [
+        {"id": f"op{number}", "kind": kind, "sentence": sentence}
+        for number, (kind, sentence) in enumerate(operations)
+    ]
+    return {
+        "event": "plan.proposed",
+        "seq": version - 1,
+        "version": version,
+        "steps": [{"id": "op0", "label": "Fetch general government debt service by creditor"}],
+        "requirements": [{"id": "debt_service_by_creditor", "sentence": operations[0][1]}],
+        "operations": ops,
+        "asks": [
+            {
+                "ask": "Debt service by creditor",
+                "answered_by": [ops[-1]["id"]],
+                "declined": declined,
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("frames", "kept"),
+    [
+        pytest.param(
+            [
+                _creditor_plan_frame(number, ("retrieve", sentence))
+                for number, sentence in enumerate(_PROD_CREDITOR_SENTENCES, start=2)
+            ],
+            False,
+            id="prod",
+        ),
+        pytest.param(
+            [
+                _creditor_plan_frame(
+                    2,
+                    ("retrieve", _PROD_CREDITOR_SENTENCES[0]),
+                    ("aggregate", _SUMS_CREDITORS_AWAY),
+                )
+            ],
+            False,
+            id="prod-plus-an-aggregate-of-the-measure",
+        ),
+        pytest.param(
+            [
+                _creditor_plan_frame(
+                    2, ("retrieve", _BY_CREDITOR_SOURCE), ("aggregate", _SUMS_CREDITORS_AWAY)
+                )
+            ],
+            False,
+            id="creditor-source-summed-by-period",
+        ),
+        pytest.param(
+            [
+                _creditor_plan_frame(
+                    2,
+                    ("retrieve", _BY_CREDITOR_SOURCE),
+                    declined="the data found does not break this down by the party asked",
+                )
+            ],
+            False,
+            id="declined",
+        ),
+        pytest.param(
+            [
+                _creditor_plan_frame(
+                    2, ("retrieve", _BY_CREDITOR_SOURCE), ("rank", _RANKS_CREDITORS)
+                )
+            ],
+            True,
+            id="ranked-creditors",
+        ),
+        pytest.param(
+            [_creditor_plan_frame(2, ("retrieve", _BY_CREDITOR_SOURCE))],
+            True,
+            id="creditor-source-as-the-answer",
+        ),
+    ],
+)
+def test_a_plan_whose_answer_never_names_the_creditors_fails_the_expectation(
+    frames: list[dict[str, Any]], kept: bool
+) -> None:
+    run = _load("run")
+    turn = {"message": "q", "expect": {"plan": {"operations_contain": ["creditor"]}}}
+
+    violations = run._check_turn_expectations(turn, frames, label="t")
+
+    assert violations == (
+        [] if kept else ["t: the operations answering the plan's asks never say 'creditor'"]
+    )

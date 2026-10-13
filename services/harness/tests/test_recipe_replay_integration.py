@@ -11,31 +11,32 @@ publish door, so no socket opens.
 
 from __future__ import annotations
 
+import gzip
+import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
-import httpx2
 import pytest
 from common.materialisation import FrameRef, get_store
 from common.recipe import build_recipe
 from common.row_budget import RowBudget
 from compiler.surface import McpSurface, ToolCallResult
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
-from data_mcp.settings import Settings as DataMcpSettings
 from harness.recipe_replay import Pending, Refused, Replayed, replay_recipe
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from planner.workflow import ToolId
 
 from .replay_support import (
+    FIRST,
     REPORTERS,
     SECOND,
     SECOND_VALUES,
     SPEC,
     FakeApis,
     Upstream,
+    data_mcp_client,
     pair,
     yearly,
 )
@@ -94,6 +95,16 @@ class Services:
         )
         return ref, recipe
 
+    def steps_of(self, frame: FrameRef) -> list[dict[str, Any]]:
+        """The steps of the last publish of `frame`."""
+        bodies = [json.loads(gzip.decompress(request.content)) for request in self.apis.published()]
+        (body, *_) = [
+            body
+            for body in reversed(bodies)
+            if pair(frame) == (body["spec_id"], body["content_version"])
+        ]
+        return body["steps"]
+
     async def replay(self, recipe: Mapping[str, Any]) -> Replayed | Pending | Refused:
         async with self.apis.client() as client:
             return await replay_recipe(
@@ -121,9 +132,7 @@ async def services(
 ) -> AsyncIterator[Services]:
     upstream = Upstream()
     monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", upstream.fetch)
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(upstream.handler))
-    )
+    client_holder.set_client(data_mcp_client(upstream.handler))
     app = create_app(settings=Settings(mcp_api_token="test-token"))
     async with running_lifespan(app):
         surface = McpSurface(
@@ -181,6 +190,16 @@ async def test_a_filter_then_growth_recipe_is_replayed_after_its_dataset_moves(
     assert services.growth_of(original) == pytest.approx({"dcid:FRA": 0.3, "dcid:GBR": 0.15})
     assert services.growth_of(replayed.frame) == pytest.approx({"dcid:FRA": 0.2, "dcid:GBR": 0.1})
     assert [name for name, _ in services.verbs] == ["filter", "growth"]
+    # The replayed frame publishes the steps of its own trace, over the moved root.
+    original_steps, replayed_steps = map(services.steps_of, (original, replayed.frame))
+    assert [step["op"] for step in replayed_steps] == ["retrieve", "filter", "growth"]
+    assert [
+        step["input"]["content_version"] for step in (original_steps[0], replayed_steps[0])
+    ] == [
+        FIRST,
+        SECOND,
+    ]
+    assert replayed_steps[2]["kept"] == original_steps[2]["kept"] == {"entities": 2}
 
     verbs, posts, mints = (
         len(services.verbs),

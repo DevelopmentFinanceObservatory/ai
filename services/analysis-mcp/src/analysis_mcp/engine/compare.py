@@ -14,10 +14,13 @@ different `entity` bindings is two slices of one frame; two different
 `(left_frame, right_frame)`, so there is one code path.
 
 `delta` (right value minus left value) is a single subtraction, never a
-reduction over rows, so `math.fsum` is never used here. Two finite doubles
-of opposite sign and large magnitude can still subtract to an infinite
-result under IEEE-754, so `compare` checks `delta` the same way `aggregate`
-and `growth` check their own results.
+reduction over rows, so `math.fsum` is never used here. Every result row
+carries the caller-supplied `stat_var`, the operation's own ref
+(`dcid:<op_spec_hash>`, which `compare_tool` passes in), because a difference
+of two variables is a third variable, as `analysis_mcp.engine.sum_of` treats a sum.
+Two finite doubles of opposite sign and large magnitude can still subtract to
+an infinite result under IEEE-754, so `compare` checks `delta` the same way
+`aggregate` and `growth` check their own results.
 
 Each side resolves its own unit independently; subtraction across two
 different units is silently wrong, so `run_compare` refuses
@@ -56,7 +59,13 @@ from dfo_frame_grammar.grammar import (
     UnitCell,
 )
 
-from analysis_mcp.engine.columnar import distinct, frame_from_columns, in_periods, keys_unique
+from analysis_mcp.engine.columnar import (
+    distinct,
+    frame_from_columns,
+    in_periods,
+    keys_unique,
+    repeated,
+)
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
@@ -64,6 +73,7 @@ from analysis_mcp.engine.common import (
     combine_exclusions,
     cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
+    entity_roles,
     facet_columns,
     first_cross_side_facet_mismatch,
     narrow_and_resolve,
@@ -173,18 +183,12 @@ class PeriodComparison:
     """One intersected period's own two values and their delta, addressed
     by `time_period` rather than by position -- the same "never trust row
     order" discipline `analysis_mcp.engine.aggregate.GroupSummary` follows.
-    `left_stat_var`/`right_stat_var` are each side's own StatVar at this
-    period, kept alongside the delta since the output row's own `stat_var`
-    (see `run_compare` below) always carries the left side's, even when the
-    two differ.
     """
 
     time_period: str
     left_value: float
     right_value: float
     delta: float
-    left_stat_var: str
-    right_stat_var: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -192,10 +196,18 @@ class CompareResult:
     """Everything `compare_tool.py` needs to mint identity, write the store,
     and render the digest -- the frame is here for the store write and
     replay; the digest itself renders from `period_comparisons`, never
-    `frame.rows`.
+    `frame.rows`. `stat_var` labels every result row; `left_stat_vars` and
+    `right_stat_vars` keep what each side measured, and `left_entities` and
+    `right_entities` the entities each side holds (`held_entities`), for the
+    step's `sides` and the digest's label.
     """
 
     frame: Frame
+    stat_var: str
+    left_stat_vars: tuple[str, ...]
+    right_stat_vars: tuple[str, ...]
+    left_entities: Mapping[str, str]
+    right_entities: Mapping[str, str]
     left_resolved_unit: UnitCell | None
     right_resolved_unit: UnitCell | None
     left_facet_selections: tuple[FacetSelection, ...]
@@ -274,6 +286,23 @@ class SideSlice:
     def populated(self) -> bool:
         """Whether any row survived narrowing."""
         return self.table.num_rows > 0
+
+
+def held_entities(frame: Frame, table: pa.Table, *, entity: Mapping[str, str]) -> dict[str, str]:
+    """The entities one side holds, as column to value in `frame`'s column
+    order. `table` is the side's narrowed slice. A column counts if it is an
+    entity column of `frame` (`entity_roles`) or `entity` binds it, and it
+    appears if it holds exactly one value across `table`. A binding narrows
+    its column to one value, so every bound column appears. A column holding
+    several values, or a null, is left out.
+    """
+    columns = set(entity_roles(frame)) | set(entity)
+    held: dict[str, str] = {}
+    for column in (column for column in frame.columns if column in columns):
+        values = array_kernel("unique", table.column(column)).to_pylist()
+        if len(values) == 1 and isinstance(values[0], str):
+            held[column] = values[0]
+    return held
 
 
 def _slice(
@@ -417,6 +446,7 @@ def run_compare(
     left_frame: Frame,
     right_frame: Frame,
     *,
+    stat_var: str,
     left_entity: Mapping[str, str],
     right_entity: Mapping[str, str],
     left_pinned_unit: UnitCell | None = None,
@@ -424,9 +454,9 @@ def run_compare(
 ) -> CompareResult:
     """Compare `left_frame`'s (narrowed by `left_entity`) and `right_frame`'s
     (narrowed by `right_entity`) own single-entity time series over their
-    intersected periods. See the module docstring for what a "slice" and
-    "the two sides" mean; see each raised exception's own docstring for its
-    refusal condition.
+    intersected periods, labelling every result row `stat_var`. See the
+    module docstring for what a "slice" and "the two sides" mean; see each
+    raised exception's own docstring for its refusal condition.
     """
     left, right = slice_pair(
         left_frame,
@@ -490,11 +520,9 @@ def run_compare(
     left_matched, right_matched = alignment.left_matched, alignment.right_matched
 
     period_comparisons = []
-    for period, left_stat_var, left_value, right_stat_var, right_value in zip(
+    for period, left_value, right_value in zip(
         intersected_periods,
-        cast("list[str]", left_matched.column(STAT_VAR_COLUMN).to_pylist()),
         cast("list[float]", left_matched.column(VALUE_COLUMN).to_pylist()),
-        cast("list[str]", right_matched.column(STAT_VAR_COLUMN).to_pylist()),
         cast("list[float]", right_matched.column(VALUE_COLUMN).to_pylist()),
         strict=True,
     ):
@@ -512,34 +540,36 @@ def run_compare(
                 left_value=left_value,
                 right_value=right_value,
                 delta=delta,
-                left_stat_var=left_stat_var,
-                right_stat_var=right_stat_var,
             )
         )
     period_comparisons = tuple(period_comparisons)
 
-    # The output frame carries the left side's `stat_var`, unit, and facet
+    # The output frame carries `stat_var`, and the left side's unit and facet
     # selections, less any axis the sides declare to different values. The
-    # delta is labelled as a movement relative to the left side, the same
-    # asymmetric choice `delta`'s own sign already makes. The
-    # right side's unit/facets are still returned above, for the trace and
+    # right side's unit/facets are returned above, for the trace and
     # digest to record in full. Every row of the left slice carries its
     # resolved unit, so its `unit` column is the output's.
+    count = len(period_comparisons)
     output_frame = frame_from_columns(
         {
-            STAT_VAR_COLUMN: left_matched.column(STAT_VAR_COLUMN),
+            STAT_VAR_COLUMN: repeated(stat_var, count),
             TIME_PERIOD_COLUMN: left_matched.column(TIME_PERIOD_COLUMN),
             VALUE_COLUMN: pa.array(
                 [comparison.delta for comparison in period_comparisons], type=pa.float64()
             ),
             UNIT_COLUMN: left_matched.column(UNIT_COLUMN),
-            **facet_columns(output_facets, count=len(period_comparisons)),
+            **facet_columns(output_facets, count=count),
         },
         role_keys=(),
     )
 
     return CompareResult(
         frame=output_frame,
+        stat_var=stat_var,
+        left_stat_vars=tuple(distinct(left_matched, STAT_VAR_COLUMN)),
+        right_stat_vars=tuple(distinct(right_matched, STAT_VAR_COLUMN)),
+        left_entities=held_entities(left_frame, left.table, entity=left_entity),
+        right_entities=held_entities(right_frame, right.table, entity=right_entity),
         left_resolved_unit=left.unit,
         right_resolved_unit=right.unit,
         left_facet_selections=left.facet_selections,

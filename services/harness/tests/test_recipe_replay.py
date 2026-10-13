@@ -375,8 +375,12 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
 
 @pytest.mark.parametrize(
     "recorded",
-    [OPTIONS | {"columns": ["financingProvider_type", "financingRecipient_type"]}, OPTIONS],
-    ids=["flow-party-types", "flow-no-columns"],
+    [
+        OPTIONS | {"columns": ["financingProvider_type", "financingRecipient_type"]},
+        OPTIONS | {"columns": ["kind"]},
+        OPTIONS,
+    ],
+    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns"],
 )
 async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
     scene: Scene, recorded: dict[str, Any]
@@ -388,7 +392,7 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
 
     assert isinstance(replayed, Replayed), replayed
     (minted,) = scene.dataset.minted
-    assert minted.options == OPTIONS | {"columns": ["kind"]}
+    assert minted.options == OPTIONS | {"columns": ["party_kind"]}
     current = FrameRef(spec_id=SPEC, content_version=SECOND)
     held = await scene.store.get_mint_record(current)
     assert held is not None

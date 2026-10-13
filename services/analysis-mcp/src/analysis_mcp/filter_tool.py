@@ -19,6 +19,10 @@ builtin at module scope would work, but naming the function distinctly
 keeps this module's own code (and any future `from analysis_mcp.filter_tool
 import filter_verb`) unambiguous, while `mcp.tool(filter_verb, name="filter")`
 still exposes it under the verb's own closed-vocabulary name.
+
+The stored step (`_filter_step`) counts the values the predicates keep and
+names the unit they share. What the predicates drop is the caller's
+selection, so the step leaves nothing out.
 """
 
 from __future__ import annotations
@@ -26,12 +30,14 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastmcp.tools import ToolResult
-from pydantic import Field
+from pydantic import Field, JsonValue
+from pydantic.experimental.missing_sentinel import MISSING
 
 from analysis_mcp.digest import render_filter_digest
 from analysis_mcp.engine.filter import (
     FilterPredicateTypeMismatchError,
     FilterPredicateValueTypeMismatchError,
+    FilterResult,
     FilterUnitConversionUnsupportedError,
     FilterUnknownColumnError,
     run_filter,
@@ -41,6 +47,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merged_time,
     read_derived_marker,
@@ -58,6 +65,7 @@ from analysis_mcp.op_spec import (
 )
 from analysis_mcp.rolling_tool import anchored_input
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import Step, build_step, caller_params, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -112,6 +120,35 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             column=exc.column, predicate_kind=exc.predicate_kind, actual_type=exc.actual_type
         )
     return refusal
+
+
+def _kit_predicate(predicate: JsonValue) -> JsonValue:
+    """One canonical predicate as a step names it: its kind left implicit in
+    its members, and a threshold's `value` as its `operand`."""
+    assert isinstance(predicate, dict)
+    return {
+        "operand" if name == "value" else name: value
+        for name, value in predicate.items()
+        if name != "kind"
+    }
+
+
+def _filter_step(op_spec: FilterOpSpec, result: FilterResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the values it kept and
+    the unit they share. Kept rows in several units, or none, name no unit."""
+    params = caller_params(trace.execution_record.content)
+    if isinstance(predicates := params.get("predicates"), list):
+        params["predicates"] = [_kit_predicate(predicate) for predicate in predicates]
+    ratio = holds_ratio(trace)
+    return build_step(
+        op="filter",
+        trace=trace,
+        inputs={"input": op_spec.frame_ref},
+        params=params,
+        kept={"entity_periods": result.kept_row_count},
+        left_out=[],
+        unit=step_unit(result.units[0], ratio=ratio) if len(result.units) == 1 else MISSING,
+    )
 
 
 @holds_input_rows
@@ -321,7 +358,7 @@ async def filter_verb(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[input_trace],
+        step=_filter_step(op_spec, result, trace=output_trace),
         digest=lambda: render_filter_digest(
             predicate_count=len(canonical_predicates),
             result=result,

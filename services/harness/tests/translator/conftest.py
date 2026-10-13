@@ -31,6 +31,8 @@ from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from planner.plan import PLAN_STATE_KEY, Decision, EvidenceRequirement, Plan, PlanStatus
 
+from ..described_nodes import stat_var_node
+
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
 SPEC_THIRD = "spec_" + "c" * 32
@@ -67,6 +69,15 @@ def _spec(spec_id: str, sentence: str, **resolved: Any) -> dict[str, Any]:
             "identity": {"shape": {"kind": "stat_var", "id": "DebtServicePaid"}},
         },
     }
+
+
+# The reason the canned search refuses each `source_code` with: IDS files one
+# StatVar under both `DT.NFL` codes, and no dataset holds the third.
+CODE_REFUSALS = {
+    "DT.NFL.MIDA.CD": "source_code_shares_variable",
+    "DT.NFL.IMFC.CD": "source_code_shares_variable",
+    "DT.NFL.NONE.CD": "source_code_not_held",
+}
 
 
 def _envelope(status: str, warnings: list[dict[str, str]], **payload: Any) -> dict[str, Any]:
@@ -108,7 +119,9 @@ def data_server(search_calls: list[dict[str, Any]]) -> FastMCP:
                 is_error=True,
             )
         warnings = _warnings_for(variable)
-        if variable == "garbage":
+        if (code_refusal := CODE_REFUSALS.get(str(part.get("source_code")))) is not None:
+            envelope = _envelope("no_data", warnings, no_data={"reason": code_refusal})
+        elif variable == "garbage":
             envelope = _envelope("partial", warnings)
         elif "unsupported" in variable:
             envelope = _envelope(
@@ -174,14 +187,7 @@ def data_server(search_calls: list[dict[str, Any]]) -> FastMCP:
                 is_error=True,
             )
         nodes = [
-            {
-                "shape": "stat_var",
-                "dcid": dcid,
-                "label": dcid,
-                "definition": "d",
-                "roles": ["recipient"],
-            }
-            for dcid in ids
+            stat_var_node(dcid, label=dcid, description="d", roles=("recipient",)) for dcid in ids
         ]
         return ToolResult(content="nodes", structured_content={"nodes": nodes})
 

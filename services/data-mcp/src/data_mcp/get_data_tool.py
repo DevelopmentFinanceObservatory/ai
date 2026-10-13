@@ -62,17 +62,16 @@ from data_mcp.frame_materialisation import (
 from data_mcp.get_data_digest import (
     BreakdownLevel,
     OperationPollNote,
-    UnheldRegionSummary,
     render_dcids,
     render_get_data_digest,
     statistics_needs_fetch,
+    summed_family,
 )
 from data_mcp.manifest import (
     ArtifactEntry,
     DefinitionModel,
     Manifest,
     SeriesStatisticsModel,
-    WarningModel,
     render_validation_errors,
     strip_manifest,
 )
@@ -90,7 +89,6 @@ from data_mcp.resolution import (
     InvalidName,
     NotFound,
     NotHeld,
-    OutOfScope,
     ResolutionOutcome,
     ResolvedEntity,
     ResolvedRegion,
@@ -98,12 +96,14 @@ from data_mcp.resolution import (
 )
 from data_mcp.series_statistics import (
     SeriesStatisticsSchemaError,
+    continuing_method,
     fetch_series_statistics,
     find_statistics_artifact,
 )
 from data_mcp.settings import Settings
 from data_mcp.stat_var_list import without_long_stat_var_list
 from data_mcp.tool_errors import (
+    ENTITY_DCID_MARKER,
     EntityCandidate,
     ToolErrorCode,
     ToolRefusal,
@@ -111,6 +111,7 @@ from data_mcp.tool_errors import (
     from_upstream_error,
     to_tool_result,
 )
+from data_mcp.version_description import fetch_version_description
 
 # Both `CanonicalDefinition.schema_version` and `MintRequest.schema_version`
 # are `Literal[1]` upstream, and a model calling this tool has no meaningful
@@ -140,21 +141,14 @@ _MAX_ENTITY_NAME_CHARS = 200
 # lowercase hex chars.
 _SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 
-# A dcid the resolve door itself just handed back in an `entity_ambiguous`
-# refusal's candidate list -- never a name the model invents. Namespaced
-# graph dcids are always `prefix/segment[/segment...]` (`country/KEN`,
-# `geoId/13`, `wikidataId/Q30`; dfo-apis' `graph_api.routing` module defines
-# the node door's own `{dcid}` path grammar as one or more `/`-joined
-# segments, each `[A-Za-z0-9_.-]+`), and every entity-role namespace is
-# lowercase-initial -- requiring that is what tells a returned dcid apart
-# from plain text without guessing at a stricter grammar dfo-apis doesn't
-# publish. A slash alone isn't enough: `Congo/Brazzaville` and
-# `Bosnia/Herzegovina` are ordinary spoken disambiguation a caller types,
-# and both contain a `/`. A capitalized segment before the slash is a name
-# to resolve, never a passthrough dcid. The mint route's own
-# `Scope._entities_are_valid` (`datasets_api/mint_models.py`) accepts any
-# non-empty value that avoids `+`/`,`, so this pattern is the tighter of
-# the two bounds.
+# An unmarked value other tools' output shows as a dcid (`country/KEN` in a digest, a
+# recall entry or the canvas digest). Namespaced graph dcids are `prefix/segment[/...]`
+# (`country/KEN`, `geoId/13`, `wikidataId/Q30`), each segment `[A-Za-z0-9_.-]+` as
+# dfo-apis' `graph_api.routing` defines the node door's `{dcid}` path, and every
+# entity-role namespace is lowercase-initial. A slash alone is not enough:
+# `Congo/Brazzaville` and `Bosnia/Herzegovina` are spoken names a caller types, so a
+# capitalised segment before the slash is a name to resolve. A bare dcid such as
+# `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`.
 _DCID_PATTERN = re.compile(r"^[a-z][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_.\-]+)+$")
 
 # What `get_data(stat_vars="sum")` asks dfo-apis for: `by` names the columns to keep,
@@ -179,7 +173,8 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 
 # The current `CallBudget` shares out one call's deadline (`data_mcp.deadline`). Inside
 # its post-mint reserve, the statistics fetch runs only with `_STATISTICS_FLOOR_S` left
-# and must finish with `_STATISTICS_RESERVE_S` still unspent, for the digest.
+# and must finish with `_STATISTICS_RESERVE_S` still unspent, for the digest. The
+# description read runs beside it and ends with the same reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
 
@@ -212,10 +207,10 @@ class GetDataScope(BaseModel):
         default=None,
         description=(
             "role -> entity names, as spoken, e.g. "
-            '{"recipient": ["Togo", "Ghana"]}. A dcid (e.g. "country/GEO") is '
-            "also accepted verbatim and skips resolution -- only to answer "
-            "an entity_ambiguous refusal's candidate list from a prior "
-            "call, never invented. Replaces the whole entities member -- an "
+            '{"recipient": ["Togo", "Ghana"]}. A dcid marked dcid: (e.g. '
+            '"dcid:country/GEO") is also accepted and skips resolution -- only '
+            "to answer an entity_ambiguous refusal's candidate list from a "
+            "prior call, never invented. Replaces the whole entities member -- an "
             "addition must restate every role you want kept. Omit to leave "
             "entities untouched; pass {} to clear them."
         ),
@@ -256,7 +251,25 @@ class GetDataScope(BaseModel):
                         f"entity name length must be 1..{_MAX_ENTITY_NAME_CHARS} characters, "
                         f"got {len(name)} for {name!r}"
                     )
+                if _entity_dcid(name) == "":
+                    raise ValueError(
+                        f"{name!r} carries the {ENTITY_DCID_MARKER} marker but no dcid"
+                    )
         return self
+
+
+def _entity_dcid(value: str) -> str | None:
+    """The dcid a `scope.entities` value names, or `None` for a name to resolve.
+
+    A value behind the `dcid:` marker is the dcid after it: the marker is how an
+    `entity_ambiguous` refusal names its candidates, and no spoken name starts with it, so a
+    bare dcid such as `GroupOfSeven` passes too. An unmarked value is a dcid when it matches
+    `_DCID_PATTERN`, as the dcids other tools' output shows do.
+    """
+    stripped = value.strip()
+    if stripped.startswith(ENTITY_DCID_MARKER):
+        return stripped.removeprefix(ENTITY_DCID_MARKER).strip()
+    return stripped if _DCID_PATTERN.fullmatch(stripped) else None
 
 
 class Breakdown(BaseModel):
@@ -363,12 +376,9 @@ def _refusal_for_unresolved_outcome(
                 role=role,
                 query=query,
                 candidates=[
-                    EntityCandidate(
-                        dcid=c.dcid, label=c.name, type=c.entity_type, parent=c.parent or ""
-                    )
+                    EntityCandidate(dcid=c.dcid, label=c.name, type=c.entity_type)
                     for c in outcome.candidates
                 ],
-                truncated=outcome.truncated,
             )
         )
     if isinstance(outcome, NotFound):
@@ -379,21 +389,7 @@ def _refusal_for_unresolved_outcome(
         )
     if isinstance(outcome, NotHeld):
         return to_tool_result(
-            ToolRefusal.entity_not_found(
-                role=role,
-                query=query,
-                near_matches=[],
-                not_held_entity_type=outcome.entity_type,
-            )
-        )
-    if isinstance(outcome, OutOfScope):
-        return to_tool_result(
-            ToolRefusal.entity_out_of_scope(
-                role=role,
-                query=query,
-                entity_type=outcome.entity_type,
-                dcid=outcome.dcid,
-            )
+            ToolRefusal.entity_not_found(role=role, query=query, near_matches=[], not_held=True)
         )
     if isinstance(outcome, InvalidName):
         return to_tool_result(
@@ -406,25 +402,21 @@ def _refusal_for_unresolved_outcome(
 
 async def _resolve_scope_entities(
     entities: Mapping[str, Sequence[str]],
-) -> tuple[dict[str, list[str]], dict[str, str], list[UnheldRegionSummary]] | ToolResult:
+) -> tuple[dict[str, list[str]], dict[str, str]] | ToolResult:
     """Resolve every name in `entities` into dcids for the mint request.
 
-    A value already shaped like a dcid (`_DCID_PATTERN`) is used verbatim and never reaches
-    the resolve door -- this is how a caller answers this tool's own `entity_ambiguous`
-    refusal, whose candidate list names dcids to pick from; everything else is resolved by
-    name.
+    A value `_entity_dcid` reads as a dcid is sent as that dcid and never reaches the resolve
+    door: one behind the `dcid:` marker, as this tool's own `entity_ambiguous` refusal names its
+    candidates, or an unmarked namespaced dcid copied from another tool's output. Everything
+    else is resolved by name.
 
-    Returns `(wire_entities, entity_labels, unheld_regions)` on full success: `wire_entities`
+    Returns `(wire_entities, entity_labels)` on full success: `wire_entities`
     is role -> bare dcids, order-preserving-deduped so the same dcid reached twice under one
     role (a region and one of its own members, both named) mints once rather than twice --
     upstream preserves this list verbatim into the hashed identity document, so an undeduped
     list would mint two different spec_ids for one logical question depending on phrasing;
-    `entity_labels` is dcid -> name for every entity and region member this call resolved by
-    name (a passthrough dcid gets no entry, so the digest renders it as itself); and
-    `unheld_regions` carries one summary per resolved region that came back with members this
-    graph doesn't hold. `ResolvedRegion` outcomes proceed on their confirmed members even when
-    `members_not_held` is non-empty -- a partially-held region still answers the question
-    asked.
+    and `entity_labels` is dcid -> name for every entity and region member this call resolved
+    by name (a passthrough dcid gets no entry, so the digest renders it as itself).
 
     Returns a refusal `ToolResult` in place of the tuple on the first name that isn't cleanly
     usable. `role` always names the failed name's own role, per the platform contract's
@@ -433,19 +425,17 @@ async def _resolve_scope_entities(
     reads pointers in -- never dfo-apis' `/input`-wrapped wire pointer.
     """
     names_to_resolve = {
-        role: [name for name in names if not _DCID_PATTERN.fullmatch(name.strip())]
+        role: [name for name in names if _entity_dcid(name) is None]
         for role, names in entities.items()
     }
     outcomes = await resolve_entities(names_to_resolve)
     wire_entities: dict[str, list[str]] = {}
     entity_labels: dict[str, str] = {}
-    unheld_regions: list[UnheldRegionSummary] = []
     for role, names in entities.items():
         dcids: list[str] = []
         for name in names:
-            stripped = name.strip()
-            if _DCID_PATTERN.fullmatch(stripped):
-                dcids.append(stripped)
+            if (dcid := _entity_dcid(name)) is not None:
+                dcids.append(dcid)
                 continue
             outcome = outcomes[role][name]
             if isinstance(outcome, ResolvedEntity):
@@ -453,37 +443,26 @@ async def _resolve_scope_entities(
                 entity_labels[outcome.dcid] = outcome.name
             elif isinstance(outcome, ResolvedRegion):
                 if not outcome.members:
-                    # The resolve door's `resolved_region` status always
-                    # carries at least one confirmed member; a region with
-                    # none held returns `not_held` instead. Treating an empty
-                    # membership list as that same not-held refusal, rather
-                    # than trusting it, keeps a role from silently scoping to
-                    # zero dcids if that guarantee ever changes upstream.
+                    # A group or region with no member country (a region of
+                    # territories only) would scope this role to zero dcids;
+                    # it refuses instead.
                     return to_tool_result(
                         ToolRefusal.entity_not_found(
                             role=role,
                             query=name,
                             near_matches=[],
-                            not_held_entity_type=outcome.entity_type,
+                            memberless_kind=outcome.entity_type,
                         )
                     )
                 for member in outcome.members:
                     dcids.append(member.dcid)
                     entity_labels[member.dcid] = member.name
-                if outcome.members_not_held:
-                    unheld_regions.append(
-                        UnheldRegionSummary(
-                            region_name=outcome.name,
-                            unheld_names=[m.name for m in outcome.members_not_held],
-                            unheld_count=len(outcome.members_not_held),
-                        )
-                    )
             else:
                 refusal = _refusal_for_unresolved_outcome(outcome, role=role, query=name)
                 if refusal is not None:
                     return refusal
         wire_entities[role] = list(dict.fromkeys(dcids))
-    return wire_entities, entity_labels, unheld_regions
+    return wire_entities, entity_labels
 
 
 def _pre_mint_deadline_refusal(*, service: str, step: str) -> ToolResult:
@@ -499,19 +478,19 @@ def _pre_mint_deadline_refusal(*, service: str, step: str) -> ToolResult:
 
 async def _resolve_entities_or_refuse(
     entities: Mapping[str, Sequence[str]], *, deadline: CallDeadline
-) -> tuple[dict[str, list[str]], dict[str, str], list[UnheldRegionSummary]] | ToolResult:
+) -> tuple[dict[str, list[str]], dict[str, str]] | ToolResult:
     """Wrap `_resolve_scope_entities` with the resolve door's own failure modes.
 
     `resolve_entities` deliberately lets `UpstreamError` propagate (see its own docstring);
     nothing else in the call path catches it, so without this wrapper a routine 503 from a
     degraded graph would escape as a raw exception -- `is_error=True` with no code, retry
     mode, or wait -- instead of this refusal grammar. A 2xx body this service still can't use
-    raises one of three exceptions, never a `ToolError`: `_outcome_from_result` raises
-    `ValueError` for a wire status this service doesn't recognise; its own dict-indexed reads
-    of the body (`result["status"]`, `result["entity"]["dcid"]`, `result["members"]`, ...) raise
-    `KeyError` for a missing key and `TypeError` for a wrongly-typed nested value. All three
-    mean the same thing -- the resolve call itself succeeded, only its body couldn't be used,
-    the same class of failure `upstream_response_unusable` already names for the mint call.
+    raises `ValueError`, never a `ToolError`: the generated `ResolveResponse` model raises
+    `pydantic.ValidationError` (a `ValueError`) for a body off the wire's schema, such as an
+    unrecognised status, and `_outcome_from_result` raises `ValueError` for a result missing a
+    field its status sets. `KeyError` and `TypeError` cover a body that is not a JSON object.
+    Each means the resolve call itself succeeded and only its body couldn't be used, the same
+    class of failure `upstream_response_unusable` already names for the mint call.
 
     Resolution must finish while the current `CallBudget.pre_mint_reserve_s` of
     `deadline` remains; past that it refuses retryably, before anything is minted.
@@ -749,7 +728,8 @@ async def _fetch_statistics_for_digest(
             subject_id=manifest.definition.spec_id,
             content_version=manifest.content_version,
             artifact=artifact,
-            expected_rows=manifest.series_count,
+            expected_series=manifest.series_count,
+            continuing=continuing_method(manifest),
             deadline=deadline.reserving(_STATISTICS_RESERVE_S),
         )
     except (
@@ -847,7 +827,6 @@ async def _finish_mint_response(
     scope: Mapping[str, Any],
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
-    unheld_regions: Sequence[UnheldRegionSummary],
     settings: Settings,
     deadline: CallDeadline,
     operation_poll: OperationPollNote | None = None,
@@ -874,9 +853,10 @@ async def _finish_mint_response(
     canonical frame, read off the snapshot route, and otherwise the artifact whose
     rendering equals `options`. A frame minted with `options.columns` or
     `options.groupby` has a `content_version` of its own, and the manifest keeps
-    dfo-apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed store write degrades this
-    call's own digest rather than refusing it (see `render_get_data_digest`'s
-    `degraded_frame`); a genuinely unusable artifact or manifest still refuses.
+    dfo-apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed
+    store write degrades this call's own digest rather than refusing it (see
+    `render_get_data_digest`'s `degraded_frame`); a genuinely unusable artifact or
+    manifest still refuses.
 
     Args:
         payload: The mint route's own manifest payload -- either an ordinary 200
@@ -884,18 +864,17 @@ async def _finish_mint_response(
             a 202 operation.
         requested_spec_id: The `spec_id` this call's own request carried, to detect a re-mint.
         options: The mint request's `options`, which name the artifact the frame is
-            read from and, through `options.columns`, its frame reference.
+            read from and, through `options.columns` and `options.groupby`, its frame
+            reference.
         scope: The mint request's `scope`, kept with `options` in the frame's mint
             record (`common.materialisation.MintRecord`).
         entity_labels: dcid -> name, forwarded to the digest renderer.
         dropped_roles: Roles silently left unbound, forwarded to the digest
             renderer.
-        unheld_regions: Resolved regions with unheld members, forwarded to
-            the digest renderer.
         settings: This service's own settings, threaded to `materialise_and_register` for
             its row-count ceiling and fetch wall-clock budget.
         deadline: The `get_data` call's deadline, which cuts the re-mint persist's, the
-            frame fetch's, and the statistics fetch's budgets.
+            frame fetch's, the statistics fetch's and the description read's budgets.
         operation_poll: Set when `payload` was resolved from a 202 operation rather
             than an ordinary 200 mint. Forwarded to the digest renderer.
         breakdown: The code system and level this mint summed within, forwarded to
@@ -907,7 +886,7 @@ async def _finish_mint_response(
         `stat_var_count` whenever
         `materialise_and_register` read or parsed the frame, and
         `summed_stat_var_count` and `summed_stat_var_label`
-        (`_stat_vars_summed_warning`), or a refusal
+        (`get_data_digest.summed_family`), or a refusal
         `ToolResult` if the response couldn't be turned into either.
     """
     try:
@@ -943,8 +922,22 @@ async def _finish_mint_response(
     frame_ref = outcome.frame_ref
     assert frame_ref is not None  # set on every outcome but a refusal
 
-    series_stats, statistics_fetch_failed = await _fetch_statistics_for_digest(
-        manifest, deadline=deadline
+    # dfo-apis' pair, not `frame_ref`, keys the description: a frame minted with
+    # `options.columns` or `options.groupby` is held under a pair of its own that dfo-apis
+    # never stored.
+    (series_stats, statistics_fetch_failed), description = await asyncio.gather(
+        _fetch_statistics_for_digest(manifest, deadline=deadline),
+        fetch_version_description(
+            spec_id=manifest.definition.spec_id,
+            content_version=manifest.content_version,
+            deadline=deadline.reserving(_STATISTICS_RESERVE_S),
+        ),
+    )
+    summed = summed_family(
+        manifest,
+        frame_summed=outcome.family_summed,
+        series_stats=series_stats,
+        description=description,
     )
 
     try:
@@ -953,13 +946,14 @@ async def _finish_mint_response(
             frame_ref=frame_ref,
             entity_labels=entity_labels,
             dropped_roles=dropped_roles,
-            unheld_regions=unheld_regions,
             remint_persist_failed=remint_persist_failed,
             degraded_frame=outcome if outcome.status == "degraded" else None,
             series_stats=series_stats,
             statistics_fetch_failed=statistics_fetch_failed,
             operation_poll=operation_poll,
             breakdown=breakdown,
+            description=description,
+            summed=summed,
         )
     except ValueError as exc:
         return to_tool_result(ToolRefusal.upstream_response_unusable(detail=str(exc)))
@@ -980,11 +974,8 @@ async def _finish_mint_response(
         # later step's declared StatVar count by the second (`compiler.frame_columns`).
         structured_content["role_keys"] = list(outcome.role_keys)
         structured_content["stat_var_count"] = outcome.stat_var_count
-    summed = _stat_vars_summed_warning(manifest)
-    structured_content["summed_stat_var_count"] = (
-        None if summed is None else summed.contributing_member_count
-    )
-    structured_content["summed_stat_var_label"] = None if summed is None else summed.stat_var_label
+    structured_content["summed_stat_var_count"] = None if summed is None else summed.count
+    structured_content["summed_stat_var_label"] = None if summed is None else summed.label
     return ToolResult(
         # The digest text stays first, so `text_of(result)` -- which reads
         # `content[0]` -- keeps working; the resource links follow it.
@@ -1011,20 +1002,6 @@ def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) ->
     statistics = find_statistics_artifact(manifest)
     artifacts = [a for a in manifest.artifacts if a.rendering == options or a is statistics]
     return manifest.model_copy(update={"artifacts": artifacts})
-
-
-# The manifest warning dfo-apis attaches to a frame that sums more than one StatVar.
-_STAT_VARS_SUMMED_WARNING = "stat_vars_summed"
-
-
-def _stat_vars_summed_warning(manifest: Manifest) -> WarningModel | None:
-    """The warning naming how many StatVars dfo-apis added into this frame's one family
-    series, and that family's label.
-
-    `None` when nothing was summed: a separate retrieval, or a summed one where a single
-    StatVar had rows, which dfo-apis serves as that StatVar's own frame with no warning.
-    """
-    return next((w for w in manifest.warnings if w.code == _STAT_VARS_SUMMED_WARNING), None)
 
 
 async def _post_mint(
@@ -1117,7 +1094,6 @@ async def _attempt_mint(
     place_types: bool,
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
-    unheld_regions: Sequence[UnheldRegionSummary],
     settings: Settings,
     deadline: CallDeadline,
     on_poll: OnPoll | None = None,
@@ -1138,7 +1114,7 @@ async def _attempt_mint(
     the default columns, and gives the frame a `content_version` of its own
     (`frame_materialisation.frame_ref_for`). A `column_unknown` refusal of the place type
     column from a table without one is sent once more with no columns
-    (`_without_unserved_place_type`). A refusal of a flow table's `kind` is relayed: a
+    (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
     flow frame without kinds would let a sum count party totals beside their parties.
     """
     mint_input: dict[str, Any] = {
@@ -1227,7 +1203,6 @@ async def _attempt_mint(
         scope=wire_scope,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,
-        unheld_regions=unheld_regions,
         settings=settings,
         deadline=deadline,
         operation_poll=operation_poll,
@@ -1523,9 +1498,9 @@ async def get_data(
                 'observationAbout_type column. Values are comma-joined ("Country", '
                 '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
                 "with none. On a flow frame it adds each party's kind instead, as "
-                "financingProvider_kind and financingRecipient_kind: party, residual, or total "
-                'for a group total such as "Africa, Total", which sums and ranks leave out, and '
-                '"untyped" for a party with none. Set it for a spec that names no place: its '
+                "financingProvider_party_kind and financingRecipient_party_kind: party, residual, "
+                'or total for a group total such as "Africa, Total", which sums and ranks leave '
+                'out, and "untyped" for a party with none. Set it for a spec that names no place: its '
                 "frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
@@ -1572,15 +1547,17 @@ async def get_data(
     map, `entities: {}`, is a deliberate clear, not a no-op.
 
     Entities are supplied as names, exactly as spoken ("France", "Sub-Saharan
-    Africa"). A dcid (e.g. "country/GEO") is also accepted, verbatim, and
-    skips resolution entirely -- but only to answer an `entity_ambiguous`
-    refusal, whose candidate list names dcids to pick from; never invent
-    one. Only countries, subregions, and continents resolve through this
-    tool; an organisation name like "World Bank" can never resolve here, by
-    design, so do not retry one. Binding the full set of continents by name
-    approximates a world or global scope, since there is no dedicated world
-    or global entity. `entity_ambiguous` fires only when a name
-    matches two or more distinct countries' own canonical or alias names.
+    Africa"). A dcid is also accepted and skips resolution entirely: a value
+    marked `dcid:` (e.g. "dcid:GroupOfSeven", as an `entity_ambiguous`
+    refusal's candidates carry it) or an unmarked `namespace/id` (e.g.
+    "country/GEO") is a dcid, and anything else is a name. Copy a dcid from
+    a refusal or another tool's output; never invent one. Countries,
+    subregions, continents, continental unions, places below a country,
+    organisations such as the World Bank, DAC aggregates and membership
+    groups such as the G7 resolve; a group or region scopes its member
+    countries. "World" resolves to the world as one place.
+    `entity_ambiguous` fires only when a name matches two or more distinct
+    entities' own canonical or alias names.
     "Guinea" resolves silently because it is Guinea's own name, while
     "Congo" is ambiguous because it names both the Democratic Republic of
     the Congo and the Republic of the Congo. Resolution calls out to this
@@ -1592,7 +1569,7 @@ async def get_data(
     subdivisions. `place_types=true` adds the `observationAbout_type` column,
     so a `filter` can keep one level before a rank or a total sets a place
     beside the places inside it. On a flow frame it adds each party's kind
-    (`financingProvider_kind`, `financingRecipient_kind`) instead.
+    (`financingProvider_party_kind`, `financingRecipient_party_kind`) instead.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got
@@ -1616,8 +1593,7 @@ async def get_data(
     Returns:
         A digest: an acknowledgement of what was retrieved, its coverage,
         the frame reference `{spec_id, content_version}` for downstream
-        tools, then the citation, and any dropped-role or unheld-region
-        notes. The
+        tools, then the citation, and any dropped-role notes. The
         artifact resource is a URI template, listed by
         resources/templates/list and absent from resources/list.
     """
@@ -1644,13 +1620,12 @@ async def get_data(
     wire_scope: dict[str, Any] = {}
     entity_labels: dict[str, str] = {}
     dropped_roles: list[str] = []
-    unheld_regions: list[UnheldRegionSummary] = []
 
     if scope is not None and scope.entities is not None:
         resolved = await _resolve_entities_or_refuse(scope.entities, deadline=deadline)
         if isinstance(resolved, ToolResult):
             return resolved
-        wire_entities, entity_labels, unheld_regions = resolved
+        wire_entities, entity_labels = resolved
         wire_scope["entities"] = wire_entities
         if scope.entities and identity is not None:
             # An explicitly empty map is a deliberate clear, not an omission
@@ -1683,7 +1658,6 @@ async def get_data(
         place_types=place_types,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,
-        unheld_regions=unheld_regions,
         settings=settings,
         deadline=deadline,
         on_poll=on_poll,

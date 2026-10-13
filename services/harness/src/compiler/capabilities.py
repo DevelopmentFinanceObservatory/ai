@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="b0dd2803b5cb254c91010cba2c4ce50c2e2b18d4f606a0ddfc467db8c33d8080",
+        input_schema_hash="39de2f6a92402cf75bd547315a8d502240e233159b47bece6e2d16bb05aada4c",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -180,8 +180,9 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.FRAME_REF_FROM_MANIFEST, artifact=ArtifactKind.FRAME_REF),
         ),
         implementation_version="1",
-        # Pins the `place_types` and `breakdown` parameters.
-        input_schema_hash="64e5c4a6fb251db556a087a42b8a82fbc09de82f41068bfa87c6db577cd609b8",
+        # Pins the `place_types` and `breakdown` parameters, and `scope.entities` taking a
+        # dcid only behind the `dcid:` marker.
+        input_schema_hash="674c81b2cebae63837eb6c62424198fc85cafe46b890ddd50bcdabfa52e24ede",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -322,6 +323,13 @@ EXCLUDED_TOOLS: tuple[ExcludedTool, ...] = (
         reason=(
             "Serves the source catalogue and a dataset's documentation to an outside "
             "model answering a question about the data itself; no workflow step reads it."
+        ),
+    ),
+    ExcludedTool(
+        tool=_data("catalogue_counts"),
+        reason=(
+            "Serves the counts of what DFO holds to the orchestrator's explain_dfo; "
+            "no workflow step reads it."
         ),
     ),
 )

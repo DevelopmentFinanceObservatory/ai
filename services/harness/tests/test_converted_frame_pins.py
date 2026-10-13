@@ -80,8 +80,8 @@ def _artifact(unit_text: str) -> bytes:
             "measurementMethod": pa.nulls(rows, type=pa.string()),
             "provenance": pa.array(["dcid:dc/base/OECD_CRS"] * rows),
             "status": pa.nulls(rows, type=pa.string()),
-            "financingProvider_kind": pa.array(["party"] * rows),
-            "financingRecipient_kind": pa.array(["party"] * rows),
+            "financingProvider_party_kind": pa.array(["party"] * rows),
+            "financingRecipient_party_kind": pa.array(["party"] * rows),
         }
     )
     buf = io.BytesIO()

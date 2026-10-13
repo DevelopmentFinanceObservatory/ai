@@ -28,6 +28,7 @@ from analysis_mcp.fixtures import (
 from dfo_frame_grammar import Frame
 
 _FIXTURES = Path(__file__).parent / "fixtures"
+STAT_VAR = "dcid:ops_" + "d" * 32
 
 
 def _frame(rows: list[dict[str, object]], *, role_keys: list[str] | None = None) -> Frame:
@@ -54,7 +55,11 @@ def test_golden_worked_compare_matches_the_committed_fixture() -> None:
     oda, gni = join_compatible_frame_pair()
 
     result = run_compare(
-        oda, gni, left_entity=golden["left_entity"], right_entity=golden["right_entity"]
+        oda,
+        gni,
+        stat_var=STAT_VAR,
+        left_entity=golden["left_entity"],
+        right_entity=golden["right_entity"],
     )
 
     assert list(result.left_periods) == golden["expected_left_periods"]
@@ -85,7 +90,7 @@ def test_policy_periods_are_intersected_not_unioned() -> None:
     left = _frame([_row(year="2020"), _row(year="2021"), _row(year="2022")])
     right = _frame([_row(year="2021"), _row(year="2022"), _row(year="2023")])
 
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     assert result.intersected_periods == ("2021", "2022")
 
@@ -95,7 +100,7 @@ def test_policy_disjoint_periods_refuse() -> None:
     right = _frame([_row(year="2023")])
 
     with pytest.raises(ComparisonPeriodsDisjointError) as exc_info:
-        run_compare(left, right, left_entity={}, right_entity={})
+        run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     assert exc_info.value.left_periods == ("2020",)
     assert exc_info.value.right_periods == ("2023",)
@@ -104,7 +109,7 @@ def test_policy_disjoint_periods_refuse() -> None:
 def test_delta_is_right_minus_left() -> None:
     left = _frame([_row(year="2020", value=10.0)])
     right = _frame([_row(year="2020", value=25.0)])
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
     assert result.period_comparisons[0].delta == pytest.approx(15.0)
 
 
@@ -117,7 +122,7 @@ def test_delta_normalises_negative_zero() -> None:
     digest renders."""
     left = _frame([_row(year="2020", value=0.0)])
     right = _frame([_row(year="2020", value=-0.0)])
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
     assert repr(result.period_comparisons[0].delta) == "0.0"
 
 
@@ -145,12 +150,14 @@ def test_entity_binding_key_order_perturbation_produces_an_identical_result() ->
     original = run_compare(
         frame,
         frame,
+        stat_var=STAT_VAR,
         left_entity={"reporter": "dcid:USA", "recipient": "dcid:KEN"},
         right_entity={"reporter": "dcid:GBR", "recipient": "dcid:KEN"},
     )
     perturbed = run_compare(
         frame,
         frame,
+        stat_var=STAT_VAR,
         left_entity={"recipient": "dcid:KEN", "reporter": "dcid:USA"},
         right_entity={"recipient": "dcid:KEN", "reporter": "dcid:GBR"},
     )
@@ -163,6 +170,8 @@ def test_entity_binding_key_order_perturbation_produces_an_identical_result() ->
 
 
 def test_two_slices_of_one_frame_compares_two_entities() -> None:
+    """The difference is written under the caller's `stat_var`, a variable
+    of its own, and keeps what each side measured."""
     frame = _frame(
         [
             _row(reporter="dcid:USA", year="2020", value=100.0),
@@ -170,10 +179,55 @@ def test_two_slices_of_one_frame_compares_two_entities() -> None:
         ]
     )
     result = run_compare(
-        frame, frame, left_entity={"reporter": "dcid:USA"}, right_entity={"reporter": "dcid:GBR"}
+        frame,
+        frame,
+        stat_var=STAT_VAR,
+        left_entity={"reporter": "dcid:USA"},
+        right_entity={"reporter": "dcid:GBR"},
     )
     assert result.period_comparisons[0].left_value == 100.0
     assert result.period_comparisons[0].right_value == 60.0
+    assert result.frame.table.column("stat_var").to_pylist() == [STAT_VAR]
+    assert result.stat_var == STAT_VAR
+    assert (result.left_stat_vars, result.right_stat_vars) == (("dcid:X",), ("dcid:X",))
+    assert (result.left_entities, result.right_entities) == (
+        {"reporter": "dcid:USA"},
+        {"reporter": "dcid:GBR"},
+    )
+
+
+def test_each_side_holds_the_entity_columns_its_slice_holds_one_value_in() -> None:
+    """Two retrievals compared unbound: each side holds the entity columns
+    with one value across its rows, and leaves out a column with several."""
+
+    def retrieved(reporter: str, recipients: tuple[str, str]) -> Frame:
+        return _frame(
+            [
+                _row(reporter=reporter, year=year, recipient=recipient)
+                for year, recipient in zip(("2020", "2021"), recipients, strict=True)
+            ],
+            role_keys=["reporter", "recipient"],
+        )
+
+    uk = retrieved("dcid:GBR", ("dcid:KEN", "dcid:KEN"))
+    result = run_compare(
+        uk,
+        retrieved("dcid:FRA", ("dcid:KEN", "dcid:KEN")),
+        stat_var=STAT_VAR,
+        left_entity={},
+        right_entity={},
+    )
+    mixed = run_compare(
+        uk,
+        retrieved("dcid:FRA", ("dcid:KEN", "dcid:UGA")),
+        stat_var=STAT_VAR,
+        left_entity={},
+        right_entity={},
+    )
+
+    assert result.left_entities == {"reporter": "dcid:GBR", "recipient": "dcid:KEN"}
+    assert result.right_entities == {"reporter": "dcid:FRA", "recipient": "dcid:KEN"}
+    assert mixed.right_entities == {"reporter": "dcid:FRA"}
 
 
 # Refusals ------------------------------------------------------------------------
@@ -187,14 +241,16 @@ def test_ambiguous_entity_binding_refuses() -> None:
         ]
     )
     with pytest.raises(CompareAmbiguousSliceError) as exc_info:
-        run_compare(frame, frame, left_entity={}, right_entity={})
+        run_compare(frame, frame, stat_var=STAT_VAR, left_entity={}, right_entity={})
     assert exc_info.value.side == "left"
 
 
 def test_heterogeneous_unit_frame_refuses() -> None:
     frame = multi_unit_frame()
     with pytest.raises(UnitHeterogeneousError):
-        run_compare(frame, frame, left_entity={"reporter": "dcid:USA"}, right_entity={})
+        run_compare(
+            frame, frame, stat_var=STAT_VAR, left_entity={"reporter": "dcid:USA"}, right_entity={}
+        )
 
 
 def test_a_reporter_narrowed_out_of_a_heterogeneous_frame_succeeds() -> None:
@@ -204,7 +260,11 @@ def test_a_reporter_narrowed_out_of_a_heterogeneous_frame_succeeds() -> None:
     own, unit-homogeneous -- compare's own primary documented use case."""
     frame = unit_disjoint_by_reporter_frame()
     result = run_compare(
-        frame, frame, left_entity={"reporter": "dcid:USA"}, right_entity={"reporter": "dcid:USA"}
+        frame,
+        frame,
+        stat_var=STAT_VAR,
+        left_entity={"reporter": "dcid:USA"},
+        right_entity={"reporter": "dcid:USA"},
     )
     assert result.intersected_periods == ("2020", "2021")
     assert result.left_resolved_unit == "dcid:USDollar"
@@ -269,6 +329,7 @@ def test_cross_side_facet_mismatch_refuses_even_though_each_side_resolves_cleanl
         run_compare(
             left,
             right,
+            stat_var=STAT_VAR,
             left_entity={"reporter": "dcid:USA"},
             right_entity={"reporter": "dcid:GBR"},
         )
@@ -285,9 +346,12 @@ def test_cross_side_facet_difference_between_disjoint_stat_vars_warns_and_compar
     left = _sourced_frame("dcid:USA", "dcid:P1", ["dcid:A", "dcid:B"])
     right = _sourced_frame("dcid:GBR", "dcid:P2", ["dcid:C", "dcid:D"])
 
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     assert result.intersected_periods == ("2020", "2021")
+    assert result.frame.table.column("stat_var").to_pylist() == [STAT_VAR, STAT_VAR]
+    assert result.left_stat_vars == ("dcid:A", "dcid:B")
+    assert result.right_stat_vars == ("dcid:C", "dcid:D")
     assert result.frame.table.column("provenance").to_pylist() == [None, None]
     assert result.left_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P1"),)
     assert result.right_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P2"),)
@@ -309,7 +373,11 @@ def test_facet_left_wholly_unbound_on_one_side_succeeds_rather_than_refusing() -
     # USA (declares P1) as left: the result carries P1 -- compare's output
     # always carries the left side's own facet selections.
     usa_left = run_compare(
-        frame, frame, left_entity={"reporter": "dcid:USA"}, right_entity={"reporter": "dcid:GBR"}
+        frame,
+        frame,
+        stat_var=STAT_VAR,
+        left_entity={"reporter": "dcid:USA"},
+        right_entity={"reporter": "dcid:GBR"},
     )
     assert usa_left.left_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P1"),)
     assert usa_left.right_facet_selections == ()
@@ -323,7 +391,11 @@ def test_facet_left_wholly_unbound_on_one_side_succeeds_rather_than_refusing() -
     # -- an order-dependent output label, surfaced by a warning instead of
     # passing silently.
     gbr_left = run_compare(
-        frame, frame, left_entity={"reporter": "dcid:GBR"}, right_entity={"reporter": "dcid:USA"}
+        frame,
+        frame,
+        stat_var=STAT_VAR,
+        left_entity={"reporter": "dcid:GBR"},
+        right_entity={"reporter": "dcid:USA"},
     )
     assert gbr_left.left_facet_selections == ()
     assert gbr_left.right_facet_selections == (FacetSelection(axis="provenance", ref="dcid:P1"),)
@@ -346,6 +418,7 @@ def test_entity_matching_no_rows_with_a_real_pinned_unit_refuses_periods_disjoin
         run_compare(
             frame,
             frame,
+            stat_var=STAT_VAR,
             left_entity={"reporter": "dcid:USA"},
             right_entity={"reporter": "dcid:NOPE"},
             right_pinned_unit="dcid:USDollar",
@@ -363,6 +436,7 @@ def test_unit_unbound_side_refuses_distinctly_from_a_genuine_unit_mismatch() -> 
         run_compare(
             frame,
             frame,
+            stat_var=STAT_VAR,
             left_entity={"reporter": "dcid:USA"},
             right_entity={"reporter": "dcid:FRA"},
         )
@@ -383,7 +457,7 @@ def test_unit_unbound_exclusion_is_tagged_by_which_side_dropped_it() -> None:
     )
     right = _frame([_row(reporter="dcid:USA", year="2020", value=200.0, unit="dcid:USDollar")])
 
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     unit_unbound = [
         record for record in result.exclusions.records if record.reason == "unit_unbound"
@@ -401,7 +475,7 @@ def test_unintersected_periods_are_recorded_as_exclusions_per_side() -> None:
     left = _frame([_row(year="2021"), _row(year="2022"), _row(year="2023")])
     right = _frame([_row(year="2022"), _row(year="2023"), _row(year="2024")])
 
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     period_records = {
         record.side: record
@@ -417,7 +491,7 @@ def test_full_period_overlap_records_no_period_unmatched_exclusion() -> None:
     left = _frame([_row(year="2021"), _row(year="2022")])
     right = _frame([_row(year="2021"), _row(year="2022")])
 
-    result = run_compare(left, right, left_entity={}, right_entity={})
+    result = run_compare(left, right, stat_var=STAT_VAR, left_entity={}, right_entity={})
 
     assert not any(record.reason == "period_unmatched" for record in result.exclusions.records)
 
@@ -434,7 +508,11 @@ def test_entity_narrowed_compare_records_the_dropped_entities_per_side() -> None
         ]
     )
     result = run_compare(
-        frame, frame, left_entity={"reporter": "dcid:USA"}, right_entity={"reporter": "dcid:GBR"}
+        frame,
+        frame,
+        stat_var=STAT_VAR,
+        left_entity={"reporter": "dcid:USA"},
+        right_entity={"reporter": "dcid:GBR"},
     )
     entity_records = {
         record.side: record
@@ -461,6 +539,7 @@ def test_default_entity_binding_over_an_already_empty_frame_with_a_pin_refuses_p
         run_compare(
             left,
             right,
+            stat_var=STAT_VAR,
             left_entity={"reporter": "dcid:USA"},
             right_entity={},
             right_pinned_unit="dcid:USDollar",

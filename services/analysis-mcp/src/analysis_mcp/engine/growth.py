@@ -69,6 +69,7 @@ from analysis_mcp.engine.columnar import (
     unit_column,
 )
 from analysis_mcp.engine.common import (
+    ExclusionReason,
     Exclusions,
     FacetSelection,
     available_entity_columns,
@@ -192,6 +193,13 @@ class GrowthResult:
     entities' rows carry inside the window, sorted. `growth_tool.py` passes
     them to `frame_ref_resolution.build_interval` to say whether the window
     is contiguous across them.
+
+    `entities_left_out` counts the entities of the narrowed input each
+    reason leaves out, for each reason that leaves any out:
+    `endpoint_missing` for an entity with no row in `window_start` or in
+    `window_end` (one with no row inside the window included), then
+    `zero_or_sign_crossing_base` and `non_finite`. With
+    `len(entity_growths)` they make every entity the narrowed input holds.
     """
 
     frame: Frame
@@ -204,6 +212,7 @@ class GrowthResult:
     observed_periods: tuple[str, ...] = ()
     change: GrowthChange = "relative"
     exclusions: Exclusions = field(default_factory=Exclusions)
+    entities_left_out: dict[ExclusionReason, int] = field(default_factory=dict)
 
 
 def _indices(positions: Iterable[int]) -> pa.Array:
@@ -447,4 +456,13 @@ def run_growth(
         observed_periods=tuple(distinct(computed_rows, TIME_PERIOD_COLUMN)),
         change=change,
         exclusions=exclusions,
+        entities_left_out={
+            reason: count
+            for reason, count in (
+                ("endpoint_missing", group_rows(table, entity_by).count - len(kept)),
+                ("zero_or_sign_crossing_base", len(undefined_base)),
+                ("non_finite", len(non_finite)),
+            )
+            if count
+        },
     )

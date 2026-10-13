@@ -16,7 +16,7 @@
     },
     {
       "id": "s2",
-      "label": "Fetch Ethiopia disbursements, 2016–2024",
+      "label": "Fetch gross disbursements (health) for Ethiopia",
       "description": "Pull disbursements for the matched codes.",
       "args": {
         "country": "ETH",
@@ -54,7 +54,7 @@
       "alternatives": [
         "Current USD"
       ],
-      "reason": "A multi-year comparison across 2016–2024 needs inflation held still.",
+      "reason": "A multi-year comparison across 2016\u20132024 needs inflation held still.",
       "resolved_by": "default"
     }
   ],
@@ -67,7 +67,7 @@
     {
       "id": "req1",
       "kind": "dataset",
-      "sentence": "Health sector disbursements to Ethiopia, 2016–2024, constant 2023 USD.",
+      "sentence": "Health sector disbursements to Ethiopia, 2016\u20132024, constant 2023 USD.",
       "decision_ids": [
         "d1",
         "d2"

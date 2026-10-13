@@ -1,0 +1,112 @@
+{
+  "id": "quotient-oda-per-person-france",
+  "kind": "quotient_of",
+  "origin": "trace 14f4a1fd-63bf-4166-abcc-3cefc127b0e1",
+  "question": "How much aid does France provide per person",
+  "searches": [
+    {
+      "query": "How much aid does France provide per person",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "France",
+              "role": "from"
+            }
+          ],
+          "variable": "aid per person"
+        },
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "role": "from",
+              "text": "France"
+            }
+          ]
+        },
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "France"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "How much aid (official development assistance) does France provide per person from 1960 to 2025?",
+  "asks": [
+    "France's official development assistance per person over time"
+  ],
+  "required_kinds": [
+    "dataset",
+    "quotient_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "quotient_of"
+  ],
+  "neighbour": {
+    "kind": "share_of",
+    "distinction": "quotient_of, not share_of: aid per French resident divides dollars by people, two measures in different units"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "How much aid (official development assistance) does France provide per person from 1960 to 2025?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "France",
+            "role": "donor"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "source_spec_id": "spec_2fa11782dfd10d6b92b84e403ae94205"
+      },
+      {
+        "kind": "dataset",
+        "id": "population",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "France"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "source_spec_id": "spec_c04173eccb9a875a8b840576c2dc87ac"
+      },
+      {
+        "kind": "quotient_of",
+        "id": "per_person",
+        "numerator": {
+          "input_id": "oda"
+        },
+        "denominator": {
+          "input_id": "population"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "per_person"
+        ]
+      }
+    ]
+  }
+}

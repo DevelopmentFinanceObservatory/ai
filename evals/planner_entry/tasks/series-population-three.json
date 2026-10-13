@@ -1,0 +1,77 @@
+{
+  "id": "series-population-three",
+  "kind": "dataset",
+  "origin": "pilot",
+  "question": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
+  "searches": [
+    {
+      "query": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
+      "parts": [
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "Nigeria"
+            },
+            {
+              "text": "Ethiopia"
+            },
+            {
+              "text": "Egypt"
+            }
+          ],
+          "time": "2000 to 2023"
+        }
+      ]
+    }
+  ],
+  "brief": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
+  "asks": [
+    "Population of Nigeria, Ethiopia and Egypt, each year 2000 to 2023"
+  ],
+  "required_kinds": [
+    "dataset"
+  ],
+  "acceptable_kinds": [
+    "dataset"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "several places of one measure are one dataset requirement, not a join of three"
+  },
+  "reference_payload": {
+    "question": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
+    "answer_mode": "series",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "population",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Nigeria"
+          },
+          {
+            "name": "Ethiopia"
+          },
+          {
+            "name": "Egypt"
+          }
+        ],
+        "period": {
+          "start": 2000,
+          "end": 2023
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "population"
+        ]
+      }
+    ]
+  }
+}

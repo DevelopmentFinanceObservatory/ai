@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 from collections.abc import Callable
 from contextlib import suppress
@@ -549,7 +550,8 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
     """`get_data` names a retrieval read with place types by its manifest's own pair,
-    and a card drawn on that pair finds the retrieval's lineage."""
+    beside the pair the store holds it under, and a card drawn on the manifest's
+    pair finds the retrieval's lineage."""
     minted = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
     typed = {"spec_id": minted["spec_id"], "content_version": "cv_" + "2" * 32}
     manifest = {
@@ -567,12 +569,37 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     drawn = await executor(tool="write_component", args={"component_id": "cmp_1", "intent": {}})
 
     assert fetched["frame_refs"] == [minted]
+    assert fetched["store_refs"] == [typed]
     assert drawn["outcome"] == "ok", drawn
     assert drawn["component"]["provenance"]["inputs"] == [minted]
     conversation = current_conversation_id.get()
     assert store.get(conversation=conversation, **typed) == store.get(
         conversation=conversation, **minted
     )
+
+
+async def test_a_fetch_that_states_no_frame_ref_logs_which_spec_was_read_by_its_served_pair(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A `get_data` result with no `frame_ref` leaves the store pair unstated, so
+    the frame is opened by the pair dfo-apis serves, and the executor warns."""
+    spec_id = "spec_" + "1" * 32
+    manifest = {
+        "definition": {"spec_id": spec_id},
+        "content_version": "cv_" + "1" * 32,
+        "trace": {},
+    }
+    scripted_presentation_client([_tool_result(manifest)])
+    executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
+
+    with caplog.at_level(logging.WARNING, logger="harness.mcp_client"):
+        fetched = await executor(tool="get_data", args={"spec_id": spec_id})
+
+    assert fetched["store_refs"] == [{"spec_id": None, "content_version": None}]
+    warned = [r for r in caplog.records if r.name == "harness.mcp_client"]
+    assert [r.levelno for r in warned] == [logging.WARNING]
+    assert spec_id in warned[0].getMessage()
 
 
 async def test_the_executor_moves_a_creates_write_token_off_the_result(
@@ -844,22 +871,6 @@ async def test_the_executor_presentation_client_carries_a_finite_call_and_init_d
     assert client._init_timeout == 7.0
 
 
-async def test_the_indicator_describe_client_carries_its_30s_deadline(
-    captured_clients: list[Client],
-) -> None:
-    """`_indicators_for`'s own `describe` lookup for the More Info panel, a
-    second call site distinct from `_get_data`'s. It catches every exception
-    from the client (a describe outage degrades to a fallback name), so the
-    connect abort never escapes -- the assertion reads the capture list,
-    not an exception."""
-    executor = McpExecutor(settings=Settings())
-
-    await executor._indicators_for(["dcid:LifeExpectancy_Person"])
-
-    (client,) = captured_clients
-    assert _call_deadline_s(client) == 30.0
-
-
 # --- a held client is built once per conversation, not once per call -- its --
 # --- factory dropping `auth=` would otherwise go unnoticed until every later -
 # --- call 401s in production, since nothing here mocks the transport away. ---
@@ -907,18 +918,6 @@ async def test_the_executors_held_presentation_client_carries_the_bearer_token(
             tool="describe_frame",
             args={"frame_ref": {"spec_id": "s", "content_version": "c"}},
         )
-
-    (client,) = captured_clients
-    assert _bearer_token_on(client) == "s3cret-token"
-
-
-async def test_the_indicator_describe_clients_held_client_carries_the_bearer_token(
-    captured_clients: list[Client],
-) -> None:
-    apply_gate(FastMCP(), token="s3cret-token", disabled=False)
-    executor = McpExecutor(settings=Settings())
-
-    await executor._indicators_for(["dcid:LifeExpectancy_Person"])
 
     (client,) = captured_clients
     assert _bearer_token_on(client) == "s3cret-token"
@@ -1292,96 +1291,20 @@ async def test_executor_aclose_disconnects_every_held_client(
 ) -> None:
     executor = McpExecutor(settings=Settings())
     await executor(tool="get_data", args={"spec_id": "spec_" + "1" * 32})
-    await executor._indicators_for(["dcid:LifeExpectancy_Person"])
     await executor._presentation_client()
 
     await executor.aclose()
 
-    assert len(fake_policy_clients) == 3
+    assert len(fake_policy_clients) == 2
     assert all(client.exited == 1 for client in fake_policy_clients)
-
-
-class _DescribingClient(_FakeMcpClient):
-    """Answers `describe` with one node per id asked for."""
-
-    async def call_tool(
-        self, tool: str, arguments: dict[str, Any], *, raise_on_error: bool, **_: Any
-    ) -> Any:
-        self.calls.append(tool)
-        self.batches.append(list(arguments["ids"]))
-        nodes = [
-            {"dcid": dcid, "label": f"label {dcid}", "definition": f"def {dcid}"}
-            for dcid in arguments["ids"]
-        ]
-        return _tool_result({"nodes": nodes})
-
-    batches: list[list[str]]
-
-    def __init__(self, caller: str | None = None) -> None:
-        super().__init__(caller)
-        self.batches = []
-
-
-class _PartiallyHeldClient(_FakeMcpClient):
-    """Answers `describe` as data-mcp does when one id of the batch is not
-    held: a `node_not_held` refusal naming it in `fix.dcids`, with no
-    `nodes`. A batch without it gets one node per id."""
-
-    def __init__(self, *, unheld: str, named: bool = True) -> None:
-        super().__init__()
-        self.unheld = unheld
-        self.named = named
-        self.batches: list[list[str]] = []
-
-    async def call_tool(
-        self, tool: str, arguments: dict[str, Any], *, raise_on_error: bool, **_: Any
-    ) -> Any:
-        self.calls.append(tool)
-        ids = list(arguments["ids"])
-        self.batches.append(ids)
-        if self.unheld in ids:
-            body: dict[str, Any] = {"code": "node_not_held"}
-            if self.named:
-                body["fix"] = {"dcids": [self.unheld]}
-            return SimpleNamespace(is_error=True, structured_content=body, content=[], meta=None)
-        nodes = [{"dcid": dcid, "label": f"label {dcid}", "definition": ""} for dcid in ids]
-        return _tool_result({"nodes": nodes})
-
-
-async def test_a_miss_that_names_no_ref_caches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    describing = _PartiallyHeldClient(unheld="Count_1", named=False)
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings())
-
-    rows = await executor._indicators_for(["dcid:Count_0", "dcid:Count_1"])
-
-    assert describing.batches == [["Count_0", "Count_1"]]
-    assert all("label" not in row["name"] for row in rows)
-    assert executor._indicator_cache == {}
-
-
-async def test_an_unheld_id_in_a_describe_batch_leaves_its_siblings_named(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    describing = _PartiallyHeldClient(unheld="Count_1")
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings())
-
-    rows = await executor._indicators_for(["dcid:Count_0", "dcid:Count_1", "dcid:Count_2"])
-
-    assert describing.batches == [["Count_0", "Count_1", "Count_2"], ["Count_0", "Count_2"]]
-    assert [row["name"] for row in rows[::2]] == ["label Count_0", "label Count_2"]
-    assert rows[1]["name"] != "label Count_1"
-    assert executor._indicator_cache["dcid:Count_0"]["name"] == "label Count_0"
 
 
 def _assembled_summary(
     *, drawn: int, resolved: int, series_cut: int
-) -> tuple[ProvenanceStore, _DescribingClient, dict[str, Any], dict[str, Any]]:
+) -> tuple[ProvenanceStore, dict[str, Any], dict[str, Any]]:
     """Assemble a card over a manifest of `resolved` StatVars whose chart
-    draws the first `drawn`; returns the store, the describe client, the envelope and the platform facts."""
+    draws the first `drawn`; returns the store, the envelope and the platform facts."""
     refs = [f"dcid:Count_{i}" for i in range(resolved)]
-    describing = _DescribingClient()
     frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}
     store = ProvenanceStore()
     manifest = {"trace": {"resolved_stat_vars": [{"ref": ref, "roles": []} for ref in refs]}}
@@ -1395,14 +1318,11 @@ def _assembled_summary(
         ],
         "series_cut": series_cut,
     }
-    return store, describing, envelope, facts
+    return store, envelope, facts
 
 
-async def test_a_card_over_thousands_of_stat_vars_describes_only_the_drawn_ones(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=5, resolved=3000, series_cut=0)
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+async def test_a_cut_series_list_leaves_the_attribution_counting_every_stat_var() -> None:
+    store, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
     executor = McpExecutor(settings=Settings(), provenance=store)
 
     component = await executor._assemble_component(
@@ -1410,42 +1330,17 @@ async def test_a_card_over_thousands_of_stat_vars_describes_only_the_drawn_ones(
     )
 
     assert component is not None
-    assert [len(batch) for batch in describing.batches] == [5]
     summary = component["fact_summary"]
-    assert [row["id"] for row in summary["indicators"]] == [f"dcid:Count_{i}" for i in range(5)]
-    assert summary["attribution"]["indicator_count"] == 3000
-    assert summary["attribution"]["label"].endswith("3000 indicator(s)")
-
-
-async def test_a_cut_series_list_is_shorter_than_the_indicator_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings(), provenance=store)
-
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
-    )
-
-    assert component is not None
-    assert sorted(len(batch) for batch in describing.batches) == [4, 8, 8]
-    summary = component["fact_summary"]
-    assert len(summary["indicators"]) == 20
     assert summary["attribution"]["label"].endswith(" · 3000 indicator(s)")
     assert " of " not in summary["attribution"]["label"]
     assert summary["attribution"]["indicator_count"] == 3000
 
 
-async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> None:
     """A family frame of 461 StatVars filtered to one: the card over the
     derived frame counts the one StatVar its producing step declared, and a
     card over the retrieval's own frame counts the manifest's 461."""
-    store, describing, root_envelope, facts = _assembled_summary(
-        drawn=1, resolved=461, series_cut=0
-    )
+    store, root_envelope, facts = _assembled_summary(drawn=1, resolved=461, series_cut=0)
     root = root_envelope["provenance"]["inputs"][0]
     derived = {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "2" * 32}
     linked = store.alias(
@@ -1455,7 +1350,6 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars(
         **derived,
     )
     assert linked
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
@@ -1472,18 +1366,15 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars(
     derived_summary = over_derived["fact_summary"]
     assert derived_summary["attribution"]["indicator_count"] == 1
     assert derived_summary["attribution"]["label"].endswith(" · 1 indicator(s)")
-    assert [row["id"] for row in derived_summary["indicators"]] == ["dcid:Count_0"]
     assert over_root["fact_summary"]["attribution"]["indicator_count"] == 461
 
 
-async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added() -> None:
     """A summed retrieval of 74 StatVars, with dfo-apis's trace still naming
     all 80 the definition resolved, and its frame aggregated by period: a
     card over either frame counts the 74 the sum added, not the one family
     ref the frame holds or the trace's 80."""
-    store, describing, root_envelope, facts = _assembled_summary(drawn=0, resolved=80, series_cut=0)
+    store, root_envelope, facts = _assembled_summary(drawn=0, resolved=80, series_cut=0)
     root = root_envelope["provenance"]["inputs"][0]
     lineage = store.get(conversation=current_conversation_id.get(), **root)
     assert lineage is not None
@@ -1497,7 +1388,6 @@ async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added(
         carried=[root_key],
         **derived,
     )
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
@@ -1515,286 +1405,8 @@ async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added(
     assert over_root["fact_summary"]["attribution"]["indicator_count"] == 74
 
 
-@pytest.mark.parametrize(
-    ("label", "citation", "name"),
-    [
-        (
-            "Official development assistance, Education",
-            "OECD CRS",
-            "Official development assistance, Education",
-        ),
-        (None, "OECD CRS", "OECD CRS"),
-        (None, None, "Unknown source"),
-    ],
-    ids=["dfo-apis label", "citation fallback", "no source named"],
-)
-async def test_a_summed_familys_ref_is_named_as_dfo_apis_names_it_and_never_described(
-    monkeypatch: pytest.MonkeyPatch, label: str | None, citation: str | None, name: str
-) -> None:
-    """The chart draws the summed frame's one ref, `dcid:<spec_id>`. The card
-    names it by `get_data`'s `summed_stat_var_label`, or by the source its
-    attribution names when dfo-apis stated none, and never asks `describe`
-    about it."""
-    store, describing, envelope, _ = _assembled_summary(drawn=0, resolved=80, series_cut=0)
-    root = envelope["provenance"]["inputs"][0]
-    lineage = store.get(conversation=current_conversation_id.get(), **root)
-    assert lineage is not None
-    lineage[0].manifest.update(
-        summed_stat_var_count=74,
-        summed_stat_var_label=label,
-        citation={"text": citation, "sources": []},
-    )
-    family_ref = f"dcid:{root['spec_id']}"
-    facts = {"series": [{"id": "s0", "coordinates": {"stat_var": family_ref}}], "series_cut": 0}
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings(), provenance=store)
-
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
-    )
-
-    assert component is not None
-    assert describing.batches == []
-    assert component["fact_summary"]["indicators"] == [
-        {"id": family_ref, "name": name, "description": "A total over 74 indicators."}
-    ]
-
-
-async def test_a_sums_ref_is_named_by_the_two_sides_it_adds_and_never_described(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A `sum_of` writes its rows under `dcid:<its spec_id>`. The card names
-    that ref by its sides: a summed family by dfo-apis's label, any other
-    StatVar by `describe`."""
-    conversation = current_conversation_id.get()
-    store = ProvenanceStore()
-    bilateral = ("spec_" + "1" * 32, "cv_" + "1" * 32)
-    imputed = ("spec_" + "2" * 32, "cv_" + "2" * 32)
-    store.put(
-        conversation=conversation,
-        spec_id=bilateral[0],
-        content_version=bilateral[1],
-        manifest={"summed_stat_var_count": 12, "summed_stat_var_label": "Bilateral ODA"},
-    )
-    store.put(
-        conversation=conversation,
-        spec_id=imputed[0],
-        content_version=imputed[1],
-        manifest={"trace": {"resolved_stat_vars": [{"ref": "dcid:ImputedOda", "roles": []}]}},
-    )
-    total = {"spec_id": "ops_" + "3" * 32, "content_version": "ocv_" + "3" * 32}
-    total_ref = f"dcid:{total['spec_id']}"
-    assert store.alias(
-        conversation=conversation,
-        sources=[bilateral, imputed],
-        stat_var_count=1,
-        carried=[bilateral, imputed],
-        own_stat_vars={total_ref: ("sum_of", (bilateral,), (imputed,))},
-        **total,
-    )
-    describing = _DescribingClient()
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings(), provenance=store)
-    facts = {"series": [{"id": "s0", "coordinates": {"stat_var": total_ref}}], "series_cut": 0}
-
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
-        envelope=resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=total),
-    )
-
-    assert component is not None
-    assert describing.batches == [["ImputedOda"]]
-    (row,) = component["fact_summary"]["indicators"]
-    assert row["id"] == total_ref
-    assert row["name"] == "Bilateral ODA plus label ImputedOda"
-
-
-_DIVIDED = "The first divided by the second for each year both report."
-_SHARED = "The first as a share of the second, in per cent, for each year both report."
-
-
-@pytest.mark.parametrize(
-    ("verb", "numerator", "denominator", "name", "description", "described"),
-    [
-        (
-            "quotient_of",
-            ("bilateral",),
-            ("population",),
-            "Bilateral ODA per label Count_Person",
-            _DIVIDED,
-            ["Count_Person"],
-        ),
-        # Two slices of one frame.
-        ("quotient_of", ("bilateral",), ("bilateral",), "Ratio of Bilateral ODA", _DIVIDED, []),
-        # A numerator that is itself a sum of two retrievals.
-        (
-            "quotient_of",
-            ("bilateral", "imputed"),
-            ("population",),
-            "Bilateral ODA and label ImputedOda per label Count_Person",
-            _DIVIDED,
-            ["ImputedOda", "Count_Person"],
-        ),
-        (
-            "share_of",
-            ("imputed",),
-            ("population",),
-            "label ImputedOda as a share of label Count_Person",
-            _SHARED,
-            ["ImputedOda", "Count_Person"],
-        ),
-        # A part of its total, both read from one frame.
-        ("share_of", ("bilateral",), ("bilateral",), "Share of Bilateral ODA", _SHARED, []),
-        (
-            "sum_of",
-            ("bilateral",),
-            ("bilateral",),
-            "Bilateral ODA",
-            "The two added together for each year both report.",
-            [],
-        ),
-        # Each side an earlier quotient, named by its own sides.
-        (
-            "share_of",
-            (("quotient_of", ("imputed",), ("population",)),),
-            (("quotient_of", ("bilateral",), ("population",)),),
-            "label ImputedOda per label Count_Person as a share of "
-            "Bilateral ODA per label Count_Person",
-            _SHARED,
-            ["ImputedOda", "Count_Person"],
-        ),
-        # A numerator that is an earlier sum of two retrievals.
-        (
-            "quotient_of",
-            (("sum_of", ("bilateral",), ("imputed",)),),
-            ("population",),
-            "Bilateral ODA plus label ImputedOda per label Count_Person",
-            _DIVIDED,
-            ["ImputedOda", "Count_Person"],
-        ),
-    ],
-    ids=[
-        "two frames",
-        "one frame",
-        "summed numerator",
-        "share",
-        "share of one frame",
-        "sum of one frame",
-        "share of two quotients",
-        "quotient of a sum",
-    ],
-)
-async def test_a_verbs_own_ref_is_named_by_its_two_sides_and_cites_both(
-    monkeypatch: pytest.MonkeyPatch,
-    verb: str,
-    numerator: tuple[Any, ...],
-    denominator: tuple[Any, ...],
-    name: str,
-    description: str,
-    described: list[str],
-) -> None:
-    """A `quotient_of`, a `share_of` or a `sum_of` writes its rows under
-    `dcid:<its spec_id>`. The card names that ref "<numerator> per
-    <denominator>" or "<numerator> as a share of <denominator>"; two sides
-    of one StatVar read "Ratio of <side>", "Share of <side>" or "<side>", as
-    dfo-apis labels a published frame. Each side is named as a sum's side
-    is, and every retrieval under either side is listed as an input (a frame
-    resting on one retrieval lists itself alone). A side that is an earlier
-    verb's own ref, written here as `(verb, first, second)`, reads as that
-    verb's own name."""
-    conversation = current_conversation_id.get()
-    store = ProvenanceStore()
-    manifests: dict[str, dict[str, Any]] = {
-        "bilateral": {"summed_stat_var_count": 12, "summed_stat_var_label": "Bilateral ODA"},
-        "imputed": {"trace": {"resolved_stat_vars": [{"ref": "dcid:ImputedOda", "roles": []}]}},
-        "population": {
-            "trace": {"resolved_stat_vars": [{"ref": "dcid:Count_Person", "roles": []}]}
-        },
-    }
-    keys = {
-        key: (f"spec_{index}" + "0" * 31, f"cv_{index}" + "0" * 31)
-        for index, key in enumerate(manifests)
-    }
-    for key, manifest in manifests.items():
-        store.put(
-            conversation=conversation,
-            spec_id=keys[key][0],
-            content_version=keys[key][1],
-            manifest=manifest,
-        )
-    written: dict[str, tuple[str, tuple[Any, ...], tuple[Any, ...]]] = {}
-    retrieved: list[str] = []
-
-    def parts(side: tuple[Any, ...]) -> tuple[Any, ...]:
-        out: list[Any] = []
-        for part in side:
-            if isinstance(part, str):
-                retrieved.append(part)
-                out.append(keys[part])
-                continue
-            nested_verb, first, second = part
-            nested_ref = f"dcid:ops_{len(written)}" + "8" * 31
-            written[nested_ref] = (nested_verb, parts(first), parts(second))
-            out.append(nested_ref)
-        return tuple(out)
-
-    ratio = {"spec_id": "ops_" + "9" * 32, "content_version": "ocv_" + "9" * 32}
-    ratio_ref = f"dcid:{ratio['spec_id']}"
-    written[ratio_ref] = (verb, parts(numerator), parts(denominator))
-    sources = [keys[key] for key in dict.fromkeys(retrieved)]
-    assert store.alias(
-        conversation=conversation,
-        sources=sources,
-        stat_var_count=1,
-        carried=sources,
-        own_stat_vars=written,
-        **ratio,
-    )
-    describing = _DescribingClient()
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings(), provenance=store)
-    facts = {"series": [{"id": "s0", "coordinates": {"stat_var": ratio_ref}}], "series_cut": 0}
-
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts},
-        envelope=resolved_revision("line_chart", component_id="cmp_1", revision=1, frame_ref=ratio),
-    )
-
-    assert component is not None
-    assert sorted(ref for batch in describing.batches for ref in batch) == sorted(described)
-    assert component["fact_summary"]["indicators"] == [
-        {"id": ratio_ref, "name": name, "description": description}
-    ]
-    assert [
-        (source["spec_id"], source["content_version"])
-        for source in component["provenance"]["inputs"]
-    ] == [(ratio["spec_id"], ratio["content_version"]), *(sources if len(sources) > 1 else [])]
-
-
-async def test_a_chart_with_no_stat_var_coordinate_lists_no_indicators(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=0, resolved=12, series_cut=0)
-    facts["series"] = [{"id": "s0", "coordinates": {"unit": "n"}}]
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
-    executor = McpExecutor(settings=Settings(), provenance=store)
-
-    component = await executor._assemble_component(
-        reply={"component_id": "cmp_1", "revision": 1, "fact_summary": facts}, envelope=envelope
-    )
-
-    assert component is not None
-    assert describing.batches == []
-    summary = component["fact_summary"]
-    assert summary["indicators"] == []
-    assert summary["attribution"]["indicator_count"] == 12
-
-
-async def test_the_platform_defaults_reach_the_wire_fact_summary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+async def test_the_platform_defaults_reach_the_wire_fact_summary() -> None:
+    store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
     executor = McpExecutor(settings=Settings(), provenance=store)
     reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
 
@@ -1827,11 +1439,8 @@ async def test_the_platform_defaults_reach_the_wire_fact_summary(
     ],
     ids=["none", "name", "structured", "composed"],
 )
-async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(
-    monkeypatch: pytest.MonkeyPatch, unit: object
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
+async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(unit: object) -> None:
+    store, envelope, facts = _assembled_summary(drawn=1, resolved=1, series_cut=0)
     executor = McpExecutor(settings=Settings(), provenance=store)
     facts["unit"] = unit
 
@@ -1844,10 +1453,8 @@ async def test_the_platform_unit_reaches_the_wire_fact_summary_as_it_is(
     assert usable_component(component)
 
 
-async def test_each_series_states_the_periods_of_its_first_and_last_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, describing, envelope, facts = _assembled_summary(drawn=4, resolved=4, series_cut=0)
+async def test_each_series_states_the_periods_of_its_first_and_last_values() -> None:
+    store, envelope, facts = _assembled_summary(drawn=4, resolved=4, series_cut=0)
     facts["series"][0] |= {"point_count": 3, "first_value": "173.6", "last_value": "60.1"}
     envelope["component"]["series"] = [
         {
@@ -1871,7 +1478,6 @@ async def test_each_series_states_the_periods_of_its_first_and_last_values(
         # No point carries a period.
         {"id": "s3", "points": [{"category": "Health", "value": 4.0}]},
     ]
-    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda self, *a, **k: describing)
     executor = McpExecutor(settings=Settings(), provenance=store)
 
     component = await executor._assemble_component(
@@ -2060,8 +1666,10 @@ async def test_the_resolver_reads_a_search_envelope_from_meta_whole(
 async def test_the_resolver_puts_each_parts_block_kind_and_skills_on_the_digest(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
-    """A two-part envelope: the definite part's own block rides on its
-    digest, a candidates part carries none, the envelope's `kind` passes
+    """A three-part envelope: the definite part's own block rides on its
+    digest, a candidates part and a `no_data` part carry none, each carries
+    the blocks of the series it offers (a `no_data` part's nearest real
+    series, which `fetch` and a pin read), the envelope's `kind` passes
     through, and its `skills` map reaches the digest as `graph_envelope`'s
     `{"id", "description"}` list."""
     first = json.loads((_DATA_MCP_FIXTURES / f"{_SEARCH_FIXTURES[0]}.json").read_text())
@@ -2071,23 +1679,37 @@ async def test_the_resolver_puts_each_parts_block_kind_and_skills_on_the_digest(
         "status": "candidates",
         "candidates": {"specs": [{"spec_id": "spec_" + "c" * 32, "resolved": {}}]},
     }
+    nearest = {"spec_id": "spec_" + "d" * 32, "resolved": {}}
+    no_data = {
+        "variable_text": "net flows",
+        "status": "no_data",
+        "no_data": {"reason": "no_observations", "nearest_real": [nearest]},
+    }
     envelope = {
         **first,
         "kind": "resolution",
-        "parts": [definite, candidates],
+        "parts": [definite, candidates, no_data],
         "skills": {"oda-measures": {"name": "ODA measures", "description": "What counts."}},
     }
     scripted_presentation_client([_search_success(envelope)])
     resolver = McpResolver(settings=Settings())
 
-    digest = await resolver(question="q", parts=[{"variable": "x"}, {"variable": "GDP"}])
+    digest = await resolver(
+        question="q", parts=[{"variable": "x"}, {"variable": "GDP"}, {"variable": "net flows"}]
+    )
 
-    assert [part["status"] for part in digest["part_digests"]] == ["definite", "candidates"]
+    assert [part["status"] for part in digest["part_digests"]] == [
+        "definite",
+        "candidates",
+        "no_data",
+    ]
     assert digest["part_digests"][0]["spec_block"] == definite["spec"]
     assert digest["part_digests"][1]["spec_block"] is None
     assert digest["part_digests"][1]["candidate_blocks"] == {
         "spec_" + "c" * 32: candidates["candidates"]["specs"][0]
     }
+    assert digest["part_digests"][2]["spec_block"] is None
+    assert digest["part_digests"][2]["candidate_blocks"] == {nearest["spec_id"]: nearest}
     assert digest["kind"] == "resolution"
     assert digest["skills"] == [{"id": "oda-measures", "description": "What counts."}]
     assert digest["spec_block"] == definite["spec"]

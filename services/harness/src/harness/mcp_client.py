@@ -2,7 +2,9 @@
 
 `McpResolver` wraps data-mcp `search`; `McpExecutor` routes plan steps to
 data-mcp (`get_data`) and presentation-mcp (`describe_frame` /
-`write_component` / `describe_component`). The analysis verbs reach
+`write_component` / `describe_component`), and publishes a run's derived
+results with their replay recipes (`publish_result`, the completion gate's
+`executor.completion.ResultPublisher`). The analysis verbs reach
 analysis-mcp through the execute node's `ToolSurface` (see
 `harness.agents.build_tool_surface`); this module never sees them. Both
 speak MCP over streamable HTTP to the mounts `harness.server.create_app`
@@ -37,10 +39,8 @@ grants revises (`common.mcp_telemetry.WRITE_TOKEN_KEY`).
 
 Holding a client for a whole conversation means a client that breaks mid-
 conversation would otherwise keep failing every later call the same way,
-with nothing to reconnect it. `_call_held` is where every call site (except
-`_indicators_for`'s, which already treats any describe failure as
-"degrade to a fallback name" and discards unconditionally) draws the line: a
-read timeout says only that one call ran past its own deadline, not that the
+with nothing to reconnect it. `_call_held` is where every call site draws
+the line: a read timeout says only that one call ran past its own deadline, not that the
 client is broken, so the client stays cached; anything else discards it, so
 the next call reconnects instead of repeating the same failure.
 
@@ -86,12 +86,23 @@ import random
 import re
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from functools import partial
+from http import HTTPStatus
 from typing import Any
 
 from common.auth import bearer_token
+from common.live_apis import LiveApisError, LiveApisNotConfigured
+from common.materialisation import (
+    FrameExpired,
+    FrameIntegrityError,
+    FrameRef,
+    FrameTooLarge,
+    get_store,
+)
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from common.recipe import RecipeAnchorError, RecipeError, build_recipe
 from common.refusal import refusal_code
 from compiler.caller_clients import CallerClients, session_call_meta
 from compiler.surface import (
@@ -100,28 +111,42 @@ from compiler.surface import (
     deliver_progress,
     mcp_progress_handler,
 )
+from data_mcp.mint_recovery import DatasetVersions, recover_mint_record
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from dfo_frame_grammar.grammar import parse_time_period
 from executor.classify import MAX_ATTEMPTS_PER_STEP, Jitter, delay_before_retry
+from executor.completion import FramePublished, PublishFault
 from fastmcp import Client
+from google.api_core.exceptions import (
+    GoogleAPICallError,
+    GoogleAPIError,
+    RetryError,
+    ServerError,
+    TooManyRequests,
+)
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT, ErrorData
-from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
+from presentation_mcp.assembler_holder import get_assembler
+from presentation_mcp.client import PlatformAssembler
+from presentation_mcp.platform_contract import (
+    RESOLVED_PAYLOAD_META_KEY,
+    NormalFormConflict,
+    Refusal,
+    RetryMode,
+)
 
 from harness.conversation import current_conversation_caller, current_conversation_id
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import (
-    BOTH_SIDES_VERBS,
     Lineage,
-    OwnStatVars,
-    ProvenanceInput,
     ProvenanceStore,
-    SidePart,
     data_artifact,
     manifest_with_stat_vars,
     merged_manifest,
+    retrieval_frame_ref,
     summed_stat_var_count,
 )
+from harness.recipe_replay import PublishFrame
 from harness.rolling_cards import (
     AdmittedWrite,
     CardReplay,
@@ -144,16 +169,6 @@ from harness.tool_contracts import (
 
 logger = logging.getLogger(__name__)
 
-
-# `describe` caps ids per call at 8, and `_describe_into_cache` keeps at most
-# `_DESCRIBE_CONCURRENCY` calls in flight. Each call reads up to four nodes at
-# once (`data_mcp.node_lookup._MAX_CONCURRENT_NODE_READS`, a semaphore built
-# per call), so the two bounds together allow eight node reads at a time
-# against the node door's admission pool of four. The door refuses a read
-# that finds every slot held with a retryable 503, which data-mcp's client
-# retries inside the call.
-_DESCRIBE_BATCH = 8
-_DESCRIBE_CONCURRENCY = 2
 
 # The source the card names when neither the manifest nor the chart names one.
 _UNKNOWN_SOURCE = "Unknown source"
@@ -378,6 +393,93 @@ def _held_to_its_resolved_periods(
     return {"outcome": "refusal", "refusal": refusal}
 
 
+# The store faults a later read may not meet: a transport error, and the
+# throttling, server errors and exhausted retries of Google Cloud Storage. Its
+# request timeout is one more (`_transient_store_fault`): an error with code
+# 408, which google.api_core raises as a bare `GoogleAPICallError`, having no
+# class of its own for it.
+_TRANSIENT_STORE_FAULTS = (OSError, TooManyRequests, ServerError, RetryError)
+
+
+def _transient_store_fault(exc: Exception) -> bool:
+    """Whether `exc`, a frame store fault, may not meet a later read."""
+    if isinstance(exc, GoogleAPICallError) and exc.code == HTTPStatus.REQUEST_TIMEOUT:
+        return True
+    return isinstance(exc, _TRANSIENT_STORE_FAULTS)
+
+
+# Every fault of the frame store `_store_fault` classifies.
+_STORE_FAULTS = (FrameExpired, FrameIntegrityError, FrameTooLarge, GoogleAPIError, OSError)
+
+
+def _store_fault(frame: FrameRef, exc: Exception) -> PublishFault:
+    """The fault a frame store failure while publishing `frame` is, the same
+    whether it came building the recipe or reading the frame to publish.
+
+    A store that cannot be reached now is retryable (`store_unavailable`).
+    A frame it no longer holds cannot be replayed (`replay_unavailable`); a
+    stored object that fails the store's checks (`frame_integrity_failed`)
+    or is over its ceilings (`frame_too_large`) reads the same on every try.
+    Any other refusal of the store is final too (`store_refused`).
+    """
+    if isinstance(exc, FrameExpired):
+        return _replay_unavailable(frame, str(exc))
+    if isinstance(exc, FrameIntegrityError):
+        return PublishFault(code="frame_integrity_failed", reason=str(exc), retryable=False)
+    if isinstance(exc, FrameTooLarge):
+        return PublishFault(code="frame_too_large", reason=str(exc), retryable=False)
+    if _transient_store_fault(exc):
+        return PublishFault(code="store_unavailable", reason=str(exc), retryable=True)
+    return PublishFault(code="store_refused", reason=str(exc), retryable=False)
+
+
+async def _replay_recipe(
+    frame: FrameRef, *, dataset_versions: DatasetVersions | None
+) -> dict[str, Any] | PublishFault:
+    """The replay recipe the store's traces build for `frame`, or the fault
+    that kept it from being built (`McpExecutor.publish_result`).
+
+    A root the store holds no mint record for has one rebuilt from its
+    dataset's stored versions (`dataset_versions`, through
+    `data_mcp.mint_recovery.recover_mint_record`), as `harness.recipe_backfill`
+    does; without `dataset_versions` such a root leaves the recipe unbuildable.
+    A versions read that fails is `dataset_versions_unavailable`, retryable
+    when dfo-apis says so. A rolling frame whose populations name a dataset no
+    rolling period of its tree reads has no anchor of its own, and its recipe
+    is the one `build_recipe` puts on its `RecipeAnchorError`, with a null
+    `anchor`, as `harness.rolling_cards.RollingCards.frame` reads it."""
+    store = get_store()
+    recover = (
+        None
+        if dataset_versions is None
+        else partial(recover_mint_record, dataset_versions=dataset_versions, store=store)
+    )
+    try:
+        trace = await store.get_trace(frame)
+        if trace is None:
+            return _replay_unavailable(frame, "the store no longer holds it")
+        return await build_recipe(frame, store=store, trace=trace, recover=recover)
+    except (LiveApisError, LiveApisNotConfigured) as exc:
+        retryable = isinstance(exc, LiveApisError) and exc.retryable
+        return PublishFault(
+            code="dataset_versions_unavailable", reason=str(exc), retryable=retryable
+        )
+    except RecipeError as exc:
+        if isinstance(exc, RecipeAnchorError) and exc.recipe is not None:
+            return exc.recipe
+        return PublishFault(code="recipe_unbuildable", reason=str(exc), retryable=False)
+    except _STORE_FAULTS as exc:
+        return _store_fault(frame, exc)
+
+
+def _replay_unavailable(frame: FrameRef, why: str) -> PublishFault:
+    return PublishFault(
+        code="replay_unavailable",
+        reason=f"frame {frame.spec_id}/{frame.content_version} cannot be replayed: {why}",
+        retryable=False,
+    )
+
+
 class McpExecutor:
     """Plan steps against data-mcp and presentation-mcp, in the graph's outcome grammar.
 
@@ -409,6 +511,8 @@ class McpExecutor:
         settings: Settings,
         provenance: ProvenanceStore | None = None,
         card_replay: CardReplay | None = None,
+        publish_frame: PublishFrame | None = None,
+        dataset_versions: DatasetVersions | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Jitter = random.uniform,
         clock: Callable[[], float] = time.monotonic,
@@ -416,6 +520,12 @@ class McpExecutor:
         self._sleep = sleep
         self._jitter = jitter
         self._clock = clock
+        # `publish_result`'s door to dfo-apis: `publish_frame` when given,
+        # else the process's `PlatformAssembler` (`_publisher`).
+        self._publish_frame = publish_frame
+        # Reads a dataset's stored versions, to rebuild the mint record of a
+        # root `publish_result`'s recipe needs (`_replay_recipe`).
+        self._dataset_versions = dataset_versions
         self._data_url = settings.data_mcp_url
         self._presentation_url = settings.presentation_mcp_url
         # See `McpResolver.__init__` above. Resolved once, after
@@ -430,15 +540,11 @@ class McpExecutor:
         # The rules for a card whose period follows the latest data, with the
         # frames and replays they have found, shared by every conversation.
         self._rolling_cards = RollingCards(replay=card_replay, clock=clock)
-        # Indicator metadata (label/definition) from data-mcp `describe`,
-        # cached per dcid for the process life -- definitions do not move.
-        self._indicator_cache: dict[str, dict[str, str]] = {}
         # One held client per conversation per mount/tool -- see the module
-        # docstring's "Clients" note. `describe`
-        # and `get_data` are separate held clients, not one shared client,
-        # because each carries its own pinned call deadline
-        # (`McpTimeoutPolicy.client`'s per-tool row): 180s for `get_data`'s
-        # mint budget, 30s for `describe`.
+        # docstring's "Clients" note. `get_data`
+        # gets its own held client because it carries a pinned call deadline
+        # (`McpTimeoutPolicy.client`'s per-tool row): 180s for its mint
+        # budget.
         self._presentation_clients = CallerClients(
             # No single tool: this client is long-lived, serving
             # `describe_frame` / `write_component` / `describe_component`
@@ -455,22 +561,71 @@ class McpExecutor:
             ),
             caller=current_conversation_caller,
         )
-        self._describe_clients = CallerClients(
-            lambda caller: self._policy.client(
-                self._data_url, auth=self._token, caller=caller, tool="describe"
-            ),
-            caller=current_conversation_caller,
-        )
 
     async def aclose(self) -> None:
-        """Release every conversation's held clients, across all three.
+        """Release every conversation's held clients, across both.
 
         Called once, from `harness.server._lifespan`'s shutdown, through
         `StudioRunner.aclose` -> `_RecordingExecutor.aclose` -> here.
         """
         await self._presentation_clients.aclose()
         await self._get_data_clients.aclose()
-        await self._describe_clients.aclose()
+
+    async def publish_result(self, frame: FrameRef) -> FramePublished | PublishFault:
+        """Publish the derived `frame` to dfo-apis with the replay recipe built
+        from the store: the completion gate's publisher
+        (`executor.completion.ResultPublisher`).
+
+        A store that cannot be reached now, no assembler to publish through
+        (`publish_unavailable`), and a refusal dfo-apis says to retry (a
+        transport failure among them) are retryable faults. Every other fault
+        of the store is final (`_store_fault`), as are a recipe that cannot be
+        built from the traces the run wrote (`recipe_unbuildable`), dfo-apis
+        holding the frame under a recipe of another normal form
+        (`recipe_normal_form_conflict`), and any other refusal, an oversized
+        recipe's among them.
+        """
+        recipe = await _replay_recipe(frame, dataset_versions=self._dataset_versions)
+        if isinstance(recipe, PublishFault):
+            return recipe
+        publisher = self._publisher()
+        if publisher is None:
+            return PublishFault(
+                code="publish_unavailable",
+                reason="presentation-mcp has wired no assembler in this process",
+                retryable=True,
+            )
+        try:
+            published = await publisher(
+                spec_id=frame.spec_id, content_version=frame.content_version, recipe=recipe
+            )
+        except _STORE_FAULTS as exc:
+            return _store_fault(frame, exc)
+        if isinstance(published, Refusal):
+            return PublishFault(
+                code=published.error,
+                reason=published.detail,
+                retryable=published.retry is RetryMode.RETRY_AFTER_DELAY,
+                retry_after_s=published.retry_after_s,
+            )
+        if isinstance(published, NormalFormConflict):
+            return PublishFault(
+                code="recipe_normal_form_conflict", reason=published.detail, retryable=False
+            )
+        return FramePublished(replay_key=recipe["replay_key"])
+
+    def _publisher(self) -> PublishFrame | None:
+        """`publish_frame` when given, else the `publish_frame` of the
+        `PlatformAssembler` presentation-mcp's lifespan wires, so a frame this
+        publishes is in the memo `describe_frame` and `write_component` read,
+        and they publish it no more. `None` while none is wired."""
+        if self._publish_frame is not None:
+            return self._publish_frame
+        try:
+            assembler = get_assembler()
+        except RuntimeError:
+            return None
+        return assembler.publish_frame if isinstance(assembler, PlatformAssembler) else None
 
     async def _presentation_client(self) -> Client:
         return await self._presentation_clients.get()
@@ -565,8 +720,8 @@ class McpExecutor:
 
         A write moved to a frame replayed for the card's own series gives that
         frame the lineage of the frame the intent named, because the replay
-        computes the same recipe and so rests on the same retrievals, carries
-        the same StatVars and names the same `sum_of` sides.
+        computes the same recipe and so rests on the same retrievals and carries
+        the same StatVars.
 
         Raises:
             CardWithheld: A rule refuses the write.
@@ -590,9 +745,6 @@ class McpExecutor:
                 content_version=target["content_version"],
                 sources=[source],
                 stat_var_count=self._provenance.stat_var_count(
-                    conversation=conversation, spec_id=source[0], content_version=source[1]
-                ),
-                own_stat_vars=self._provenance.own_stat_vars(
                     conversation=conversation, spec_id=source[0], content_version=source[1]
                 ),
             )
@@ -659,13 +811,22 @@ class McpExecutor:
             return _refusal_outcome(result.structured_content, fallback_text=_result_text(result))
         manifest = await manifest_with_stat_vars(result.structured_content or {})
         # The frame goes straight to describe_frame and charts, which read it from
-        # dfo-apis under the pair `put_retrieval` returns.
+        # dfo-apis under the pair `put_retrieval` returns. The materialisation
+        # store holds it under the pair the result states as its `frame_ref`.
         ref = self._provenance.put_retrieval(
             conversation=current_conversation_id.get(), manifest=manifest
         )
+        store_ref = retrieval_frame_ref(manifest)
+        if None in store_ref.values():
+            logger.warning(
+                "get_data for spec_id=%r states no complete frame_ref; the frame will be "
+                "opened in the materialisation store by the pair dfo-apis serves it under",
+                (manifest.get("definition") or {}).get("spec_id"),
+            )
         return {
             "outcome": "ok",
             "frame_refs": [ref],
+            "store_refs": [store_ref],
             "summary": _manifest_summary(manifest),
             "rows": (manifest.get("coverage") or {}).get("rows"),
             "warnings": manifest.get("warnings") or [],
@@ -750,212 +911,6 @@ class McpExecutor:
             outcome[WRITE_TOKEN_KEY] = write_token
         return outcome
 
-    async def _indicators_for(
-        self, refs: list[str], *, named: Mapping[str, dict[str, str]] | None = None
-    ) -> list[dict[str, str]]:
-        """The More Info panel's indicator rows for `refs` (deduplicated),
-        as real as local data allows: labels and definitions from data-mcp
-        `describe`, with a mechanical prettifying of the dcid as the label
-        fallback. A describe outage degrades to the fallback and the
-        component still writes. A ref in `named` takes its row from there
-        and is never described: a family ref (`_family_indicators`) is no
-        graph node."""
-        named = named or {}
-        refs = list(dict.fromkeys(refs))
-        missing = [ref for ref in refs if ref not in named and ref not in self._indicator_cache]
-        if missing:
-            await self._describe_into_cache(missing)
-        return [
-            {
-                "id": ref,
-                **(
-                    named.get(ref)
-                    or self._indicator_cache.get(ref)
-                    or {"name": _indicator_name(ref), "description": ""}
-                ),
-            }
-            for ref in refs
-        ]
-
-    async def _own_stat_var_indicators(
-        self,
-        refs: list[str],
-        *,
-        lineage: Lineage,
-        family: Mapping[str, dict[str, str]],
-        written: OwnStatVars,
-    ) -> dict[str, dict[str, str]]:
-        """The indicator row for each ref among `refs` that a verb wrote for
-        its own result, named by its two sides in the verb's words
-        (`BOTH_SIDES_VERBS`): "X plus Y" for a sum, "X per Y" for a quotient
-        and "X as a share of Y" for a share. Two sides holding the same
-        StatVars read "X", "Ratio of X" and "Share of X".
-
-        A side's name is its parts' names joined by " and ": a summed
-        family's from `family`, an earlier verb's own ref by that verb's
-        sides in turn, as dfo-apis labels a published frame, and any other
-        StatVar's from `describe`. A share of Debt per Population over GDP per
-        Population reads "Debt per Population as a share of GDP per
-        Population". A ref whose sides rest on a retrieval missing from
-        `lineage` gets no row.
-        """
-        members = {(member.spec_id, member.content_version): member for member in lineage}
-        named: dict[str, dict[str, str] | None] = {}
-        for ref in refs:
-            if ref in written:
-                await self._name_own_stat_var(
-                    ref, members=members, family=family, written=written, named=named
-                )
-        return {ref: row for ref in refs if (row := named.get(ref)) is not None}
-
-    async def _name_own_stat_var(
-        self,
-        ref: str,
-        *,
-        members: Mapping[tuple[str | None, str | None], ProvenanceInput],
-        family: Mapping[str, dict[str, str]],
-        written: OwnStatVars,
-        named: dict[str, dict[str, str] | None],
-    ) -> dict[str, str] | None:
-        """`ref`'s row for `_own_stat_var_indicators`, memoised in `named`,
-        or `None` when a side cannot be named."""
-        if ref in named:
-            return named[ref]
-        named[ref] = None
-        tool, *sides = written[ref]
-        wording = BOTH_SIDES_VERBS[tool].own_stat_var
-        if wording is None:
-            return None
-        named_sides: list[tuple[str, list[str]]] = []
-        for side in sides:
-            named_side = await self._name_side(
-                side, members=members, family=family, written=written, named=named
-            )
-            if named_side is None:
-                return None
-            named_sides.append(named_side)
-        (first, first_refs), (second, second_refs) = named_sides
-        named[ref] = {
-            "name": f"{wording.equal_sides}{first}"
-            if first_refs == second_refs
-            else wording.joiner.join((first, second)),
-            "description": wording.description,
-        }
-        return named[ref]
-
-    async def _name_side(
-        self,
-        side: Sequence[SidePart],
-        *,
-        members: Mapping[tuple[str | None, str | None], ProvenanceInput],
-        family: Mapping[str, dict[str, str]],
-        written: OwnStatVars,
-        named: dict[str, dict[str, str] | None],
-    ) -> tuple[str, list[str]] | None:
-        """One side's name for `_name_own_stat_var`, with the StatVar refs it
-        names, or `None` when a part cannot be named or the side is empty."""
-        refs: list[str] = []
-        own_rows: dict[str, dict[str, str]] = {}
-        for part in side:
-            if isinstance(part, str):
-                if part not in written:
-                    return None
-                row = await self._name_own_stat_var(
-                    part, members=members, family=family, written=written, named=named
-                )
-                if row is None:
-                    return None
-                own_rows[part] = row
-                refs.append(part)
-            elif (member := members.get(part)) is not None:
-                refs.extend(_member_stat_vars(member))
-            else:
-                return None
-        if not refs:
-            return None
-        rows = await self._indicators_for(refs, named={**family, **own_rows})
-        return " and ".join(dict.fromkeys(row["name"] for row in rows)), refs
-
-    async def _describe_into_cache(self, refs: list[str]) -> None:
-        """Describe `refs` in concurrent batches, filling `_indicator_cache`
-        as each batch lands. A batch that fails leaves its unresolved refs
-        uncached; answered refs and definitive misses stay cached."""
-        client: Client | None = None
-        try:
-            client = await self._describe_clients.get()
-            gate = asyncio.Semaphore(_DESCRIBE_CONCURRENCY)
-
-            async def one(batch: list[str]) -> None:
-                async with gate:
-                    await self._describe_batch(client, batch)
-
-            outcomes = await asyncio.gather(
-                *(
-                    one(refs[start : start + _DESCRIBE_BATCH])
-                    for start in range(0, len(refs), _DESCRIBE_BATCH)
-                ),
-                return_exceptions=True,
-            )
-            failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
-            if failures:
-                raise failures[0]
-        except Exception:
-            logger.warning("indicator describe failed; using fallback names", exc_info=True)
-            # This degrades to a fallback either way, so it does not need to
-            # tell a slow call apart from a broken client: either is reason
-            # enough for the next call to reconnect and not repeat it. `client` is `None` only when `get()` itself failed to
-            # connect, in which case there is nothing held to evict.
-            if client is not None:
-                await self._describe_clients.discard(client)
-        finally:
-            if client is not None:
-                await self._describe_clients.release(client)
-
-    async def _describe_batch(self, client: Client, refs: list[str]) -> None:
-        """Describe one batch and cache each ref's answer: the node's label
-        and definition, or the fallback name for a ref the refusal names as
-        a definitive miss. Any other error, and a miss that names no ref of
-        this batch, caches nothing."""
-        # Refs are "dcid:"-prefixed; describe wants bare dcids.
-        by_dcid = {ref.removeprefix("dcid:"): ref for ref in refs}
-        result = await client.call_tool(
-            "describe", {"ids": list(by_dcid)}, meta=session_call_meta(client), raise_on_error=False
-        )
-        nodes: list[dict[str, Any]] = []
-        if result.is_error:
-            # node_not_held is a definitive answer; anything else may be
-            # transient -- do not poison the cache.
-            body = result.structured_content or {}
-            if body.get("code") != "node_not_held":
-                return
-            # The refusal names the unheld dcids in `fix.dcids` and carries
-            # no `nodes`, so the batch's held refs are described again on
-            # their own rather than cached under their fallback names.
-            unheld = [
-                by_dcid[dcid]
-                for dcid in (body.get("fix") or {}).get("dcids") or []
-                if dcid in by_dcid
-            ]
-            if not unheld:
-                return
-            held = [ref for ref in refs if ref not in unheld]
-            if held:
-                for ref in unheld:
-                    self._indicator_cache[ref] = {"name": _indicator_name(ref), "description": ""}
-                await self._describe_batch(client, held)
-                return
-        else:
-            nodes = (result.structured_content or {}).get("nodes") or []
-        for ref in refs:
-            self._indicator_cache[ref] = {"name": _indicator_name(ref), "description": ""}
-        for node in nodes:
-            ref = by_dcid.get(str(node.get("dcid", "")))
-            if ref:
-                self._indicator_cache[ref] = {
-                    "name": str(node.get("label") or _indicator_name(ref)),
-                    "description": str(node.get("definition") or ""),
-                }
-
     async def _assemble_component(
         self, *, reply: dict[str, Any], envelope: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -977,10 +932,6 @@ class McpExecutor:
         which `merged_manifest` folds into one before the wire shapes are
         built; `_wire_provenance` also lists each retrieval as an input.
 
-        The indicators listed are the StatVars the chart draws
-        (`_drawn_stat_vars`), a summed family's ref named as dfo-apis names
-        it (`_family_indicators`) and a `sum_of`, `quotient_of` or `share_of`
-        result's ref by its two sides (`_own_stat_var_indicators`).
         `indicator_count` counts the StatVars of the frame the card draws
         from, which is the count the step that produced the frame declared
         (`ProvenanceStore.stat_var_count`), or, for a
@@ -1023,19 +974,6 @@ class McpExecutor:
             )
             return None
         manifest = merged_manifest(lineage)
-        drawn = _drawn_stat_vars(platform_facts)
-        family = _family_indicators(lineage)
-        written = await self._own_stat_var_indicators(
-            drawn,
-            lineage=lineage,
-            family=family,
-            written=self._provenance.own_stat_vars(
-                conversation=current_conversation_id.get(),
-                spec_id=frame_ref.get("spec_id"),
-                content_version=frame_ref.get("content_version"),
-            ),
-        )
-        indicators = await self._indicators_for(drawn, named={**family, **written})
         return {
             "component_id": component_id,
             "revision": revision,
@@ -1049,7 +987,6 @@ class McpExecutor:
                 component_id=component_id,
                 revision=revision,
                 manifest=manifest,
-                indicators=indicators,
                 indicator_count=(
                     frame_stat_var_count
                     if frame_stat_var_count is not None
@@ -1171,12 +1108,10 @@ def _wire_fact_summary(
     component_id: str,
     revision: int,
     manifest: dict[str, Any] | None,
-    indicators: list[dict[str, str]],
     indicator_count: int,
 ) -> dict[str, Any]:
     """The wire fact summary. `indicator_count` is the frame's StatVar count,
-    which the label states. `indicators` lists the StatVars the chart draws,
-    so a list shorter than the count is a partial one. Each series carries
+    which the label states. Each series carries
     the periods of its first and last values, read from the drawn points:
     a series with gaps starts or ends inside the window. `unit` is the
     platform's, forwarded as it is: the unit slot of the card's payload."""
@@ -1209,7 +1144,6 @@ def _wire_fact_summary(
         "component_id": component_id,
         "revision": revision,
         "series": series,
-        "indicators": indicators,
         "attribution": {
             "label": f"{source_label} · {total} indicator(s)",
             "source_count": max(len(citation.get("sources") or []), 1),
@@ -1263,51 +1197,6 @@ def _manifest_stat_vars(manifest: dict[str, Any] | None) -> list[str]:
     return list(dict.fromkeys(str(entry["ref"]) for entry in entries if entry.get("ref")))
 
 
-def _family_indicators(lineage: Lineage) -> dict[str, dict[str, str]]:
-    """The indicator row for each family ref a frame in `lineage` can carry.
-
-    A summed retrieval's frame holds one StatVar ref, `dcid:<spec_id>` of
-    its own definition. It is named by `get_data`'s `summed_stat_var_label`,
-    the label dfo-apis's presentation door gives the same ref on the chart,
-    or by the retrieval's citation text, the source the card's attribution
-    names, when dfo-apis stated none. Every member gets a row, so no family
-    ref reaches `describe`. Its description counts the StatVars the sum
-    added, when known.
-    """
-    rows: dict[str, dict[str, str]] = {}
-    for member in lineage:
-        manifest = member.manifest
-        if member.spec_id is None:
-            continue
-        label = manifest.get("summed_stat_var_label")
-        citation = manifest.get("citation") or {}
-        name = label if isinstance(label, str) and label else citation.get("text")
-        count = summed_stat_var_count(manifest)
-        rows[f"dcid:{member.spec_id}"] = {
-            "name": str(name or _UNKNOWN_SOURCE),
-            "description": f"A total over {count} indicators." if count is not None else "",
-        }
-    return rows
-
-
-def _member_stat_vars(member: ProvenanceInput) -> list[str]:
-    """The StatVar refs a retrieval's frame carries: its family ref when
-    summed (`_family_indicators`), else the StatVars its manifest resolved."""
-    if member.spec_id is not None and summed_stat_var_count(member.manifest) is not None:
-        return [f"dcid:{member.spec_id}"]
-    return _manifest_stat_vars(member.manifest)
-
-
-def _drawn_stat_vars(platform_facts: dict[str, Any]) -> list[str]:
-    """The distinct StatVars the chart's series carry in their `stat_var`
-    coordinate. Empty when no series has one, as in a groupby rendering."""
-    refs = (
-        (entry.get("coordinates") or {}).get("stat_var")
-        for entry in platform_facts.get("series") or []
-    )
-    return list(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref))
-
-
 def _drawn_window(component: dict[str, Any]) -> dict[str, Any]:
     """The periods a chart draws, read from its axis. The platform states no
     window for a bar chart of entities at one period, and that chart draws
@@ -1322,15 +1211,6 @@ def _drawn_window(component: dict[str, Any]) -> dict[str, Any]:
         return {}
     parsed = parse_time_period(str(period))
     return {"start": parsed.start, "end": parsed.end}
-
-
-def _indicator_name(ref: str) -> str:
-    """A display name derived mechanically from the stat var id --
-    "dcid:LifeExpectancy_Person" -> "Life Expectancy Person". Opaque codes
-    (e.g. WDI's "BX.GRT.EXTA.CD.DT") pass through unchanged."""
-    bare = ref.removeprefix("dcid:")
-    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", bare.replace("_", " ")).strip()
-    return spaced or ref
 
 
 def _platform_source(platform_facts: dict[str, Any]) -> str | None:

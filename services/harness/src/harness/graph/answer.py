@@ -1,8 +1,11 @@
 """What a plan's run says about its answer: the retrievals each answer frame's
 evidence comes from (`link_evidence_to_terminal_frames`), the answer frames
 (`answer_frames`), and the notes on how the figures were computed
-(`answer_notes`). The `execute` node (`harness.graph.execute`) is its only
-caller.
+(`answer_notes`). The `execute` node (`harness.graph.execute`) and the
+direct `submit_analysis` (`harness.direct_recipes`) call it, and
+`harness.graph.resume` links a completed run carried on from an earlier turn
+through `link_accepted_run` and reads its notes from the plan both routes
+store before the run (`store_run_plan`, `stored_run_plan`).
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from collections.abc import (
     Sequence,
 )
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 from common.materialisation import FrameRef
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
@@ -23,6 +26,7 @@ from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
 from executor.artifacts import declared_shape, parse_manifest
+from executor.ledger import RunLedger, store_faults
 from executor.outcomes import (
     Accepted,
     RunOutcome,
@@ -34,6 +38,7 @@ from planner.plan import (
     EvidenceRequirement,
     QuotientRequirement,
     ResolvedBy,
+    stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
 from planner.records import Reduction
@@ -94,7 +99,7 @@ def _carried_frame_parameters(step: WorkflowStep) -> list[str]:
 def _writes_own_stat_var(step: WorkflowStep) -> bool:
     """Whether `step`'s verb writes its result under a StatVar of its own."""
     verb = BOTH_SIDES_VERBS.get(step.tool.name)
-    return verb is not None and verb.own_stat_var is not None
+    return verb is not None and verb.writes_own_stat_var
 
 
 def _carried_retrievals(
@@ -106,11 +111,10 @@ def _carried_retrievals(
     """The retrieval step ids whose StatVars `step_id`'s frame carries.
 
     A verb writes the StatVars of the frame bound to `FRAME_PARAMETER`, and
-    `join` also those of its right side. `sum_of`, `quotient_of` and
-    `share_of` each write a StatVar of their own that stands for both sides'
-    StatVars, so they carry both too (`_carried_frame_parameters`).
-    `compare`'s right side supplies values only, so a frame resting on it
-    carries none of its StatVars. A subset of `_upstream_retrievals`.
+    `join` also those of its right side. `compare`, `sum_of`, `quotient_of`
+    and `share_of` each write a StatVar of their own that stands for both
+    sides' StatVars, so they carry both too (`_carried_frame_parameters`).
+    A subset of `_upstream_retrievals`.
     """
     if step_id in retrieval_step_ids:
         return frozenset({step_id})
@@ -135,10 +139,10 @@ def _carried_parts(
     """The retrieval steps, and the steps writing a StatVar of their own,
     whose StatVars `step_id`'s frame carries.
 
-    The walk `_carried_retrievals` takes, stopping at each `sum_of`,
-    `quotient_of` or `share_of` (`_writes_own_stat_var`). The frame carries
-    that step's one StatVar, which stands for every StatVar under its sides,
-    in place of the retrievals beneath it.
+    The walk `_carried_retrievals` takes, stopping at each `compare`,
+    `sum_of`, `quotient_of` or `share_of` (`_writes_own_stat_var`). The frame
+    carries that step's one StatVar, which stands for every StatVar under its
+    sides, in place of the retrievals beneath it.
     """
     if step_id in retrieval_step_ids:
         return frozenset({step_id}), frozenset()
@@ -164,24 +168,61 @@ def _ran(outcome: RunOutcome) -> tuple[StepRecord, ...]:
     return outcome.steps if isinstance(outcome, Accepted) else outcome.completed
 
 
-def answer_frames(outcome: RunOutcome) -> dict[str, FrameRef]:
+def presentable_steps(outcome: RunOutcome, *, published: bool = True) -> tuple[StepRecord, ...]:
+    """Every finished step of `outcome`'s run whose frame and digest may reach
+    the agent, in the plan's own step order. A retrieved (`spec_`) frame is
+    always presentable. A derived (`ops_`) frame is presentable only once
+    published with its replay recipe (`executor.completion`), since an
+    unpublished figure is never quoted or charted: an accepted run's are
+    when `published` says its run completed, and a stopped run's never are,
+    whatever `published` says. The answer frames (`answer_frames`) and the
+    step summaries `execute` hands back both read this one selection."""
+    if isinstance(outcome, Accepted) and published:
+        return outcome.steps
+    return tuple(
+        record for record in _ran(outcome) if not record.frame_ref.spec_id.startswith("ops_")
+    )
+
+
+class AnswerFrame(NamedTuple):
+    """One answer frame's two pairs: `presented`, which it is described and
+    drawn by (`StepRecord.presented_ref`), and `store`, which the
+    materialisation store holds it under (`StepRecord.frame_ref`). They are
+    the same pair unless the frame is a retrieval minted with extra columns."""
+
+    presented: FrameRef
+    store: FrameRef
+
+
+def answer_frames(outcome: RunOutcome, *, published: bool = True) -> dict[str, AnswerFrame]:
     """Each terminal frame that stands as an answer, by step id, in the
-    workflow's terminal order: every terminal step's on an accepted run
+    workflow's terminal order: each terminal step's on an accepted run
     (`Accepted.results`), and on a stopped run each finished terminal step's
     that passed the same answer check (`answers`, `executor.run._Run.
-    _answer_refusal`).
+    _answer_refusal`), when it is presentable (`presentable_steps`, given
+    `published`).
 
-    Each frame is named by the pair it is described and drawn by
-    (`StepRecord.presented_ref`): a final retrieval minted with extra columns
-    is named by its manifest's own pair, which dfo-apis serves, while the
-    steps reading it were bound to its `frame_ref`."""
-    records = {record.step_id: record for record in _ran(outcome)}
+    Each frame comes with both its pairs (`AnswerFrame`): a final retrieval
+    minted with extra columns is described and drawn by its manifest's own
+    pair, which dfo-apis serves, while the store holds it under its
+    `frame_ref`, the pair the steps reading it were bound to."""
+    records = {record.step_id: record for record in presentable_steps(outcome, published=published)}
     answers = outcome.results if isinstance(outcome, Accepted) else outcome.answers
-    return {step_id: records[step_id].presented_ref for step_id in answers}
+    return {
+        step_id: AnswerFrame(
+            presented=records[step_id].presented_ref, store=records[step_id].frame_ref
+        )
+        for step_id in answers
+        if step_id in records
+    }
 
 
 def link_evidence_to_terminal_frames(
-    tool_surface: ToolSurface | None, outcome: RunOutcome, *, workflow: PlanWorkflow
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    workflow: PlanWorkflow,
+    published: bool = True,
 ) -> None:
     """Link each terminal frame's provenance to every retrieval that feeds it.
 
@@ -195,7 +236,8 @@ def link_evidence_to_terminal_frames(
     Without this, `McpExecutor._assemble_component` would never find a
     terminal frame's provenance on the approved-plan path.
 
-    A stopped run links the terminal frames it finished (`answer_frames`)
+    A stopped run, or an accepted run whose derived frames are not yet
+    `published`, links the terminal frames it hands back (`answer_frames`)
     the same way, from the evidence its finished retrievals recorded, so a
     partial answer's cards keep their sources.
 
@@ -212,10 +254,6 @@ def link_evidence_to_terminal_frames(
     carries (`_carried_parts`), each sum with the retrievals under it, so a
     summed family's ref counts as the StatVars it sums and a sum's ref as the
     distinct StatVars under its sides, and a quotient's ref the same way.
-    Each `sum_of`, `quotient_of` or `share_of` step's own StatVar ref goes
-    with every link, beside its tool name and the parts of each of its sides
-    (`_own_stat_vars`), so the card can name that ref by what it adds or
-    divides wherever it is drawn.
 
     All-or-nothing: a frame with no retrieval under it (a workflow defect,
     never a valid one), or one whose retrieval has no `EvidenceRecord`, is
@@ -232,14 +270,9 @@ def link_evidence_to_terminal_frames(
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     stat_var_counts = {record.step_id: record.stat_var_count for record in _ran(outcome)}
-    own_stat_vars = _own_stat_vars(
-        outcome,
-        steps_by_id=steps_by_id,
-        retrieval_step_ids=retrieval_step_ids,
-        step_order=step_order,
-    )
     memo: dict[str, frozenset[str]] = {}
-    for step_id, frame_ref in answer_frames(outcome).items():
+    for step_id, frame in answer_frames(outcome, published=published).items():
+        frame_ref = frame.presented
         sources = sorted(
             _upstream_retrievals(
                 step_id,
@@ -285,55 +318,64 @@ def link_evidence_to_terminal_frames(
                     for writer in sorted(writers, key=step_order.__getitem__)
                 )
             ],
-            own_stat_vars=own_stat_vars,
         )
 
 
-def _own_stat_vars(
-    outcome: RunOutcome,
+async def link_accepted_run(
+    tool_surface: ToolSurface | None,
+    outcome: Accepted,
     *,
-    steps_by_id: dict[str, WorkflowStep],
-    retrieval_step_ids: frozenset[str],
-    step_order: dict[str, int],
-) -> dict[str, tuple[str, list[dict[str, Any] | str], list[dict[str, Any] | str]]]:
-    """Each StatVar ref a step wrote for its own result (`_writes_own_stat_var`),
-    with the step's tool name and the parts of its first and second side.
+    workflow: PlanWorkflow,
+    ledger: RunLedger,
+    published: bool = True,
+) -> None:
+    """Link accepted run `outcome`'s terminal frames to their retrievals
+    (`link_evidence_to_terminal_frames`, given `published`: false for a run
+    whose publication is unfinished, which links only its retrieved
+    terminals), once the surface holds the lineage of every `get_data`
+    result the run sealed its inputs from (`RunLedger.retrievals`). A run
+    computed in another turn or another process left none in this process's
+    provenance store, so its frames would otherwise link to nothing. `restore_retrievals` is looked up via
+    `getattr`, as `link_evidence` is.
 
-    analysis-mcp writes a sum's, a quotient's or a share's rows under
-    `dcid:<its spec_id>`, a ref no graph node describes. A side's parts are
-    what its frame carries (`_carried_parts`), in workflow order: a
-    retrieval as its frame ref, and an earlier sum, quotient or share as the
-    ref it wrote, which the card names by that verb's own sides. A share of
-    two quotients therefore lists one quotient's ref on each side. A step
-    whose second side reads its first frame again names no second frame, so
-    both sides list the same parts.
+    Raises:
+        LedgerUnavailableError: the ledger's store could not be read.
     """
-    evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    written_by_step = {
-        record.step_id: f"dcid:{record.frame_ref.spec_id}"
-        for record in _ran(outcome)
-        if (step := steps_by_id.get(record.step_id)) is not None and _writes_own_stat_var(step)
-    }
+    restore = getattr(tool_surface, "restore_retrievals", None)
+    if restore is not None and outcome.run_id is not None:
+        async with store_faults(outcome.run_id):
+            retrievals = await ledger.retrievals(outcome.run_id)
+        await restore(retrievals or [])
+    link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow, published=published)
 
-    def side_parts(from_step: str) -> list[dict[str, Any] | str]:
-        retrievals, writers = _carried_parts(
-            from_step, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids
+
+async def store_run_plan(ledger: RunLedger, *, revision: str, plan: PlannerPlan) -> None:
+    """Store `plan`, which compiled the work `revision` names, in `ledger`
+    before that work's run is admitted, so the turn that completes the run,
+    in whichever session it runs, reads its notes (`answer_notes`) from it
+    (`stored_run_plan`). A store that cannot take it is logged, and such a
+    run completed by a later turn lists no notes."""
+    try:
+        await ledger.store_plan(revision, plan.model_dump_json())
+    except Exception:
+        logger.warning(
+            "the plan for revision %s could not be stored; a later turn that completes its "
+            "run lists no notes",
+            revision,
+            exc_info=True,
         )
-        parts: list[dict[str, Any] | str] = []
-        for part in sorted(retrievals | writers, key=step_order.__getitem__):
-            if part in evidence_by_step:
-                parts.append(evidence_by_step[part].frame_ref.model_dump())
-            elif part in written_by_step:
-                parts.append(written_by_step[part])
-        return parts
 
-    written: dict[str, tuple[str, list[dict[str, Any] | str], list[dict[str, Any] | str]]] = {}
-    for step_id, ref in written_by_step.items():
-        step = steps_by_id[step_id]
-        left = step.bindings[FRAME_PARAMETER]
-        right = step.bindings.get(BOTH_SIDES_VERBS[step.tool.name].second_frame, left)
-        written[ref] = (step.tool.name, side_parts(left.from_step), side_parts(right.from_step))
-    return written
+
+async def stored_run_plan(ledger: RunLedger, *, run_id: str, revision: str) -> PlannerPlan | None:
+    """The plan `store_run_plan` stored for `revision`, the work of run
+    `run_id`, or `None` when none was stored or this release cannot read it.
+
+    Raises:
+        LedgerUnavailableError: the ledger's store could not be read.
+    """
+    async with store_faults(run_id):
+        raw = await ledger.plan(revision)
+    return stored_plan(raw if isinstance(raw, str) else None, state_key=f"run plan {revision}")
 
 
 # The flow axis a recipient's role column sits on (`get_data`'s coverage
@@ -353,7 +395,7 @@ def _stat_var_totals(
 
     Walks the retrievals whose StatVars each answer frame carries
     (`_carried_retrievals`, the walk the card counts its indicators by), so
-    a `compare`'s right side gets no sentence. A retrieval is summed when
+    both sides of a `compare` get their sentence. A retrieval is summed when
     its recorded `get_data` result (`_RecordingSurface.retrieval_manifest`,
     looked up via `getattr` like `link_evidence`) names the StatVars
     dfo-apis added into the family total
@@ -664,8 +706,8 @@ def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> 
 
 
 def _family_name(manifest: Mapping[str, Any], source: SelectedSource | None) -> str:
-    """The name narration gives a summed family: the label dfo-apis gave the
-    family's ref (`summed_stat_var_label`), else the name of its source."""
+    """The name narration gives a summed family: the name dfo-apis gave the
+    family (`summed_stat_var_label`), else the name of its source."""
     label = manifest.get("summed_stat_var_label")
     if isinstance(label, str) and label:
         return label

@@ -1,0 +1,158 @@
+{
+  "id": "sum-bilateral-plus-imputed-japan-indonesia",
+  "kind": "sum_of",
+  "origin": "pilot",
+  "question": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
+  "searches": [
+    {
+      "query": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
+      "parts": [
+        {
+          "variable": "bilateral ODA",
+          "entities": [
+            {
+              "text": "Japan",
+              "role": "from"
+            },
+            {
+              "text": "Indonesia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021",
+          "separate": true
+        },
+        {
+          "variable": "imputed multilateral ODA",
+          "entities": [
+            {
+              "text": "Japan",
+              "role": "from"
+            },
+            {
+              "text": "Indonesia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021",
+          "separate": true
+        }
+      ]
+    },
+    {
+      "query": "Japan's official development assistance to Indonesia, 2015 to 2021",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Japan",
+              "role": "from"
+            },
+            {
+              "text": "Indonesia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2021"
+        }
+      ]
+    }
+  ],
+  "brief": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
+  "asks": [
+    "Japan's total ODA to Indonesia counting bilateral and imputed multilateral aid, each year 2015 to 2021"
+  ],
+  "required_kinds": [
+    "dataset",
+    "sum_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "sum_of"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "sum_of, not aggregate: two different sources are added, where aggregate totals several entities of one series"
+  },
+  "reference_payload": {
+    "question": "What was Japan's total ODA to Indonesia in each year from 2015 to 2021, counting both its bilateral aid and its imputed share of multilateral aid?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether bilateral and imputed multilateral ODA are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "planner_default",
+        "rationale": "Both are OECD DAC2a tables, which the oda-dac2a skill says add up: a donor's imputed multilateral ODA is not in its bilateral flows."
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "bilateral",
+        "measure": "bilateral ODA",
+        "entities": [
+          {
+            "name": "Japan",
+            "role": "donor"
+          },
+          {
+            "name": "Indonesia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "source_spec_id": "spec_1586dded7ed3ac3f2e79ae41497c5c2d"
+      },
+      {
+        "kind": "dataset",
+        "id": "imputed",
+        "measure": "imputed multilateral ODA",
+        "entities": [
+          {
+            "name": "Japan",
+            "role": "donor"
+          },
+          {
+            "name": "Indonesia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2021
+        },
+        "source_spec_id": "spec_1b72d4480643f7711ee5186f06e75ea4"
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "left": {
+          "input_id": "bilateral"
+        },
+        "right": {
+          "input_id": "imputed"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

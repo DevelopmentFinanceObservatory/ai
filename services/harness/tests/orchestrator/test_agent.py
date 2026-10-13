@@ -12,6 +12,7 @@ from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.scripted_plan import scripted_fetch_series_stats
+from harness.turn_budget import BoundedGemini
 from orchestrator.agent import AGENT_NAME, INSTRUCTION, create_orchestrator_agent
 
 from ..data_mcp_definitions import DataMcpDefinitions
@@ -23,6 +24,8 @@ def test_the_orchestrator_runs_on_the_model_it_is_given_with_retries(model_name)
     agent = create_orchestrator_agent(model_name=model_name)
 
     assert agent.name == AGENT_NAME
+    # Every call keeps to the request's budget.
+    assert isinstance(agent.model, BoundedGemini)
     assert agent.model.model == "gemini-test"
     assert agent.model.retry_options.attempts == 3
     assert agent.include_contents == "default"
@@ -126,7 +129,30 @@ def test_the_instruction_says_what_the_canvas_digests_focus_card_is():
 
 def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gives():
     assert "stating only the figures it gives" in INSTRUCTION
-    assert "Never state a\nfigure in a reply to a greeting or small talk" in INSTRUCTION
+    text = " ".join(INSTRUCTION.split())
+    assert "Do not state a figure in a reply to a greeting or small talk" in text
+
+
+def test_the_instruction_states_of_each_series_what_the_user_asked_of_it():
+    """A value question gets the value, a change or named-span question the
+    first and last values, a show request what the series covers, and an
+    answer over more than three series points to the chart with no values."""
+    text = " ".join(INSTRUCTION.split())
+    assert "What the reply states of a series follows what the user asked of it" in text
+    assert (
+        "asked for a value, give that value with its period and no other value of the series"
+        in text
+    )
+    assert "asked how it changed, grew or fell, or to show or see it over a named span" in text
+    assert "give its first and last values with their periods, which are the answer" in text
+    assert "asked only to show it, with no span named, say what it covers" in text
+    assert "give at most its latest value" in text
+    assert (
+        "more than three series, say what the chart holds and state no series' value, "
+        "range or highlight" in text
+    )
+    assert "never pick series to name by comparing their values" in text
+    assert "leave its values to the card" not in text
 
 
 def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_reads_as():
@@ -138,19 +164,18 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
 def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
     text = " ".join(INSTRUCTION.split())
     assert (
-        "Put a word for how a flow is counted into `variable` only when the user said it; "
-        "search elects the rest" in text
+        "Put a word for how a flow is counted into `variable` only when the user said it, "
+        "and let search elect the rest" in text
     )
     assert (
-        "the count search chose is the first option, and the other counts the result names "
-        "follow. Each of these options is the label the result gives that count, with the "
-        "spec_id the result gives it" in text
+        "The count search chose is the first option, and the other counts the result names "
+        "follow. Label every option as the result labels that count, with the spec_id the "
+        "result gives it" in text
     )
     assert (
-        "When the user picks another count the result names, fetch that count's spec_id or "
-        "name it in the plan brief; search again only for a choice the result does not name" in text
+        "When the user picks another count the result names, fetch its spec_id or name it in "
+        "the plan brief. Search again only for a choice the result does not name" in text
     )
-    assert "in the user's words, except a count, offered as the result labels it" in text
     assert "gross or net" not in text
 
 
@@ -167,6 +192,7 @@ async def test_every_run_of_the_agent_in_the_workflow_reads_the_clocks_utc_date(
         executor=no_executor,
         tool_surface=None,
         definition_surface=DataMcpDefinitions(),
+        publisher=None,
         fetch_series_stats=scripted_fetch_series_stats,
     )
     runner = Runner(

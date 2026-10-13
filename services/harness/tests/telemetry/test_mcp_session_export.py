@@ -127,14 +127,11 @@ async def composed_app(
         yield app
 
 
-# A dcid `describe` refuses on its grammar, before it reads any backend.
-MALFORMED_DCID = "dcid:not a dcid"
-
 # One call per harness client path: `McpExecutor` reaches presentation-mcp
-# (`describe_frame`) and data-mcp (`describe`), `McpSurface` reaches data-mcp
-# (`sources`) and analysis-mcp (`filter`). Each is answered without a backend,
-# by a refusal or a catalogue read.
-CALLED_TOOLS = ("describe_frame", "describe", "sources", "filter")
+# (`describe_frame`), `McpSurface` reaches data-mcp (`sources`) and
+# analysis-mcp (`filter`). Each is answered without a backend, by a refusal or
+# a catalogue read.
+CALLED_TOOLS = ("describe_frame", "sources", "filter")
 ABSENT_FRAME = {"spec_id": "absent", "content_version": "absent"}
 
 
@@ -155,7 +152,6 @@ async def _call_through_the_harness_clients(app: FastAPI) -> None:
     frame_ref = ABSENT_FRAME
     try:
         await executor(tool="describe_frame", args={"frame_ref": frame_ref})
-        await executor._describe_into_cache([MALFORMED_DCID])
         await surface.call_tool(tool=ToolId(server="data-mcp", name="sources"), arguments={})
         await surface.call_tool(
             tool=ToolId(server="analysis-mcp", name="filter"), arguments={"frame_ref": frame_ref}
@@ -216,12 +212,6 @@ async def test_a_harness_mcp_call_records_its_arguments_and_result_on_its_server
     filter_input = _attribute(filter_span, OBSERVATION_INPUT)
     assert isinstance(filter_input, str)
     assert json.loads(filter_input) == {"frame_ref": ABSENT_FRAME}
-    (describe_span,) = _tool_call_spans(fake_langfuse, "describe")
-    describe_input = _attribute(describe_span, OBSERVATION_INPUT)
-    assert isinstance(describe_input, str)
-    assert MALFORMED_DCID.removeprefix("dcid:") in describe_input
-    # `describe` refuses the malformed dcid, and the span's output is that refusal.
-    assert json.loads(outputs["describe"])["code"] == "request_invalid"
 
 
 async def test_a_call_to_a_server_off_loopback_sends_no_session(

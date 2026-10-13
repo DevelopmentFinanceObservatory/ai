@@ -1,10 +1,10 @@
 """The derived-ness marker (`frame_ref_resolution.DerivedMarker`) end to
-end: producers (`rank`, `growth`, `share_of`, `compare`) write
+end: producers (`rank`, `growth`, `share_of`) write
 `applied_policy.detail["derived"]` on their own output's trace, every verb
 carries an input's marker onward, the verbs that cannot read a rank
-position refuse `derived_input_ordinal`, and `quotient_of` writes no marker
-of its own. Also covers `Trace.time`, the
-interval `aggregate` and `rank` record when they collapse periods.
+position refuse `derived_input_ordinal`, and `compare` and `quotient_of`
+write no marker of their own. Also covers `Trace.time`, the interval
+`aggregate` and `rank` record when they collapse periods.
 """
 
 from __future__ import annotations
@@ -636,32 +636,12 @@ async def test_share_of_output_compared_against_itself_succeeds(seeded) -> None:
     assert compared.is_error is False
 
 
-async def test_compare_across_different_stat_vars_writes_inherited_stat_var(seeded) -> None:
-    """The output row's own `stat_var` always carries the left side's
-    (`engine/compare.py`), so a GNI-minus-ODA delta ships labelled as ODA --
-    `compare` must flag that with its own `inherited_stat_var` marker.
-    """
-    store, handles = seeded
-    oda_ref, gni_ref = handles.join_pair
-
-    result = await compare(
-        frame_ref=oda_ref,
-        left_entity={"reporter": "dcid:USA"},
-        right_frame_ref=gni_ref,
-        right_entity={"reporter": "dcid:USA"},
-    )
-
-    assert result.is_error is False
-    _frame, trace = await store.get(_frame_ref(result))
-    assert trace.applied_policy.detail["derived"]["inherited_stat_var"] is True
-
-
 async def test_quotient_of_writes_no_marker_of_its_own_and_carries_an_inherited_one(
     seeded,
 ) -> None:
     """A quotient's unit and `stat_var` are its own, so two measured sides
-    leave `detail` with no `derived` key. A side that is a `compare` across
-    two StatVars brings `inherited_stat_var`, which carries forward."""
+    leave `detail` with no `derived` key. A side that is a `growth` result
+    brings `inherited_stat_var`, which carries forward."""
     store, handles = seeded
     oda_ref, gni_ref = handles.join_pair
     usa = {"reporter": "dcid:USA"}
@@ -672,36 +652,44 @@ async def test_quotient_of_writes_no_marker_of_its_own_and_carries_an_inherited_
         denominator_frame_ref=gni_ref,
         denominator_entity=usa,
     )
-    compared = await compare(
-        frame_ref=oda_ref, left_entity=usa, right_frame_ref=gni_ref, right_entity=usa
+    grown = await growth(
+        frame_ref=handles.time_series_with_gap,
+        window_start="2022",
+        window_end="2023",
+        change="absolute",
     )
-    over_a_difference = await quotient_of(
-        frame_ref=_pair(compared), denominator_frame_ref=gni_ref, denominator_entity=usa
-    )
+    over_a_change = await quotient_of(frame_ref=_pair(grown), denominator_frame_ref=_pair(grown))
 
     assert measured.is_error is False
     _frame, trace = await store.get(_frame_ref(measured))
     assert "derived" not in trace.applied_policy.detail
     assert "derived result" not in measured.content[0].text
-    assert over_a_difference.is_error is False
-    _frame, trace = await store.get(_frame_ref(over_a_difference))
+    assert over_a_change.is_error is False
+    _frame, trace = await store.get(_frame_ref(over_a_change))
     assert trace.applied_policy.detail["derived"] == {"inherited_stat_var": True}
 
 
-async def test_compare_across_same_stat_var_writes_no_inherited_stat_var(seeded) -> None:
-    """Both sides resolve to the same `stat_var` -- the output row's
-    borrowed label is honest, so no marker is written."""
+@pytest.mark.parametrize("sides", ["one_stat_var", "two_stat_vars"])
+async def test_compare_writes_no_marker_of_its_own(seeded, sides: str) -> None:
+    """A compare result's rows are written under its own `stat_var`,
+    `dcid:<op_spec_hash>`, whether its sides hold one StatVar or two, so two
+    measured sides leave no `derived` key."""
     store, handles = seeded
+    usa = {"reporter": "dcid:USA"}
+    if sides == "one_stat_var":
+        left_ref = right_ref = handles.plain_single_unit
+        right_entity = {"reporter": "dcid:GBR"}
+    else:
+        left_ref, right_ref = handles.join_pair
+        right_entity = usa
 
     result = await compare(
-        frame_ref=handles.plain_single_unit,
-        left_entity={"reporter": "dcid:USA"},
-        right_frame_ref=handles.plain_single_unit,
-        right_entity={"reporter": "dcid:GBR"},
+        frame_ref=left_ref, left_entity=usa, right_frame_ref=right_ref, right_entity=right_entity
     )
 
     assert result.is_error is False
-    _frame, trace = await store.get(_frame_ref(result))
+    frame, trace = await store.get(_frame_ref(result))
+    assert set(frame.table.column("stat_var").to_pylist()) == {f"dcid:{trace.op_spec_hash}"}
     assert "derived" not in trace.applied_policy.detail
 
 

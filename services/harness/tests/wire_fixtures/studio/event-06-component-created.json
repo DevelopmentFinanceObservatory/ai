@@ -51,13 +51,6 @@
     "countries": [
       "Ethiopia"
     ],
-    "indicators": [
-      {
-        "id": "BX.GRT.EXTA.CD.DT",
-        "name": "Grants, Excluding Technical Cooperation (current US$)",
-        "description": "Grants are defined as legally binding commitments that obligate a specific value of funds available for disbursement for which there is no repayment requirement. Data are in current U.S. dollars."
-      }
-    ],
     "attribution": {
       "label": "World Bank IDS \u00b7 1 indicator",
       "source_count": 1,

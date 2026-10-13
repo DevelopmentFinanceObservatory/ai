@@ -1,0 +1,4521 @@
+{
+  "answers": [
+    "3bda4d8f9ff7a016",
+    "83076d57407729d3",
+    "e7e3c48d56e3d761",
+    "f279c775491b5692"
+  ],
+  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
+  "recorded_at": "2026-10-12T05:57:26+00:00",
+  "schema": 2,
+  "searches": [
+    {
+      "envelope": {
+        "diagnostics": {
+          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "llm_usage": {
+            "cached_tokens": 0,
+            "input_tokens": 8620,
+            "output_tokens": 648
+          },
+          "timed_out": false,
+          "timing_ms": {
+            "total": 3367
+          },
+          "trace_id": "533bb3def9f442bbbeefaa9622a8d83e",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "departures": [],
+            "no_data": {
+              "ambiguous_entities": [],
+              "ambiguous_sources": [],
+              "category": "absent",
+              "elected_count": 1,
+              "entity_terms": [],
+              "message": "No per-capita data is available for \"aid per person\". Try dropping the per-capita phrasing.",
+              "reason": "denominator_not_available",
+              "source_terms": [],
+              "unbound_qualifiers": []
+            },
+            "operations": [],
+            "rendered_sentence": "No per-capita data is available for \"aid per person\". Try dropping the per-capita phrasing.",
+            "restatement": {
+              "entities": [
+                {
+                  "role_text": "from",
+                  "text": "France"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "variable_text": "aid per person"
+            },
+            "sentence_plan": [
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": "No per-capita data is available for \"aid per person\". Try dropping the per-capita phrasing."
+              }
+            ],
+            "status": "no_data",
+            "timing_ms": {
+              "by_step": {
+                "bind": 1119,
+                "materialise": 24,
+                "recall": 325,
+                "shape": 1884
+              },
+              "total": 3352
+            },
+            "variable_text": "aid per person",
+            "warnings": [
+              {
+                "code": "slot_defaulted",
+                "message": "No aid type was named, so the answer covers official development assistance.",
+                "severity": "warn"
+              },
+              {
+                "code": "time_window_defaulted",
+                "message": "no time_text was given; the answer was resolved across every period with data.",
+                "severity": "warn"
+              },
+              {
+                "code": "skills_not_matchable",
+                "message": "Skills were requested, but this part resolved to no spec, so it binds no graph nodes to match a skill against.",
+                "severity": "warn"
+              }
+            ]
+          },
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "role_text": "from",
+                  "text": "France"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "variable_text": "official development assistance"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "origin": [
+                      "country/FRA"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "kind": "all"
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "amount",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "FinancialFlow",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "ref": "DAC1AidType1010",
+                        "state": "value"
+                      },
+                      "property": "dac1AidType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "dacTypeOfFinance"
+                    },
+                    {
+                      "binding": {
+                        "ref": "Disbursement",
+                        "state": "value"
+                      },
+                      "property": "financialFlowType"
+                    },
+                    {
+                      "binding": {
+                        "ref": "Gross",
+                        "state": "value"
+                      },
+                      "property": "nettingBasis"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_2fa11782dfd10d6b92b84e403ae94205"
+              },
+              "resolved": {
+                "alternative_measures": [
+                  {
+                    "axis": "what",
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "origin": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "amount",
+                          "measurement_qualifier": "Nominal",
+                          "population_type": "FinancialFlow",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "DAC1AidType1010",
+                              "state": "value"
+                            },
+                            "property": "dac1AidType"
+                          },
+                          {
+                            "binding": {
+                              "state": "unbound"
+                            },
+                            "property": "dacTypeOfFinance"
+                          },
+                          {
+                            "binding": {
+                              "ref": "Disbursement",
+                              "state": "value"
+                            },
+                            "property": "financialFlowType"
+                          },
+                          {
+                            "binding": {
+                              "ref": "Net",
+                              "state": "value"
+                            },
+                            "property": "nettingBasis"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_c3b67bd05bcde67080907504848bf26c"
+                    },
+                    "label": "net disbursements",
+                    "measure_axis_values": [
+                      {
+                        "axis": "populationType",
+                        "value": {
+                          "label": "financial flow",
+                          "ref": "FinancialFlow"
+                        }
+                      },
+                      {
+                        "axis": "measuredProperty",
+                        "value": {
+                          "label": "amount",
+                          "ref": "amount"
+                        }
+                      },
+                      {
+                        "axis": "measurementQualifier",
+                        "value": {
+                          "label": "nominal",
+                          "ref": "Nominal"
+                        }
+                      },
+                      {
+                        "axis": "financialFlowType",
+                        "value": {
+                          "label": "disbursement",
+                          "ref": "Disbursement"
+                        }
+                      },
+                      {
+                        "axis": "nettingBasis",
+                        "value": {
+                          "label": "net",
+                          "ref": "Net"
+                        }
+                      }
+                    ],
+                    "served_rows": 66,
+                    "served_rows_exact": true
+                  },
+                  {
+                    "axis": "what",
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "origin": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "amount",
+                          "measurement_qualifier": "Nominal",
+                          "population_type": "FinancialObligation",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "DAC1AidType1010",
+                              "state": "value"
+                            },
+                            "property": "dac1AidType"
+                          },
+                          {
+                            "binding": {
+                              "state": "unbound"
+                            },
+                            "property": "dacTypeOfFinance"
+                          },
+                          {
+                            "binding": {
+                              "ref": "Commitment",
+                              "state": "value"
+                            },
+                            "property": "financialObligationType"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_427b9ca43da9100715ca4e00d65b7760"
+                    },
+                    "label": "commitments",
+                    "measure_axis_values": [
+                      {
+                        "axis": "populationType",
+                        "value": {
+                          "label": "financial obligation",
+                          "ref": "FinancialObligation"
+                        }
+                      },
+                      {
+                        "axis": "measuredProperty",
+                        "value": {
+                          "label": "amount",
+                          "ref": "amount"
+                        }
+                      },
+                      {
+                        "axis": "measurementQualifier",
+                        "value": {
+                          "label": "nominal",
+                          "ref": "Nominal"
+                        }
+                      },
+                      {
+                        "axis": "financialObligationType",
+                        "value": {
+                          "label": "commitment",
+                          "ref": "Commitment"
+                        }
+                      }
+                    ],
+                    "served_rows": 59,
+                    "served_rows_exact": true
+                  }
+                ],
+                "available_at_place": true,
+                "confidence": "medium",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 66,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 66
+                },
+                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "download": {
+                  "licence": {
+                    "label": "OECD Terms and Conditions"
+                  },
+                  "rows": 66,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "France",
+                    "ref": "country/FRA",
+                    "role": "origin"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "OECD DAC1",
+                            "ref": "provenance/OECDDAC1"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "US Dollar",
+                            "ref": "CurrencyUSD"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "account": "provider",
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    "label": "OECD DAC1",
+                    "ref": "provenance/OECDDAC1",
+                    "source": {
+                      "label": "Organisation for Economic Co-operation and Development (OECD)",
+                      "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                    }
+                  },
+                  "unit": {
+                    "basis": "fallback",
+                    "currency": "USD",
+                    "label": "US Dollar",
+                    "ref": "CurrencyUSD"
+                  }
+                },
+                "headline": {
+                  "observations": 1,
+                  "recent_years": [
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingProvider": 1
+                      },
+                      "series": 1,
+                      "year": 2025
+                    },
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingProvider": 1
+                      },
+                      "series": 1,
+                      "year": 2024
+                    },
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingProvider": 1
+                      },
+                      "series": 1,
+                      "year": 2023
+                    }
+                  ],
+                  "role_counts": {
+                    "financingProvider": 1
+                  },
+                  "series": 1,
+                  "year": 2025,
+                  "year_named": false
+                },
+                "inapplicable_slots": [
+                  "dacTypeOfFinance",
+                  "financialObligationType"
+                ],
+                "measure_axis_values": [
+                  {
+                    "axis": "populationType",
+                    "value": {
+                      "label": "financial flow",
+                      "ref": "FinancialFlow"
+                    }
+                  },
+                  {
+                    "axis": "measuredProperty",
+                    "value": {
+                      "label": "amount",
+                      "ref": "amount"
+                    }
+                  },
+                  {
+                    "axis": "measurementQualifier",
+                    "value": {
+                      "label": "nominal",
+                      "ref": "Nominal"
+                    }
+                  },
+                  {
+                    "axis": "financialFlowType",
+                    "value": {
+                      "label": "disbursement",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "axis": "nettingBasis",
+                    "value": {
+                      "label": "gross",
+                      "ref": "Gross"
+                    }
+                  }
+                ],
+                "measure_label": "gross disbursements",
+                "measure_label_axes": [
+                  "populationType",
+                  "measuredProperty",
+                  "measurementQualifier",
+                  "financialFlowType",
+                  "nettingBasis"
+                ],
+                "rendered_sentence": "France's gross disbursements for official development assistance, 1960 to 2025. Current US dollars \u00b7 OECD DAC1.",
+                "sentence_plan": [
+                  {
+                    "binding_ref": "origin:",
+                    "entity_refs": [
+                      "country/FRA"
+                    ],
+                    "kind": "slot",
+                    "role": "origin",
+                    "segment": "heading",
+                    "states": [
+                      "origin:"
+                    ],
+                    "text": "France"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:financialFlowType",
+                      "how:nettingBasis",
+                      "axis:populationType",
+                      "axis:measuredProperty"
+                    ],
+                    "text": "gross disbursements"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " for "
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:dac1AidType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "dac1AidType",
+                    "segment": "heading",
+                    "states": [
+                      "how:dac1AidType"
+                    ],
+                    "text": "official development assistance"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:dacTypeOfFinance",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "dacTypeOfFinance",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:financialFlowType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "financialFlowType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nettingBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nettingBasis",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "1960 to 2025"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Current US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "OECD DAC1"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    }
+                  ],
+                  "label": "gross disbursements (official development assistance)",
+                  "measured_property": {
+                    "label": "amount",
+                    "ref": "amount"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 3,
+                  "member_digest": "9a2c6c88a5c7db0a4c0a4c5ead745192971375fdca1fc6961c78a7097c05a801",
+                  "population_type": {
+                    "label": "financial flow",
+                    "ref": "FinancialFlow"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "financialflow_amount_measuredvalue_nominal_family_f1112b09",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "aid type",
+                      "property": {
+                        "label": "DAC 1 aid type",
+                        "ref": "dac1AidType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "financial flow type",
+                      "property": {
+                        "label": "financial flow type",
+                        "ref": "financialFlowType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "netting basis",
+                      "property": {
+                        "label": "netting basis",
+                        "ref": "nettingBasis"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "DAC type of finance",
+                      "property": {
+                        "label": "DAC type of finance",
+                        "ref": "dacTypeOfFinance"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [
+                  "oda-dac1"
+                ],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "aid type",
+                      "property": {
+                        "label": "DAC 1 aid type",
+                        "ref": "dac1AidType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "member_count": 8,
+                        "parent": "DAC1AidType1010",
+                        "relation": "child",
+                        "served_rows": 65,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bilateral ODA",
+                            "ref": "DAC1AidType1015"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "member_count": 8,
+                        "parent": "DAC1AidType1010",
+                        "relation": "child",
+                        "served_rows": 65,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "multilateral ODA",
+                            "ref": "DAC1AidType2000"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "member_count": 7,
+                        "parent": "DAC1AidType1010",
+                        "relation": "child",
+                        "served_rows": 10,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "contribution to the HIPC Initiative",
+                            "ref": "DAC1AidType2901"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "member_count": 7,
+                        "parent": "DAC1AidType1010",
+                        "relation": "child",
+                        "served_rows": 7,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "contribution to the IDA Debt Reduction Facility",
+                            "ref": "DAC1AidType2902"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "official development assistance",
+                          "ref": "DAC1AidType1010"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "aid type",
+                      "property": {
+                        "label": "DAC 1 aid type",
+                        "ref": "dac1AidType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "disbursement",
+                          "ref": "Disbursement"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "financial flow type",
+                      "property": {
+                        "label": "financial flow type",
+                        "ref": "financialFlowType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "gross",
+                          "ref": "Gross"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "netting basis",
+                      "property": {
+                        "label": "netting basis",
+                        "ref": "nettingBasis"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "DAC type of finance",
+                      "property": {
+                        "label": "DAC type of finance",
+                        "ref": "dacTypeOfFinance"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2025",
+                    "start": "1960"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": true,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [
+                    {
+                      "disposition": "bound",
+                      "named": [
+                        {
+                          "label": "official development assistance",
+                          "ref": "DAC1AidType1010"
+                        }
+                      ],
+                      "selected": [],
+                      "slot": "dac1AidType",
+                      "text": "official development assistance"
+                    }
+                  ],
+                  "resolved_entities": [
+                    {
+                      "label": "France",
+                      "ref": "country/FRA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "dfo",
+                        "label": "Development Finance Observatory"
+                      },
+                      "label": "OECD DAC1",
+                      "ref": "provenance/OECDDAC1",
+                      "source": {
+                        "label": "Organisation for Economic Co-operation and Development (OECD)",
+                        "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "aid type",
+                        "property": {
+                          "label": "DAC 1 aid type",
+                          "ref": "dac1AidType"
+                        }
+                      },
+                      "provenance": "text_recognized",
+                      "refs": [
+                        {
+                          "label": "official development assistance",
+                          "ref": "DAC1AidType1010"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "financial flow type",
+                        "property": {
+                          "label": "financial flow type",
+                          "ref": "financialFlowType"
+                        }
+                      },
+                      "provenance": "measure_elected",
+                      "refs": [
+                        {
+                          "label": "disbursement",
+                          "ref": "Disbursement"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "netting basis",
+                        "property": {
+                          "label": "netting basis",
+                          "ref": "nettingBasis"
+                        }
+                      },
+                      "provenance": "measure_elected",
+                      "refs": [
+                        {
+                          "label": "gross",
+                          "ref": "Gross"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "DAC type of finance",
+                        "property": {
+                          "label": "DAC type of finance",
+                          "ref": "dacTypeOfFinance"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unit_conversion": {
+                  "currencies": [
+                    {
+                      "base_year_max": 2023,
+                      "base_year_min": 2023,
+                      "code": "AED",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2021,
+                        "start_year": 1997
+                      },
+                      "noun": "UAE dirhams"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2002,
+                      "code": "AFN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2002
+                      },
+                      "noun": "Afghan afghanis"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "ALL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Albanian leks"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "AMD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Armenian drams"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1991,
+                      "code": "AOA",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1991
+                      },
+                      "noun": "Angolan kwanzas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "ARS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Argentine pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "AUD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Australian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1995,
+                      "code": "AWG",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1995
+                      },
+                      "noun": "Aruban florins"
+                    },
+                    {
+                      "base_year_max": 2023,
+                      "base_year_min": 2023,
+                      "code": "AZN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2019,
+                        "start_year": 2014
+                      },
+                      "noun": "Azerbaijani manats"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1996,
+                      "code": "BAM",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1996
+                      },
+                      "noun": "Bosnia-Herzegovina convertible marks"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BBD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Barbadian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BDT",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Bangladeshi taka"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BHD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Bahraini dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BIF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Burundian francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1985,
+                      "code": "BND",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1985
+                      },
+                      "noun": "Brunei dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BOB",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Bolivian bolivianos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1986,
+                      "code": "BRL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1986
+                      },
+                      "noun": "Brazilian reais"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BSD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Bahamian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BTN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Bhutanese ngultrums"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BWP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Botswana pula"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "BYN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Belarusian rubles"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "BZD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Belize dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "CAD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Canadian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1991,
+                      "code": "CDF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1991
+                      },
+                      "noun": "Congolese francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "CHF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Swiss francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "CLP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Chilean pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "CNY",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Chinese yuan"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "COP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Colombian pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "CRC",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Costa Rican colones"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "CVE",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Cape Verdean escudos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1998,
+                      "code": "CZK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1998
+                      },
+                      "noun": "Czech korunas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1990,
+                      "code": "DJF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1990
+                      },
+                      "noun": "Djiboutian francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "DKK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Danish kroner"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "DOP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Dominican pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "DZD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Algerian dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "EGP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Egyptian pounds"
+                    },
+                    {
+                      "base_year_max": 2019,
+                      "base_year_min": 1992,
+                      "code": "ERN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2019,
+                        "start_year": 1992
+                      },
+                      "noun": "Eritrean nakfas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "ETB",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Ethiopian birr"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1973,
+                      "code": "EUR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1973
+                      },
+                      "noun": "euros"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "FJD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Fijian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "GBP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "British pounds"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1994,
+                      "code": "GEL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1994
+                      },
+                      "noun": "Georgian lari"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "GHS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Ghanaian cedis"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "GMD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Gambian dalasis"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "GNF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Guinean francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "GTQ",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Guatemalan quetzales"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "GYD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Guyanese dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "HKD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Hong Kong dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "HNL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Honduran lempiras"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "HTG",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Haitian gourdes"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2003,
+                      "code": "HUF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2003
+                      },
+                      "noun": "Hungarian forints"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "IDR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Indonesian rupiahs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1997,
+                      "code": "ILS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1997
+                      },
+                      "noun": "Israeli new shekels"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "INR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Indian rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2000,
+                      "code": "IQD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2000
+                      },
+                      "noun": "Iraqi dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "IRR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Iranian rials"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1997,
+                      "code": "ISK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1997
+                      },
+                      "noun": "Icelandic kr\u00f3nur"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "JMD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Jamaican dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "JOD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Jordanian dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "JPY",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Japanese yen"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "KES",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Kenyan shillings"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "KGS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Kyrgyz soms"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1986,
+                      "code": "KHR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1986
+                      },
+                      "noun": "Cambodian riels"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "KMF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Comorian francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1987,
+                      "code": "KRW",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1987
+                      },
+                      "noun": "South Korean won"
+                    },
+                    {
+                      "base_year_max": 2024,
+                      "base_year_min": 1995,
+                      "code": "KWD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2024,
+                        "start_year": 1995
+                      },
+                      "noun": "Kuwaiti dinars"
+                    },
+                    {
+                      "base_year_max": 2024,
+                      "base_year_min": 2013,
+                      "code": "KZT",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2024,
+                        "start_year": 2013
+                      },
+                      "noun": "Kazakh tenge"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "LAK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Lao kip"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "LBP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Lebanese pounds"
+                    },
+                    {
+                      "base_year_max": 2024,
+                      "base_year_min": 1980,
+                      "code": "LKR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2024,
+                        "start_year": 1980
+                      },
+                      "noun": "Sri Lankan rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "LSL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Lesotho maloti"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "LYD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Libyan dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MAD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Moroccan dirhams"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "MDL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Moldovan lei"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MGA",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Malagasy ariary"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "MKD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Macedonian denars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1998,
+                      "code": "MMK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1998
+                      },
+                      "noun": "Myanmar kyats"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MNT",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Mongolian tugriks"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2001,
+                      "code": "MOP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2001
+                      },
+                      "noun": "Macanese patacas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1990,
+                      "code": "MRU",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1990
+                      },
+                      "noun": "Mauritanian ouguiyas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MUR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Mauritian rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MVR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Maldivian rufiyaa"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MWK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Malawian kwachas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MXN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Mexican pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MYR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Malaysian ringgits"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "MZN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Mozambican meticais"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1989,
+                      "code": "NAD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1989
+                      },
+                      "noun": "Namibian dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1990,
+                      "code": "NGN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1990
+                      },
+                      "noun": "Nigerian naira"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1987,
+                      "code": "NIO",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1987
+                      },
+                      "noun": "Nicaraguan c\u00f3rdobas"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "NOK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Norwegian kroner"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "NPR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Nepalese rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1961,
+                      "code": "NZD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1961
+                      },
+                      "noun": "New Zealand dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "OMR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Omani rials"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "PEN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Peruvian soles"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "PGK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Papua New Guinean kina"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "PHP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Philippine pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "PKR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Pakistani rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1998,
+                      "code": "PLN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1998
+                      },
+                      "noun": "Polish zlotys"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "PYG",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Paraguayan guaran\u00eds"
+                    },
+                    {
+                      "base_year_max": 2023,
+                      "base_year_min": 2023,
+                      "code": "QAR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 1990,
+                        "start_year": 1985
+                      },
+                      "noun": "Qatari riyals"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2013,
+                      "code": "RON",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2013
+                      },
+                      "noun": "Romanian lei"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1997,
+                      "code": "RSD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1997
+                      },
+                      "noun": "Serbian dinars"
+                    },
+                    {
+                      "base_year_max": 2020,
+                      "base_year_min": 2010,
+                      "code": "RUB",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2020,
+                        "start_year": 2010
+                      },
+                      "noun": "Russian rubles"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "RWF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Rwandan francs"
+                    },
+                    {
+                      "base_year_max": 2023,
+                      "base_year_min": 2000,
+                      "code": "SAR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2023,
+                        "start_year": 2000
+                      },
+                      "noun": "Saudi riyals"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SBD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Solomon Islands dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SCR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Seychellois rupees"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SDG",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Sudanese pounds"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "SEK",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "Swedish kronor"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SGD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Singapore dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SLE",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Sierra Leonean leones"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SRD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Surinamese dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2011,
+                      "code": "SSP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2011
+                      },
+                      "noun": "South Sudanese pounds"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "STN",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "S\u00e3o Tom\u00e9 and Pr\u00edncipe dobras"
+                    },
+                    {
+                      "base_year_max": 2010,
+                      "base_year_min": 1980,
+                      "code": "SYP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2010,
+                        "start_year": 1980
+                      },
+                      "noun": "Syrian pounds"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "SZL",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Swazi emalangeni"
+                    },
+                    {
+                      "base_year_max": 2024,
+                      "base_year_min": 2018,
+                      "code": "THB",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2016,
+                        "start_year": 2006
+                      },
+                      "noun": "Thai baht"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "TJS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Tajikistani somonis"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "TMT",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Turkmenistani manat"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "TND",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Tunisian dinars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "TOP",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Tongan pa\u02bbanga"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1990,
+                      "code": "TRY",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1990
+                      },
+                      "noun": "Turkish lira"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "TTD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Trinidad and Tobago dollars"
+                    },
+                    {
+                      "base_year_max": 2024,
+                      "base_year_min": 2023,
+                      "code": "TWD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2016,
+                        "start_year": 2006
+                      },
+                      "noun": "New Taiwan dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "TZS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Tanzanian shillings"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1991,
+                      "code": "UAH",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1991
+                      },
+                      "noun": "Ukrainian hryvnias"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "UGX",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Ugandan shillings"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1960,
+                      "code": "USD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "noun": "US dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "UYU",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Uruguayan pesos"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1992,
+                      "code": "UZS",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1992
+                      },
+                      "noun": "Uzbekistani soms"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2017,
+                      "code": "VES",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2017
+                      },
+                      "noun": "Venezuelan bol\u00edvares"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "VND",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Vietnamese dong"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "VUV",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Vanuatu vatu"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "WST",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Samoan tala"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "XAF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Central African CFA francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "XCD",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "East Caribbean dollars"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "XOF",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "West African CFA francs"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 2014,
+                      "code": "YER",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 2014
+                      },
+                      "noun": "Yemeni rials"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "ZAR",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "South African rand"
+                    },
+                    {
+                      "base_year_max": 2025,
+                      "base_year_min": 1980,
+                      "code": "ZMW",
+                      "constant_years": {
+                        "end_year": 2025,
+                        "start_year": 1960
+                      },
+                      "current_years": {
+                        "end_year": 2025,
+                        "start_year": 1980
+                      },
+                      "noun": "Zambian kwachas"
+                    }
+                  ],
+                  "default_base_year": 2024,
+                  "role_currencies": {
+                    "origin": "EUR"
+                  }
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_2fa11782dfd10d6b92b84e403ae94205"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 9,
+                "bind": 1332,
+                "materialise": 24,
+                "options": 5,
+                "recall": 2,
+                "shape": 1562
+              },
+              "total": 2934
+            },
+            "variable_text": "official development assistance",
+            "warnings": [
+              {
+                "code": "retrieval_score_weak",
+                "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
+                "severity": "info"
+              },
+              {
+                "code": "time_window_defaulted",
+                "message": "no time_text was given; the answer was resolved across every period with data.",
+                "severity": "warn"
+              }
+            ]
+          },
+          {
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "France"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "variable_text": "population"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/FRA"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "kind": "all"
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "count",
+                    "population_type": "Person",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "age"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "gender"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maritalStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "nativity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfBirth"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_c04173eccb9a875a8b840576c2dc87ac"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 66,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 66
+                },
+                "download": {
+                  "licence": {
+                    "label": "OECD Terms and Conditions"
+                  },
+                  "rows": 66,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "France",
+                    "ref": "country/FRA",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "OECD DAC1",
+                            "ref": "provenance/OECDDAC1"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "account": "provider",
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    "label": "OECD DAC1",
+                    "ref": "provenance/OECDDAC1",
+                    "source": {
+                      "label": "Organisation for Economic Co-operation and Development (OECD)",
+                      "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "age",
+                  "maritalStatus",
+                  "gender",
+                  "placeOfBirth",
+                  "nativity",
+                  "employment",
+                  "employmentStatus"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Demographics",
+                  "ref": "dc/g/Demographics"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_c5eb2e3b8796ec133ceb69fc5a777043"
+                    },
+                    "stat_var": {
+                      "label": "Rate of Population Growth",
+                      "ref": "GrowthRate_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "lifeExpectancy",
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_268302d2b2c4412a0c3dee6dfd559d03"
+                    },
+                    "stat_var": {
+                      "label": "Life Expectancy",
+                      "ref": "LifeExpectancy_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "meanValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_666b1ffa0ad0c6f8d8882bd1cefc2f87"
+                    },
+                    "stat_var": {
+                      "label": "Mean count of person",
+                      "ref": "Mean_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "measurement_denominator": {
+                            "ref": "area"
+                          },
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_df312cbc337dc7d4868fd17343692391"
+                    },
+                    "stat_var": {
+                      "label": "Population Density",
+                      "ref": "Count_Person_PerArea"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "kind": "all"
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "age",
+                          "population_type": "Person",
+                          "stat_type": "meanValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_d456b67939c8f30330625eebc9f7c606"
+                    },
+                    "stat_var": {
+                      "label": "Average age of people",
+                      "ref": "Mean_Age_Person"
+                    }
+                  }
+                ],
+                "rendered_sentence": "France's total population, 1960 to 2025. OECD DAC1.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "France"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "total population"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:age",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "age",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:gender",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "gender",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maritalStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maritalStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nativity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nativity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfBirth",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfBirth",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "1960 to 2025"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "OECD DAC1"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Total population",
+                  "measured_property": {
+                    "label": "count",
+                    "ref": "count"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 497,
+                  "population_type": {
+                    "label": "Person",
+                    "ref": "Person"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "person_count_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [
+                  "oda-dac1"
+                ],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 25 To 34",
+                            "ref": "Years25To34"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 35 To 44",
+                            "ref": "Years35To44"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 45 To 54",
+                            "ref": "Years45To54"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 55 To 64",
+                            "ref": "Years55To64"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 65 To 74",
+                            "ref": "Years65To74"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employed",
+                            "ref": "Employed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "France",
+                          "ref": "country/FRA"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2025",
+                    "start": "1960"
+                  },
+                  "member_count": 55,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_daf889452657d56d",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "resolved_entities": [
+                    {
+                      "label": "France",
+                      "ref": "country/FRA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "dfo",
+                        "label": "Development Finance Observatory"
+                      },
+                      "label": "OECD DAC1",
+                      "ref": "provenance/OECDDAC1",
+                      "source": {
+                        "label": "Organisation for Economic Co-operation and Development (OECD)",
+                        "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age",
+                        "property": {
+                          "label": "age",
+                          "ref": "age"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "marital status",
+                        "property": {
+                          "label": "maritalStatus",
+                          "ref": "maritalStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "gender",
+                        "property": {
+                          "label": "gender",
+                          "ref": "gender"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of birth",
+                        "property": {
+                          "label": "placeOfBirth",
+                          "ref": "placeOfBirth"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "nativity",
+                        "property": {
+                          "label": "nativity",
+                          "ref": "nativity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment",
+                        "property": {
+                          "label": "employment",
+                          "ref": "employment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment status",
+                        "property": {
+                          "label": "employmentStatus",
+                          "ref": "employmentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "France",
+                          "ref": "country/FRA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_c04173eccb9a875a8b840576c2dc87ac"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 82,
+                "bind": 1808,
+                "materialise": 113,
+                "options": 73,
+                "recall": 1,
+                "shape": 301
+              },
+              "total": 2378
+            },
+            "variable_text": "population",
+            "warnings": [
+              {
+                "code": "time_window_defaulted",
+                "message": "no time_text was given; the answer was resolved across every period with data.",
+                "severity": "warn"
+              }
+            ]
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true,
+          "raw_query": "How much aid does France provide per person"
+        },
+        "rendered_sentence": "No per-capita data for aid per person. Try dropping the per-capita phrasing. France's gross disbursements for official development assistance, 1960 to 2025. Current US dollars \u00b7 OECD DAC1. France's total population, 1960 to 2025. OECD DAC1.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "No per-capita data for "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "aid per person"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": ". Try dropping the per-capita phrasing."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "binding_ref": "origin:",
+            "entity_refs": [
+              "country/FRA"
+            ],
+            "kind": "slot",
+            "part_index": 1,
+            "role": "origin",
+            "segment": "heading",
+            "states": [
+              "origin:"
+            ],
+            "text": "France"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "how:financialFlowType",
+              "how:nettingBasis",
+              "axis:populationType",
+              "axis:measuredProperty"
+            ],
+            "text": "gross disbursements"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": " for "
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:dac1AidType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "dac1AidType",
+            "segment": "heading",
+            "states": [
+              "how:dac1AidType"
+            ],
+            "text": "official development assistance"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:dacTypeOfFinance",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "dacTypeOfFinance",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:financialFlowType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "financialFlowType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nettingBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "nettingBasis",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "1960 to 2025"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Current US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "OECD DAC1"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "France"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [],
+            "text": "total population"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:age",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "age",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employment",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "employment",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employmentStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "employmentStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:gender",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "gender",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:maritalStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "maritalStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nativity",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "nativity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:placeOfBirth",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "placeOfBirth",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "1960 to 2025"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "OECD DAC1"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 2,
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "skills": {
+          "oda-dac1": {
+            "content_version": "sha256:b9dc0317d230b1377e6fc9dfaec27dc6d9df63b50c6f4f12c8f7047e4eb11ed6",
+            "description": "Context for working with the OECD DAC1 table, the donor-level totals of ODA, OOF, export credits and private flows by aid type. Covers who reports, the flow types (grant equivalent, net and gross disbursements, commitments) and price bases, what the ODA total includes (in-donor costs and core multilateral contributions), private sector instruments, ODA/GNI, and the double-counting traps with donor aggregates, EU Institutions, nested aid-type lines and memo items. Load once DAC1 has been chosen for an analysis, or when working with DAC1 figures. For choosing between DAC datasets, use oda-dataset-selection.",
+            "id": "oda-dac1",
+            "name": "oda-dac1"
+          }
+        },
+        "status": "mixed"
+      },
+      "parts": [
+        {
+          "entities": [
+            {
+              "role": "from",
+              "text": "France"
+            }
+          ],
+          "variable": "aid per person"
+        },
+        {
+          "entities": [
+            {
+              "role": "from",
+              "text": "France"
+            }
+          ],
+          "variable": "official development assistance"
+        },
+        {
+          "entities": [
+            {
+              "text": "France"
+            }
+          ],
+          "variable": "population"
+        }
+      ],
+      "question": "How much aid does France provide per person",
+      "raw_text": false
+    }
+  ],
+  "task": "quotient-oda-per-person-france"
+}

@@ -38,6 +38,7 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
+from harness.direct_recipes import DirectRecipes
 from harness.generative import GeminiEdit
 from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
@@ -46,6 +47,7 @@ from harness.mcp_client import McpExecutor, McpResolver
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.prefix_cache import PrefixCache
 from harness.provenance import ProvenanceStore
+from harness.run_ledger import StudioRunLedger
 from harness.session_store import build_session_service
 from harness.settings import (
     ANALYSIS_MCP_MOUNT_PATH,
@@ -405,7 +407,10 @@ def create_app(
     # The executor replays a rolling frame through the refresh's clients when
     # a card draws other series than the frame's latest period was taken over.
     executor = McpExecutor(
-        settings=resolved_settings, provenance=provenance, card_replay=live_refresh.replay
+        settings=resolved_settings,
+        provenance=provenance,
+        card_replay=live_refresh.replay,
+        dataset_versions=live_refresh.dataset_versions,
     )
     # The store exists before the workflow because the recall seam is
     # bound to it (conversation resolved per request via contextvar).
@@ -422,6 +427,11 @@ def create_app(
     logger.info("orchestrator thinking level: %s", resolved_settings.orchestrator_thinking_level)
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
+        # Runs are kept in the conversation's ledger session, and a run
+        # completes once its derived results are published with their
+        # replay recipes. The `execute` node and the orchestrator's direct
+        # recipes run on the one ledger.
+        run_ledger = StudioRunLedger(store)
         # The orchestrator's tools run through the same recorder and
         # recording surface as the `execute` node, so their steps and cards
         # reach the wire.
@@ -437,6 +447,14 @@ def create_app(
                 definition_surface=tool_surface,
                 recall_part=make_recall_part(store),
                 remove_cards=make_remove_cards(store),
+                direct=DirectRecipes(
+                    recipes=tuple(resolved_settings.orchestrator_direct_recipes),
+                    run_ledger=run_ledger,
+                    publisher=executor.publish_result,
+                    tool_surface=surface_recorder,
+                    translation_surface=tool_surface,
+                    max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
+                ),
             ),
         )
         return create_root_workflow(
@@ -460,6 +478,8 @@ def create_app(
             # Activity feed.
             tool_surface=surface_recorder,
             definition_surface=tool_surface,
+            run_ledger=run_ledger,
+            publisher=executor.publish_result,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
         )
 
@@ -468,7 +488,10 @@ def create_app(
         executor=executor,
         session_service=app.state.session_service,
         store=store,
-        edit_model=GeminiEdit(model_name=resolved_settings.model_name),
+        edit_model=GeminiEdit(
+            model_name=resolved_settings.model_name,
+            timeout_s=resolved_settings.turn_model_time_s,
+        ),
         tool_surface=tool_surface,
         provenance=provenance,
     )

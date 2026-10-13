@@ -154,9 +154,12 @@ COMBINED_MCP_INSTRUCTIONS = (
 
 # data-mcp's `resolve_definition`, which resolves each Search result a Studio
 # turn starts from, and a seed's identity over a plan's years, again through
-# Search and stores its definition. The harness calls it at `DATA_MCP_URL`
-# (`translator.discovery.resolve_definition`).
-HARNESS_ONLY_TOOLS = frozenset({"resolve_definition"})
+# Search and stores its definition, and `catalogue_counts`, the counts
+# `explain_dfo` quotes. `sources` gives an outside client the same counts. The
+# harness calls both at `DATA_MCP_URL`
+# (`translator.discovery.resolve_definition`,
+# `harness.dfo_faq.read_catalogue_counts`).
+HARNESS_ONLY_TOOLS = frozenset({"resolve_definition", "catalogue_counts"})
 
 # The wait a caller is told before repeating a call the in-flight cap refused. A call
 # runs for up to `EXTERNAL_CALL_LIMIT_S`, and most finish within a few seconds.

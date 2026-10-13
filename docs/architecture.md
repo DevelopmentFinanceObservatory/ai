@@ -46,18 +46,22 @@ accepted proposal runs translation on the plan it recorded, the plan passes
 through session state, and the proposal's answer carries a `translation`
 verdict, `{"outcome": "ok"}` for a compiled plan or the referral translation
 stopped on.
-Nothing runs until the user approves. The planner's own tool is `submit_plan`:
-it approves nothing and executes nothing, and declares a compiled plan ready
-for the user's answer. The gate is the workflow's approval interrupt, raised
-by its `approve` node and answered through `POST /api/studio/interrupt`, keyed
+Nothing runs until the user approves. A `propose_plan` whose translation
+compiles declares the plan ready for the user's answer in code
+(`planner.agent.declare_ready`); it approves nothing and executes nothing.
+The gate is the workflow's approval interrupt, raised by its `approve` node and answered through `POST /api/studio/interrupt`, keyed
 on the plan's revision rather than its version integer, so what runs is
 exactly what was approved. The executor, also code, takes the
 approved plan from there: `execute_approved_plan` refuses a plan whose content
 no longer hashes to its approved revision or whose tools' schemas have changed,
 runs the workflow step by step with each step's frame references bound from the
 steps before it, re-runs the evidence checks on the manifests `get_data`
-returns, and ends the plan `COMPLETED` on an `Accepted` outcome or `FAILED` on a
-`Refused` one or a `MethodChoiceNeeded` that hands a choice back to the planner.
+returns, and ends the plan `COMPLETED` once an `Accepted` run completes, with
+each derived result published with its replay recipe, or `FAILED` on a
+`Refused` outcome, a `MethodChoiceNeeded` that hands a choice back to the
+planner, or a run whose publication failed. An `Accepted` run whose
+publication is still unfinished leaves the plan `EXECUTING` until a later turn
+completes it.
 See `services/harness/src/planner/README.md`,
 `services/harness/src/translator/README.md`,
 `services/harness/src/compiler/README.md` and
@@ -169,8 +173,7 @@ successful `search` puts its upstream envelope in the result's `_meta`
 (`data_mcp.search_result.SEARCH_ENVELOPE_META_KEY`) and a small answer in
 `structuredContent`, so a host that hands `structuredContent` to a model
 shows it a few hundred bytes; the harness reads the envelope from `_meta`.
-`harness.mcp_client.McpExecutor._indicators_for` reads `describe`'s `nodes`
-for the More Info panel. `translator.discovery` reads a `search` envelope
+`translator.discovery` reads a `search` envelope
 through `compiler.sources.outcome_from_envelope` and answers with
 `compact_source`'s own field set, and keeps one `definition` string per
 source out of a `describe` answer. `executor.run` keeps each server's digest

@@ -6,13 +6,13 @@ import copy
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 
 import pytest
 from compiler.sources import source_from_spec_block
 from data_mcp.search_tool import SearchSource
-from planner.agent import _Patch
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -23,8 +23,10 @@ from planner.operations import (
     Side,
     Translation,
 )
+from planner.parties import PartyRole
 from planner.plan import (
     CUT_MARKER,
+    MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_DECISION_OPTIONS,
     MAX_DECISION_RATIONALE_CHARS,
@@ -43,11 +45,15 @@ from planner.plan import (
     AggregateRequirement,
     AnswerMode,
     AskAnswer,
+    AskBreakdown,
+    AskRoleDroppedError,
     ComparisonRequirement,
     Coverage,
     DatasetRequirement,
     Decision,
+    DecisionDraft,
     DecisionFixes,
+    Decline,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -75,6 +81,7 @@ from planner.plan import (
     plan_revision,
     retrieves_period,
     rolls_from_its_start,
+    settle_decisions,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -113,6 +120,7 @@ from planner.workflow import (
     WorkflowStep,
 )
 from pydantic import TypeAdapter, ValidationError
+from submission.service import _Patch
 
 from ..context_probe import field_limits_record, plan_record, record_chars, unbounded_paths
 
@@ -223,8 +231,8 @@ def _every_kind_plan(decision: Decision) -> Plan:
     comparison_a = ComparisonRequirement(
         id="comparison_a",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="totals_a"),
-        right=RequirementSide(input_id="filtered_b"),
+        minuend=RequirementSide(input_id="filtered_b"),
+        subtrahend=RequirementSide(input_id="totals_a"),
     )
     sum_a = SumOfRequirement(
         id="sum_a",
@@ -364,15 +372,17 @@ def test_amend_revives_a_rejected_plan_as_a_new_version(decision: DecisionFactor
     assert amended.previous_version == 1
 
 
-def test_amend_clears_the_approved_revision(decision: DecisionFactory) -> None:
+def test_amend_clears_the_approval(decision: DecisionFactory) -> None:
     # The user approved the previous version's content; the new content has
     # not been looked at.
-    approved = _plan(decision()).approve()
+    approved = _plan(decision()).approve(at=datetime.now(UTC))
 
     amended = approved.amend()
 
     assert approved.approved_revision is not None
+    assert approved.approved_at is not None
     assert amended.approved_revision is None
+    assert amended.approved_at is None
 
 
 def test_amend_validates_the_amended_plan_in_full(decision: DecisionFactory) -> None:
@@ -686,56 +696,60 @@ def test_a_requirement_the_question_states_outright_cites_no_decision(
     assert plan.evidence_requirements[0].decision_ids == ()
 
 
-def test_a_pinned_source_citing_no_decision_is_still_refused(
-    requirement: RequirementFactory,
-) -> None:
-    with pytest.raises(
-        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
-    ):
-        Plan(
-            question="Show me Kenya's external debt service.",
-            answer_mode=AnswerMode.SERIES,
-            evidence_requirements=[requirement(decision_ids=[], source_spec_id=_PIN)],
-        )
-
-
 def test_a_requirement_may_cover_a_whole_party_and_name_no_entity() -> None:
     dataset = DatasetRequirement(
         id="health_spending",
         decision_ids=["measure"],
         measure="health spending per person",
-        across="country",
+        across=("country",),
         period=Period(start=2022, end=2022),
     )
 
     assert dataset.entities == ()
-    assert dataset.across == "country"
+    assert dataset.across == ("country",)
 
 
 @pytest.mark.parametrize(
-    ("role", "across"),
+    ("role", "across", "word"),
     [
-        ("recipient", "recipient"),
-        ("Recipient", "recipient"),
-        ("recipients", "recipient"),
-        ("recipient", "recipients"),
-        ("debtor", "recipient"),
-        ("recipient country", "recipient"),
-        ("country", "countries"),
+        ("recipient", ("recipient",), "recipient"),
+        ("Recipient", ("recipient",), "recipient"),
+        ("recipients", ("recipient",), "recipient"),
+        ("recipient", ("recipients",), "recipients"),
+        ("debtor", ("recipient",), "recipient"),
+        ("recipient country", ("recipient",), "recipient"),
+        ("country", ("countries",), "countries"),
+        ("recipient", ("donor", "recipient"), "recipient"),
     ],
 )
 def test_a_requirement_names_no_entity_in_the_party_across_covers(
-    requirement: RequirementFactory, role: str, across: str
+    requirement: RequirementFactory, role: str, across: tuple[str, ...], word: str
 ) -> None:
     # Kenya as a recipient, across every recipient, claims two populations at
     # once. The two are compared by the party each names, not by spelling.
-    every = "country" if across == "countries" else "recipient"
+    every = "country" if word == "countries" else "recipient"
     with pytest.raises(
         ValidationError,
-        match=rf"across='{across}' covers every {every}, so no entity may also be named in "
-        r"that party; named: \['Kenya'\]",
+        match=rf"across word '{word}' covers every {every}, so no entity may also be named "
+        r"in that party; named: \['Kenya'\]",
     ):
         requirement(entities=[Entity(name="Kenya", role=role)], across=across)
+
+
+@pytest.mark.parametrize(
+    "across", [("donor", "donors"), ("donor", "provider"), ("country", "economy")]
+)
+def test_a_requirement_states_each_party_once_in_across(
+    requirement: RequirementFactory, across: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValidationError, match=r"`across` states each party once"):
+        requirement(entities=[], across=across)
+
+
+def test_a_requirement_may_cover_both_sides_of_a_flow(requirement: RequirementFactory) -> None:
+    dataset = requirement(entities=[], across=("donor", "recipient"))
+
+    assert dataset.across == ("donor", "recipient")
 
 
 @pytest.mark.parametrize("across", ["country", "countries", "economy"])
@@ -748,23 +762,23 @@ def test_a_requirement_names_no_unroled_entity_beside_every_place(
         ValidationError,
         match=r"\['Kenya'\] carry no `role`, so each names one of them and leaves no "
         r"population open\. To rank every member, drop them; to rank them against every "
-        r"member, drop `across` and state the rank's among='population'",
+        r"member, drop the word from `across` and state the rank's among='population'",
     ):
-        requirement(entities=[Entity(name="Kenya")], across=across)
+        requirement(entities=[Entity(name="Kenya")], across=(across,))
 
 
 def test_an_unroled_entity_may_sit_beside_a_flow_party(requirement: RequirementFactory) -> None:
-    dataset = requirement(entities=[Entity(name="Kenya")], across="donor")
+    dataset = requirement(entities=[Entity(name="Kenya")], across=("donor",))
 
-    assert dataset.across == "donor"
+    assert dataset.across == ("donor",)
 
 
 def test_a_requirement_names_an_entity_beside_the_party_across_covers(
     requirement: RequirementFactory,
 ) -> None:
-    dataset = requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor")
+    dataset = requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",))
 
-    assert dataset.across == "donor"
+    assert dataset.across == ("donor",)
 
 
 # --- Derived requirement validation --------------------------------------------
@@ -814,12 +828,12 @@ def test_a_rank_needs_among_stated() -> None:
 
 
 def test_comparison_sides_must_differ() -> None:
-    with pytest.raises(ValidationError, match="left and right sides must differ"):
+    with pytest.raises(ValidationError, match="minuend and subtrahend must differ"):
         ComparisonRequirement(
             id="excess",
             decision_ids=["measure"],
-            left=RequirementSide(input_id="annual_debt_service"),
-            right=RequirementSide(input_id="annual_debt_service"),
+            minuend=RequirementSide(input_id="annual_debt_service"),
+            subtrahend=RequirementSide(input_id="annual_debt_service"),
         )
 
 
@@ -911,8 +925,8 @@ def test_nothing_may_read_a_comparison(
     comparison = ComparisonRequirement(
         id="excess",
         decision_ids=["measure"],
-        left=RequirementSide(input_id=dataset.id),
-        right=RequirementSide(input_id=agg.id),
+        minuend=RequirementSide(input_id=agg.id),
+        subtrahend=RequirementSide(input_id=dataset.id),
     )
     reads_comparison = AggregateRequirement(
         id="totals_of_excess",
@@ -977,8 +991,40 @@ def test_a_calculation_the_question_states_outright_cites_no_decision(
     assert plan.requirement("total").decision_ids == ()
 
 
-def test_a_draft_names_exactly_the_fields_a_decision_fixes() -> None:
-    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields)
+def test_a_draft_names_every_field_a_decision_fixes_but_the_pin() -> None:
+    assert set(get_args(FixedField)) == set(DecisionFixes.model_fields) - {"source_spec_id"}
+
+
+@pytest.mark.parametrize(
+    ("periods", "fixed"),
+    [
+        ([Period(start=2015, end=2024)] * 2, Period(start=2015, end=2024)),
+        ([Period(start=2015, end=2024), Period(start=2018, end=2024)], None),
+        ([], None),
+    ],
+    ids=["agreeing", "disagreeing", "unstated"],
+)
+def test_settling_a_draft_reads_a_named_field_off_the_requirements_citing_it(
+    requirement: RequirementFactory, periods: list[Period], fixed: Period | None
+) -> None:
+    """A value the citing requirements agree on is recorded; any other is left out, never refused."""
+    draft = DecisionDraft(
+        slot="years",
+        description="Which years to read.",
+        options=["2015-2024", "2018-2024"],
+        chosen="2015-2024",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="r",
+        fixes=("period",),
+    )
+    citing = [
+        requirement(id=f"r{index}", decision_ids=["years"], period=period)
+        for index, period in enumerate(periods)
+    ]
+
+    (settled,) = settle_decisions([draft], citing)
+
+    assert (settled.fixes.period if settled.fixes else None) == fixed
 
 
 @pytest.mark.parametrize("multilateral_start", [2010, 2011])
@@ -1178,8 +1224,8 @@ def test_a_requirement_side_entity_must_name_an_upstream_entity(
     comparison = ComparisonRequirement(
         id="excess",
         decision_ids=["measure"],
-        left=RequirementSide(input_id=narrowed, entity=entity),
-        right=RequirementSide(input_id=({agg.id, other_agg.id} - {narrowed}).pop()),
+        minuend=RequirementSide(input_id=({agg.id, other_agg.id} - {narrowed}).pop()),
+        subtrahend=RequirementSide(input_id=narrowed, entity=entity),
     )
 
     with pytest.raises(ValidationError, match=match):
@@ -1210,8 +1256,8 @@ def test_a_comparison_reading_a_join_is_rejected(
     comparison = ComparisonRequirement(
         id="excess",
         decision_ids=["measure"],
-        left=RequirementSide(input_id=joined.id, entity="Not a real entity"),
-        right=RequirementSide(input_id=agg_a.id),
+        minuend=RequirementSide(input_id=agg_a.id),
+        subtrahend=RequirementSide(input_id=joined.id, entity="Not a real entity"),
     )
 
     with pytest.raises(ValidationError) as refused:
@@ -1469,8 +1515,8 @@ def test_a_comparison_reads_an_extreme_by_entity_as_single_years(
     comparison = ComparisonRequirement(
         id="excess",
         decision_ids=["measure"],
-        left=RequirementSide(input_id=peak.id),
-        right=RequirementSide(input_id=right_id),
+        minuend=RequirementSide(input_id=right_id),
+        subtrahend=RequirementSide(input_id=peak.id),
     )
     requirements.append(comparison)
 
@@ -1479,7 +1525,7 @@ def test_a_comparison_reads_an_extreme_by_entity_as_single_years(
             _plan(decision(), evidence_requirements=requirements)
     else:
         plan = _plan(decision(), evidence_requirements=requirements)
-        assert plan.requirement("excess").left.input_id == peak.id
+        assert plan.requirement("excess").subtrahend.input_id == peak.id
 
 
 def _after_peak(kind: str) -> EvidenceRequirement:
@@ -1666,7 +1712,7 @@ def test_a_rank_over_the_party_across_covers_validates(
     # "Top countries by health spending": no country is named, and the lone
     # role dimension is the one `across` states. The retrieval holds every
     # level of place, so a filter keeps the countries first.
-    dataset = requirement(entities=[], across="country", period=Period(start=2022, end=2022))
+    dataset = requirement(entities=[], across=("country",), period=Period(start=2022, end=2022))
 
     plan = _plan(
         _population_decision(decision),
@@ -1693,36 +1739,33 @@ def _every_place(requirement: RequirementFactory, **overrides: Any) -> DatasetRe
     """GDP with no place named, over one year unless `overrides` says otherwise."""
     fields: dict[str, Any] = {
         "entities": [],
-        "across": "country",
+        "across": ["country"],
         "period": Period(start=2022, end=2022),
     }
     return requirement(**(fields | overrides))
 
 
-_EVERY_LEVEL = "holds every place with data at every level"
-
-
 @pytest.mark.parametrize("across", ["country", "countries", "place", "economy"])
-def test_a_rank_over_a_requirement_naming_no_place_needs_a_level_first(
+def test_a_plan_over_a_requirement_naming_no_place_leaves_the_level_to_compile(
     across: str, decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Top 10 by GDP": the retrieval holds World, regions and World Bank
-    # groups beside the countries, so a rank over it would place them together.
-    dataset = _every_place(requirement, across=across)
+    # The place word covers `observationAbout`, which mixes levels, or a flow
+    # axis, which does not; only compile knows which (`compile._check_level_filters`).
+    dataset = _every_place(requirement, across=(across,))
 
-    with pytest.raises(ValidationError, match=f"'ranked': .*{_EVERY_LEVEL}.*place_level"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, _rank(dataset.id, limit=10)],
-        )
+    ranked = _plan(
+        _population_decision(decision),
+        evidence_requirements=[dataset, _rank(dataset.id, limit=10)],
+    )
+
+    assert ranked.requirement("ranked").input_id == dataset.id
 
 
-def test_a_total_across_places_needs_a_level_first_and_a_total_per_place_is_refused(
+def test_a_total_per_place_over_a_requirement_naming_no_place_is_refused(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Total population": summing every row counts a country beside its own
-    # subdivisions and the world. A group by entity keeps only the places the
-    # requirement names, and it names none.
+    # A group by entity keeps only the places the requirement names, and it
+    # names none.
     dataset = _every_place(requirement, period=Period(start=2015, end=2024))
     total = AggregateRequirement(
         id="total",
@@ -1731,9 +1774,6 @@ def test_a_total_across_places_needs_a_level_first_and_a_total_per_place_is_refu
         reduction=Reduction.SUM,
         group_by=(GroupBy.PERIOD,),
     )
-
-    with pytest.raises(ValidationError, match=f"'total': .*{_EVERY_LEVEL}.*a total or an average"):
-        _plan(decision(), evidence_requirements=[dataset, total])
 
     by_country = total.model_copy(update={"input_id": "countries"})
     plan = _plan(decision(), evidence_requirements=[dataset, _countries(dataset.id), by_country])
@@ -1744,12 +1784,11 @@ def test_a_total_across_places_needs_a_level_first_and_a_total_per_place_is_refu
         _plan(decision(), evidence_requirements=[dataset, per_place])
 
 
-def test_a_rank_over_each_places_growth_still_needs_a_level(
+def test_a_level_filter_reads_the_retrieval_not_each_places_growth(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
-    # "Fastest-growing by GDP": a growth per place keeps every level, and it
-    # drops the type each place carries, so the level filter has to read the
-    # retrieval itself.
+    # "Fastest-growing by GDP": a growth per place drops the type each place
+    # carries, so the level filter has to read the retrieval itself.
     dataset = _every_place(requirement, period=Period(start=2015, end=2024))
     growth = GrowthRequirement(
         id="growth",
@@ -1759,11 +1798,6 @@ def test_a_rank_over_each_places_growth_still_needs_a_level(
         window_end=2024,
     )
 
-    with pytest.raises(ValidationError, match=f"'ranked': .*{_EVERY_LEVEL}"):
-        _plan(
-            _population_decision(decision),
-            evidence_requirements=[dataset, growth, _rank("growth")],
-        )
     with pytest.raises(ValidationError, match="'countries': a place_level filter reads"):
         _plan(
             _population_decision(decision),
@@ -1781,27 +1815,6 @@ def test_a_rank_over_each_places_growth_still_needs_a_level(
         ],
     )
     assert plan.requirement("ranked").input_id == "growth"
-
-
-def test_a_share_over_a_requirement_naming_no_place_needs_a_level_first(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = _every_place(requirement)
-    world = requirement(id="world", entities=[Entity(name="World")], period=dataset.period)
-    share = ShareOfRequirement(
-        id="share",
-        decision_ids=["measure"],
-        numerator=RequirementSide(input_id=dataset.id),
-        denominator=RequirementSide(input_id="world"),
-        axis="country",
-        denominator_scope=DenominatorScope.POOLED,
-    )
-
-    with pytest.raises(ValidationError, match=f"'share': .*{_EVERY_LEVEL}.*a share"):
-        _plan(
-            decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED)),
-            evidence_requirements=[dataset, world, share],
-        )
 
 
 def test_a_level_filter_reads_through_another_filter(
@@ -1855,30 +1868,6 @@ def test_a_series_of_every_place_needs_no_level(
     assert plan.answer_mode is AnswerMode.SERIES
 
 
-def test_a_decision_fixing_the_level_agrees_with_the_filter_citing_it(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = _every_place(requirement)
-    level = decision(
-        slot="level",
-        options=["countries", "continents"],
-        chosen="countries",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        fixes=DecisionFixes(predicates=(PlaceLevel(level=PlaceType.CONTINENT),)),
-    )
-
-    with pytest.raises(ValidationError, match="predicates"):
-        Plan(
-            question="top 10 by GDP",
-            decisions=[_population_decision(decision), level],
-            evidence_requirements=[
-                dataset,
-                _countries(dataset.id, decision_ids=["level"]),
-                _rank("countries"),
-            ],
-        )
-
-
 def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
@@ -1886,7 +1875,7 @@ def test_a_rank_over_across_beside_a_named_entity_states_a_reduction(
     # role dimensions, so ranking donors collapses the recipient rows first.
     dataset = requirement(
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2022, end=2022),
     )
 
@@ -2388,7 +2377,9 @@ def test_a_quotient_pairs_only_with_another_quotient(
     second = "other_per_head" if rate_side in ("second", "both") else "other"
     sides = (RequirementSide(input_id=first), RequirementSide(input_id=second))
     paired: EvidenceRequirement = (
-        ComparisonRequirement(id="paired", decision_ids=["measure"], left=sides[0], right=sides[1])
+        ComparisonRequirement(
+            id="paired", decision_ids=["measure"], minuend=sides[1], subtrahend=sides[0]
+        )
         if derived == "comparison"
         else ShareOfRequirement(
             id="paired", decision_ids=["measure"], numerator=sides[0], denominator=sides[1]
@@ -2480,8 +2471,8 @@ def test_a_change_in_a_quotient_keeps_its_composed_unit_only_when_absolute(
         reading = ComparisonRequirement(
             id="reading",
             decision_ids=["measure"],
-            left=sides[0],
-            right=RequirementSide(input_id=right),
+            minuend=RequirementSide(input_id=right),
+            subtrahend=sides[0],
         )
     requirements = [
         aid,
@@ -3274,120 +3265,7 @@ def test_a_population_rank_over_a_prenarrowed_axis_fails_naming_both_readings(
         _plan(_population_decision(decision), evidence_requirements=[dataset, named, rank])
 
 
-# --- Requirements honour the decisions they cite ---------------------------------
-
-
-def test_a_requirement_cannot_contradict_what_a_cited_decision_fixes(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    # `chosen` is prose, so it cannot be held against the requirement; `fixes`
-    # can be.
-    fixed = decision(fixes=DecisionFixes(period=Period(start=2018, end=2024)))
-
-    with pytest.raises(
-        ValidationError,
-        match=r"'annual_debt_service' states period .*2015.*'measure' it cites fixes",
-    ):
-        _plan(fixed, evidence_requirements=[requirement(), derived_requirement()])
-
-
-def test_a_requirement_cannot_contradict_the_across_a_cited_decision_fixes(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    fixed = decision(fixes=DecisionFixes(across="donor"))
-
-    with pytest.raises(
-        ValidationError,
-        match=r"'annual_debt_service' states across 'creditor', but the decision 'measure'",
-    ):
-        _plan(fixed, evidence_requirements=[requirement(across="creditor"), derived_requirement()])
-    plan = _plan(fixed, evidence_requirements=[requirement(across="donor"), derived_requirement()])
-
-    assert plan.requirement("annual_debt_service").across == "donor"
-
-
-def test_a_decision_holds_a_requirement_only_to_the_fields_it_fixes(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    fixed = decision(fixes=DecisionFixes(measure="external debt service paid"))
-    other_period = requirement(period=Period(start=2000, end=2001))
-
-    plan = _plan(fixed, evidence_requirements=[other_period, derived_requirement()])
-
-    assert plan.requirement(other_period.id) == other_period
-
-
-def test_a_requirement_stating_no_unit_contradicts_a_decision_fixing_one(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    fixed = decision(fixes=DecisionFixes(unit=Unit(currency="USD", prices="current")))
-
-    with pytest.raises(ValidationError, match="states unit None"):
-        _plan(fixed, evidence_requirements=[requirement(unit=None), derived_requirement()])
-
-
-def test_an_aggregate_contradicting_its_decision_is_rejected(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(reduction=Reduction.MEAN))
-    totals = AggregateRequirement(
-        id="totals",
-        decision_ids=["measure"],
-        input_id=dataset.id,
-        reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD,),
-    )
-
-    with pytest.raises(
-        ValidationError, match=r"states reduction .*sum.*'measure' it cites fixes .*mean"
-    ):
-        _plan(fixed, evidence_requirements=[dataset, totals])
-
-
-def test_a_growth_window_contradicting_its_decision_is_rejected(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(window_start=2018))
-    growth = GrowthRequirement(
-        id="growth",
-        decision_ids=["measure"],
-        input_id=dataset.id,
-        window_start=2016,
-        window_end=2020,
-    )
-
-    with pytest.raises(
-        ValidationError, match=r"states window_start 2016, but the decision .*fixes 2018"
-    ):
-        _plan(fixed, evidence_requirements=[dataset, growth])
-
-
-def test_a_rank_direction_contradicting_its_decision_is_rejected(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(direction=RankDirection.LOWEST_FIRST))
-
-    with pytest.raises(
-        ValidationError, match=r"states direction .*highest_first.*fixes .*lowest_first"
-    ):
-        _plan(
-            fixed,
-            evidence_requirements=[
-                dataset,
-                _rank(dataset.id, reduction=Reduction.MEAN, among=RankAmong.POPULATION),
-            ],
-        )
+# --- A rank's limit ---------------------------------------------------------------
 
 
 def test_a_population_rank_with_a_limit_validates(
@@ -3414,235 +3292,70 @@ def test_a_rank_limit_at_the_maximum_validates() -> None:
     assert _rank("annual_debt_service", limit=MAX_RANK_LIMIT).limit == MAX_RANK_LIMIT
 
 
-def test_a_rank_limit_contradicting_its_decision_is_rejected(
-    decision: DecisionFactory, requirement: RequirementFactory
+# --- A decision's `fixes` binds the requirements citing it ----------------------
+
+
+@pytest.mark.parametrize(
+    ("fixes", "stated", "agreeing"),
+    [
+        (
+            DecisionFixes(period=Period(start=2018, end=2024)),
+            {"period": Period(start=2015, end=2024)},
+            {"period": Period(start=2018, end=2024)},
+        ),
+        (DecisionFixes(across=("donor",)), {"across": ["creditor"]}, {"across": ["donor"]}),
+        (
+            DecisionFixes(unit=Unit(currency="USD", prices="current")),
+            {"unit": None},
+            {"unit": Unit(currency="USD", prices="current")},
+        ),
+    ],
+    ids=["period", "across", "unit"],
+)
+def test_a_requirement_contradicting_a_value_its_decision_fixes_is_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    fixes: DecisionFixes,
+    stated: dict[str, object],
+    agreeing: dict[str, object],
 ) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(among=RankAmong.POPULATION, limit=5))
+    """The backstop under `propose_plan`, which drops or refuses a carried decision a patch contradicts."""
+    cited = decision(fixes=fixes)
+    plan = _plan(cited, evidence_requirements=[requirement(**agreeing), derived_requirement()])
+    assert plan.decisions == (cited,)
 
-    with pytest.raises(ValidationError, match=r"states limit 10, but the decision .* fixes 5"):
-        _plan(
-            fixed,
-            evidence_requirements=[dataset, _rank(dataset.id, reduction=Reduction.MEAN, limit=10)],
-        )
-    with pytest.raises(ValidationError, match=r"states limit None, but the decision .* fixes 5"):
-        _plan(fixed, evidence_requirements=[dataset, _rank(dataset.id, reduction=Reduction.MEAN)])
-
-    agreeing = _rank(dataset.id, reduction=Reduction.MEAN, limit=5)
-    plan = _plan(fixed, evidence_requirements=[dataset, agreeing])
-    assert plan.requirement(agreeing.id) == agreeing
+    with pytest.raises(ValidationError, match="but the decision 'measure' it cites fixes"):
+        _plan(cited, evidence_requirements=[requirement(**stated), derived_requirement()])
 
 
-def test_filter_predicates_contradicting_its_decision_is_rejected(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(predicates=(ValueThreshold(op="gte", value=0),)))
-    filtered = FilterRequirement(
-        id="filtered",
-        decision_ids=["measure"],
-        input_id=dataset.id,
-        predicates=(ValueThreshold(op="gt", value=0),),
-    )
-
-    with pytest.raises(ValidationError, match=r"states predicates .*'measure' it cites fixes"):
-        _plan(fixed, evidence_requirements=[dataset, filtered])
-
-
-def test_a_group_by_fix_agreeing_in_a_different_order_is_accepted(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    fixed = decision(fixes=DecisionFixes(group_by=(GroupBy.ENTITY, GroupBy.PERIOD)))
-    totals = AggregateRequirement(
-        id="totals",
-        decision_ids=["measure"],
-        input_id=dataset.id,
-        reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD, GroupBy.ENTITY),
-    )
-
-    plan = _plan(fixed, evidence_requirements=[dataset, totals])
-
-    assert plan.requirement("totals").group_by == (GroupBy.PERIOD, GroupBy.ENTITY)
-
-
-def test_a_predicates_fix_agreeing_in_a_different_order_is_accepted(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    dataset = requirement()
-    gt, lte = ValueThreshold(op="gt", value=0), ValueThreshold(op="lte", value=100)
-    fixed = decision(fixes=DecisionFixes(predicates=(lte, gt)))
-    filtered = FilterRequirement(
-        id="filtered", decision_ids=["measure"], input_id=dataset.id, predicates=(gt, lte)
-    )
-
-    plan = _plan(fixed, evidence_requirements=[dataset, filtered])
-
-    assert plan.requirement("filtered").predicates == (gt, lte)
-
-
-def test_a_period_fix_cited_by_a_dataset_and_an_aggregate_is_accepted(
-    decision: DecisionFactory, requirement: RequirementFactory
-) -> None:
-    # `period` is a `DatasetRequirement` field only -- an `AggregateRequirement`
-    # citing the same decision is not held to a field its own class does not
-    # declare.
-    fixed = decision(fixes=DecisionFixes(period=Period(start=2015, end=2024)))
-    dataset = requirement(period=Period(start=2015, end=2024))
-    totals = AggregateRequirement(
-        id="totals",
-        decision_ids=["measure"],
-        input_id=dataset.id,
-        reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD,),
-    )
-
-    plan = _plan(fixed, evidence_requirements=[dataset, totals])
-
-    assert plan.requirement("totals").decision_ids == ("measure",)
-
-
-def test_fixed_entities_compare_regardless_of_order(
+def test_a_requirement_keeps_its_own_pin_whatever_a_cited_decision_fixes(
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
 ) -> None:
-    kenya, nigeria = Entity(name="Kenya", role="debtor"), Entity(name="Nigeria", role="debtor")
-    fixed = decision(fixes=DecisionFixes(entities=(nigeria, kenya)))
+    """Code writes and moves a decision's `source_spec_id` with the pin, so no requirement is held to it."""
+    dataset = requirement(source_spec_id=_PIN)
 
     plan = _plan(
-        fixed, evidence_requirements=[requirement(entities=[kenya, nigeria]), derived_requirement()]
+        decision(fixes=DecisionFixes(source_spec_id="spec_" + "b" * 32)),
+        evidence_requirements=[dataset, derived_requirement()],
     )
 
-    assert plan.decisions[0].fixes == DecisionFixes(entities=(nigeria, kenya))
+    assert plan.requirement(dataset.id) == dataset
 
 
-def test_derived_requirements_are_not_compared_with_what_a_decision_fixes(
+def test_a_pinned_source_needs_no_decision(
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
 ) -> None:
-    # The aggregate cites `measure` too and carries no period of its own.
-    fixed = decision(fixes=DecisionFixes(period=Period(start=2015, end=2024)))
+    pinned = requirement(decision_ids=[], source_spec_id=_PIN)
 
-    plan = _plan(fixed, evidence_requirements=[requirement(), derived_requirement()])
-
-    assert plan.requirement("annual_totals").decision_ids == ("measure",)
-
-
-def test_a_pinned_source_needs_a_decision_that_fixes_it(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    # `decision()`'s default carries no `fixes` at all, so citing it pins
-    # nothing -- regardless of who resolved it.
-    with pytest.raises(
-        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
-    ):
-        _plan(
-            decision(),
-            evidence_requirements=[requirement(source_spec_id=_PIN), derived_requirement()],
-        )
-
-
-def test_a_pin_needs_a_decision_that_fixes_that_exact_source(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    # `resolved_by=USER` alone is not enough: the cited decision has to fix
-    # this exact pin structurally, not merely be a user's choice about
-    # something else.
-    source = decision(
-        slot="source",
-        options=["OECD DAC", "World Bank IDS"],
-        chosen="OECD DAC",
-        resolved_by=ResolvedBy.USER,
-    )
-    pinned = requirement(decision_ids=["measure", "source"], source_spec_id=_PIN)
-
-    with pytest.raises(
-        ValidationError, match="cites no decision whose `fixes` names `source_spec_id`"
-    ):
-        _plan(
-            decision(),
-            decisions=[decision(), source],
-            evidence_requirements=[pinned, derived_requirement()],
-        )
-
-
-def test_a_pinned_source_backed_by_a_user_decision_validates(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    # The user chooses "OECD DAC", not a hash; `chosen` states the prose
-    # choice while `fixes.source_spec_id` is what the pin is checked against.
-    source = decision(
-        slot="source",
-        options=["OECD DAC", "World Bank IDS"],
-        chosen="OECD DAC",
-        resolved_by=ResolvedBy.USER,
-        fixes=DecisionFixes(source_spec_id=_PIN),
-    )
-    pinned = requirement(decision_ids=["measure", "source"], source_spec_id=_PIN)
-
-    plan = _plan(
-        decision(),
-        decisions=[decision(), source],
-        evidence_requirements=[pinned, derived_requirement()],
-    )
+    plan = _plan(decision(), evidence_requirements=[pinned, derived_requirement()])
 
     assert plan.requirement(pinned.id).source_spec_id == _PIN
-
-
-def test_a_pinned_source_backed_by_a_planner_default_decision_validates(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    # Attribution is not this validator's business: a decision the planner
-    # settled itself pins just as well, as long as `fixes` names the pin.
-    source = decision(
-        slot="source",
-        options=["OECD DAC", "World Bank IDS"],
-        chosen="OECD DAC",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        fixes=DecisionFixes(source_spec_id=_PIN),
-    )
-    pinned = requirement(decision_ids=["measure", "source"], source_spec_id=_PIN)
-
-    plan = _plan(
-        decision(),
-        decisions=[decision(), source],
-        evidence_requirements=[pinned, derived_requirement()],
-    )
-
-    assert plan.requirement(pinned.id).source_spec_id == _PIN
-
-
-def test_a_pinned_source_matches_the_one_the_cited_decision_fixes(
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    derived_requirement: DerivedRequirementFactory,
-) -> None:
-    source = decision(
-        slot="source",
-        options=["OECD DAC", "World Bank IDS"],
-        chosen="OECD DAC",
-        resolved_by=ResolvedBy.USER,
-        fixes=DecisionFixes(source_spec_id="spec_" + "b" * 32),
-    )
-    pinned = requirement(decision_ids=["measure", "source"], source_spec_id=_PIN)
-
-    with pytest.raises(ValidationError, match=r"states source_spec_id .*'source' it cites fixes"):
-        _plan(
-            decision(),
-            decisions=[decision(), source],
-            evidence_requirements=[pinned, derived_requirement()],
-        )
+    assert plan.requirement(pinned.id).decision_ids == ()
 
 
 # --- Requirement lookup ---------------------------------------------------------
@@ -4021,19 +3734,22 @@ def test_plan_revision_covers_the_workflow(
 def test_approve_marks_status_without_mutating_original(decision: DecisionFactory) -> None:
     plan = _plan(decision())
 
-    approved = plan.approve()
+    approved = plan.approve(at=datetime.now(UTC))
 
     assert plan.status == PlanStatus.PENDING_APPROVAL
     assert approved.status == PlanStatus.APPROVED
     assert approved.decisions == plan.decisions
 
 
-def test_approve_records_the_revision_approved(decision: DecisionFactory) -> None:
+def test_approve_records_the_revision_approved_and_when(decision: DecisionFactory) -> None:
     plan = _plan(decision())
+    at = datetime(2026, 10, 1, 9, 30, tzinfo=UTC)
 
-    approved = plan.approve()
+    approved = plan.approve(at=at)
 
     assert approved.approved_revision == plan_revision(plan)
+    assert approved.approved_at == at
+    assert Plan.model_validate_json(approved.model_dump_json()).approved_at == at
 
 
 @pytest.mark.parametrize(
@@ -4050,7 +3766,7 @@ def test_approve_refuses_a_plan_not_awaiting_approval(
     with pytest.raises(
         ValueError, match="cannot be approved; that takes a plan that is pending_approval"
     ):
-        plan.approve()
+        plan.approve(at=datetime.now(UTC))
 
 
 def test_reject_marks_status_without_mutating_original(decision: DecisionFactory) -> None:
@@ -4082,7 +3798,7 @@ def test_reject_holds_on_a_plan_already_rejected(decision: DecisionFactory) -> N
 def test_execution_follows_approval_and_ends_completed_or_failed(
     decision: DecisionFactory,
 ) -> None:
-    executing = _plan(decision()).approve().start_execution()
+    executing = _plan(decision()).approve(at=datetime.now(UTC)).start_execution()
 
     assert executing.status == PlanStatus.EXECUTING
     assert executing.complete().status == PlanStatus.COMPLETED
@@ -4099,7 +3815,7 @@ def test_start_execution_refuses_content_that_is_not_what_was_approved(
 ) -> None:
     # The recorded revision is the guard: a plan whose content hashes to
     # anything else was not the plan the user said yes to.
-    approved = _plan(decision()).approve()
+    approved = _plan(decision()).approve(at=datetime.now(UTC))
     tampered = approved.model_copy(update={"question": "a question nobody approved"})
 
     with pytest.raises(ValueError, match="is not what was approved"):
@@ -4113,7 +3829,7 @@ def test_start_execution_refuses_content_that_is_not_what_was_approved(
 def test_only_a_running_plan_completes_or_fails(
     transition: str, refusal: str, decision: DecisionFactory
 ) -> None:
-    approved = _plan(decision()).approve()
+    approved = _plan(decision()).approve(at=datetime.now(UTC))
 
     with pytest.raises(ValueError, match=refusal):
         getattr(approved, transition)()
@@ -4126,7 +3842,7 @@ def test_plan_revision_ignores_status_and_approval(decision: DecisionFactory) ->
     # Approving must not change the value that was approved.
     plan = _plan(decision())
 
-    assert plan_revision(plan.approve()) == plan_revision(plan)
+    assert plan_revision(plan.approve(at=datetime.now(UTC))) == plan_revision(plan)
     assert plan_revision(plan.reject()) == plan_revision(plan)
 
 
@@ -4444,7 +4160,8 @@ _LIMITS: list[tuple[str, tuple[str | int, ...], int]] = [
         ("decisions", 0, "fixes", "entities", 0, "role"),
         MAX_ENTITY_ROLE_CHARS,
     ),
-    ("Fixes.across", ("decisions", 0, "fixes", "across"), MAX_ENTITY_ROLE_CHARS),
+    ("Fixes.across", ("decisions", 0, "fixes", "across"), MAX_ACROSS_WORDS),
+    ("Fixes.across[]", ("decisions", 0, "fixes", "across", 0), MAX_ENTITY_ROLE_CHARS),
     ("Fixes.measure", ("decisions", 0, "fixes", "measure"), MAX_MEASURE_CHARS),
     ("Fixes.axis", ("decisions", 0, "fixes", "axis"), MAX_ENTITY_ROLE_CHARS),
     ("Fixes.group_by", ("decisions", 0, "fixes", "group_by"), MAX_GROUP_BY),
@@ -4481,7 +4198,12 @@ _LIMITS: list[tuple[str, tuple[str | int, ...], int]] = [
         ("evidence_requirements", 0, "entities", 0, "role"),
         MAX_ENTITY_ROLE_CHARS,
     ),
-    ("Dataset.across", ("evidence_requirements", 0, "across"), MAX_ENTITY_ROLE_CHARS),
+    ("Dataset.across", ("evidence_requirements", 0, "across"), MAX_ACROSS_WORDS),
+    (
+        "Dataset.across[]",
+        ("evidence_requirements", 0, "across", 0),
+        MAX_ENTITY_ROLE_CHARS,
+    ),
     ("Dataset.source", ("evidence_requirements", 0, "source"), MAX_SOURCE_CHARS),
     ("Filter.predicates", ("evidence_requirements", 8, "predicates"), MAX_PREDICATES),
     (
@@ -4529,13 +4251,13 @@ _LIMITS: list[tuple[str, tuple[str | int, ...], int]] = [
         MAX_ENTITY_NAME_CHARS,
     ),
     (
-        "Comparison.left.entity",
-        ("evidence_requirements", 22, "left", "entity"),
+        "Comparison.minuend.entity",
+        ("evidence_requirements", 22, "minuend", "entity"),
         MAX_ENTITY_NAME_CHARS,
     ),
     (
-        "Comparison.right.entity",
-        ("evidence_requirements", 22, "right", "entity"),
+        "Comparison.subtrahend.entity",
+        ("evidence_requirements", 22, "subtrahend", "entity"),
         MAX_ENTITY_NAME_CHARS,
     ),
     ("Join.decision_ids", ("evidence_requirements", 23, "decision_ids"), MAX_PLAN_DECISIONS),
@@ -4668,9 +4390,9 @@ def test_an_amendment_that_pushes_the_plan_past_the_size_limit_is_refused() -> N
 
 # The `Plan` fields a model does not write: the compiler fills `translation` and
 # `workflow` from search and tool results, and `approve` records the revision
-# hash. `propose_plan` accepts none of them, so their text is not model output
-# and the limits above do not apply to it.
-_SYSTEM_AUTHORED = frozenset({"translation", "workflow", "approved_revision"})
+# hash and the time of approval. `propose_plan` accepts none of them, so their
+# text is not model output and the limits above do not apply to it.
+_SYSTEM_AUTHORED = frozenset({"translation", "workflow", "approved_revision", "approved_at"})
 
 
 def test_every_string_and_collection_a_model_writes_into_a_plan_is_bounded() -> None:
@@ -5181,3 +4903,270 @@ def test_a_copy_of_a_recorded_dataset_over_another_window_keeps_the_set_its_plac
 
     assert africa.groups
     assert pinned.groups == africa.groups
+
+
+# --- The parties an ask breaks down by ---------------------------------------
+
+_BY_CREDITOR_ASKS = ["Debt service by creditor for general government in 2031"]
+
+
+def _creditor_plan(
+    decision: DecisionFactory,
+    across: tuple[str, ...],
+    *,
+    axis: str | None = None,
+    group_by: tuple[GroupBy, ...] | None = None,
+    declined: tuple[Decline, ...] = (),
+    breakdowns: tuple[AskBreakdown, ...] = (AskBreakdown(ask=0, by=("creditor",)),),
+) -> Plan:
+    """A by-creditor plan: debt service across `across`, answered by a rank on `axis` or an
+    aggregate grouping by `group_by` when either is given, else by the dataset itself."""
+    requirements: list[EvidenceRequirement] = [
+        DatasetRequirement(
+            id="debt_service",
+            decision_ids=["measure"],
+            measure="general government debt service",
+            across=across,
+            period=Period(start=2031, end=2031),
+        )
+    ]
+    if axis is not None:
+        requirements.append(
+            RankRequirement(
+                id="ranked",
+                decision_ids=["measure"],
+                input_id="debt_service",
+                direction=RankDirection.HIGHEST_FIRST,
+                among=RankAmong.POPULATION,
+                axis=axis,
+                reduction=Reduction.SUM,
+            )
+        )
+    if group_by is not None:
+        requirements.append(
+            AggregateRequirement(
+                id="summed",
+                decision_ids=["measure"],
+                input_id="debt_service",
+                reduction=Reduction.SUM,
+                group_by=group_by,
+            )
+        )
+    return Plan(
+        question="general government debt service by creditor for 2031",
+        decisions=[decision(fixes=DecisionFixes(among=RankAmong.POPULATION))],
+        evidence_requirements=requirements,
+        asks=_BY_CREDITOR_ASKS,
+        ask_breakdowns=breakdowns,
+        answered=[AskAnswer(ask=0, outputs=(requirements[-1].id,))],
+        declined=declined,
+    )
+
+
+@pytest.mark.parametrize(
+    ("across", "axis", "group_by", "declined", "dropped"),
+    [
+        pytest.param(("recipient",), None, None, (), True, id="across-recipient-only"),
+        pytest.param(("creditor",), None, None, (), False, id="across-creditor"),
+        pytest.param(("lenders",), None, None, (), False, id="across-a-creditor-synonym"),
+        pytest.param(("recipient", "creditor"), "creditor", None, (), False, id="ranked-creditors"),
+        pytest.param(
+            ("recipient", "creditor"), "recipient", None, (), True, id="ranked-recipients"
+        ),
+        pytest.param(
+            ("creditor",), None, (GroupBy.PERIOD,), (), True, id="aggregate-sums-creditors-away"
+        ),
+        pytest.param(
+            ("recipient",),
+            None,
+            None,
+            (Decline(ask="by creditor", code=UnsupportedOperation.BREAKDOWN_NOT_KEPT, ask_ref=0),),
+            False,
+            id="breakdown-declined",
+        ),
+        pytest.param(
+            ("recipient",),
+            None,
+            None,
+            (Decline(ask="by creditor", code=UnsupportedOperation.UNSUPPORTED_ASK, ask_ref=0),),
+            True,
+            id="declined-under-another-code",
+        ),
+    ],
+)
+def test_an_answer_keeps_open_each_party_its_ask_breaks_down_by(
+    decision: DecisionFactory,
+    across: tuple[str, ...],
+    axis: str | None,
+    group_by: tuple[GroupBy, ...] | None,
+    declined: tuple[Decline, ...],
+    dropped: bool,
+) -> None:
+    def build() -> Plan:
+        return _creditor_plan(decision, across, axis=axis, group_by=group_by, declined=declined)
+
+    if not dropped:
+        assert build().ask_breakdowns == (AskBreakdown(ask=0, by=("creditor",)),)
+        return
+    with pytest.raises(ValidationError) as refused:
+        build()
+    causes = [error.get("ctx", {}).get("error") for error in refused.value.errors()]
+    assert [cause.dropped for cause in causes if isinstance(cause, AskRoleDroppedError)] == [
+        {0: ("creditor",)}
+    ]
+
+
+_AID_ASK = "Each donor's aid to each recipient"
+_DONOR_AND_RECIPIENT = (AskBreakdown(ask=0, by=("donor", "recipient")),)
+
+
+@pytest.mark.parametrize(
+    ("asks", "breakdowns", "outputs", "dropped"),
+    [
+        pytest.param(
+            [_AID_ASK],
+            _DONOR_AND_RECIPIENT,
+            {0: [("donor", "recipient")]},
+            None,
+            id="both-parties-in-one-output",
+        ),
+        pytest.param(
+            [_AID_ASK],
+            _DONOR_AND_RECIPIENT,
+            {0: [("donor",), ("recipient",)]},
+            ("recipient",),
+            id="a-party-per-output",
+        ),
+        pytest.param(
+            [_AID_ASK],
+            _DONOR_AND_RECIPIENT,
+            {0: [("recipient",), ("donor",)]},
+            ("donor",),
+            id="a-party-per-output-recipients-first",
+        ),
+        pytest.param(
+            [_AID_ASK],
+            _DONOR_AND_RECIPIENT,
+            {0: [("country",), ("donor",)]},
+            ("recipient",),
+            id="measured-against-the-output-keeping-the-most",
+        ),
+        pytest.param(
+            [_AID_ASK], _DONOR_AND_RECIPIENT, {0: [("donor",)]}, ("recipient",), id="one-of-two"
+        ),
+        pytest.param(
+            ["Aid by donor", "Aid by recipient"],
+            (AskBreakdown(ask=0, by=("donor",)), AskBreakdown(ask=1, by=("recipient",))),
+            {0: [("donor",)], 1: [("recipient",)]},
+            None,
+            id="an-ask-per-party",
+        ),
+        pytest.param(
+            ["Aid by donor"],
+            (AskBreakdown(ask=0, by=("donor",)),),
+            {0: [("creditor",)]},
+            None,
+            id="another-word-for-the-side",
+        ),
+        pytest.param(
+            ["Debt by creditor and debtor"],
+            (AskBreakdown(ask=0, by=("creditor", "debtor")),),
+            {0: [("lender",), ("borrower",)]},
+            ("debtor",),
+            id="a-party-per-output-in-other-words",
+        ),
+    ],
+)
+def test_an_answer_keeps_the_parties_of_one_ask_together_in_one_output(
+    decision: DecisionFactory,
+    asks: list[str],
+    breakdowns: tuple[AskBreakdown, ...],
+    outputs: dict[int, list[tuple[str, ...]]],
+    dropped: tuple[str, ...] | None,
+) -> None:
+    """`outputs` gives each ask the `across` of each dataset answering it."""
+    requirements: list[EvidenceRequirement] = []
+    answered: list[AskAnswer] = []
+    for ask, each_across in outputs.items():
+        datasets = [
+            DatasetRequirement(
+                id=f"aid_{ask}_{index}",
+                decision_ids=["measure"],
+                measure="aid disbursed",
+                across=across,
+                period=Period(start=2031, end=2031),
+            )
+            for index, across in enumerate(each_across)
+        ]
+        requirements += datasets
+        answered.append(AskAnswer(ask=ask, outputs=tuple(dataset.id for dataset in datasets)))
+
+    def build() -> Plan:
+        return Plan(
+            question="each donor's aid to each recipient in 2031",
+            decisions=[decision(fixes=DecisionFixes(among=RankAmong.POPULATION))],
+            evidence_requirements=requirements,
+            asks=asks,
+            ask_breakdowns=breakdowns,
+            answered=answered,
+        )
+
+    if dropped is None:
+        assert build().ask_breakdowns == breakdowns
+        return
+    with pytest.raises(ValidationError) as refused:
+        build()
+    causes = [error.get("ctx", {}).get("error") for error in refused.value.errors()]
+    by = breakdowns[0].by
+    assert [
+        (cause.dropped, cause.together)
+        for cause in causes
+        if isinstance(cause, AskRoleDroppedError)
+    ] == [({0: dropped}, {0: by} if len(by) > 1 else {})]
+
+
+@pytest.mark.parametrize(
+    ("by", "taken"),
+    [
+        (("debtor", "creditor"), True),
+        (("recipient", "debtor"), False),
+        (("creditor", "recipient", "debtor"), False),
+    ],
+)
+def test_an_ask_breakdown_takes_one_word_for_each_side_of_the_flow(
+    by: tuple[PartyRole, ...], taken: bool
+) -> None:
+    if taken:
+        assert AskBreakdown(ask=0, by=by).by == by
+        return
+    with pytest.raises(ValidationError):
+        AskBreakdown(ask=0, by=by)
+
+
+@pytest.mark.parametrize(
+    "breakdowns",
+    [
+        (AskBreakdown(ask=1, by=("creditor",)),),
+        (AskBreakdown(ask=0, by=("creditor",)), AskBreakdown(ask=0, by=("debtor",))),
+    ],
+    ids=["unlisted-ask", "ask-twice"],
+)
+def test_a_breakdown_names_a_listed_ask_once(
+    decision: DecisionFactory, breakdowns: tuple[AskBreakdown, ...]
+) -> None:
+    with pytest.raises(ValidationError, match="breakdown"):
+        _creditor_plan(decision, ("creditor",), breakdowns=breakdowns)
+
+
+def test_a_breakdown_names_at_least_one_party() -> None:
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        AskBreakdown(ask=0, by=())
+
+
+def test_an_amendment_under_the_same_asks_keeps_their_breakdowns(
+    decision: DecisionFactory,
+) -> None:
+    plan = _creditor_plan(decision, ("creditor",))
+
+    assert plan.amend(question="q").ask_breakdowns == plan.ask_breakdowns
+    assert plan.amend(asks=_BY_CREDITOR_ASKS, answered=plan.answered).ask_breakdowns == ()

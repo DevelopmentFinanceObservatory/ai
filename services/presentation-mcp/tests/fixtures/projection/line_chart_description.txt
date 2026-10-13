@@ -1,0 +1,26 @@
+Line chart of Gross disbursements for Basic health care, Health policy and administrativ… and Infectious disease control, 2010 to 2024 (`cmp_Ab3dE5gH7k`, revision 2).
+Title, written by the model: Gross disbursements to Nigeria for health, 2010 to 2024
+
+| Period | Basic health care | Health policy and administrativ… | Infectious disease control |
+| --- | --- | --- | --- |
+| 2010 | 212.4 | 88.1 | 301.6 |
+| 2011 | 198.7 | 92.4 | 315.2 |
+| 2012 | 240.1 | 97 | 322.8 |
+| 2013 | 251.3 | 101.8 | 340.1 |
+| 2014 | 263 | 99.5 | 352.7 |
+| 2015 | 270.8 | 104.2 | 361.4 |
+| 2016 | 281.5 | 110.6 | 349.9 |
+| 2017 | 296.2 | 115.3 | 366 |
+| 2018 | 288.4 | 112.9 | 372.5 |
+| 2019 | 301.7 | 118.4 | 380.8 |
+| 2020 | 344.9 | 131 | 412.3 |
+| 2021 | 362.3 | 136.7 | 428.9 |
+| 2022 | 355 | 129.8 | 419.4 |
+| 2023 | 371.6 | 140.3 | 433 |
+| 2024 | missing | 146.5 | 441.7 |
+
+Unit: USD millions, current prices.
+
+Data through 2024.
+Warning, provisional: Values of infectious disease control in 2024 are provisional.
+Source: OECD Creditor Reporting System (CRS) via ONE DFO, retrieved 2026-09-28

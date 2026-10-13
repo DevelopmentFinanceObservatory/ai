@@ -71,19 +71,19 @@
         "shape_id": "financialflow_amount_measuredvalue_nominal",
         "label": "gross disbursements (nominal, education, official development assistance)",
         "population_type": {
-          "dcid": "FinancialFlow",
+          "ref": "FinancialFlow",
           "label": "financial flow"
         },
         "measured_property": {
-          "dcid": "amount",
+          "ref": "amount",
           "label": "amount"
         },
         "stat_type": {
-          "dcid": "measuredValue",
+          "ref": "measuredValue",
           "label": "measuredValue"
         },
         "measurement_qualifier": {
-          "dcid": "Nominal",
+          "ref": "Nominal",
           "label": "Nominal"
         },
         "measurement_denominator_unresolved": false,
@@ -91,7 +91,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "crsCooperationModality",
+              "ref": "crsCooperationModality",
               "label": "CRS cooperation modality"
             },
             "label": "modality"
@@ -99,7 +99,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "crsPurpose",
+              "ref": "crsPurpose",
               "label": "CRS purpose"
             },
             "label": "sector"
@@ -107,7 +107,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "crsTypeOfFinance",
+              "ref": "crsTypeOfFinance",
               "label": "CRS type of finance"
             },
             "label": "instrument"
@@ -115,7 +115,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "crsTypeOfFlow",
+              "ref": "crsTypeOfFlow",
               "label": "CRS type of flow"
             },
             "label": "flow"
@@ -123,7 +123,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "financialFlowType",
+              "ref": "financialFlowType",
               "label": "financial flow type"
             },
             "label": "financial flow type"
@@ -131,7 +131,7 @@
           {
             "axis": "how",
             "property": {
-              "dcid": "nettingBasis",
+              "ref": "nettingBasis",
               "label": "netting basis"
             },
             "label": "netting basis"
@@ -158,7 +158,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "crsCooperationModality",
+              "ref": "crsCooperationModality",
               "label": "CRS cooperation modality"
             },
             "label": "modality"
@@ -171,7 +171,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "crsPurpose",
+              "ref": "crsPurpose",
               "label": "CRS purpose"
             },
             "label": "sector"
@@ -180,7 +180,7 @@
             "kind": "value",
             "value": {
               "ref": {
-                "dcid": "CRSPurposeCode110",
+                "ref": "CRSPurposeCode110",
                 "label": "education"
               },
               "value_kind": "enum_value"
@@ -189,79 +189,79 @@
           "expansion": {
             "added": [
               {
-                "dcid": "CRSPurposeCode111",
+                "ref": "CRSPurposeCode111",
                 "label": "unspecified-level education"
               },
               {
-                "dcid": "CRSPurposeCode112",
+                "ref": "CRSPurposeCode112",
                 "label": "basic education"
               },
               {
-                "dcid": "CRSPurposeCode113",
+                "ref": "CRSPurposeCode113",
                 "label": "upper secondary education"
               },
               {
-                "dcid": "CRSPurposeCode114",
+                "ref": "CRSPurposeCode114",
                 "label": "post-secondary education"
               },
               {
-                "dcid": "CRSPurposeCode11110",
+                "ref": "CRSPurposeCode11110",
                 "label": "education policy and administrative management"
               },
               {
-                "dcid": "CRSPurposeCode11120",
+                "ref": "CRSPurposeCode11120",
                 "label": "education facility and training"
               },
               {
-                "dcid": "CRSPurposeCode11130",
+                "ref": "CRSPurposeCode11130",
                 "label": "teacher training"
               },
               {
-                "dcid": "CRSPurposeCode11182",
+                "ref": "CRSPurposeCode11182",
                 "label": "educational research"
               },
               {
-                "dcid": "CRSPurposeCode11220",
+                "ref": "CRSPurposeCode11220",
                 "label": "primary education"
               },
               {
-                "dcid": "CRSPurposeCode11230",
+                "ref": "CRSPurposeCode11230",
                 "label": "basic life skills for adults"
               },
               {
-                "dcid": "CRSPurposeCode11231",
+                "ref": "CRSPurposeCode11231",
                 "label": "basic life skills for youth"
               },
               {
-                "dcid": "CRSPurposeCode11232",
+                "ref": "CRSPurposeCode11232",
                 "label": "primary education equivalent for adults"
               },
               {
-                "dcid": "CRSPurposeCode11240",
+                "ref": "CRSPurposeCode11240",
                 "label": "early childhood education"
               },
               {
-                "dcid": "CRSPurposeCode11250",
+                "ref": "CRSPurposeCode11250",
                 "label": "school feeding"
               },
               {
-                "dcid": "CRSPurposeCode11260",
+                "ref": "CRSPurposeCode11260",
                 "label": "lower secondary education"
               },
               {
-                "dcid": "CRSPurposeCode11320",
+                "ref": "CRSPurposeCode11320",
                 "label": "upper secondary schooling"
               },
               {
-                "dcid": "CRSPurposeCode11330",
+                "ref": "CRSPurposeCode11330",
                 "label": "vocational training"
               },
               {
-                "dcid": "CRSPurposeCode11420",
+                "ref": "CRSPurposeCode11420",
                 "label": "higher education"
               },
               {
-                "dcid": "CRSPurposeCode11430",
+                "ref": "CRSPurposeCode11430",
                 "label": "advanced technical and managerial training"
               }
             ]
@@ -271,7 +271,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "crsTypeOfFinance",
+              "ref": "crsTypeOfFinance",
               "label": "CRS type of finance"
             },
             "label": "instrument"
@@ -284,7 +284,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "crsTypeOfFlow",
+              "ref": "crsTypeOfFlow",
               "label": "CRS type of flow"
             },
             "label": "flow"
@@ -293,7 +293,7 @@
             "kind": "value",
             "value": {
               "ref": {
-                "dcid": "CRSTypeOfFlow10",
+                "ref": "CRSTypeOfFlow10",
                 "label": "official development assistance"
               },
               "value_kind": "enum_value"
@@ -304,7 +304,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "financialFlowType",
+              "ref": "financialFlowType",
               "label": "financial flow type"
             },
             "label": "financial flow type"
@@ -313,7 +313,7 @@
             "kind": "value",
             "value": {
               "ref": {
-                "dcid": "Disbursement",
+                "ref": "Disbursement",
                 "label": "disbursement"
               },
               "value_kind": "enum_value"
@@ -324,7 +324,7 @@
           "key": {
             "axis": "how",
             "property": {
-              "dcid": "nettingBasis",
+              "ref": "nettingBasis",
               "label": "netting basis"
             },
             "label": "netting basis"
@@ -333,7 +333,7 @@
             "kind": "value",
             "value": {
               "ref": {
-                "dcid": "Gross",
+                "ref": "Gross",
                 "label": "gross"
               },
               "value_kind": "enum_value"
@@ -349,7 +349,7 @@
             "kind": "value",
             "value": {
               "ref": {
-                "dcid": "country/KEN",
+                "ref": "country/KEN",
                 "label": "Kenya"
               },
               "value_kind": "entity"

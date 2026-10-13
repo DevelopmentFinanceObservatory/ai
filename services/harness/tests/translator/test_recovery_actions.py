@@ -26,7 +26,6 @@ from data_mcp.digest import render_answer
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
-from planner.agent import _choice_not_offered
 from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
@@ -42,6 +41,7 @@ from planner.plan import (
 )
 from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource
+from submission.service import _choice_not_offered
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
     DiscoveryRecord,
@@ -391,7 +391,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
             {"role": "destination", "label": "Ghana", "ref": "country/GHA"},
             {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
         ],
-        entity_groups={"destination": {"label": "Africa", "dcid": "africa"}},
+        entity_groups={"destination": {"label": "Africa", "ref": "africa"}},
     )
     france = [Entity(name="France", role="donor"), Entity(name="Germany", role="donor")]
     context = context_holding(
@@ -401,7 +401,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
                 requirement(
                     measure="official development assistance",
                     entities=france,
-                    across="recipient",
+                    across=("recipient",),
                     source_spec_id=SPEC_AFRICA,
                     source=named_source,
                 ),
@@ -436,7 +436,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
     assert withheld["sentence"] == "France's gross disbursements to 266 recipients"
     (dropped,) = withheld["dropped"]
     assert "Africa" in dropped and "266" in dropped
-    repair = "name 'Africa' as recipient in `entities` and drop `across`"
+    repair = "name 'Africa' as recipient in `entities` and drop 'recipient' from `across`"
     assert referral["repair"] == repair
     assert f"none keeps it, so {repair}" in referral["reason"]
     stored = load_referral(context.state)
@@ -449,7 +449,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
             requirement(
                 measure="official development assistance",
                 entities=france,
-                across="recipient",
+                across=("recipient",),
                 source_spec_id=SPEC_EVERY_RECIPIENT,
             ),
             derived_requirement(),
@@ -472,7 +472,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
                 requirement(
                     measure="official development assistance",
                     entities=entities,
-                    across=across,
+                    across=() if across is None else (across,),
                     source=source,
                 ),
                 derived_requirement(),

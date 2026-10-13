@@ -1,11 +1,130 @@
 {
-  "shape": "stat_var",
-  "dcid": "dc/topic/MalariaGrantDisbursements",
-  "label": "Malaria grant disbursements",
-  "definition": "Grant disbursements attributed to malaria-focused health programmes.",
-  "roles": ["measure"],
-  "population_type": "FinancialTransaction",
-  "processing_level": null,
-  "facets": null,
-  "sources": null
+  "ref": "GDP_Nominal",
+  "label": "GDP, current prices",
+  "types": [
+    "StatisticalVariable"
+  ],
+  "description": "Gross domestic product at current prices.",
+  "links": {
+    "facets": "/api/graph/node/GDP_Nominal/members?relation=facets"
+  },
+  "gaps": [
+    "stat_var.definition.stat_type.label",
+    "stat_var.definition.measure"
+  ],
+  "built_from": {
+    "code_index": "952a221e6d43254927fcb75abbf12ce7ba03285fbfeef7d9913e2ddcf49f904c",
+    "origin_catalogue": "restrictive-catalogue-6fde3fb68115",
+    "coverage_index": "test-coverage-stamp-build"
+  },
+  "kind": "stat_var",
+  "stat_var": {
+    "definition": {
+      "population_type": {
+        "ref": "EconomicActivity",
+        "label": "Economic activity"
+      },
+      "measured_property": {
+        "ref": "gdp",
+        "label": "gross domestic product"
+      },
+      "stat_type": {
+        "ref": "measuredValue",
+        "label": null
+      },
+      "measure": null,
+      "roles": [
+        "observationAbout"
+      ],
+      "source_indicator_codes": [],
+      "constraints": [],
+      "definitions": [
+        {
+          "of": {
+            "ref": "GDP_Nominal",
+            "label": "GDP, current prices"
+          },
+          "text": "Gross domestic product at current prices."
+        }
+      ]
+    },
+    "availability": {
+      "scope": "dfo",
+      "summary": {
+        "places": {
+          "country": 2
+        },
+        "entities": null,
+        "first_year": "2000",
+        "last_year": "2020",
+        "sources": 1,
+        "facets": 2
+      },
+      "default": {
+        "facets": [
+          "fUSD"
+        ],
+        "source": {
+          "ref": "provenance/IMFWorldEconomicOutlook",
+          "label": "provenance/IMFWorldEconomicOutlook",
+          "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook"
+        },
+        "unit": {
+          "ref": "CurrencyUSD",
+          "label": "US dollars"
+        },
+        "measurement_method": null,
+        "observation_period": "P1Y",
+        "first_year": "2000",
+        "last_year": "2020",
+        "places": 2,
+        "without_data": 0
+      },
+      "sources": [
+        {
+          "source": {
+            "ref": "provenance/IMFWorldEconomicOutlook",
+            "label": "provenance/IMFWorldEconomicOutlook",
+            "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook"
+          },
+          "places": {
+            "country": 2
+          },
+          "entities": null,
+          "first_year": "2000",
+          "last_year": "2020",
+          "facets": 2,
+          "series": [
+            {
+              "measurement_method": null,
+              "observation_period": "P1Y",
+              "scaling": null,
+              "first_year": "2000",
+              "last_year": "2020",
+              "places": 2,
+              "observations": 42,
+              "units": {
+                "count": 1,
+                "leading": [
+                  {
+                    "ref": "CurrencyUSD",
+                    "label": "US dollars",
+                    "places": 2
+                  }
+                ],
+                "more": 0,
+                "national_currency": null
+              },
+              "binding": {
+                "provenance": "provenance/IMFWorldEconomicOutlook",
+                "measurementMethod": null,
+                "unit": "CurrencyUSD"
+              }
+            }
+          ]
+        }
+      ],
+      "more_sources": 0
+    }
+  }
 }

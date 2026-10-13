@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +18,16 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.materialisation import FrameTooLarge
+from common.place_type import PARTY_ROLES, kind_column, type_column
 from compiler.evidence import EvidenceIssueCode, check_evidence, evidence_from_source
 from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
+from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.search_tool import MAX_PARTS
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar import Frame
 from google.adk.sessions.state import State
 from google.adk.tools import FunctionTool
 from harness import orchestrator_tools, planner_seam
@@ -50,15 +56,16 @@ from harness.turn_records import SearchReading, loose_match_notes, render_readin
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
-from planner import agent as planner_agent
 from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
+    AskBreakdown,
     DatasetRequirement,
     current_earlier_block,
     current_recorded_identity,
 )
 from planner.records import Period
+from submission import service as submission_service
 
 from .search_results import search_result_parts
 from .test_turn_records import _top_donors
@@ -77,7 +84,7 @@ FAMILY_BLOCK = {
         "stat_vars": {"member_count": 2, "served_count": 2},
         "slots": [
             {
-                "key": {"property": {"dcid": "crsPurposeCode"}},
+                "key": {"property": {"ref": "crsPurposeCode"}},
                 "binding": {"kind": "unbound"},
                 "summable": True,
             }
@@ -160,7 +167,11 @@ def _tools(
         remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
-    return by_name, SimpleNamespace(state={"surface": surface_name}, invocation_id="inv_1")
+    return by_name, SimpleNamespace(
+        state={"surface": surface_name},
+        invocation_id="inv_1",
+        actions=SimpleNamespace(skip_summarization=None),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -328,7 +339,7 @@ async def _recall_unknown_part(tools: dict[str, Any], ctx: Any) -> dict[str, Any
             "charts.1.type",
             "literal_error",
         ),
-        (_plan_non_text_ask, "plan", "plan", "asks.1", "string_type"),
+        (_plan_non_text_ask, "plan", "plan", "asks.1", "model_type"),
         (_recall_unknown_part, "recall", "recall", "part", "literal_error"),
     ],
 )
@@ -561,6 +572,23 @@ def test_search_tells_the_model_when_to_set_a_role():
     assert '{"text": "Kenya", "role": "to"}' in doc
 
 
+async def test_search_sends_a_source_code_and_tells_the_model_where_it_goes():
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    part = {"variable": "debt service", "source_code": "DT.TDS.DEGG.CD"}
+
+    await tools["search"]("DT.TDS.DEGG.CD by creditor", ctx, [part])
+
+    assert resolver.calls[0]["parts"] == [part]
+    declared = json.loads(_declarations()["search"])["parameters_json_schema"]["$defs"]
+    assert "source_code" in declared["SearchPart"]["properties"]
+    doc = " ".join(tools["search"].__doc__.split())
+    assert "goes in the part's `source_code`" in doc
+    assert "or the code itself when the user gives none" in doc
+    assert "`source_code_ambiguous`), retry with a `sources` entry" in doc
+    assert "`source_codes`" in doc
+
+
 @pytest.mark.parametrize("ref", [None, "provenance/WorldBankInternationalDebtStatistics"])
 async def test_search_sends_each_source_a_part_names_and_offers_no_dataset_list(ref):
     resolver = _resolver(_digest())
@@ -689,6 +717,22 @@ async def test_search_stores_a_reading_for_every_part_and_warnings_for_every_spe
     assert set(ctx.state["orchestrator:specs"]) == {ROLE_OPEN_ID, SPEC_LIFE}
 
 
+async def test_search_shows_the_counts_of_a_part_searched_for_the_latest_period():
+    envelope = _recorded_envelope()
+    envelope["parts"][0]["spec"]["definition"]["identity"]["requested_window"] = {"kind": "latest"}
+    tools, ctx = _tools(_resolver(resolver_digest(envelope)))
+
+    found = await tools["search"]("education aid to Kenya", ctx, [{"variable": "education aid"}])
+
+    # The model sees the per-year counts behind the latest period.
+    definite, *others = found["parts"]
+    assert definite["recent_years"] == [
+        {"year": 2024, "observations": 239, "series": 239},
+        {"year": 2023, "observations": 1807, "series": 300},
+    ]
+    assert all("recent_years" not in part for part in others)
+
+
 def test_comparison_intent_reaches_the_stored_search_ledger() -> None:
     state: dict[str, Any] = {}
     envelope = {
@@ -770,6 +814,33 @@ async def test_fetch_adds_its_summary_or_refusal_to_the_reading_of_its_spec_id()
     assert life.fetch is not None and life.fetch.summary == "64 observations"
     assert refused.fetch is not None and refused.fetch.refusal_code == "over_ceiling"
     assert aid.fetch is None
+
+
+async def test_fetch_of_a_nearest_series_adds_a_settled_reading_for_it():
+    """A `no_data` part's nearest real series is fetched as a candidate is:
+    its block is stored, so the fetch adds a `chosen` reading the planner
+    may pin with no second search."""
+    envelope = {
+        "status": "no_data",
+        "parts": [
+            {
+                "status": "no_data",
+                "variable_text": "net flows",
+                "no_data": {"reason": "no_observations", "nearest_real": [SINGLE_BLOCK]},
+            }
+        ],
+    }
+    tools, ctx = _tools(_resolver(resolver_digest(envelope)))
+    await tools["search"]("net flows to Nigeria", ctx, [{"variable": "net flows"}])
+
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    readings = [SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"]]
+    assert [(r.status, r.spec_id, r.text) for r in readings] == [
+        ("no_data", None, "net flows"),
+        ("chosen", SPEC_LIFE, "net flows"),
+    ]
+    assert ctx.state["orchestrator:specs"][SPEC_LIFE] == SINGLE_BLOCK
 
 
 async def test_fetch_of_a_chosen_candidate_adds_a_reading_for_it():
@@ -886,7 +957,17 @@ async def test_fetch_reads_a_family_as_its_total_and_a_single_indicator_as_is(
     assert aid["frames"] == [{"frame": frame_id_for(REF), "view": VIEW}]
     assert life["summary"] == "64 observations"
     assert unknown["frames"][0]["frame"] == frame_id_for(REF)
-    assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF): {"ref": REF, "view": VIEW}}
+    # The frame keeps the arguments of the fetch that last registered it.
+    assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {
+        frame_id_for(REF): {
+            "ref": REF,
+            "view": VIEW,
+            "fetch_args": {
+                "spec_id": "spec_other",
+                "scope": {"window": {"kind": "range", "start_year": 2015, "end_year": 2020}},
+            },
+        }
+    }
 
 
 async def test_fetch_keeps_the_reading_a_plan_step_used_for_its_spec():
@@ -1314,20 +1395,519 @@ async def test_make_charts_relays_the_values_a_platform_refusal_would_accept():
     )
 
 
+WIDE_VIEW: dict[str, Any] = {
+    "dimensions": [
+        {"name": "stat_var", "values": [], "plural": False, "total_count": 1},
+        {"name": "financingProvider", "values": [], "plural": True, "total_count": 30},
+        {"name": "financingRecipient", "values": [], "plural": False, "total_count": 1},
+    ],
+    "period_grain": "year",
+    "coverage": ["2023", "2024"],
+}
+
+
+# The pair dfo-apis serves the retrieval under, whatever its rendering.
+WIDE_REF = {"spec_id": SPEC_AID, "content_version": "cv_" + "c" * 32}
+SUMMED = {"by": ["time_period"], "op": "sum"}
+# The pair the store holds the summed retrieval under, as data-mcp names a
+# `groupby` rendering.
+WIDE_STORE_REF = frame_ref_for(**WIDE_REF, groupby=SUMMED).model_dump()
+# The pair the store holds the same retrieval under when it is asked with
+# `place_types`, with each party's kind.
+KINDS_STORE_REF = frame_ref_for(**WIDE_REF, columns=KIND_COLUMNS, groupby=SUMMED).model_dump()
+
+
+class WideFrameExecutor(FakeExecutor):
+    """Fetches aid to Kenya from `providers` providers, described by `view`."""
+
+    def __init__(self, *, providers: int = 30, view: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.view = view or WIDE_VIEW
+        self.view["dimensions"][1]["total_count"] = providers
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data":
+            self.calls.append((tool, args))
+            store_ref = KINDS_STORE_REF if args.get("place_types") else WIDE_STORE_REF
+            return {
+                "outcome": "ok",
+                "frame_refs": [WIDE_REF],
+                "store_refs": [store_ref],
+                "summary": "60 observations",
+            }
+        if tool == "describe_frame":
+            self.calls.append((tool, args))
+            return {"outcome": "ok", "view": self.view}
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+class HeldFrames:
+    """The frame store, holding one frame of `providers` members of `role`
+    whose 2024 value is their number and 2023 value its reverse under `wide`,
+    or nothing. Under `KINDS_STORE_REF` it holds the same members with their
+    enrichment column, and when `carried`, as a retrieval asked with
+    `place_types` is stored, under `wide` too. On a party role those in
+    `totals` are group totals and the rest parties; on a place role those in
+    `totals` are typed `Place` and the rest countries, typed `Country` or
+    `Country,Place`. It holds nothing under any other `content_version`."""
+
+    def __init__(
+        self,
+        *,
+        held: bool = True,
+        providers: int = 30,
+        trace: Any = None,
+        totals: frozenset[str] = frozenset(),
+        wide: dict[str, Any] = WIDE_STORE_REF,
+        role: str = "financingProvider",
+        carried: bool = False,
+    ) -> None:
+        self.held = held
+        self.wide_cv = wide["content_version"]
+        self.providers = providers
+        self.trace = trace
+        self.totals = totals
+        self.role = role
+        self.carried = carried
+
+    def cell(self, number: int, member: str) -> str:
+        if self.role in PARTY_ROLES:
+            return "total" if member in self.totals else "party"
+        if member in self.totals:
+            return "Place"
+        return "Country,Place" if number % 2 else "Country"
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "stat_var": "dcid:aid",
+                self.role: f"donor/{number:02d}",
+                "financingRecipient": "country/KEN",
+                "time_period": period,
+                "value": float(number if period == "2024" else 100 - number),
+                "unit": "USDollar",
+            }
+            for number in range(self.providers)
+            for period in ("2023", "2024")
+        ]
+
+    async def open(self, ref: Any) -> SimpleNamespace | None:
+        kinds_cv = KINDS_STORE_REF["content_version"]
+        if not self.held or ref.content_version not in (self.wide_cv, kinds_cv):
+            return None
+        rows = self.rows()
+        roles = [self.role, "financingRecipient"]
+        if self.carried or ref.content_version == kinds_cv:
+            column = (kind_column if self.role in PARTY_ROLES else type_column)(self.role)
+            rows = [
+                {**row, column: self.cell(int(row[self.role][-2:]), row[self.role])} for row in rows
+            ]
+            roles.append(column)
+        frame = Frame.build(role_keys=roles, rows=rows)
+
+        async def read(*, max_rows: int) -> tuple[Frame, Any]:
+            return frame, self.trace
+
+        return SimpleNamespace(num_rows=frame.num_rows, read=read)
+
+
+async def _draw_wide(
+    monkeypatch: pytest.MonkeyPatch,
+    store: Any,
+    *,
+    providers: int = 30,
+    view: dict[str, Any] | None = None,
+    **chart: Any,
+) -> tuple[WideFrameExecutor, dict[str, Any]]:
+    """Fetch the wide frame and draw one chart of it over `store`."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: store)
+    executor = WideFrameExecutor(providers=providers, view=copy.deepcopy(view or WIDE_VIEW))
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    spec = {
+        "frame": frame_id_for(WIDE_REF),
+        "type": "table",
+        "title": "Aid to Kenya",
+        "select_json": json.dumps({"financingRecipient": "country/KEN"}),
+        **chart,
+    }
+    return executor, await tools["make_charts"]([spec], ctx)
+
+
+def _intents(executor: FakeExecutor) -> list[dict[str, Any]]:
+    return [args["intent"] for tool, args in executor.calls if tool == "write_component"]
+
+
+@pytest.mark.parametrize(("type_", "drawn"), [("table", 24), ("line_chart", LINE_CHART_MAX_VALUES)])
+async def test_make_charts_draws_the_largest_values_of_a_select_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch, type_: str, drawn: int
+) -> None:
+    """A table of every provider's aid to Kenya is over the 24-series
+    cap, so the card draws the largest by the latest year, highest first,
+    and says so on the card and to the model."""
+    executor, result = await _draw_wide(monkeypatch, HeldFrames(), type=type_)
+
+    (intent,) = _intents(executor)
+    assert intent["select"] == {
+        "financingRecipient": "country/KEN",
+        "financingProvider": [f"donor/{number:02d}" for number in range(29, 29 - drawn, -1)],
+    }
+    note = f"top {drawn} of 30 by 2024 value"
+    assert intent["title"] == f"Aid to Kenya ({note})"
+    assert note in result["charts"][0]["note"]
+
+
+@pytest.mark.parametrize(
+    ("role", "carried"),
+    [("financingProvider", False), ("financingProvider", True), ("observationAbout", True)],
+    ids=["kinds_asked_again", "kinds_carried", "place_types_carried"],
+)
+async def test_make_charts_ranks_parties_only_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch, role: str, carried: bool
+) -> None:
+    """Group totals (the largest values here) are left out of the top N, and
+    out of its count, by the kind dfo-apis serves for the same retrieval; the
+    chart is drawn on the frame the model chose. A frame whose rows carry the
+    kind or type column is ranked from those rows, with no second retrieval.
+    That means parties among totals, or countries typed `Country` and
+    `Country,Place` among places that are not countries."""
+    totals = frozenset(f"donor/{number:02d}" for number in range(25, 30))
+    view = copy.deepcopy(WIDE_VIEW)
+    view["dimensions"][1]["name"] = role
+    store = HeldFrames(totals=totals, role=role, carried=carried)
+
+    executor, result = await _draw_wide(monkeypatch, store, view=view, type="table")
+
+    (intent,) = _intents(executor)
+    assert intent["frame_ref"] == WIDE_REF
+    assert intent["select"][role] == [f"donor/{number:02d}" for number in range(24, 0, -1)]
+    assert "top 24 of 25 by 2024 value" in result["charts"][0]["note"]
+    asked_again = [
+        args for tool, args in executor.calls if tool == "get_data" and args.get("place_types")
+    ]
+    assert len(asked_again) == (0 if carried else 1)
+
+
+@pytest.mark.parametrize(
+    ("spec_id", "stored", "asked"),
+    [
+        (SPEC_AID, {}, {"spec_id": SPEC_AID, "place_types": True}),
+        (
+            SPEC_AID,
+            {"store_ref": {"spec_id": SPEC_AID, "content_version": None}},
+            {"spec_id": SPEC_AID, "place_types": True},
+        ),
+        ("ops_" + "e" * 32, {}, None),
+    ],
+    ids=["plan_step_frame", "store_pair_unstated", "analysis_result"],
+)
+async def test_make_charts_asks_a_frame_with_no_fetch_for_its_kinds_by_its_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    spec_id: str,
+    stored: dict[str, Any],
+    asked: dict[str, Any] | None,
+) -> None:
+    """A frame a plan step registered carries no fetch arguments: its kinds are
+    read from its spec alone. An analysis result, which no retrieval serves, is
+    not narrowed. An entry that states no store pair, or one with a member
+    missing, is read from the store by its own pair."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: HeldFrames(wide=WIDE_REF))
+    executor = WideFrameExecutor()
+    tools, ctx = _tools(executor=executor)
+    ref = {**WIDE_REF, "spec_id": spec_id}
+    ctx.state[ORCHESTRATOR_FRAMES_KEY] = {
+        "fplan": {"ref": ref, "view": copy.deepcopy(WIDE_VIEW), **stored}
+    }
+    select = json.dumps({"financingRecipient": "country/KEN"})
+
+    result = await tools["make_charts"](
+        [{"frame": "fplan", "type": "table", "title": "t", "select_json": select}], ctx
+    )
+
+    calls = [args for tool, args in executor.calls if tool == "get_data"]
+    if asked is None:
+        assert calls == []
+        assert "error" in result["charts"][0]
+    else:
+        assert calls == [asked]
+        assert "top 24 of 30" in result["charts"][0]["note"]
+
+
+async def test_make_charts_counts_only_the_members_the_chart_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A select listing ten providers draws the largest of those ten that are
+    parties, not of every provider the retrieval holds."""
+    listed = [f"donor/{number:02d}" for number in range(10)]
+    select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
+    totals = frozenset({"donor/09"})
+
+    executor, result = await _draw_wide(
+        monkeypatch, HeldFrames(totals=totals), type="line_chart", select_json=select
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
+    assert "top 8 of 9 by 2024 value" in result["charts"][0]["note"]
+
+
+async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    every = frozenset(f"donor/{number:02d}" for number in range(30))
+
+    executor, result = await _draw_wide(monkeypatch, HeldFrames(totals=every))
+
+    assert "error" in result["charts"][0]
+    assert _writes(executor) == 0
+
+
+async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table that binds neither the six recipients nor the thirty providers
+    is not narrowed: the model reads both dimensions and their counts."""
+    view = copy.deepcopy(WIDE_VIEW)
+    view["dimensions"][2]["total_count"] = 6
+
+    executor, result = await _draw_wide(monkeypatch, HeldFrames(), view=view, select_json="{}")
+
+    error = result["charts"][0]["error"]
+    assert "financingRecipient (6 values)" in error
+    assert "financingProvider (30 values)" in error
+    assert _writes(executor) == 0
+
+
+@pytest.mark.parametrize(
+    "store",
+    [
+        HeldFrames(providers=5),
+        HeldFrames(providers=5, totals=frozenset({"donor/04"}), carried=True),
+    ],
+    ids=["plain", "kinds_carried"],
+)
+async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
+    monkeypatch: pytest.MonkeyPatch, store: HeldFrames
+) -> None:
+    """A bar chart answering a ranking lists every provider, highest first,
+    with no note, since nothing is left out. A kind column the rows carry
+    leaves the ordering as it is, group total included."""
+    executor, result = await _draw_wide(
+        monkeypatch, store, providers=5, type="bar_chart", order_by_value=True
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in (4, 3, 2, 1, 0)]
+    assert intent["title"] == "Aid to Kenya"
+    assert "note" not in result["charts"][0]
+
+
+async def test_make_charts_keeps_the_listed_order_unless_asked_to_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listed = ["donor/00", "donor/03", "donor/01"]
+    select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
+
+    executor, _ = await _draw_wide(
+        monkeypatch, HeldFrames(providers=5), providers=5, type="bar_chart", select_json=select
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["select"]["financingProvider"] == listed
+
+
+async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table draws series times periods rows, at most 2,000, counting every
+    period of the frame's window, gaps included: over 1925-2024 that is 20
+    series, though the rows hold two years."""
+
+    class LongFrames(HeldFrames):
+        def rows(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "stat_var": "dcid:aid",
+                    "financingProvider": f"donor/{number:02d}",
+                    "financingRecipient": "country/KEN",
+                    "time_period": year,
+                    "value": float(number),
+                    "unit": "USDollar",
+                }
+                for number in range(30)
+                for year in ("1925", "2024")
+            ]
+
+    view = {**WIDE_VIEW, "coverage": ["1925", "2024"]}
+    executor, result = await _draw_wide(monkeypatch, LongFrames(), view=view)
+
+    (intent,) = _intents(executor)
+    assert len(intent["select"]["financingProvider"]) == 20
+    assert "top 20 of 30" in result["charts"][0]["note"]
+
+
+@pytest.mark.parametrize(
+    ("coverage", "periods"),
+    [
+        (["1925", "2024"], 100),
+        (["2015-01", "2024-12"], 120),
+        (["2024-01-01", "2024-03-31"], 93),
+        (["2020/2024", "2020/2024"], 1),
+    ],
+)
+def test_periods_covered_counts_every_period_of_the_window_never_too_few(
+    coverage: list[str], periods: int
+) -> None:
+    """Days count up to 31 a month: January to March is 91 days, counted 93."""
+    assert orchestrator_tools._periods_covered({"coverage": coverage}) == periods
+
+
+async def test_make_charts_keeps_a_drawable_select_when_ordering_would_break_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nine providers unbound draw as nine lines; listing all nine would pass
+    the eight a line chart lists, so ordering leaves the select as written."""
+    executor, result = await _draw_wide(
+        monkeypatch,
+        HeldFrames(providers=9),
+        providers=9,
+        type="line_chart",
+        order_by_value=True,
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["select"] == {"financingRecipient": "country/KEN"}
+    assert "error" not in result["charts"][0]
+
+
+async def test_make_charts_notes_members_left_out_without_claiming_a_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering under the cap leaves out a provider with no value in the
+    latest year, and the note says so without blaming the drawing cap."""
+
+    class Sparse(HeldFrames):
+        def rows(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "stat_var": "dcid:aid",
+                    "financingProvider": provider,
+                    "financingRecipient": "country/KEN",
+                    "time_period": period,
+                    "value": value,
+                    "unit": "USDollar",
+                }
+                for provider, period, value in (
+                    ("donor/a", "2024", 1.0),
+                    ("donor/b", "2024", 2.0),
+                    ("donor/c", "2023", 3.0),
+                )
+            ]
+
+    executor, result = await _draw_wide(
+        monkeypatch, Sparse(), providers=3, type="bar_chart", order_by_value=True
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["select"]["financingProvider"] == ["donor/b", "donor/a"]
+    assert result["charts"][0]["note"] == (
+        "This card draws only the top 2 of 3 by 2024 value, highest first. Say in the reply "
+        "that it shows the largest of them, and leave its values to the card."
+    )
+
+
+class UnreadableFrames:
+    async def open(self, ref: Any) -> None:
+        raise FrameTooLarge(ref, reason="over the read ceiling")
+
+
+class UncountedFrames:
+    async def open(self, ref: Any) -> SimpleNamespace:
+        return SimpleNamespace(num_rows=None)
+
+
+class FailingStore:
+    async def open(self, ref: Any) -> None:
+        raise TimeoutError("the bucket did not answer")
+
+
+def _rank_positions() -> HeldFrames:
+    """The store, holding a plan's per-period rank: its values are positions."""
+    trace = SimpleNamespace(applied_policy=SimpleNamespace(detail={"derived": {"ordinal": True}}))
+    return HeldFrames(trace=trace)
+
+
+@pytest.mark.parametrize(
+    ("store", "chart", "view", "warned"),
+    [
+        (UnreadableFrames(), {}, None, True),
+        (FailingStore(), {}, None, True),
+        (HeldFrames(held=False), {}, None, True),
+        (UncountedFrames(), {}, None, True),
+        (_rank_positions(), {}, None, False),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False),
+        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False),
+    ],
+    ids=[
+        "unreadable",
+        "store_failed",
+        "not_held",
+        "no_row_count",
+        "rank_positions",
+        "rolling",
+        "latest_periods",
+    ],
+)
+async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    store: Any,
+    chart: dict[str, Any],
+    view: Any,
+    warned: bool,
+) -> None:
+    """A frame the store cannot read, a plan's rank positions (where the
+    highest number is the worst), and a card whose period moves with the
+    data (a list picked today would not follow it) are never narrowed: the
+    refusal stands. A frame the store cannot read, does not hold or states no
+    row count for is logged as a warning."""
+    monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
+
+    with caplog.at_level(logging.WARNING, logger=orchestrator_tools.__name__):
+        executor, result = await _draw_wide(monkeypatch, store, view=view, **chart)
+
+    assert "error" in result["charts"][0]
+    assert _writes(executor) == 0
+    assert (orchestrator_tools.__name__ in {record.name for record in caplog.records}) is warned
+
+
+def _marker_of(trace: Any) -> Any:
+    """`read_derived_marker` over the test's stand-in trace."""
+    derived = getattr(getattr(trace, "applied_policy", None), "detail", {}).get("derived")
+    return SimpleNamespace(**derived) if derived else None
+
+
 # --- ask_user and plan: one pending action per turn ----------------------
 
 
 def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
+    """A recorded hand-off ends the turn without the model call that would only
+    end it; a refused one goes back to the model."""
     tools, ctx = _tools()
+    _, later = _tools()
 
     options = [{"label": "Republic of the Congo"}, {"label": "DR Congo"}]
 
     assert "error" in tools["ask_user"]("Which Congo?", [], ctx)
+    assert not ctx.actions.skip_summarization
     asked = tools["ask_user"]("Which Congo?", options, ctx)
-    second = tools["plan"]("Congo's GDP", [], ctx)
+    later.state.update(ctx.state)
+    second = tools["plan"]("Congo's GDP", [], later)
 
     assert asked[HANDED_OFF] == "ask"
+    assert ctx.actions.skip_summarization is True
     assert HANDED_OFF not in second
+    assert not later.actions.skip_summarization
     assert pending_action(ctx.state) == PendingAsk(question="Which Congo?", options=options)
     assert "already waiting on ask" in second["error"]
 
@@ -1501,8 +2081,10 @@ async def test_a_fetched_other_count_states_the_measure_search_elected(gross_fir
         earlier=(),
         warnings={},
     )
-    choice = planner_agent._measure_choices(pins)[FRANCE_KENYA_NET]
-    decision = planner_agent._measure_decision("counted_as", FRANCE_KENYA_NET, choice, user=False)
+    choice = submission_service.measure_choices(pins)[FRANCE_KENYA_NET]
+    decision = submission_service._measure_decision(
+        "counted_as", FRANCE_KENYA_NET, choice, user=None
+    )
 
     assert pins[FRANCE_KENYA_NET].other_count_of == gross
     assert (decision.options, decision.chosen, decision.rationale) == (
@@ -1584,6 +2166,168 @@ def test_plan_refuses_asks_past_the_planner_limits_without_spending_the_call(ask
     assert pending_action(ctx.state) == PendingPlan(
         brief="France's aid to Guatemala", asks=["the total since 2010"]
     )
+
+
+_BY_CREDITOR = {
+    "variable": "general government debt service by creditor",
+    "time": "2031",
+    "open_roles": ["creditor"],
+}
+
+
+async def _searched(part: dict[str, Any], status: str = "definite"):
+    """The tools and context after one search of `part` that read as `status`."""
+    reading = {"variable": part["variable"], "status": status}
+    if status == "definite":
+        reading["spec_id"] = SPEC_AID
+    tools, ctx = _tools(_resolver(_digest(reading, kind="resolution")))
+    await tools["search"](part["variable"], ctx, [part])
+    return tools, ctx
+
+
+async def test_plan_refuses_asks_that_leave_out_a_party_the_search_held_open():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    refused = tools["plan"]("Debt service by creditor", ["Debt service by creditor"], ctx)
+    recorded = tools["plan"](
+        "Debt service by creditor",
+        [{"text": "Debt service by creditor", "by": ["creditor", "creditor"]}],
+        ctx,
+    )
+
+    assert refused["invalid"] == [{"loc": "asks", "type": "breakdown_missing", "party": "creditor"}]
+    assert "`by`" in refused["error"] and "`over`" in refused["error"]
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="Debt service by creditor",
+        asks=["Debt service by creditor"],
+        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+    )
+
+
+@pytest.mark.parametrize(
+    ("part", "status"),
+    [
+        (_BY_CREDITOR, "no_data"),
+        ({"variable": "aid", "entities": [{"text": "France", "role": "from"}]}, "definite"),
+    ],
+    ids=["no_data", "named_party"],
+)
+async def test_plan_takes_asks_without_parties_when_no_settled_search_held_one_open(
+    part: dict[str, Any], status: str
+):
+    tools, ctx = await _searched(part, status)
+
+    recorded = tools["plan"]("the brief", ["the total"], ctx)
+
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(brief="the brief", asks=["the total"])
+
+
+_FROM_ANY_ORIGIN = {**_BY_CREDITOR, "open_roles": ["origin"]}
+
+
+@pytest.mark.parametrize(
+    "parts", [[_FROM_ANY_ORIGIN], [_FROM_ANY_ORIGIN, _BY_CREDITOR]], ids=["origin", "then-creditor"]
+)
+async def test_plan_takes_an_ask_naming_the_held_side_in_another_word(parts: list[dict[str, Any]]):
+    tools, ctx = await _searched(parts[0])
+    for part in parts[1:]:
+        await tools["search"](part["variable"], ctx, [part])
+
+    recorded = tools["plan"](
+        "Debt service by creditor", [{"text": "Debt service by creditor", "by": ["creditor"]}], ctx
+    )
+
+    assert recorded[HANDED_OFF] == "plan"
+
+
+async def test_plan_refuses_asks_naming_one_of_two_parties_two_flows_held_open():
+    tools, ctx = await _searched({"variable": "aid by donor", "open_roles": ["donor"]})
+    await tools["search"](_BY_CREDITOR["variable"], ctx, [_BY_CREDITOR])
+
+    refused = tools["plan"](
+        "brief", [{"text": "aid by donor", "by": ["donor"]}, "total debt service"], ctx
+    )
+
+    assert refused["invalid"] == [{"loc": "asks", "type": "breakdown_missing", "party": "creditor"}]
+
+
+async def test_plan_refuses_an_ask_listing_two_parties_of_one_side_and_takes_an_ask_for_each():
+    tools, ctx = await _searched({"variable": "aid by donor", "open_roles": ["donor"]})
+    await tools["search"](_BY_CREDITOR["variable"], ctx, [_BY_CREDITOR])
+
+    refused = tools["plan"](
+        "brief", [{"text": "aid by donor, debt by creditor", "by": ["donor", "creditor"]}], ctx
+    )
+    recorded = tools["plan"](
+        "brief",
+        [{"text": "aid by donor", "by": ["donor"]}, {"text": "debt", "by": ["creditor"]}],
+        ctx,
+    )
+
+    assert refused["invalid"] == [{"loc": "asks.0", "type": "value_error"}]
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="brief",
+        asks=["aid by donor", "debt"],
+        ask_breakdowns=[
+            AskBreakdown(ask=0, by=("donor",)),
+            AskBreakdown(ask=1, by=("creditor",)),
+        ],
+    )
+
+
+async def test_plan_names_the_parties_of_a_side_the_search_held_open_by_its_column():
+    tools, ctx = await _searched(_FROM_ANY_ORIGIN)
+
+    refused = tools["plan"](
+        "Debt service by debtor", [{"text": "Debt service by debtor", "by": ["debtor"]}], ctx
+    )
+
+    assert refused["invalid"] == [
+        {"loc": "asks", "type": "breakdown_missing", "party": "donor/creditor/exporter"}
+    ]
+    assert "held donor/creditor/exporter open" in refused["error"]
+    assert not re.search(r'(?<!one of )"donor"', refused["error"])
+    assert pending_action(ctx.state) is None
+
+
+async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    recorded = tools["plan"](
+        "Total debt service", [{"text": "Total debt service", "over": ["creditor"]}], ctx
+    )
+
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="Total debt service", asks=["Total debt service"]
+    )
+
+
+@pytest.mark.parametrize("by", ["creditor", "donor"], ids=["one-word", "two-words-for-one-side"])
+async def test_plan_refuses_an_ask_that_lists_and_totals_one_party(by: str):
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    refused = tools["plan"](
+        "brief", [{"text": "Debt service", "by": [by], "over": ["creditor"]}], ctx
+    )
+
+    assert refused["invalid"] == [{"loc": "asks.0", "type": "value_error"}]
+    assert pending_action(ctx.state) is None
+
+
+async def test_the_breakdown_refusal_spends_the_invalid_argument_budget_not_the_plan():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    for _ in range(BUDGETS["invalid_arguments"]):
+        assert "invalid" in tools["plan"]("brief", ["Debt service"], ctx)
+    spent = tools["plan"]("brief", ["Debt service"], ctx)
+
+    assert "limit" in spent["error"]
+    assert "plan" not in ctx.state[ORCHESTRATOR_CALLS_KEY]
+    assert pending_action(ctx.state) is None
 
 
 # --- the skill tools and explain_dfo ----------------------------------------
@@ -1678,20 +2422,60 @@ async def test_a_skill_read_that_does_not_complete_is_a_retryable_error_for_the_
     assert len(surface.calls) == 1
 
 
-async def test_explain_dfo_reads_dfo_faq_off_the_activity_feed():
-    """dfo-faq comes through the bare surface: the recording one would put a
-    second step beside `explain_dfo`'s own."""
+class ByToolSurface(FakeSurface):
+    """A surface answering each tool with its own result; a tool mapped to
+    `None` raises as a call that does not complete."""
+
+    def __init__(self, results: dict[str, ToolCallResult | None]) -> None:
+        super().__init__(ToolCallResult(is_error=False, text=""))
+        self.results = results
+
+    async def call_tool(self, *, tool, arguments, on_progress=None) -> ToolCallResult:
+        self.calls.append((tool, arguments))
+        result = self.results[tool.name]
+        if result is None:
+            raise ToolSurfaceUnavailableError(f"{tool.name} timed out after 30s")
+        return result
+
+
+_COUNTS = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
+
+
+@pytest.mark.parametrize(
+    ("counts_result", "counts"),
+    [
+        (ToolCallResult(is_error=False, text=_COUNTS), _COUNTS),
+        # dfo-apis answers 503 while no search catalogue is published.
+        (
+            ToolCallResult(is_error=True, structured_content={"code": "service_unavailable"}),
+            COUNTS_UNAVAILABLE,
+        ),
+        (None, COUNTS_UNAVAILABLE),
+    ],
+)
+async def test_explain_dfo_reads_dfo_faq_and_the_counts_off_the_activity_feed(
+    counts_result: ToolCallResult | None, counts: str
+):
+    """dfo-faq and the counts come through the bare surface: the recording one
+    would put more steps beside `explain_dfo`'s own. Counts that could not be
+    read are named unavailable, never quoted."""
     recorded = FakeSurface(ToolCallResult(is_error=False, text="unused"))
-    bare = FakeSurface(ToolCallResult(is_error=False, text="# The DFO\nBuilt by ONE Data."))
+    bare = ByToolSurface(
+        {
+            "get_skill": ToolCallResult(is_error=False, text="# The DFO\nBuilt by ONE Data."),
+            "catalogue_counts": counts_result,
+        }
+    )
     tools, _ = _tools(surface=recorded, dfo_faq_surface=bare)
 
     explained = await tools["explain_dfo"]()
 
-    assert [(tool.name, arguments) for tool, arguments in bare.calls] == [
-        ("get_skill", {"skill_id": "dfo-faq"})
+    assert sorted((tool.name, arguments) for tool, arguments in bare.calls) == [
+        ("catalogue_counts", {}),
+        ("get_skill", {"skill_id": "dfo-faq"}),
     ]
     assert recorded.calls == []
-    assert explained == {"explainer": "# The DFO\nBuilt by ONE Data."}
+    assert explained == {"explainer": "# The DFO\nBuilt by ONE Data.", "counts": counts}
 
 
 @pytest.mark.parametrize(
@@ -2028,7 +2812,7 @@ async def test_source_alias_confirmation_survives_an_orchestrator_pin():
     requirement = DatasetRequirement(
         id="aid",
         measure="aid",
-        across="recipient",
+        across=("recipient",),
         period=Period(start=2020, end=2023),
         source="DAC",
     )

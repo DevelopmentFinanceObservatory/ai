@@ -1,0 +1,189 @@
+{
+  "id": "sum-bilateral-plus-imputed-france-guatemala",
+  "kind": "sum_of",
+  "origin": "trace b543ce3b-99b9-42ba-9d72-cc5448359a10",
+  "question": "give me the total (bilateral and imputed multilateral) aid france gave guatemala between 2010 and the latest",
+  "searches": [
+    {
+      "query": "give me the total (bilateral and imputed multilateral) aid france gave guatemala between 2010 and the latest",
+      "parts": [
+        {
+          "variable": "total bilateral and imputed multilateral aid",
+          "entities": [
+            {
+              "role": "from",
+              "text": "France"
+            },
+            {
+              "role": "to",
+              "text": "Guatemala"
+            }
+          ],
+          "time": "2010 to latest"
+        }
+      ]
+    },
+    {
+      "query": "bilateral ODA and imputed multilateral ODA from France to Guatemala 2010 to 2024",
+      "parts": [
+        {
+          "entities": [
+            {
+              "role": "from",
+              "text": "France"
+            },
+            {
+              "text": "Guatemala",
+              "role": "to"
+            }
+          ],
+          "variable": "bilateral ODA",
+          "time": "2010 to 2024"
+        },
+        {
+          "entities": [
+            {
+              "text": "France",
+              "role": "from"
+            },
+            {
+              "text": "Guatemala",
+              "role": "to"
+            }
+          ],
+          "variable": "imputed multilateral ODA",
+          "time": "2010 to 2024"
+        }
+      ]
+    },
+    {
+      "query": "official development assistance from France to Guatemala 2010 to 2024",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "time": "2010 to 2024",
+          "entities": [
+            {
+              "text": "France",
+              "role": "from"
+            },
+            {
+              "text": "Guatemala",
+              "role": "to"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Total bilateral and imputed multilateral aid from France to Guatemala between 2010 and the latest available year",
+  "asks": [
+    "Total bilateral and imputed multilateral aid from France to Guatemala, 2010 to the latest year"
+  ],
+  "required_kinds": [
+    "dataset",
+    "sum_of",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "sum_of",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "sum_of, not join: the user asks for one total of the two flows, not the two set side by side"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Total bilateral and imputed multilateral aid from France to Guatemala between 2010 and the latest available year",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether bilateral and imputed multilateral aid are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "planner_default",
+        "rationale": "Both are OECD DAC2a tables, which the oda-dac2a skill says add up: a donor's imputed multilateral ODA is not in its bilateral flows."
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "bilateral",
+        "measure": "bilateral aid",
+        "entities": [
+          {
+            "name": "France",
+            "role": "donor"
+          },
+          {
+            "name": "Guatemala",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2010,
+          "end": 2024
+        },
+        "period_end_open": true,
+        "source_spec_id": "spec_572616752d5ad2e05de592c40c87a1a6"
+      },
+      {
+        "kind": "dataset",
+        "id": "imputed",
+        "measure": "imputed multilateral aid",
+        "entities": [
+          {
+            "name": "France",
+            "role": "donor"
+          },
+          {
+            "name": "Guatemala",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2010,
+          "end": 2024
+        },
+        "period_end_open": true,
+        "source_spec_id": "spec_9d39a36838a622855a4264d061cd575d"
+      },
+      {
+        "kind": "sum_of",
+        "id": "yearly",
+        "left": {
+          "input_id": "bilateral"
+        },
+        "right": {
+          "input_id": "imputed"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "yearly",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

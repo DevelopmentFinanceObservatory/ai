@@ -14,11 +14,12 @@ lives in `data_mcp.digest`; the shared upstream client lives in
 from __future__ import annotations
 
 import logging
+import unicodedata
 from collections.abc import Mapping, Sequence
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, Self
 
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
@@ -39,10 +40,18 @@ _MAX_ENTITY_TEXT_CHARS = 128
 _MAX_ROLE_CHARS = 64
 _MAX_TIME_CHARS = 100
 _MAX_UNIT_CHARS = 100
+_MAX_SOURCE_CODE_CHARS = 64
 _MAX_PART_SOURCES = 8
 _MAX_SOURCE_TEXT_CHARS = 120
 _MAX_SOURCE_REF_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
+_MAX_PART_OPERATIONS = 8
+_MAX_OPERATION_PHRASE_CHARS = 200
+_MAX_FORECAST_TARGET_YEAR = 2200
+
+# Control characters (newlines among them) and the Unicode line and paragraph
+# separators, which the door refuses in an operation's phrase.
+_LINE_BREAKING_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 # The wall-clock budget for one call to the Search API's resolve route, retries
 # included. It sits above `Settings.upstream_read_timeout_s` (50 s, itself above
@@ -87,6 +96,54 @@ class SearchEntity(BaseModel):
             "set as one place: 'Africa' is {text: 'Africa'}"
         ),
     )
+
+
+class SearchOperation(BaseModel):
+    """One computation the question asks for over a part's data. Search does not
+    perform it; it opens the axis the operation runs over, so the part returns
+    every value the operation needs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verb: Literal["rank", "aggregate", "growth", "share_of", "explain", "forecast", "report"] = (
+        Field(description="what the question asks to compute")
+    )
+    phrase: str = Field(
+        min_length=1,
+        max_length=_MAX_OPERATION_PHRASE_CHARS,
+        description="the user's wording for it, on one line, e.g. 'top 5 creditors'",
+    )
+    over: Literal["place", "origin", "destination", "category", "year"] | None = Field(
+        default=None,
+        description=(
+            "the axis it runs across: 'origin' for givers (donors, creditors), 'destination' "
+            "for receivers, 'place' for countries, 'category' for a breakdown such as "
+            "sectors, 'year' for time; leave it out when the verb names none"
+        ),
+    )
+    target_year: int | None = Field(
+        default=None,
+        ge=1000,
+        le=_MAX_FORECAST_TARGET_YEAR,
+        description="the year a forecast projects to; set only on a forecast",
+    )
+
+    @field_validator("phrase")
+    @classmethod
+    def _phrase_is_one_line(cls, phrase: str) -> str:
+        if any(unicodedata.category(char) in _LINE_BREAKING_CATEGORIES for char in phrase):
+            raise ValueError(
+                "phrase must not contain control characters, newlines or line separators"
+            )
+        if not phrase.strip():
+            raise ValueError("phrase must not be blank")
+        return phrase
+
+    @model_validator(mode="after")
+    def _target_year_only_on_a_forecast(self) -> Self:
+        if self.target_year is not None and self.verb != "forecast":
+            raise ValueError("target_year is set only on a forecast")
+        return self
 
 
 class SearchSource(BaseModel):
@@ -157,10 +214,22 @@ class SearchPart(BaseModel):
             min_length=1,
             max_length=2,
             description=(
-                "the side the ask covers every member of, as a role word, e.g. ['creditor'] "
-                "for 'which creditors'; never a side one of the entities names"
+                "a flow side the ask breaks down, as a role word, e.g. ['creditor'] for "
+                "'which creditors' or 'by creditor'; use only for an origin or destination "
+                "side of a flow, never a side one of the entities names"
             ),
         )
+    )
+    operations: list[SearchOperation] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_PART_OPERATIONS,
+        description=(
+            "what the question asks to compute over this part's data, in the user's order, "
+            "e.g. a rank for 'top 5'; a rank over place, category or year has no flow role, "
+            "while origin is a giving side and destination is a receiving side; leave it out "
+            "when the question asks for none"
+        ),
     )
     sources: list[SearchSource] | None = Field(
         default=None,
@@ -170,6 +239,17 @@ class SearchPart(BaseModel):
             "the publishers or datasets the user names for this part, in their own "
             "words, each with `exclude` when the user asks to leave it out; a lender, "
             "donor or recipient the flow runs from or to is an entity, not a source"
+        ),
+    )
+    source_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_SOURCE_CODE_CHARS,
+        description=(
+            "a publisher's own indicator code, exactly as the user or a skill wrote it, "
+            "e.g. 'DT.TDS.DEGG.CD'. It names a family of variables, so keep the rest of "
+            "the ask (places, time, `open_roles`) in the other fields. `variable` holds "
+            "the user's words for the measure, or the code itself when the user gives none"
         ),
     )
     separate: bool | None = Field(
@@ -217,6 +297,10 @@ def _wire_part(part: SearchPart) -> dict[str, Any]:
         wire["unit_text"] = part.unit
     if part.open_roles is not None:
         wire["open_roles"] = part.open_roles
+    if part.operations is not None:
+        wire["operations"] = [
+            operation.model_dump(exclude_none=True) for operation in part.operations
+        ]
     if part.sources is not None:
         wire["sources"] = [
             {
@@ -226,6 +310,8 @@ def _wire_part(part: SearchPart) -> dict[str, Any]:
             }
             for source in part.sources
         ]
+    if part.source_code is not None:
+        wire["source_code"] = part.source_code
     if part.separate:
         wire["separate"] = True
     return wire
@@ -427,7 +513,24 @@ async def search(
     (e.g. donor, provider, creditor, exporter) is "from", a word for where it
     is directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
     the forms its own description lists. `open_roles` asks for every member
-    of a side, as in "which creditors does Nigeria pay", in the same role words.
+    of a flow side, in the same role words: send it for a "by creditor" or
+    "which creditors" ask. A rank in `operations` over `origin` or
+    `destination` also opens that flow side. Keep `open_roles` when the user
+    explicitly asks to break down that side.
+    "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
+    "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
+    ["creditor"], "operations": [{"verb": "rank",
+    "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,
+    category or year has no flow side. A worldwide country
+    ranking is a rank `over` "place" with no entity. A donor or creditor
+    ranking uses `origin`; a recipient or debtor ranking uses `destination`.
+    A flow role may contain countries and organisations, so opening it does
+    not restrict the entity type. A scoped country ranking keeps its scope:
+    "top 5 African countries" keeps
+    `{"text": "Africa", "members": true}`, and an explicitly named country
+    stays an entity, independently of the ranking axis. Do not add "World" as
+    a stand-in for an open population; retain it when the user asks for the
+    World total.
     A `role_text_not_recognised` or `time_text_not_parsed` warning in the
     response means that field needs rephrasing into that grammar. A
     publisher or dataset the user names, to read from or to leave out, goes
@@ -437,7 +540,12 @@ async def search(
     an entity with its role: "debt service to the World Bank" names the
     World Bank as an entity. When a source is ambiguous, ask the user which
     candidate they mean, then retry with that candidate's `ref` on the same
-    source entry, keeping its `text` and `exclude` flag.
+    source entry, keeping its `text` and `exclude` flag. A publisher's
+    indicator code that the user or a skill gives ("DT.TDS.DEGG.CD") goes in
+    the part's `source_code`, and `variable` holds the user's words for the
+    measure, or the code itself when the user gives none. When Search reports
+    the code ambiguous (`source_code_ambiguous`), retry with a `sources` entry
+    naming one of the sources it lists.
 
     A comparison of two categories of one measure ("health versus education
     aid") is one part per category, each with `separate: true`, and so is

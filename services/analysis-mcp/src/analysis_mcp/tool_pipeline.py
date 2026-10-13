@@ -18,13 +18,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from common.caller import current_writer
-from common.materialisation import FrameRef, FrameTooLarge, composed_stat_vars_of, get_store
-from dfo_frame_grammar import STAT_VAR_COLUMN
+from common.materialisation import FrameRef, FrameTooLarge, get_store
 from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
 from analysis_mcp.artifact import Exclusion
-from analysis_mcp.engine.columnar import distinct
 from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
 from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
 from analysis_mcp.identity import mint_toolkit_content_version
@@ -32,13 +30,13 @@ from analysis_mcp.result import VerbResult, observed_shape
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
-    from common.materialisation import ComposedStatVar, StoredFrameTrace
     from dfo_frame_grammar import Frame
 
     from analysis_mcp.engine.common import Exclusions
     from analysis_mcp.identity import OpSpecVariant
+    from analysis_mcp.steps import Step
     from analysis_mcp.trace import Trace
 
 
@@ -132,71 +130,12 @@ def exclusions_for_trace(exclusions: Exclusions) -> tuple[Exclusion, ...]:
     )
 
 
-def _composed_stat_vars(
-    frame: Frame,
-    *,
-    op_spec_hash: str,
-    input_traces: Sequence[StoredFrameTrace],
-    own: ComposedStatVar | None,
-) -> tuple[ComposedStatVar, ...]:
-    """The descriptions `frame`'s stored trace carries: the entry of every
-    `stat_var` in `frame` that an input trace or `own` describes, and of every
-    StatVar those entries name, each after the entries its sides name.
-
-    An entry whose StatVar is neither in `frame` nor named by a kept entry is
-    left out. `frame` holding `dcid:{op_spec_hash}`, the StatVar only this
-    result's own operation can have minted, with no `own` to describe it is a
-    programming error in the calling verb.
-    """
-    own_ref = f"dcid:{op_spec_hash}"
-    if own is not None and own.stat_var != own_ref:
-        raise ValueError(f"the own entry describes {own.stat_var!r}, not this result's {own_ref!r}")
-    described: dict[str, ComposedStatVar] = {
-        entry.stat_var: entry for trace in input_traces for entry in composed_stat_vars_of(trace)
-    }
-    if own is not None:
-        described[own_ref] = own
-    held = distinct(frame.table, STAT_VAR_COLUMN)
-    if own_ref in held and own is None:
-        raise RuntimeError(
-            f"the result frame holds its own StatVar {own_ref!r}, and the verb passed no "
-            "entry describing it"
-        )
-    return _in_dependency_order(held, described)
-
-
-def _in_dependency_order(
-    refs: Sequence[str], described: Mapping[str, ComposedStatVar]
-) -> tuple[ComposedStatVar, ...]:
-    """The entry in `described` of each of `refs` and of every ref those
-    entries' sides name, however deep, each once and after the entries its own
-    sides name. A ref `described` has no entry for contributes nothing.
-    """
-    ordered: dict[str, ComposedStatVar] = {}
-    entered: set[str] = set()
-    # Each pending item is a ref and whether its sides have already been pushed.
-    pending = [(ref, False) for ref in reversed(refs)]
-    while pending:
-        ref, sides_done = pending.pop()
-        entry = described.get(ref)
-        if entry is None:
-            continue
-        if sides_done:
-            ordered[ref] = entry
-        elif ref not in entered:
-            entered.add(ref)
-            pending.append((ref, True))
-            pending.extend((side, False) for side in reversed((*entry.first, *entry.second)))
-    return tuple(ordered.values())
-
-
 async def store_result_and_render(
     *,
     frame: Frame,
     trace: Trace,
-    input_traces: Sequence[StoredFrameTrace],
     digest: Callable[[], str],
-    own_composed_stat_var: ComposedStatVar | None = None,
+    step: Step | None = None,
     dropped_key_count: int = 0,
 ) -> ToolResult:
     """Store `frame`/`trace` under the pair identity `trace` already carries
@@ -206,11 +145,8 @@ async def store_result_and_render(
     lines every verb's own body ends with, once its own output `Trace` is
     built.
 
-    The stored trace is `trace` with `composed_stat_vars` set here, from the
-    traces of every frame the verb read (`input_traces`) and, for a verb that
-    writes rows under a StatVar of its own, `own_composed_stat_var`
-    (`_composed_stat_vars`). A verb that leaves such a StatVar in `frame`
-    without describing it raises `RuntimeError`.
+    The stored trace is `trace` with its `steps` set to `step`, the record of
+    the verb's own operation, or empty when the caller passes none.
 
     A durable store's `put` can raise `FrameTooLarge` for a result over its
     own row ceiling -- a two-sided verb (`join`'s own doubled output rows
@@ -230,16 +166,7 @@ async def store_result_and_render(
     `dropped_key_count` is the number of keys the verb left out of `frame`,
     which `frame` cannot state; only a keyed `quotient_of` passes one.
     """
-    trace = trace.model_copy(
-        update={
-            "composed_stat_vars": _composed_stat_vars(
-                frame,
-                op_spec_hash=trace.op_spec_hash,
-                input_traces=input_traces,
-                own=own_composed_stat_var,
-            )
-        }
-    )
+    trace = trace.model_copy(update={"steps": () if step is None else (step,)})
     ref = FrameRef(spec_id=trace.op_spec_hash, content_version=trace.content_version)
     try:
         # A durable store's `put` encodes and uploads in a worker thread that a

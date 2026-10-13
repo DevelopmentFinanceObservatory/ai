@@ -394,12 +394,16 @@ async def test_replay_from_execution_record_content_is_bit_identical(seeded) -> 
     replayed = run_compare(
         left_frame,
         right_frame,
+        stat_var=f"dcid:{stored_trace.op_spec_hash}",
         left_entity=parameters["left_entity"],
         right_entity=parameters["right_entity"],
         left_pinned_unit=parameters["left_unit"],
         right_pinned_unit=parameters["right_unit"],
     )
     assert replayed.frame == stored_frame
+    assert set(stored_frame.table.column("stat_var").to_pylist()) == {
+        f"dcid:{stored_trace.op_spec_hash}"
+    }
 
     # Distinct from the recompute-from-parameters replay above. Proves the
     # *stored* frame_content_version was derived over the stored output

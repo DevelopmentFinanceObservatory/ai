@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -53,6 +52,7 @@ from compiler.surface import (
     ToolSurface,
     ToolSurfaceUnavailableError,
 )
+from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.workflow.utils._workflow_hitl_utils import (
@@ -60,12 +60,15 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
+from planner.agent import proposing_tool
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement
 from planner.plan import Plan as PlannerPlan
-from planner.tool_results import ProblemCode
+from planner.settings import SchemaDelivery
+from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from submission.tool import SubmissionOutcome, SubmissionStage
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -78,14 +81,15 @@ from harness.graph.state import (
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
 )
+from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.planner_seam import PlannerSeamError
 from harness.provenance import (
     ProvenanceStore,
-    SidePart,
     manifest_with_stat_vars,
+    retrieval_frame_ref,
 )
-from harness.seeds import SEED_STEP_TOOL
+from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -136,12 +140,6 @@ _STEP_DETAIL_CAP = 400
 # (`planner.plan.ResolvedBy`); the wire vocabulary is default/user.
 _RESOLVED_BY_TO_WIRE = {"planner_default": "default", "user": "user"}
 
-# Status lines for the planner's own calls. A call not named here leaves
-# the current line running.
-_PLANNER_CALL_LABELS = {
-    "submit_plan": "Getting the plan ready for you",
-}
-
 # The line a `propose_plan` call opens and its response closes. The call
 # runs the translation (`planner.agent`'s `propose_plan_translating`), so
 # the line's duration covers it. The label stays generic: a call's arguments
@@ -150,6 +148,15 @@ _PLANNER_CALL_LABELS = {
 # closing frame's `detail` names the recorded plan's data (`_data_phrase`),
 # which Studio shows as the line's summary.
 _CHECKING = "Checking the plan against the data"
+
+# The tools a planner proposes through, one per `SchemaDelivery`.
+_PROPOSING_TOOLS = frozenset(proposing_tool(delivery) for delivery in SchemaDelivery)
+
+# The outcomes of a proposal that recorded a plan: `propose_plan`'s `ok`, and
+# `submit_analysis`'s two labels for it.
+_RECORDED_OUTCOMES = frozenset(
+    {Outcome.OK, SubmissionOutcome.RECORDED, SubmissionOutcome.READY_FOR_REVIEW}
+)
 
 # The line a refused `propose_plan` opens while the planner redrafts, and the
 # Activity detail for the refusal's code. The refusal's own message names
@@ -160,7 +167,6 @@ _REWORK_REASONS = {
     ProblemCode.INVALID_PLAN: "a step didn't fit the plan's rules",
     ProblemCode.INVALID_ARGUMENTS: "a step didn't fit the plan's rules",
     ProblemCode.OPERATION_UNSUPPORTED: "a step asked for something the tools can't do",
-    ProblemCode.VERSION_STALE: "the draft was out of date",
     ProblemCode.PLAN_NOT_DRAFT: "the draft was out of date",
 }
 
@@ -194,6 +200,15 @@ _TOOL_LABELS = {
 }
 # A tool with no label above is never shown by its machine name.
 _UNNAMED_TOOL_LABEL = "Working on your request"
+
+# What a failed seed step says. A failed tool call's step carries no detail,
+# since its refusal is written for the agent, but a seed is taken before the
+# agent runs, and a turn that keeps none starts from the question with no
+# word of the datasets the user brought: this line is where the user learns it.
+_SEEDS_UNUSED = (
+    "The datasets from Search could not be used, so the answer starts from your question"
+)
+_SEED_UNUSED = "This Search result was left out"
 
 
 def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) -> dict[str, Any]:
@@ -508,8 +523,14 @@ class _RecordingExecutor:
             await aclose()
 
 
-def _surface_call_outcome(result: ToolCallResult) -> dict[str, Any]:
+def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
     """A `ToolCallResult` in the outcome grammar `_Translator._drain_recorder` reads.
+
+    A successful `get_data` call's summary is its manifest's one line, the
+    one a direct fetch shows (`harness.mcp_client._manifest_summary`); any
+    other successful call has none, since its plan step's label already
+    says what it did. The digest text is written for the model and names
+    dcids and dimension keys, so it never becomes the summary.
 
     A refusal carries `code`, `retry_mode`, `fix` and `message`, read off
     `structured_content`, the machine-readable half of the result. The digest
@@ -520,7 +541,8 @@ def _surface_call_outcome(result: ToolCallResult) -> dict[str, Any]:
     unattributed; `McpExecutor._refusal_outcome` states both.
     """
     if not result.is_error:
-        return {"outcome": "ok", "frame_refs": [], "summary": _first_line(result.text)}
+        summary = _manifest_summary(result.structured_content or {}) if tool == "get_data" else None
+        return {"outcome": "ok", "frame_refs": [], "summary": summary}
     body = result.structured_content or {}
     return {
         "outcome": "refusal",
@@ -619,15 +641,12 @@ class _RecordingSurface:
             )
             raise
         if self._provenance is not None and tool.name == "get_data" and not result.is_error:
-            result = result.model_copy(
-                update={
-                    "structured_content": await manifest_with_stat_vars(
-                        dict(result.structured_content or {})
-                    )
-                }
-            )
-            self._remember_manifest(result)
-        self._record(tool.name, arguments, _surface_call_outcome(result), started=started)
+            manifest = await manifest_with_stat_vars(dict(result.structured_content or {}))
+            result = result.model_copy(update={"structured_content": manifest})
+            self._remember_manifest(manifest)
+        self._record(
+            tool.name, arguments, _surface_call_outcome(tool.name, result), started=started
+        )
         return result
 
     def _record(
@@ -649,7 +668,7 @@ class _RecordingSurface:
             )
         )
 
-    def _remember_manifest(self, result: ToolCallResult) -> None:
+    def _remember_manifest(self, manifest: dict[str, Any]) -> None:
         """Write a successful `get_data` step's manifest into `provenance`.
 
         Through `ProvenanceStore.put_retrieval`, as `harness.mcp_client.McpExecutor
@@ -658,9 +677,26 @@ class _RecordingSurface:
         """
         assert self._provenance is not None  # guarded by the caller
         self._provenance.put_retrieval(
-            conversation=current_conversation_id.get(),
-            manifest=dict(result.structured_content or {}),
+            conversation=current_conversation_id.get(), manifest=manifest
         )
+
+    async def restore_retrievals(self, results: Sequence[Mapping[str, Any]]) -> None:
+        """Write each `get_data` result in `results` into `provenance` as
+        `call_tool` writes a step's own, its long StatVar list read back
+        first. A run carried on from its record (`harness.graph.resume`)
+        passes the results it sealed its inputs from
+        (`executor.ledger.RunLedger.retrievals`), so its frames rest on the
+        same lineage as a run that never left its turn. A no-op when
+        `provenance` was never given, and for a result whose lineage
+        `provenance` already holds, as a run computed in this process does."""
+        if self._provenance is None:
+            return
+        conversation = current_conversation_id.get()
+        for result in results:
+            held = self._provenance.get(conversation=conversation, **retrieval_frame_ref(result))
+            if held is not None:
+                continue
+            self._remember_manifest(await manifest_with_stat_vars(dict(result)))
 
     def mark_step_failed(self, *, step_id: str, tool: str, code: str, detail: str) -> None:
         """Make `step_id`'s last record read failed.
@@ -682,7 +718,7 @@ class _RecordingSurface:
         (`harness.graph.execute._failed_step`'s `code`: a tool's own code when one
         called it, the specific `EvidenceIssueCode` when `check_evidence`
         raised it, `outcome.refusal.value` otherwise) -- never a fixed
-        string, so the Activity feed names the actual check that fired
+        string, so the step's record names the actual check that fired
         instead of one generic label for every masked failure.
         """
         conversation = current_conversation_id.get()
@@ -726,15 +762,6 @@ class _RecordingSurface:
         stat_var_count: int | None,
         carried_frame_refs: Sequence[Mapping[str, str | None]],
         summed_frame_refs: Sequence[Sequence[Mapping[str, str | None]]] = (),
-        own_stat_vars: Mapping[
-            str,
-            tuple[
-                str,
-                Sequence[Mapping[str, str | None] | str],
-                Sequence[Mapping[str, str | None] | str],
-            ],
-        ]
-        | None = None,
     ) -> None:
         """Write `frame_ref`'s lineage from the retrieval frames in `evidence_frame_refs`.
 
@@ -752,9 +779,7 @@ class _RecordingSurface:
         StatVars it sums, and each ref a `sum_of`, `quotient_of` or
         `share_of` wrote for its own result that the frame carries as the
         distinct StatVars of its entry in `summed_frame_refs`, the
-        retrievals under that verb's sides. `own_stat_vars` maps each such ref to the verb's tool name
-        and the parts of its first and second side (a retrieval frame, or
-        an earlier verb's own ref), which the card names that ref by. Called once per terminal frame from
+        retrievals under that verb's sides. Called once per terminal frame from
         `harness.graph.answer.link_evidence_to_terminal_frames`.
 
         A no-op when `provenance` was never given. All-or-nothing: when any
@@ -781,10 +806,6 @@ class _RecordingSurface:
                 [(ref.get("spec_id"), ref.get("content_version")) for ref in under]
                 for under in summed_frame_refs
             ],
-            own_stat_vars={
-                stat_var: (tool, _side_parts(first), _side_parts(second))
-                for stat_var, (tool, first, second) in (own_stat_vars or {}).items()
-            },
         )
         if not linked:
             logger.warning(
@@ -846,23 +867,6 @@ class _RecordingSurface:
         return self._step_labels.get(conversation, {})
 
 
-def _side_parts(side: Sequence[Mapping[str, str | None] | str]) -> tuple[SidePart, ...]:
-    """A verb's side as `ProvenanceStore.alias` holds it: each retrieval
-    frame as its `(spec_id, content_version)` key, each own ref as it is."""
-    return tuple(
-        part if isinstance(part, str) else (part.get("spec_id"), part.get("content_version"))
-        for part in side
-    )
-
-
-def _first_line(text: str, *, limit: int = 160) -> str | None:
-    """A result's digest text, as the Activity feed's one-line summary."""
-    line = text.strip().splitlines()[0].strip() if text.strip() else ""
-    if not line:
-        return None
-    return line if len(line) <= limit else line[: limit - 1] + "…"
-
-
 # ---------------------------------------------------------------------------
 # ADK events -> wire frames
 # ---------------------------------------------------------------------------
@@ -899,6 +903,13 @@ def _record_detail(record: _ExecutorRecord) -> str | None:
     if record.tool == "write_component":
         return None
     return record.result.get("summary")
+
+
+def _refused_detail(record: _ExecutorRecord) -> str | None:
+    """A failed recorded call's line: a seed step's plain sentence, else none."""
+    if record.tool != SEED_STEP_TOOL:
+        return None
+    return _SEEDS_UNUSED if record.step_id == SEEDS_STEP_ID else _SEED_UNUSED
 
 
 def _step_label(tool: str, plan_label: str | None = None) -> str:
@@ -951,26 +962,6 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan.model_validate(fields)
 
 
-def _refusal_detail(refusal: dict[str, Any]) -> str:
-    """A failed step's one-line reason, for the Activity feed.
-
-    The message is included because a fastmcp argument-validation error
-    carries no structured body: its `code` is "unspecified" and the
-    explanation lives in `message`, so the user reads the reason itself.
-    Cut on a word boundary with an ellipsis rather than mid-word: a
-    refusal's final sentence -- often the one telling the user what to do
-    next -- must read as a sentence even when the whole message doesn't fit.
-    """
-    code = str(refusal.get("code") or "refused")
-    said = refusal.get("message") or refusal.get("fix") or ""
-    if not isinstance(said, str):
-        said = json.dumps(said, default=str)
-    full = f"{code}: {said}".strip(": ")
-    if len(full) <= _STEP_DETAIL_CAP:
-        return full
-    return full[:_STEP_DETAIL_CAP].rsplit(" ", 1)[0] + "..."
-
-
 class _Translator:
     """One turn segment's ADK-event-to-wire-frame translation.
 
@@ -1008,7 +999,7 @@ class _Translator:
       sit above the question or the plan card, so neither is the answer;
     - an orchestrator node's own status line ("Reading your question") as a
       running step until the next thing happens; a plan hand-back shows a
-      failed step and then "Reading the planner's answer" when the planner
+      failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
       opened at the execute node's result so it covers `plan_done` too.
     """
@@ -1031,8 +1022,9 @@ class _Translator:
         # The running status line, as (wire id, label, monotonic start).
         self._status: tuple[str, str, float] | None = None
         self._streamed_text = False
-        # Each open call's wire step id, label and arguments, by call id.
-        self._open_calls: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        # Each open call's wire step id, label, arguments and monotonic
+        # start, by call id.
+        self._open_calls: dict[str, tuple[str, str, dict[str, Any], float]] = {}
         # Calls that show only if they fail, by call id: the tool's name.
         self._quiet_calls: dict[str, str] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
@@ -1061,9 +1053,9 @@ class _Translator:
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
             for call in event.get_function_calls():
-                frames.extend(self._planner_call_status(call.name or ""))
+                frames.extend(self._planner_call_status(call.name or "", call.args or {}))
             for response in event.get_function_responses():
-                if response.name == "propose_plan":
+                if response.name in _PROPOSING_TOOLS:
                     recorded = event.actions.state_delta.get(PLAN_STATE_KEY)
                     frames.extend(self._proposal_answered(response.response or {}, recorded))
             return frames
@@ -1083,30 +1075,38 @@ class _Translator:
             frames.extend(self._close_status())
         return frames
 
-    def _planner_call_status(self, name: str) -> list[ActivityStep]:
-        """The status line for one of the planner's own calls. A
-        `propose_plan` call opens the checking line, since the tool translates
-        the plan it records before it answers."""
-        if name == "propose_plan":
+    def _planner_call_status(self, name: str, args: dict[str, Any]) -> list[ActivityStep]:
+        """The status line for one of the planner's own calls. A proposing
+        call (`_PROPOSING_TOOLS`) opens the checking line, since the tool
+        translates the plan it records before it answers; a `submit_analysis`
+        `intent` call checks nothing and opens none. Any other call leaves
+        the current line running."""
+        if name in _PROPOSING_TOOLS:
+            if args.get("submission_stage") == SubmissionStage.INTENT:
+                return []
             return self._open_status(_CHECKING)
-        label = _PLANNER_CALL_LABELS.get(name)
-        return self._open_status(label) if label is not None else []
+        return []
 
     def _proposal_answered(self, answer: dict[str, Any], recorded: object) -> list[ActivityStep]:
-        """The line change a `propose_plan` response makes: an accepted
-        proposal completes the checking line with the data of the plan it
-        recorded as `detail` (`recorded` is the plan's JSON from the
-        response's state delta), and a refused one (it recorded nothing, so
-        ran no translation) makes the planner's redraft a separate "Reworking
-        the draft" line. The refusal's code shows in plain words; its message,
-        which names plan fields, never reaches the wire."""
-        if answer.get("outcome") == "ok":
+        """The line change a proposing response makes: an accepted
+        proposal (`_RECORDED_OUTCOMES`) completes the checking line with the
+        data of the plan it recorded as `detail` (`recorded` is the plan's
+        JSON from the response's state delta), and a refused one (it recorded
+        nothing, so ran no translation) makes the planner's redraft a separate
+        "Reworking the draft" line. The refusal's code shows in plain words;
+        its message, which names plan fields, never reaches the wire. A
+        `submit_analysis` intent, which records nothing and refuses nothing,
+        completes the line with no `detail`."""
+        outcome = answer.get("outcome")
+        if outcome in _RECORDED_OUTCOMES:
             detail = (
                 _data_phrase(PlannerPlan.model_validate_json(recorded))
                 if isinstance(recorded, str)
                 else None
             )
             return self._close_status(detail=detail)
+        if outcome == SubmissionOutcome.REQUIREMENTS:
+            return self._close_status()
         return self._open_status(_REWORKING, detail=_REWORK_REASONS.get(answer.get("code") or ""))
 
     def _open_status(self, label: str, *, detail: str | None = None) -> list[ActivityStep]:
@@ -1239,7 +1239,6 @@ class _Translator:
             seq = self._conversation.next_seq()
             step_id = self._wire_step_id(record.step_id, seq=seq)
             refused = record.result.get("outcome") == "refusal"
-            refusal = record.result.get("refusal") or {}
             component = record.result.get("component")
             frames.append(
                 ActivityStep(
@@ -1250,7 +1249,7 @@ class _Translator:
                     status=StepStatus.FAILED if refused else StepStatus.COMPLETE,
                     tool=record.tool,
                     duration_ms=record.duration_ms,
-                    detail=_refusal_detail(refusal) if refused else _record_detail(record),
+                    detail=_refused_detail(record) if refused else _record_detail(record),
                     produced=(
                         StepProduced(
                             component_id=component["component_id"],
@@ -1640,7 +1639,12 @@ class _Translator:
             frame = self._step(
                 None, label, StepStatus.RUNNING, tool=name, detail=str(query) if query else None
             )
-            self._open_calls[call.id or frame.step_id] = (frame.step_id, label, args)
+            self._open_calls[call.id or frame.step_id] = (
+                frame.step_id,
+                label,
+                args,
+                time.monotonic(),
+            )
             frames.append(frame)
         # What the agent's next model call reads: (tool, arguments, result,
         # failed) for each response a status line can name.
@@ -1651,9 +1655,9 @@ class _Translator:
             answer = response.response or {}
             if answer.get(HANDED_OFF):
                 self._handed_off = str(answer[HANDED_OFF])
+            # A failure's reason is written for the model, so its line
+            # shows the failure alone.
             failed = "error" in answer or "refusal" in answer
-            reason = answer.get("error") or answer.get("refusal")
-            failure = str(reason)[:_STEP_DETAIL_CAP] if failed and reason else None
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
                 if failed:
@@ -1663,19 +1667,27 @@ class _Translator:
                             _tool_call_label(quiet, {}),
                             StepStatus.FAILED,
                             tool=quiet,
-                            detail=failure,
                         )
                     )
                 continue
             opened = self._open_calls.get(response.id or "")
             if opened is None:
                 continue
-            step_id, label, args = opened
+            step_id, label, args, started = opened
             if failed:
-                status, detail = StepStatus.FAILED, failure
+                status, detail = StepStatus.FAILED, None
             else:
                 status, detail = self._outcome(response.name or "", args, answer)
-            frames.append(self._step(step_id, label, status, tool=response.name, detail=detail))
+            # Studio closes a `pending` line only on a frame with a duration;
+            # every other status closes it by itself.
+            timed = (
+                {"duration_ms": int((time.monotonic() - started) * 1000)}
+                if status is StepStatus.PENDING
+                else {}
+            )
+            frames.append(
+                self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
+            )
             if response.name == "remove_cards" and answer.get("removed"):
                 # The tool already took the blocks off; the client re-renders
                 # from the manifest (`harness.studio_state.remove_cards`).
@@ -1793,6 +1805,10 @@ class _Translator:
             return StepStatus.COMPLETE, str(summary) if summary else None
         if name == "make_charts":
             return _charts_outcome(args, answer)
+        if name == "submit_analysis":
+            return _direct_outcome(answer)
+        if name == "explain_dfo":
+            return StepStatus.COMPLETE, _explain_detail(answer)
         return StepStatus.COMPLETE, None
 
     def _measure(self, spec_id: Any) -> str | None:
@@ -1858,7 +1874,7 @@ class _Translator:
 
 # The step a plan hand-back with no plan shows: the closing message says
 # what could not be calculated.
-_PLAN_FAILED = "The planner could not make a plan"
+_PLAN_FAILED = "No plan could be made"
 # Agent tools whose calls show only when they fail.
 _QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
 _SKILL_READS = frozenset({"get_skill", "get_skill_file"})
@@ -1883,7 +1899,8 @@ _ORCHESTRATOR_TOOL_LABELS = {
     "search": "Searching for data",
     "fetch": "Fetching data",
     "ask_user": "Asking you a question",
-    "plan": "Handing the question to the planner",
+    "plan": _WORKING_ON_PLAN,
+    "submit_analysis": "Calculating",
     "explain_dfo": "Reading about DFO",
     "recall": "Looking back at an earlier turn",
     "remove_cards": "Removing cards from the canvas",
@@ -1912,15 +1929,16 @@ def _is_canvas_listing(name: str, args: dict[str, Any]) -> bool:
 
 
 def _search_detail(query: Any, answer: dict[str, Any]) -> str | None:
-    """A search's result in words: the query, what it found, and what it did
-    not find with the reason Search gave."""
+    """A search's result in words: the query, what it found (a definite
+    part by the measure it resolved to), and what it did not find with the
+    reason Search gave."""
     found: list[str] = []
     missed: list[str] = []
     for part in answer.get("parts") or []:
         variable = str(part.get("variable") or "a measure")
         status = part.get("status")
         if status == "definite":
-            found.append(variable)
+            found.append(str(part.get("resolved") or variable))
         elif status == "candidates":
             found.append(f"{variable} (more than one reading)")
         elif status == "no_data":
@@ -1968,16 +1986,44 @@ def _year_span(start: int, end: int) -> str:
     return str(start) if start == end else f"{start}\u2013{end}"
 
 
+def _explain_detail(answer: dict[str, Any]) -> str | None:
+    """The catalogue counts an `explain_dfo` answer carries, shown where the
+    user and the Studio eval's grounding check read a step's facts, or
+    `None` when it carries none."""
+    counts = answer.get("counts")
+    return None if counts in (None, COUNTS_UNAVAILABLE) else str(counts)
+
+
+def _direct_outcome(answer: dict[str, Any]) -> tuple[StepStatus, str | None]:
+    """A submit_analysis result's status by its `outcome`
+    (`submission.recipes.DirectOutcome`): complete once its run completed,
+    pending or failed with the run's standing, and skipped when the harness
+    refused to run it. The run's id and code and the refusal's message are
+    written for the agent, so the line states the standing alone."""
+    outcome = answer.get("outcome")
+    if outcome == "completed":
+        return StepStatus.COMPLETE, None
+    if outcome == "not_chartable":
+        return StepStatus.COMPLETE, "The result cannot be drawn"
+    if outcome == "pending":
+        return StepStatus.PENDING, "Storing the result is unfinished"
+    if outcome == "failed":
+        return StepStatus.FAILED, "The calculation failed"
+    return StepStatus.SKIPPED, None
+
+
 def _charts_outcome(args: dict[str, Any], answer: dict[str, Any]) -> tuple[StepStatus, str | None]:
     """A make_charts result's status: failed when any chart asked for was not
-    drawn, either refused or past the per-call limit, with which and why."""
+    drawn, either refused or past the per-call limit, with how many and the
+    titles of the refused ones. A refusal's reason is written for the model,
+    so it stays out."""
     asked = len(args.get("charts") or [])
     charts = answer.get("charts") or []
-    problems = [f"{chart.get('title')}: {chart['error']}" for chart in charts if "error" in chart]
-    if answer.get("not_drawn"):
-        problems.append(str(answer["not_drawn"]))
-    if not problems:
+    refused = [str(chart.get("title")) for chart in charts if "error" in chart]
+    if not refused and not answer.get("not_drawn"):
         return StepStatus.COMPLETE, None
     drawn = sum(1 for chart in charts if "error" not in chart)
-    detail = f"{asked - drawn} of {asked} could not be drawn: " + "; ".join(problems)
+    detail = f"{asked - drawn} of {asked} could not be drawn"
+    if refused:
+        detail += ": " + "; ".join(refused)
     return StepStatus.FAILED, detail[:_STEP_DETAIL_CAP]

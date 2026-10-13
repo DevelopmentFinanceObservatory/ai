@@ -42,14 +42,14 @@ from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
 from harness.conversation import current_conversation_id
 from harness.graph import answer as answer_module
-from harness.graph.answer import link_evidence_to_terminal_frames
+from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.execute import _failed_step, _mark_masked_step_failed
 from harness.mcp_client import McpExecutor, _wire_provenance
 from harness.provenance import ProvenanceInput, ProvenanceStore
 from harness.scripted import SCRIPTED_SPEC
 from harness.scripted import ScriptedSurface as ScriptedToolSurface
 from harness.settings import Settings
-from harness.studio_translate import _RecordingSurface, _refusal_detail
+from harness.studio_translate import _RecordingSurface
 from planner.plan import (
     DatasetRequirement,
     Decision,
@@ -353,7 +353,7 @@ async def test_two_independent_retrievals_each_attribute_to_their_own_frame(
         assert provenance["freshness"]["last_refreshed"] != _today_utc()
 
 
-async def test_a_stopped_run_links_the_terminal_frame_it_finished_to_its_source(
+async def test_a_stopped_runs_derived_frame_is_withheld_unlinked(
     two_source_plan: PlanFactory,
     manifest_for: Callable[..., dict[str, Any]],
     source: Callable[..., Any],
@@ -361,9 +361,9 @@ async def test_a_stopped_run_links_the_terminal_frame_it_finished_to_its_source(
     real_schemas: list[ToolSchema],
 ) -> None:
     """The population branch's aggregate refuses after the debt branch's
-    finished. The stop carries the evidence its finished retrievals
-    recorded, so the debt frame links to its own source as an accepted
-    run's would, and its card keeps that source."""
+    finished. The debt branch's derived frame was never published with its
+    replay recipe, so it is no answer (`answer_frames`): it is not linked,
+    and no card is drawn on it."""
     debt_manifest = manifest_for(
         source(),
         citation={
@@ -390,11 +390,11 @@ async def test_a_stopped_run_links_the_terminal_frame_it_finished_to_its_source(
     assert isinstance(outcome, Refused), outcome
     assert outcome.step_id == "population_totals_op"
     assert [record.step_id for record in outcome.evidence] == ["debt", "pop"]
-    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
     (debt,) = (record for record in outcome.completed if record.step_id == "totals")
-    component = await _assemble(store, debt.frame_ref.model_dump())
-    assert component is not None
-    assert component["provenance"]["citation"] == "World Bank, International Debt Statistics"
+    assert outcome.answers == {"totals": debt.frame_ref}
+    assert answer_frames(outcome) == {}
+    link_evidence_to_terminal_frames(surface, outcome, workflow=plan.workflow)
+    assert await _assemble(store, debt.frame_ref.model_dump()) is None
 
 
 async def test_a_frame_with_no_linked_manifest_is_withheld_not_fabricated() -> None:
@@ -746,10 +746,6 @@ async def test_a_join_of_two_different_source_retrievals_states_both(
         },
     ]
     assert component["fact_summary"]["attribution"]["source_count"] == 2
-    assert {row["id"] for row in component["fact_summary"]["indicators"]} == {
-        "dcid:DebtServicePaid",
-        "dcid:Gdp",
-    }
     assert component["fact_summary"]["attribution"]["indicator_count"] == 2
 
 
@@ -997,7 +993,6 @@ async def test_the_linked_retrievals_follow_workflow_order_whatever_the_set_iter
             "stat_var_count": _TERMINAL_FRAMES["join"]["stat_var_count"],
             "carried_frame_refs": [_DEBT_FRAME, _GDP_FRAME],
             "summed_frame_refs": [],
-            "own_stat_vars": {},
         }
     ]
 
@@ -1125,14 +1120,14 @@ def _level_filtered_join_plan(
                 id="debt",
                 decision_ids=["level"],
                 measure="external debt service paid",
-                across="country",
+                across=("country",),
                 period=period,
             ),
             DatasetRequirement(
                 id="gdp",
                 decision_ids=["level"],
                 measure="gross domestic product",
-                across="country",
+                across=("country",),
                 period=period,
             ),
             FilterRequirement(
@@ -1158,7 +1153,9 @@ def _level_filtered_join_plan(
         discovered={"debt": debt_source, "gdp": gdp_source},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_serves(
@@ -1269,6 +1266,36 @@ async def test_a_transport_failure_is_recorded_as_a_failed_activity(
     }
 
 
+async def test_a_plan_steps_summary_is_its_manifests_line_never_the_models_digest(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """A fetch step reads as a direct fetch does, off its manifest; an
+    analysis step has none. Neither carries the digest, which names dcids
+    and dimension keys for the model."""
+    manifest = {
+        "coverage": {"rows": 25, "window": {"start_year": 2000, "end_year": 2024}},
+        "citation": {"text": "World Bank International Debt Statistics (IDS)"},
+    }
+    fetched = ok(manifest, text="Retrieved the requested data for destination country/GHA.")
+    grown = ok({}, text="growth: 2000..2024, entity_by financingRecipient")
+    surface = _RecordingSurface(
+        ScriptedSurface(schemas=real_schemas, responses={"get_data": [fetched], "growth": [grown]})
+    )
+
+    returned = [
+        await surface.call_tool(tool=ToolId(server="data-mcp", name="get_data"), arguments={}),
+        await surface.call_tool(tool=ToolId(server="analysis-mcp", name="growth"), arguments={}),
+    ]
+
+    # The run reads each result as the tool gave it, digest included.
+    assert returned == [fetched, grown]
+    records = surface.drain(current_conversation_id.get())
+    assert [record.result["summary"] for record in records] == [
+        "25 observations, 2000\u20132024 \u00b7 World Bank International Debt Statistics (IDS)",
+        None,
+    ]
+
+
 async def test_a_calls_progress_reaches_the_callback_through_the_recording_surface() -> None:
     report = ProgressReport(progress=3, message="running")
     surface = _RecordingSurface(ScriptedToolSurface(get_data_progress=[report]))
@@ -1337,14 +1364,6 @@ async def test_a_step_refused_after_its_own_call_succeeded_is_amended_to_failed(
     # would have shown before this fix.
     assert failed["code"] == "source_drift"
     assert "spec_" + "e" * 32 in failed["message"]
-
-    # What `_drain_recorder` actually renders onto the wire's `activity.step`
-    # `detail` (`studio_translate._refusal_detail`, unchanged by this fix):
-    # the real code, not the fixed `post_call_validation_failed` every
-    # masked failure used to report regardless of what refused it.
-    rendered = _refusal_detail(records[0].result["refusal"])
-    assert rendered.startswith("source_drift: ")
-    assert "spec_" + "e" * 32 in rendered
 
 
 @pytest.mark.parametrize(

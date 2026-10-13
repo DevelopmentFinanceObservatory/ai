@@ -1,0 +1,147 @@
+{
+  "id": "join-malaria-domestic-and-aid-kenya",
+  "kind": "join",
+  "origin": "trace 41543e8e-8bde-44c8-bfb9-51376c81961a",
+  "question": "Compare Kenya's domestic spending on malaria with ODA to Kenya for malaria over time",
+  "searches": [
+    {
+      "query": "Compare Kenya's domestic spending on malaria with ODA to Kenya for malaria over time",
+      "parts": [
+        {
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "variable": "ODA for malaria"
+        },
+        {
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "variable": "domestic spending on malaria"
+        }
+      ]
+    },
+    {
+      "query": "malaria control aid to Kenya",
+      "parts": [
+        {
+          "variable": "malaria control",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "sources": [
+            {
+              "text": "OECD Creditor Reporting System"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Compare Kenya's domestic spending on malaria (from WHO, 2015 to 2024) with gross disbursements of aid to Kenya for malaria control across all providers (from OECD CRS, 2003 to 2024) over time.",
+  "asks": [
+    "Kenya's domestic expenditure on malaria over time",
+    "Total aid disbursements to Kenya for malaria control over time",
+    "Comparison of domestic spending and aid for malaria in Kenya over time"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "join"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "join"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "join, not comparison: 'compare' sets domestic spending beside aid over time, and no difference is asked for"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Compare Kenya's domestic spending on malaria (from WHO, 2015 to 2024) with gross disbursements of aid to Kenya for malaria control across all providers (from OECD CRS, 2003 to 2024) over time.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "domestic",
+        "measure": "domestic spending on malaria",
+        "entities": [
+          {
+            "name": "Kenya"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "source_spec_id": "spec_eb83adcc5a67220872bdfc98c10d1e63"
+      },
+      {
+        "kind": "dataset",
+        "id": "aid",
+        "measure": "ODA for malaria control",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2003,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_549db1bb9f3b143321e530580ca527b6"
+      },
+      {
+        "kind": "aggregate",
+        "id": "aid_total",
+        "input_id": "aid",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "join",
+        "id": "both",
+        "left_id": "domestic",
+        "right_id": "aid_total"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "domestic"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "aid_total"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "both"
+        ]
+      }
+    ]
+  }
+}

@@ -46,9 +46,6 @@
           }
         },
         {
-          "text": "Handed to the planner."
-        },
-        {
           "text": "Life expectancy in Kenya rose over the period."
         }
       ]
@@ -103,17 +100,11 @@
           }
         },
         {
-          "text": "Handed to the planner."
-        },
-        {
           "call": "plan",
           "args": {
             "brief": "Life expectancy in Kenya, any recent years",
             "asks": []
           }
-        },
-        {
-          "text": "Handed to the planner again."
         },
         {
           "text": "The plan could not be run."
@@ -274,12 +265,6 @@
           }
         },
         {
-          "call": "submit_plan",
-          "args": {
-            "version": 1
-          }
-        },
-        {
           "text": "The plan is ready for your approval."
         }
       ],
@@ -301,9 +286,6 @@
             "brief": "Growth of life expectancy in Kenya since 2000",
             "asks": []
           }
-        },
-        {
-          "text": "Handed to the planner."
         },
         {
           "text": "Life expectancy in Kenya rose over the period."
@@ -532,9 +514,6 @@
           }
         },
         {
-          "text": "Handed to the planner."
-        },
-        {
           "text": "The plan could not be carried out."
         }
       ]
@@ -581,9 +560,6 @@
             "brief": "Growth of life expectancy in Kenya since 2000",
             "asks": []
           }
-        },
-        {
-          "text": "Handed to the planner."
         },
         {
           "text": "Life expectancy in Kenya rose over the period."
@@ -784,12 +760,6 @@
           }
         },
         {
-          "call": "submit_plan",
-          "args": {
-            "version": 1
-          }
-        },
-        {
           "text": "The plan is ready for your approval."
         }
       ],
@@ -816,10 +786,155 @@
           }
         },
         {
+          "text": "Average life expectancy in Kenya rose; the ranking could not be computed."
+        }
+      ]
+    },
+    "direct-growth": {
+      "direct": true,
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_22222222222222222222222222222222",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2015,
+                2022
+              ]
+            }
+          ]
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya from 2015 to 2022",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "submit_analysis",
+          "args": {
+            "recipe": "growth",
+            "spec_id": "spec_22222222222222222222222222222222",
+            "start_year": 2015,
+            "end_year": 2022,
+            "change": "relative"
+          }
+        },
+        {
+          "text": "Life expectancy in Kenya grew between 2015 and 2022."
+        }
+      ]
+    },
+    "direct-growth-unverified-source": {
+      "direct": true,
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_22222222222222222222222222222222",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2015,
+                2022
+              ]
+            }
+          ]
+        }
+      ],
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya from 2015 to 2022",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "submit_analysis",
+          "args": {
+            "recipe": "growth",
+            "spec_id": "spec_33333333333333333333333333333333",
+            "start_year": 2015,
+            "end_year": 2022,
+            "change": "relative"
+          }
+        },
+        {
+          "text": "That series could not be verified, so nothing was calculated."
+        }
+      ]
+    },
+    "direct-growth-after-a-planning-request": {
+      "direct": true,
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_22222222222222222222222222222222",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2015,
+                2022
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_22222222222222222222222222222222",
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya from 2015 to 2022",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "submit_analysis",
+          "args": {
+            "recipe": "growth",
+            "spec_id": "spec_22222222222222222222222222222222",
+            "start_year": 2015,
+            "end_year": 2022,
+            "change": "relative"
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya from 2015 to 2022",
+            "asks": [
+              "growth of life expectancy from 2015 to 2022"
+            ]
+          }
+        },
+        {
           "text": "Handed to the planner."
         },
         {
-          "text": "Average life expectancy in Kenya rose; the ranking could not be computed."
+          "text": "Life expectancy in Kenya grew between 2015 and 2022."
         }
       ]
     }
@@ -1083,6 +1198,71 @@
           "plan_decision": "approve",
           "expect": {
             "terminal": "done"
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-direct-growth-completes-without-a-plan",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "direct-growth",
+      "checks": [
+        "direct_run_completed"
+      ],
+      "turns": [
+        {
+          "message": "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true,
+            "step_tools": [
+              "get_data",
+              "growth"
+            ],
+            "message_contains": [
+              "grew"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-direct-growth-on-an-unsearched-source-is-refused",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "direct-growth-unverified-source",
+      "checks": [
+        "unverified_source_refused"
+      ],
+      "turns": [
+        {
+          "message": "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-a-planning-request-still-runs-a-direct-growth",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "direct-growth-after-a-planning-request",
+      "xfail": "Known gap: a user's request for a plan has no structural signal, so its precedence over submit_analysis rests on the orchestrator's instruction alone. The harness runs the direct growth, which spends the turn's plan call, so no plan card follows.",
+      "turns": [
+        {
+          "message": "Please plan this: how much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1
+            }
           }
         }
       ]
@@ -1455,6 +1635,48 @@
       ]
     },
     {
+      "id": "orchestrator-live-kenya-creditors-use-debt-stock-and-rank-the-open-side",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Who are Kenya's top 5 creditors?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "kenya-creditor-ranking-uses-stock-and-creditor-axis",
+          "property": "The plan and answer use an outstanding external-debt stock for Kenya, not a debt-flow series, and rank the five largest creditors on the creditor or origin dimension. The answer names five creditors. A total for Kenya with no creditor ranking, a ranking of countries, or a net-flow measure is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-african-debt-ranking-keeps-member-scope",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Rank the top five African countries by outstanding external debt in the latest year.",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "african-debt-ranking-keeps-members-and-stock",
+          "property": "The plan and answer use an outstanding external-debt stock, retain Africa as its member-country scope, and rank five African countries. The plan may not replace Africa with a worldwide ranking, one total for Africa, or a creditor, recipient, donor or other flow-side breakdown. The answer names five African countries. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
       "id": "orchestrator-live-g7-is-read-as-its-total",
       "modes": [
         "live"
@@ -1493,6 +1715,85 @@
         {
           "id": "bilateral-part-is-stated-as-net",
           "property": "The answer states that the bilateral part is net ODA (net disbursements) and gives the reason, that DAC counts a donor's total contribution to a recipient as net bilateral ODA plus imputed multilateral ODA. An answer that sums the two without naming the bilateral basis, or that names a gross bilateral basis, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-general-government-debt-service-by-creditor-keeps-the-creditors",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "general government debt service by creditor for 2031",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "operations_contain": [
+                "creditor"
+              ]
+            },
+            "message_excludes": [
+              "not available",
+              "unavailable"
+            ]
+          }
+        },
+        {
+          "message": "I said general government not PPG",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        },
+        {
+          "message": "That is incorrect",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "creditor-breakdown-is-answered-not-called-missing",
+          "property": "The first turn's answer breaks general government debt service down by creditor, or states plainly that it declined that part and why. An answer that says the creditor breakdown is not available or not held in the data, when the plan ranked or kept creditors, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "general-government-is-not-called-ppg-only",
+          "property": "After the user says 'general government not PPG', the reply names the series as general government debt service and does not treat the user's wording as a mistake. A reply that restates the series as public and publicly guaranteed debt without naming general government as the debtor type, or that tells the user that general government sits inside PPG as a correction, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "a-bare-objection-is-met-with-the-data",
+          "property": "After 'That is incorrect', the reply either changes the answer for a stated reason drawn from the series on screen, or restates what the series is and asks what the user sees differently. A reply that repeats the earlier explanation of IDS debt categories without reference to the series on screen is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-source-code-finds-its-creditor-breakdown",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "DT.TDS.DEGG.CD by creditor for 2031",
+          "expect": {
+            "terminal": "done",
+            "message_excludes": [
+              "not available",
+              "unavailable"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "the-code-is-read-as-general-government-debt-service",
+          "property": "The answer states the series as general government external debt service, with the creditor breakdown, from World Bank International Debt Statistics. An answer that treats the code as unknown, or asks the user to name the measure, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "the-answer-names-the-world-bank-code-of-its-series",
+          "property": "The answer names DT.TDS.DEGG.CD as the World Bank code of the series it shows. An answer that does not name the code, or names it without tying it to the World Bank series shown, is a no. This property always applies and is never inapplicable."
         }
       ]
     }

@@ -9,12 +9,10 @@ You can connect the DFO to an AI assistant such as Claude, ChatGPT, or Gemini. O
 The connection uses MCP (Model Context Protocol), a standard way for AI assistants to use outside tools. You only need one thing, the DFO's server address:
 
 ```text
-https://mcp.<dfo-domain>/mcp
+https://developmentfinance.org/mcp
 ```
 
 Copy it exactly, with no slash at the end.
-
-<!-- TODO: replace <dfo-domain> with the public domain once the website is deployed. -->
 
 ## Add the DFO to your assistant
 
@@ -22,13 +20,7 @@ Copy it exactly, with no slash at the end.
 
 ::tab{label="Claude"}
 
-The quickest way is to open this link, which fills in the details for you, then confirm:
-
-```text
-https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=DFO&connectorUrl=https%3A%2F%2Fmcp.<dfo-domain>%2Fmcp
-```
-
-<!-- TODO: turn the template into a link once the domain is set. -->
+The quickest way is to open [this link](https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=DFO&connectorUrl=https%3A%2F%2Fdevelopmentfinance.org%2Fmcp), which fills in the details for you, then confirm.
 
 To add it manually:
 
@@ -87,7 +79,7 @@ The rest of this page covers the server's behaviour, setup for developer tools, 
 The server uses MCP over streamable HTTP at a single URL, a DFO subdomain served by the website's proxy:
 
 ```text
-https://mcp.<dfo-domain>/mcp
+https://developmentfinance.org/mcp
 ```
 
 Leave off the trailing slash in every client configuration. The site answers `/mcp/` with a 308 redirect to `/mcp`, which some clients don't follow.
@@ -116,7 +108,7 @@ A few notes:
 
 Clients that support MCP Apps show components as interactive views. Clients that declare their capabilities without MCP Apps get the component's data as a Markdown table in the reply text.
 
-This server is stateless, so it can't see capabilities that clients on the 2025-11-25 protocol revision declare at session start. It treats those clients as MCP Apps hosts and leaves the data table out of the reply. Text-only clients should pass `"include_projection": "full"` to `write_component` or `describe_component` to get the table.
+The server treats clients on the 2025-11-25 protocol revision as MCP Apps hosts and leaves the data table out of the reply. Text-only clients should pass `"include_projection": "full"` to `write_component` or `describe_component` to get the table.
 
 ### Time limits
 
@@ -147,7 +139,7 @@ All supported clients allow more than 45 seconds per tool call, so no timeout ov
 Run this in a terminal:
 
 ```sh
-claude mcp add --transport http dfo https://mcp.<dfo-domain>/mcp
+claude mcp add --transport http dfo https://developmentfinance.org/mcp
 ```
 
 This adds the server to the current project only. Add `--scope user` to use it in every project, or `--scope project` to write it to a shared `.mcp.json`:
@@ -157,7 +149,7 @@ This adds the server to the current project only. Add `--scope user` to use it i
   "mcpServers": {
     "dfo": {
       "type": "http",
-      "url": "https://mcp.<dfo-domain>/mcp"
+      "url": "https://developmentfinance.org/mcp"
     }
   }
 }
@@ -173,7 +165,7 @@ Or add the server to `~/.codex/config.toml`:
 
 ```toml title="~/.codex/config.toml"
 [mcp_servers.dfo]
-url = "https://mcp.<dfo-domain>/mcp"
+url = "https://developmentfinance.org/mcp"
 ```
 
 The desktop app, CLI and IDE extension share this configuration.
@@ -186,7 +178,7 @@ Add the server to `settings.json`: `~/.gemini/settings.json` for every project, 
 {
   "mcpServers": {
     "dfo": {
-      "httpUrl": "https://mcp.<dfo-domain>/mcp"
+      "httpUrl": "https://developmentfinance.org/mcp"
     }
   }
 }
@@ -228,7 +220,7 @@ unit options for get_data: InternationalDollar (InternationalDollar), USDollar (
 no time_text was given; the answer was resolved across every period with data.
 ```
 
-The reply should include the id `spec_0002907ee44bf25fc98f343372614a84` and name World Development Indicators as the source.
+The reply should cite the same spec id as the output above and name World Development Indicators as the source.
 
 <!-- TODO: verify this output against the public endpoint once it exists. It comes from a call to the data tools against the dev APIs on 28 September 2026. -->
 
@@ -270,5 +262,5 @@ Each developer tool takes the header in its own field:
 
 ## Next
 
-- [**How the MCP server answers questions**](what-you-can-ask.md)**:** Follows one question from search to a cited answer and lists what the server refuses.
+- [How the MCP server answers questions](what-you-can-ask.md) follows one question from search to a cited answer and lists what the server refuses.
 - **Tools reference:** Every argument and error code. <!-- TODO: link when the generated Tools reference is published. -->

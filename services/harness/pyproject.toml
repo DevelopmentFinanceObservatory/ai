@@ -1,7 +1,7 @@
 [project]
 name = "harness"
 version = "0.1.0"
-description = "Agentic loop for the DFO site's chat+canvas: Google ADK + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor and orchestrator (see tool.uv.build-backend below)."
+description = "Agentic loop for the DFO site's chat+canvas: Google ADK + FastAPI, SSE event stream. Also ships planner (the plan record and the Planner Agent), compiler, translator, executor, orchestrator and submission (see tool.uv.build-backend below)."
 requires-python = ">=3.13"
 dependencies = [
     "analysis_mcp",
@@ -48,13 +48,14 @@ requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 # planner (the plan record and the Planner Agent), compiler (the workflow
-# build), translator (the translation `propose_plan` runs), executor (the run)
-# and orchestrator (the Orchestrator Agent) live at src/planner/,
-# src/compiler/, src/translator/, src/executor/ and src/orchestrator/,
+# build), translator (the translation `propose_plan` runs), executor (the run),
+# orchestrator (the Orchestrator Agent) and submission (the shared submission
+# service) live at src/planner/, src/compiler/, src/translator/, src/executor/,
+# src/orchestrator/ and src/submission/,
 # top-level modules alongside src/harness/, so they ship on harness's own
 # dependencies, tests, and CI.
 [tool.uv.build-backend]
-module-name = ["harness", "planner", "compiler", "translator", "executor", "orchestrator"]
+module-name = ["harness", "planner", "compiler", "translator", "executor", "orchestrator", "submission"]
 
 [tool.coverage.run]
 source = ["src"]

@@ -177,6 +177,14 @@
       "envelope_chars": 4230
     },
     {
+      "id": "definite_source_codes",
+      "status": "definite",
+      "spec_count": 1,
+      "rendered_spec_count": 1,
+      "digest_chars": 344,
+      "envelope_chars": 1193
+    },
+    {
       "id": "definite_stat_vars_50",
       "status": "definite",
       "spec_count": 1,

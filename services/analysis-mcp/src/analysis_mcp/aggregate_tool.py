@@ -17,6 +17,10 @@ wrapper is the backstop that turns it into an `internal_error` refusal
 instead of a raw traceback reaching the wire (see that module's own
 docstring), and this backstop complements the typed handling below rather
 than replacing it.
+
+The stored step (`_aggregate_step`) counts the groups, the output entities
+that hold a total and the periods the reduction kept, the input entities each
+period's totals pool, and the flow parties and unit-less values it left out.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from pydantic import Field
 from analysis_mcp.digest import render_aggregate_digest
 from analysis_mcp.engine.aggregate import (
     AGGREGATIONS,
+    AggregateResult,
     ComposedUnitSumError,
     NonFiniteAggregateResultError,
     StatVarUnresolvedError,
@@ -48,6 +53,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merged_time,
     read_derived_marker,
@@ -56,6 +62,7 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import AggregateOpSpec, PinnedUnit
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -118,6 +125,26 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             group_key=exc.group_key, aggregation=exc.aggregation
         )
     return refusal
+
+
+def _aggregate_step(op_spec: AggregateOpSpec, result: AggregateResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the groups it
+    reduced, the output entities that hold a total, the periods, how many
+    input entities each period's totals pool, what it left out, and the
+    input's unit, the ratio unit over a ratio."""
+    return build_step(
+        op="aggregate",
+        trace=trace,
+        inputs={"input": op_spec.frame_ref},
+        kept={
+            "groups": result.present_cell_count,
+            "entities": result.entity_count,
+            "periods": len(result.collapsed_periods),
+        },
+        left_out=left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
+        unit=step_unit(result.resolved_unit, ratio=holds_ratio(trace)),
+        period_entities=result.period_entities,
+    )
 
 
 @holds_input_rows
@@ -313,7 +340,7 @@ async def aggregate(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[input_trace],
+        step=_aggregate_step(op_spec, result, trace=output_trace),
         digest=lambda: render_aggregate_digest(
             group_by=group_by,
             aggregation=op_spec.aggregation,

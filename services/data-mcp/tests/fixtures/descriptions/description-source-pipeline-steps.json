@@ -1,0 +1,217 @@
+{
+  "id": "description-source-pipeline-steps",
+  "description": "A dataset version whose steps are its source pipeline's steps as the mint read them, each served with its recorded description as its sentence, is accepted.",
+  "schema": "description",
+  "input": {
+    "describes": {
+      "kind": "dataset_version",
+      "id": "spec_91d7345eec81a029629938b3d0ffd775",
+      "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c"
+    },
+    "title": "Gross disbursements to Nigeria for health",
+    "about": {
+      "measure": {
+        "label": "gross disbursements",
+        "definition": null
+      },
+      "fixed": [
+        {
+          "property": {
+            "ref": "financingRecipient",
+            "label": "recipient"
+          },
+          "value": {
+            "ref": "country/NGA",
+            "label": "Nigeria"
+          }
+        },
+        {
+          "property": {
+            "ref": "financialFlowType",
+            "label": "flow type"
+          },
+          "value": {
+            "ref": "Disbursement",
+            "label": "disbursement"
+          }
+        },
+        {
+          "property": {
+            "ref": "nettingBasis",
+            "label": "netting basis"
+          },
+          "value": {
+            "ref": "Gross",
+            "label": "gross"
+          }
+        }
+      ],
+      "varies": [
+        {
+          "property": {
+            "ref": "financingProvider",
+            "label": "provider"
+          },
+          "count": 63,
+          "values": "/api/datasets/spec_91d7345eec81a029629938b3d0ffd775/cv_b785befb9f87471de96eb31cd7c56f5c/description/values?property=financingProvider"
+        },
+        {
+          "property": {
+            "ref": "crsPurpose",
+            "label": "sector"
+          },
+          "within": {
+            "ref": "CRSPurposeCode120",
+            "label": "health"
+          },
+          "count": 19,
+          "top": [
+            {
+              "label": "basic health care",
+              "variables": 19
+            },
+            {
+              "label": "health policy and administrative management",
+              "variables": 19
+            }
+          ],
+          "more": 17
+        },
+        {
+          "property": {
+            "ref": "crsCooperationModality",
+            "label": "modality"
+          },
+          "count": 12,
+          "undeclared_variables": 16,
+          "top": [
+            {
+              "label": "project-type intervention",
+              "variables": 47
+            },
+            {
+              "label": "other technical assistance",
+              "variables": 24
+            }
+          ],
+          "more": 10
+        },
+        {
+          "property": {
+            "ref": "crsTypeOfFinance",
+            "label": "instrument"
+          },
+          "count": 4,
+          "top": [
+            {
+              "label": "standard grant",
+              "variables": 134
+            },
+            {
+              "label": "standard loan",
+              "variables": 16
+            }
+          ],
+          "more": 2
+        },
+        {
+          "property": {
+            "ref": "crsTypeOfFlow",
+            "label": "flow"
+          },
+          "count": 4,
+          "top": [
+            {
+              "label": "official development assistance",
+              "variables": 105
+            },
+            {
+              "label": "private development finance",
+              "variables": 39
+            }
+          ],
+          "more": 2
+        }
+      ],
+      "variables": {
+        "admitted_at_mint": 505,
+        "with_data": 154
+      },
+      "series": 523,
+      "period": {
+        "start": "1995",
+        "end": "2024",
+        "grain": "year"
+      },
+      "unit": {
+        "ref": "CurrencyUSD",
+        "label": "US dollars",
+        "prices": "current"
+      }
+    },
+    "sources": [
+      {
+        "ref": "provenance/OECDCreditorReportingSystem",
+        "label": "OECD Creditor Reporting System (CRS)",
+        "publisher": "OECD",
+        "licence": "OECD Terms and Conditions",
+        "series": 523,
+        "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem"
+      }
+    ],
+    "freshness": {
+      "prepared": "2026-09-28",
+      "latest_period": "2024",
+      "series_reaching_it": 146,
+      "source_release": null,
+      "source_downloaded_at_mint": "2026-09-26",
+      "source_downloaded_since": "2026-10-08",
+      "next_release": "2026-09",
+      "estimated_values": null,
+      "provisional_values": null
+    },
+    "steps": [
+      {
+        "id": "p1",
+        "op": "source_step",
+        "policy": "source_pipeline_as_recorded",
+        "params": {
+          "description": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release.",
+          "source": "provenance/OECDCreditorReportingSystem",
+          "title": "Download the source data"
+        },
+        "text": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release."
+      },
+      {
+        "id": "p2",
+        "op": "source_step",
+        "policy": "source_pipeline_as_recorded",
+        "params": {
+          "description": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count.",
+          "source": "provenance/OECDCreditorReportingSystem",
+          "title": "Exclude donor core contributions to multilaterals"
+        },
+        "text": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count."
+      }
+    ],
+    "caveats": [],
+    "cite": {
+      "title": "Gross disbursements to Nigeria for health",
+      "text": "OECD Creditor Reporting System (CRS) via ONE DFO, retrieved 2026-09-28",
+      "id": "spec_91d7345eec81a029629938b3d0ffd775",
+      "content_version": "cv_b785befb9f87471de96eb31cd7c56f5c",
+      "data": "/api/datasets/spec_91d7345eec81a029629938b3d0ffd775/cv_b785befb9f87471de96eb31cd7c56f5c"
+    },
+    "gaps": [
+      "about.measure.definition",
+      "freshness.source_release",
+      "freshness.estimated_values",
+      "freshness.provisional_values"
+    ],
+    "built_from": {
+      "facts_schema": 1,
+      "vocabulary": "voc_5e1d9a3c7b2f8e64"
+    }
+  },
+  "expect": "accept"
+}

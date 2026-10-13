@@ -77,8 +77,8 @@ together is one `search` deadline, 60 s (the `call_timeout_s` of the `search`
 capability row), per wave of concurrent calls
 the budget admits, rather than one deadline per call. A turn discovering
 `DISCOVERY_CALL_BUDGET` requirements at once waits out that one deadline
-together. Inside a planner entry a call is also cut off when the entry
-needs the rest of its deadline (`_call_within_entry`), and recorded as a
+together. Inside a planner entry a call is also cut off at the request's
+wall-clock bound (`_call_within_entry`), and recorded as a
 timeout. A search the entry had no time left to issue (`NoTimeLeftError`)
 is not recorded and spends nothing, and refers the requirement back marked
 `not_issued`. A cut `resolve_definition` keeps running for the entry's next
@@ -106,9 +106,10 @@ from weakref import WeakValueDictionary
 
 import rfc8785
 from common.hashed_fields import revision_content
-from compiler.evidence import named_members, open_axis_for, source_requirement_matches
+from compiler.evidence import named_members, open_axes_for, source_requirement_matches
 from compiler.sources import (
     EXACT_COVERAGE,
+    SOURCE_CODE_REFUSALS,
     DiscoveryStatus,
     PartWarning,
     outcome_from_envelope,
@@ -122,6 +123,7 @@ from data_mcp import resolution
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from data_mcp.errors import UpstreamError
+from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
@@ -211,11 +213,14 @@ DESCRIBE_ID_BATCH_MAX = 8
 # rides out with the answer.
 BLOCKING_WARNING_CODES = frozenset({"role_text_not_recognised", "time_text_not_parsed"})
 
-# The answers a pin may be honoured from. A pin the planner chose among a
-# `source_ambiguous` referral's candidates is honoured from the `candidates`
-# answer a search for the pinned requirement gives again. A `no_data`
-# answer's nearest real series are offered instead of the ask, not as it, so
-# a pin among them is not the source the search found for the requirement.
+# The answers of the translator's own search a pin may be honoured from. A
+# pin the planner chose among a `source_ambiguous` referral's candidates is
+# honoured from the `candidates` answer a search for the pinned requirement
+# gives again. A `no_data` answer's nearest real series are offered instead
+# of the ask, not as it, so a pin among them is not the source that search
+# found for the requirement. A pin of a series the planner was shown, a
+# nearest series the orchestrator fetched included, is honoured from its
+# block or its identity before any search (`_source_from_resolve_pin`).
 _PIN_HONOURING = frozenset({DiscoveryStatus.DEFINITE, DiscoveryStatus.CANDIDATES})
 
 # The referral kind to point at for each answer that is not `definite`. A
@@ -560,11 +565,8 @@ class DiscoveryLog(StrictModel):
                 withheld.append(WithheldSource(source=source, dropped=dropped))
             else:
                 offered.append(source)
-        repair = (
-            scope_repair(held, requirement.across)
-            if withheld and requirement.across is not None
-            else None
-        )
+        repairs = [repair for word in requirement.across if (repair := scope_repair(held, word))]
+        repair = "; ".join(repairs) if withheld and repairs else None
         return ScopeKept(offered=tuple(offered), withheld=tuple(withheld), repair=repair)
 
     def recorded_source(self, spec_id: str) -> SelectedSource | None:
@@ -700,7 +702,7 @@ def dataset_keys(plan: Plan) -> DatasetKeys:
     return DatasetKeys(
         requirement_keys={r.id: requirement_revision(r) for r in datasets},
         pinned={r.id: r.source_spec_id for r in datasets if r.source_spec_id is not None},
-        across=frozenset(r.id for r in datasets if r.across is not None),
+        across=frozenset(r.id for r in datasets if r.across),
     )
 
 
@@ -1037,16 +1039,14 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
 
     Covers exactly what `_search_part` sends to `search` -- `measure`,
     `entities`, `period`, `unit`, the open role `across` asks for
-    (`requirement_open_roles`) and the `source` the question names, each
-    stated only when there is one -- plus `source_spec_id`,
+    (`requirement_open_roles`), the `source` the question names and the
+    `source_code`, each stated only when there is one -- plus `source_spec_id`,
     the pin `selectable` honours. Never `decision_ids`, `coverage` or `id`, none of
     which affects what is searched or what a pin resolves to. Canonical JSON
     (RFC 8785) under SHA-256, the same discipline `plan_revision` uses for the
     whole plan: stable across an edit to a different requirement or a
     decision, and changed exactly when this requirement's own searched
-    content or pin changes -- including when a `Decision.fixes` changes one
-    of those fields, since `fixes` is applied onto the requirement's own
-    field values in the draft, not read independently here.
+    content or pin changes.
     """
     content = revision_content(
         requirement, include={"measure", "entities", "period", "unit", "source_spec_id"}
@@ -1059,6 +1059,8 @@ def requirement_revision(requirement: DatasetRequirement) -> str:
         content["source_ref"] = requirement.source_ref
     if requirement.source_exclude:
         content["source_exclude"] = True
+    if requirement.source_code is not None:
+        content["source_code"] = requirement.source_code
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
@@ -1162,6 +1164,7 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     open role (`requirement_open_roles`). A `source`, the publisher or dataset
     the question names in the user's own words, goes as one included
     `sources` entry, with its chosen reference and exclusion flag when stated.
+    A publisher's series code goes as the part's `source_code`.
 
     An entity's role goes as the `PARTY_ROLES` word it stands for
     (`party_role`), each a word of `search`'s role lexicon. A role standing
@@ -1200,27 +1203,28 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
         if requirement.source_exclude:
             mention["exclude"] = True
         part["sources"] = [mention]
+    if requirement.source_code is not None:
+        part["source_code"] = requirement.source_code
     return part
 
 
 def requirement_open_roles(requirement: DatasetRequirement) -> list[str]:
-    """The role `search` is asked to hold open for `requirement`, its `across` when that names a side of a flow.
+    """The roles `search` is asked to hold open for `requirement`, one per `across` word naming a side of a flow.
 
-    The role goes as the `PARTY_ROLES` word `across` stands for, so "lenders"
-    asks for every creditor. Search then elects a source that breaks the
-    measure down by that role over one that only totals it, and counts the
-    role's members. An `across` naming the place, a population narrower than
-    a party ("bilateral donor"), or two words of one side names no role
-    `search` holds open, and nothing is sent. No entity binds the side sent,
-    because `DatasetRequirement` refuses an entity in the party its `across` covers.
+    Each role goes as the `PARTY_ROLES` word its `across` word stands for, in
+    `across` order, so "lenders" asks for every creditor. Search then elects a
+    source that breaks the measure down by those roles over one that only
+    totals them, and counts each role's members. A word naming the place, a
+    population narrower than a party ("bilateral donor"), or two words of one
+    side names no role `search` holds open, and nothing is sent for it. No
+    entity binds a side sent, because `DatasetRequirement` refuses an entity
+    in a party its `across` covers.
     """
-    if requirement.across is None or across_party(requirement.across) not in (
-        "giving",
-        "receiving",
-    ):
-        return []
-    role = party_role(requirement.across)
-    return [role] if role is not None else []
+    return [
+        role
+        for word in requirement.across
+        if across_party(word) in ("giving", "receiving") and (role := party_role(word)) is not None
+    ]
 
 
 def _dropped_phrases(
@@ -1349,17 +1353,16 @@ async def _describe_ids(
 
 
 def _definition_of(nodes: Sequence[Mapping[str, object]], dcid: str) -> str | None:
-    """`dcid`'s own `definition`, read out of a `describe` answer's `nodes`; `None` if `dcid` is absent.
+    """`dcid`'s own planner line, read out of a `describe` answer's `nodes`; `None` if `dcid` is absent.
 
-    Reads by dcid, `dcid:`-stripped, rather than by position: `describe` may
-    answer fewer ids than asked, or in a different order.
+    The line is the variable's description, else one composed from its definition
+    (`data_mcp.node_lookup.variable_text`). Reads by `ref`, `dcid:`-stripped, rather than by
+    position: `describe` may answer fewer ids than asked, or in a different order.
     """
     target = _bare_dcid(dcid)
     for node in nodes:
-        if not isinstance(node, Mapping) or _bare_dcid(str(node.get("dcid", ""))) != target:
-            continue
-        definition = node.get("definition")
-        return definition if isinstance(definition, str) and definition else None
+        if _bare_dcid(str(node.get("ref", ""))) == target:
+            return described_variable_text(node)
     return None
 
 
@@ -1666,9 +1669,9 @@ class DefinitionNotResolvedError(RuntimeError):
 
 
 class CutCalls:
-    """The calls a planner entry cut off at its deadline and left running, by tool and arguments.
+    """The calls a planner entry cut off for lack of time and left running, by tool and arguments.
 
-    A `resolve_definition` the entry's deadline cuts is shielded rather than
+    A `resolve_definition` the request's wall-clock bound cuts is shielded rather than
     cancelled, since Search often answers it moments later (a cold member
     walk) and the definition it stores is the same whichever call stores it.
     The next call with the same tool and arguments in the same entry takes
@@ -2093,8 +2096,8 @@ async def _source_from_resolve_pin(
     nothing on record, which `search` itself must confirm.
 
     A requirement whose `across` asks for every member of a side of a flow
-    (`requirement_open_roles`) takes the source only when it leaves that side open
-    (`compiler.evidence.open_axis_for`). Otherwise the source is recorded
+    (`requirement_open_roles`) takes the source only when it leaves open every
+    party `across` covers (`compiler.evidence.open_axes_for`). Otherwise the source is recorded
     as set aside (`DiscoveryLog.set_aside_pin`) and this returns `None` too,
     and the fresh `search` asks for the side as an open role, which elects
     a source broken down by it where one exists. A source that search finds
@@ -2122,7 +2125,7 @@ async def _source_from_resolve_pin(
             requirement_key=requirement_revision(requirement),
             spec_ids=(source.spec_id,),
             variable_sent=requirement.measure,
-            detail=f"set aside: it holds closed the {requirement.across!r} side `across` asks for",
+            detail=f"set aside: it holds closed a side `across` {list(requirement.across)!r} asks for",
         )
         async with discovery_lock(tool_context.state):
             log = load_log(tool_context.state)
@@ -2155,8 +2158,11 @@ async def _pin_source(
     Honoured means the block or identity reader holds it over the
     requirement's period. A source read only off the discovery log
     (`DiscoveryLog.recorded_source`) is not honoured, and serves the scope
-    check alone. `None` when no reader holds a source; a problem a reader
-    met is returned as it is.
+    check alone. A source that does not confirm the `source` or the
+    `source_code` the requirement states
+    (`compiler.evidence.source_requirement_matches`) is not honoured either,
+    so the caller searches again with them. `None` when no reader holds a
+    source; a problem a reader met is returned as it is.
     """
     source: SelectedSource | dict[str, object] | None = _block_source(
         tool_context, plan=plan, requirement=requirement
@@ -2170,22 +2176,20 @@ async def _pin_source(
         source = load_log(tool_context.state).recorded_source(requirement.source_spec_id)
     if source is None:
         return None
-    if requirement.source is not None and not source_requirement_matches(
-        requirement=requirement, source=source
-    ):
-        # Refresh an unconfirmed source constraint while retaining the pin's
-        # scope, so a replacement cannot silently widen a closed group.
+    if (
+        requirement.source is not None or requirement.source_code is not None
+    ) and not source_requirement_matches(requirement=requirement, source=source):
+        # Refresh an unconfirmed source constraint or series code while
+        # retaining the pin's scope, so a replacement cannot silently widen a
+        # closed group.
         honoured = False
     return source.model_copy(update={"searched_as": requirement.measure}), honoured
 
 
 def _holds_closed(requirement: DatasetRequirement, source: SelectedSource) -> bool:
-    """Whether `source` holds closed the side of a flow `requirement`'s `across` asks every member of."""
-    across = requirement.across
-    return (
-        across is not None
-        and bool(requirement_open_roles(requirement))
-        and isinstance(open_axis_for(across, source.open_entity_axes), str)
+    """Whether `source` fails to leave open a side of a flow `requirement`'s `across` asks every member of."""
+    return bool(requirement_open_roles(requirement)) and isinstance(
+        open_axes_for(requirement.across, source.open_entity_axes), str
     )
 
 
@@ -2213,7 +2217,7 @@ async def _record_honoured_pin(
 
 
 class NamedGroup(NamedTuple):
-    """A group `name_pinned_groups` named on a requirement in place of its `across`."""
+    """A group `name_pinned_groups` named on a requirement in place of one `across` word."""
 
     requirement_id: str
     entity: Entity
@@ -2223,13 +2227,13 @@ class NamedGroup(NamedTuple):
 async def name_pinned_groups(
     tool_context: ToolContext, *, surface: ToolSurface
 ) -> tuple[NamedGroup, ...]:
-    """Name the group a pin holds a requirement's `across` side to, in place of that `across`, on the draft.
+    """Name the group a pin holds a requirement's `across` side to, in place of that `across` word, on the draft.
 
     A dataset requirement whose `across` asks for every member of a side of
     a flow (`requirement_open_roles`), and whose pinned source holds that side closed
     to one group (`translator.referral.closing_group`), names the group in
-    `entities` under the side's `PARTY_ROLES` word and drops `across`. The
-    pin stays. A source a search could find in the pin's place either leaves
+    `entities` under the side's `PARTY_ROLES` word and drops the word from
+    `across`. The pin stays. A source a search could find in the pin's place either leaves
     the side open, dropping the group, or holds it to the same group
     (`translator.referral.dropped_scope`), so no search is spent to learn
     that. A named group is read as the pinned source binds it, as its
@@ -2260,24 +2264,24 @@ async def name_pinned_groups(
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
-        found = await _group_named(
+        found = await _groups_named(
             tool_context, plan=plan, requirement=requirement, surface=surface
         )
         if found is None:
             continue
-        group, source = found
+        groups, source = found
         try:
-            plan, rewritten = _with_group_named(plan, requirement, group.entity)
+            plan, rewritten = _with_groups_named(plan, requirement, groups)
         except ValueError as exc:
             logger.info(
                 "left %r with across %r: naming %r in its place does not validate: %s",
                 requirement.id,
-                group.across,
-                group.entity.name,
+                [group.across for group in groups],
+                [group.entity.name for group in groups],
                 exc,
             )
             continue
-        named.append(group)
+        named.extend(groups)
         if source is not None:
             honoured.append((rewritten, source))
     if not named:
@@ -2305,16 +2309,21 @@ def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
     )
 
 
-def _with_group_named(
-    plan: Plan, requirement: DatasetRequirement, entity: Entity
+def _with_groups_named(
+    plan: Plan, requirement: DatasetRequirement, groups: Sequence[NamedGroup]
 ) -> tuple[Plan, DatasetRequirement]:
-    """`plan` with `requirement` naming `entity` in place of its `across`, and that requirement.
+    """`plan` with `requirement` naming each group's entity in place of its `across` word, and that requirement.
 
     Raises:
         ValueError: If the rewritten requirement or plan does not validate.
     """
+    dropped = {group.across for group in groups}
     rewritten = DatasetRequirement.model_validate(
-        {**requirement.model_dump(), "entities": [*requirement.entities, entity], "across": None}
+        {
+            **requirement.model_dump(),
+            "entities": [*requirement.entities, *(group.entity for group in groups)],
+            "across": [word for word in requirement.across if word not in dropped],
+        }
     )
     requirements = [
         rewritten if item.id == requirement.id else item for item in plan.evidence_requirements
@@ -2325,32 +2334,38 @@ def _with_group_named(
     return rebuilt, rewritten
 
 
-async def _group_named(
+async def _groups_named(
     tool_context: ToolContext,
     *,
     plan: Plan,
     requirement: DatasetRequirement,
     surface: ToolSurface,
-) -> tuple[NamedGroup, SelectedSource | None] | None:
-    """The group `requirement`'s pin holds its `across` side to, and the pin's source when it is honoured.
+) -> tuple[tuple[NamedGroup, ...], SelectedSource | None] | None:
+    """The group `requirement`'s pin holds each `across` side to, and the pin's source when it is honoured.
 
-    `None` when a requirement reading it keeps the side apart
-    (`_summed_by_every_reader`), or when the pin's source cannot be read,
-    leaves the side open, or holds it to anything but one group.
+    One group per `across` word whose side the pin's source holds to one
+    group (`translator.referral.closing_group`). `None` when a requirement
+    reading it keeps the sides apart (`_summed_by_every_reader`), or when
+    the pin's source cannot be read, leaves every side `across` asks for
+    open, or holds none of them to one group.
     """
-    across = requirement.across
-    role = party_role(across) if across is not None else None
-    if across is None or role is None or not _summed_by_every_reader(plan, requirement.id):
+    roles = [(word, role) for word in requirement.across if (role := party_role(word))]
+    if not roles or not _summed_by_every_reader(plan, requirement.id):
         return None
     read = await _pin_source(tool_context, plan=plan, requirement=requirement, surface=surface)
     if read is None or isinstance(read, dict):
         return None
     source, honoured = read
-    label = closing_group(source, across) if _holds_closed(requirement, source) else None
-    if label is None:
+    if not _holds_closed(requirement, source):
         return None
-    group = NamedGroup(requirement.id, Entity(name=label, role=role), across)
-    return group, source if honoured else None
+    groups = tuple(
+        NamedGroup(requirement.id, Entity(name=label, role=role), word)
+        for word, role in roles
+        if (label := closing_group(source, word)) is not None
+    )
+    if not groups:
+        return None
+    return groups, source if honoured else None
 
 
 async def _discovery_start(
@@ -2429,8 +2444,8 @@ def _unavailable(
 
     A call the planner entry had no time left to issue (`not_issued`)
     refers the requirement back as `discovery_unavailable` marked
-    `not_issued`, which the planner seam ends the entry on as its deadline.
-    Any other failure names no `action`, and `translator.mechanical` refers
+    `not_issued`, which the planner seam takes as the request's wall-clock
+    bound spent and ends the entry on. Any other failure names no `action`, and `translator.mechanical` refers
     it back as `discovery_unavailable` unmarked.
     """
     action = None
@@ -2657,7 +2672,15 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         pin_honoured = (
             requirement.source_spec_id is not None and requirement.source_spec_id in honoured
         )
-        pinned_not_found = requirement.source_spec_id is not None and not pin_honoured
+        # A refused `source_code` is not a missing pin: the pin's source was
+        # read, and the code cannot be served under any dataset, so the
+        # answer's own hint reaches the planner.
+        code_refused = (
+            requirement.source_code is not None and outcome.reason in SOURCE_CODE_REFUSALS
+        )
+        pinned_not_found = (
+            requirement.source_spec_id is not None and not pin_honoured and not code_refused
+        )
 
         # An honoured pin has already settled this requirement --
         # `selectable` (this module) resolves it from the log the same

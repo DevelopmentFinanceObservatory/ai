@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from typing import Any
 
 import httpx2
@@ -57,6 +57,7 @@ from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
+from .resolve_results import members_result, resolve_result, resolved_result
 from .test_client import _client, _problem_body, text_of
 from .test_operations import _FakeClock
 
@@ -91,6 +92,23 @@ def _stub_materialise_and_register(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(get_data_tool, "materialise_and_register", _stub)
+
+
+@pytest.fixture(autouse=True)
+def _stub_description_read() -> Iterator[None]:
+    """Every test here renders without a version description, so its handler need not
+    answer the description route. `test_version_description.py` drives the read.
+
+    Patched on a context of its own, so a test's `monkeypatch.undo()`, which removes
+    the materialisation stub, keeps this one.
+    """
+
+    async def _no_description(**_: Any) -> None:
+        return None
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(get_data_tool, "fetch_version_description", _no_description)
+        yield
 
 
 # Store doubles
@@ -401,19 +419,7 @@ async def test_mint_request_body_matches_exactly_with_a_scope_override(
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/UGA",
-                                "name": "Uganda",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                    ]
-                },
+                json={"results": [resolved_result("Uganda", "country/UGA")]},
             )
         if request.url.path == "/api/datasets":
             requests.append(json.loads(request.content))
@@ -500,20 +506,7 @@ async def test_the_definition_sidecar_is_always_sent(arguments_extra: dict[str, 
             texts = json.loads(request.content)["texts"]
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/UGA",
-                                "name": text,
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                        for text in texts
-                    ]
-                },
+                json={"results": [resolved_result(text, "country/UGA") for text in texts]},
             )
         if request.url.path == "/api/datasets":
             requests.append(json.loads(request.content))
@@ -898,19 +891,7 @@ async def test_registry_fallback_reports_no_dropped_roles() -> None:
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/TGO",
-                                "name": "Togo",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                    ]
-                },
+                json={"results": [resolved_result("Togo", "country/TGO")]},
             )
         if request.url.path == "/api/datasets":
             return httpx2.Response(
@@ -1120,9 +1101,9 @@ async def test_resolve_unrecognised_status_refuses_rather_than_raising() -> None
 
 
 async def test_resolve_response_missing_results_key_refuses_rather_than_raising() -> None:
-    """`resolve_entities` reads `response.json()["results"]` -- a 2xx body missing that key
-    raises `KeyError`, which the resolve guard must catch alongside `ValueError` rather than
-    letting it escape as a raw exception with none of this module's refusal fields.
+    """A 2xx body missing `results` fails `ResolveResponse` validation, which the resolve
+    guard must catch rather than let escape as a raw exception with none of this module's
+    refusal fields.
     """
     stored = _stored_definition()
 
@@ -1144,9 +1125,8 @@ async def test_resolve_response_missing_results_key_refuses_rather_than_raising(
 
 
 async def test_resolve_response_wrongly_typed_nested_value_refuses_rather_than_raising() -> None:
-    """`_outcome_from_result` reads `result["entity"]["dcid"]` for a `resolved` status -- a
-    2xx body whose `entity` is a string rather than a mapping raises `TypeError` on that
-    subscript, which the resolve guard must also catch.
+    """A 2xx body whose `entity` is a string rather than a mapping fails `ResolveResponse`
+    validation, which the resolve guard must also catch.
     """
     stored = _stored_definition()
 
@@ -1181,18 +1161,13 @@ async def test_ambiguous_entity_refuses_with_the_role_present() -> None:
                 200,
                 json={
                     "results": [
-                        {
-                            "status": "ambiguous",
-                            "candidates": [
-                                {
-                                    "dcid": "geoId/13",
-                                    "name": "Georgia",
-                                    "entity_type": "geo.country",
-                                    "parent": None,
-                                }
+                        resolve_result(
+                            "Georgia",
+                            "ambiguous",
+                            candidates=[
+                                {"ref": "geoId/13", "label": "Georgia", "kind": "place_other"}
                             ],
-                            "truncated": False,
-                        }
+                        )
                     ]
                 },
             )
@@ -1223,24 +1198,14 @@ async def test_ambiguous_entity_candidates_each_carry_their_own_type() -> None:
                 200,
                 json={
                     "results": [
-                        {
-                            "status": "ambiguous",
-                            "candidates": [
-                                {
-                                    "dcid": "geoId/13",
-                                    "name": "Georgia",
-                                    "entity_type": "geo.country",
-                                    "parent": None,
-                                },
-                                {
-                                    "dcid": "country/GEO",
-                                    "name": "Georgia",
-                                    "entity_type": "geo.country",
-                                    "parent": "continent/AS",
-                                },
+                        resolve_result(
+                            "Georgia",
+                            "ambiguous",
+                            candidates=[
+                                {"ref": "geoId/13", "label": "Georgia", "kind": "place_other"},
+                                {"ref": "country/GEO", "label": "Georgia", "kind": "country"},
                             ],
-                            "truncated": False,
-                        }
+                        )
                     ]
                 },
             )
@@ -1255,10 +1220,10 @@ async def test_ambiguous_entity_candidates_each_carry_their_own_type() -> None:
     assert result.is_error is True
     assert result.structured_content is not None
     candidates = result.structured_content["fix"]["candidates"]
-    assert len(candidates) == 2
-    assert {c["dcid"] for c in candidates} == {"geoId/13", "country/GEO"}
-    for candidate in candidates:
-        assert candidate["type"] == "geo.country"
+    assert {c["dcid"]: c["type"] for c in candidates} == {
+        "geoId/13": "place_other",
+        "country/GEO": "country",
+    }
 
 
 async def test_not_found_entity_refuses_with_the_role_present() -> None:
@@ -1267,7 +1232,7 @@ async def test_not_found_entity_refuses_with_the_role_present() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
-                200, json={"results": [{"status": "not_found", "near_matches": []}]}
+                200, json={"results": [resolve_result("Nowhereland", "not_found", near_matches=[])]}
             )
         raise AssertionError("mint should not be reached on a not_found entity")
 
@@ -1292,7 +1257,13 @@ async def test_not_held_entity_refuses_entity_not_found_with_a_distinct_detail()
             return httpx2.Response(
                 200,
                 json={
-                    "results": [{"status": "not_held", "name": "Andorra", "dcid": "country/AND"}]
+                    "results": [
+                        resolve_result(
+                            "Andorra",
+                            "not_held",
+                            entity={"ref": "country/AND", "label": "Andorra", "kind": None},
+                        )
+                    ]
                 },
             )
         raise AssertionError("mint should not be reached on a not_held entity")
@@ -1308,32 +1279,29 @@ async def test_not_held_entity_refuses_entity_not_found_with_a_distinct_detail()
     assert result.structured_content["code"] == "entity_not_found"
     assert result.structured_content["fix"]["role"] == "recipient"
     # Distinct from a genuine miss: `near_matches` reads the same as a
-    # not_found refusal, but `not_held` and `entity_type` are the
-    # machine-readable discriminator, and the message says so too.
+    # not_found refusal, but `not_held` is the machine-readable
+    # discriminator. The door names no kind for it, so none is stated.
     assert result.structured_content["fix"]["not_held"] is True
-    assert result.structured_content["fix"]["entity_type"] == "entity"
-    assert "does not hold" in text_of(result)
+    assert "entity_type" not in result.structured_content["fix"]
 
 
-async def test_out_of_scope_entity_refuses_distinct_from_upstream_response_unusable() -> None:
+async def test_an_organisation_resolves_into_scope() -> None:
     stored = _stored_definition()
+    requests: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "out_of_scope",
-                            "name": "World Bank",
-                            "entity_type": "geo.organization",
-                            "dcid": None,
-                        }
-                    ]
-                },
+                json={"results": [resolved_result("World Bank", "WorldBank", "organisation")]},
             )
-        raise AssertionError("mint should not be reached on an out_of_scope entity")
+        if request.url.path == "/api/datasets":
+            requests.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json=_manifest_response(spec_id=stored.spec_id, entities={"donor": ["WorldBank"]}),
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
 
     result = await _call_get_data(
         handler,
@@ -1341,18 +1309,8 @@ async def test_out_of_scope_entity_refuses_distinct_from_upstream_response_unusa
         {"spec_id": stored.spec_id, "scope": {"entities": {"donor": ["World Bank"]}}},
     )
 
-    assert result.is_error is True
-    assert result.structured_content is not None
-    assert result.structured_content["code"] == "entity_out_of_scope"
-    assert result.structured_content["retry_mode"] == "correct_and_retry"
-    assert result.structured_content["fix"] == {
-        "role": "donor",
-        "query": "World Bank",
-        "entity_type": "geo.organization",
-        "dcid": None,
-    }
-    assert "World Bank" in text_of(result)
-    assert "countries, subregions, and continents" in text_of(result)
+    assert result.is_error is False
+    assert requests[0]["input"]["scope"]["entities"] == {"donor": ["WorldBank"]}
 
 
 async def test_invalid_name_refuses_request_invalid_with_the_role_in_the_pointer() -> None:
@@ -1391,19 +1349,12 @@ async def test_region_expansion_reaches_the_mint_call_as_member_dcids_only() -> 
                 200,
                 json={
                     "results": [
-                        {
-                            "status": "resolved_region",
-                            "region": {
-                                "name": "Sub-Saharan Africa",
-                                "entity_type": "geo.subregion",
-                            },
-                            "members": [
-                                {"dcid": "country/KEN", "name": "Kenya"},
-                                {"dcid": "country/NGA", "name": "Nigeria"},
-                            ],
-                            "members_not_held": [],
-                            "confidence": 0.8,
-                        }
+                        members_result(
+                            "Sub-Saharan Africa",
+                            "undata-geo/G00134000",
+                            "subregion",
+                            [("country/KEN", "Kenya"), ("country/NGA", "Nigeria")],
+                        )
                     ]
                 },
             )
@@ -1434,34 +1385,48 @@ async def test_region_expansion_reaches_the_mint_call_as_member_dcids_only() -> 
 # dcid passthrough: how a caller answers this tool's own `entity_ambiguous` refusal
 
 
-async def test_dcid_passthrough_skips_resolution_and_reaches_mint_verbatim() -> None:
+@pytest.mark.parametrize(
+    ("entity", "dcid"),
+    [
+        ("dcid:country/GEO", "country/GEO"),
+        ("dcid:geoId/13", "geoId/13"),
+        # An unmarked namespaced dcid, as digests and recall entries show one.
+        ("country/KEN", "country/KEN"),
+        (" geoId/13 ", "geoId/13"),
+        ("dcid:wikidataId/Q30", "wikidataId/Q30"),
+        # Bare dcids carry no `/`: a group, a region and an organisation.
+        ("dcid:GroupOfSeven", "GroupOfSeven"),
+        ("dcid:africa", "africa"),
+        ("dcid:WorldBank", "WorldBank"),
+        (" dcid: undata-geo/G00406000 ", "undata-geo/G00406000"),
+    ],
+)
+async def test_a_dcid_skips_resolution_and_reaches_mint_bare(entity: str, dcid: str) -> None:
     stored = _stored_definition()
     requests: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/graph/resolve":
-            raise AssertionError("a bare dcid needs no resolve call")
+            raise AssertionError("a dcid needs no resolve call")
         if request.url.path == "/api/datasets":
             requests.append(json.loads(request.content))
             return httpx2.Response(
                 200,
-                json=_manifest_response(
-                    spec_id=stored.spec_id, entities={"recipient": ["country/GEO"]}
-                ),
+                json=_manifest_response(spec_id=stored.spec_id, entities={"recipient": [dcid]}),
             )
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     result = await _call_get_data(
         handler,
         _StubStore(stored),
-        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": ["country/GEO"]}}},
+        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": [entity]}}},
     )
 
     assert result.is_error is False
-    assert requests[0]["input"]["scope"]["entities"] == {"recipient": ["country/GEO"]}
+    assert requests[0]["input"]["scope"]["entities"] == {"recipient": [dcid]}
 
 
-async def test_dcid_passthrough_mixes_with_a_resolved_name_in_the_same_role() -> None:
+async def test_marked_dcid_mixes_with_a_resolved_name_in_the_same_role() -> None:
     stored = _stored_definition()
     resolve_texts: list[str] = []
     requests: list[dict[str, Any]] = []
@@ -1472,27 +1437,14 @@ async def test_dcid_passthrough_mixes_with_a_resolved_name_in_the_same_role() ->
             resolve_texts.extend(texts)
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/TGO",
-                                "name": "Togo",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                        for _ in texts
-                    ]
-                },
+                json={"results": [resolved_result("Togo", "country/TGO") for _ in texts]},
             )
         if request.url.path == "/api/datasets":
             requests.append(json.loads(request.content))
             return httpx2.Response(
                 200,
                 json=_manifest_response(
-                    spec_id=stored.spec_id, entities={"recipient": ["country/GEO", "country/TGO"]}
+                    spec_id=stored.spec_id, entities={"recipient": ["GroupOfSeven", "country/TGO"]}
                 ),
             )
         raise AssertionError(f"unexpected call to {request.url.path}")
@@ -1500,13 +1452,83 @@ async def test_dcid_passthrough_mixes_with_a_resolved_name_in_the_same_role() ->
     result = await _call_get_data(
         handler,
         _StubStore(stored),
-        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": ["country/GEO", "Togo"]}}},
+        {
+            "spec_id": stored.spec_id,
+            "scope": {"entities": {"recipient": ["dcid:GroupOfSeven", "Togo"]}},
+        },
     )
 
     assert result.is_error is False
     # Only the name reaches the resolve door -- the dcid never does.
     assert resolve_texts == ["Togo"]
-    assert requests[0]["input"]["scope"]["entities"]["recipient"] == ["country/GEO", "country/TGO"]
+    assert requests[0]["input"]["scope"]["entities"]["recipient"] == ["GroupOfSeven", "country/TGO"]
+
+
+async def test_an_ambiguous_candidate_passed_back_as_offered_reaches_mint_as_its_dcid() -> None:
+    """The round trip the marker exists for: the refusal's `entity` for a bare-dcid candidate,
+    passed back unchanged, mints that dcid and is never resolved again."""
+    stored = _stored_definition()
+    resolve_texts: list[str] = []
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/graph/resolve":
+            texts = json.loads(request.content)["texts"]
+            resolve_texts.extend(texts)
+            candidates = [
+                {"ref": "GroupOfSeven", "label": "Group of Seven", "kind": "group"},
+                {"ref": "country/GMB", "label": "Gambia", "kind": "country"},
+            ]
+            return httpx2.Response(
+                200, json={"results": [resolve_result("G", "ambiguous", candidates=candidates)]}
+            )
+        if request.url.path == "/api/datasets":
+            requests.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json=_manifest_response(
+                    spec_id=stored.spec_id, entities={"recipient": ["GroupOfSeven"]}
+                ),
+            )
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    refused = await _call_get_data(
+        handler,
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": ["G"]}}},
+    )
+    assert refused.structured_content is not None
+    offered = refused.structured_content["fix"]["candidates"][0]["entity"]
+    assert offered in text_of(refused)
+
+    result = await _call_get_data(
+        handler,
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": [offered]}}},
+    )
+
+    assert result.is_error is False
+    assert resolve_texts == ["G"]
+    assert requests[0]["input"]["scope"]["entities"] == {"recipient": ["GroupOfSeven"]}
+
+
+@pytest.mark.parametrize("entity", ["dcid:", " dcid:  "])
+async def test_a_marker_with_no_dcid_is_refused_before_any_call(entity: str) -> None:
+    stored = _stored_definition()
+    calls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.url.path)
+        return httpx2.Response(500)
+
+    result = await _call_get_data(
+        handler,
+        _StubStore(stored),
+        {"spec_id": stored.spec_id, "scope": {"entities": {"recipient": [entity]}}},
+    )
+
+    assert result.is_error is True
+    assert calls == []
 
 
 async def test_slash_containing_spoken_name_is_resolved_not_treated_as_dcid_passthrough() -> None:
@@ -1525,20 +1547,7 @@ async def test_slash_containing_spoken_name_is_resolved_not_treated_as_dcid_pass
             resolve_texts.extend(texts)
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/COG",
-                                "name": "Congo",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                        for _ in texts
-                    ]
-                },
+                json={"results": [resolved_result("Congo", "country/COG") for _ in texts]},
             )
         if request.url.path == "/api/datasets":
             requests.append(json.loads(request.content))
@@ -1565,39 +1574,6 @@ async def test_slash_containing_spoken_name_is_resolved_not_treated_as_dcid_pass
     assert resolve_texts == ["Congo/Brazzaville", "Bosnia/Herzegovina"]
 
 
-async def test_dcid_passthrough_covers_geoid_and_wikidataid_namespaces() -> None:
-    stored = _stored_definition()
-    requests: list[dict[str, Any]] = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path == "/api/graph/resolve":
-            raise AssertionError("a bare dcid needs no resolve call")
-        if request.url.path == "/api/datasets":
-            requests.append(json.loads(request.content))
-            return httpx2.Response(
-                200,
-                json=_manifest_response(
-                    spec_id=stored.spec_id,
-                    entities={"recipient": ["geoId/13", "wikidataId/Q30"]},
-                ),
-            )
-        raise AssertionError(f"unexpected call to {request.url.path}")
-
-    result = await _call_get_data(
-        handler,
-        _StubStore(stored),
-        {
-            "spec_id": stored.spec_id,
-            "scope": {"entities": {"recipient": ["geoId/13", "wikidataId/Q30"]}},
-        },
-    )
-
-    assert result.is_error is False
-    assert requests[0]["input"]["scope"]["entities"] == {
-        "recipient": ["geoId/13", "wikidataId/Q30"]
-    }
-
-
 # Duplicate dcid dedup
 
 
@@ -1617,32 +1593,15 @@ async def test_duplicate_dcids_across_a_region_and_its_member_are_deduped_before
             for text in texts:
                 if text == "Sub-Saharan Africa":
                     results.append(
-                        {
-                            "status": "resolved_region",
-                            "region": {
-                                "name": "Sub-Saharan Africa",
-                                "entity_type": "geo.subregion",
-                            },
-                            "members": [
-                                {"dcid": "country/KEN", "name": "Kenya"},
-                                {"dcid": "country/NGA", "name": "Nigeria"},
-                            ],
-                            "members_not_held": [],
-                            "confidence": 0.8,
-                        }
+                        members_result(
+                            "Sub-Saharan Africa",
+                            "undata-geo/G00134000",
+                            "subregion",
+                            [("country/KEN", "Kenya"), ("country/NGA", "Nigeria")],
+                        )
                     )
                 elif text == "Kenya":
-                    results.append(
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/KEN",
-                                "name": "Kenya",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                    )
+                    results.append(resolved_result("Kenya", "country/KEN"))
                 else:
                     raise AssertionError(f"unexpected resolve text {text!r}")
             return httpx2.Response(200, json={"results": results})
@@ -1681,19 +1640,7 @@ async def test_dropping_a_role_is_named_in_the_acknowledgement() -> None:
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/TGO",
-                                "name": "Togo",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                    ]
-                },
+                json={"results": [resolved_result("Togo", "country/TGO")]},
             )
         if request.url.path == "/api/datasets":
             return httpx2.Response(
@@ -1732,7 +1679,7 @@ async def test_an_open_role_the_scope_leaves_out_is_not_named_dropped() -> None:
     result = await _call_get_data(
         handler,
         _StubStore(stored),
-        {"spec_id": stored.spec_id, "scope": {"entities": {"destination": ["country/GHA"]}}},
+        {"spec_id": stored.spec_id, "scope": {"entities": {"destination": ["dcid:country/GHA"]}}},
     )
 
     assert result.is_error is False
@@ -1806,19 +1753,7 @@ async def test_remint_persists_the_new_definition_and_a_second_call_reads_it() -
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved",
-                            "entity": {
-                                "dcid": "country/UGA",
-                                "name": "Uganda",
-                                "entity_type": "geo.country",
-                            },
-                            "confidence": 0.9,
-                        }
-                    ]
-                },
+                json={"results": [resolved_result("Uganda", "country/UGA")]},
             )
         if request.url.path == "/api/datasets":
             return httpx2.Response(
@@ -2324,17 +2259,7 @@ async def test_region_with_no_confirmed_members_refuses_entity_not_found() -> No
         if request.url.path == "/api/graph/resolve":
             return httpx2.Response(
                 200,
-                json={
-                    "results": [
-                        {
-                            "status": "resolved_region",
-                            "region": {"name": "Micronesia", "entity_type": "geo.subregion"},
-                            "members": [],
-                            "members_not_held": [{"name": "Nauru", "entity_type": "geo.country"}],
-                            "confidence": 0.8,
-                        }
-                    ]
-                },
+                json={"results": [members_result("Micronesia", "micronesia", "subregion", [])]},
             )
         raise AssertionError("mint should not be reached when no member is confirmed")
 
@@ -2349,7 +2274,7 @@ async def test_region_with_no_confirmed_members_refuses_entity_not_found() -> No
     assert result.structured_content["code"] == "entity_not_found"
     assert result.structured_content["fix"]["role"] == "recipient"
     assert result.structured_content["fix"]["not_held"] is True
-    assert result.structured_content["fix"]["entity_type"] == "geo.subregion"
+    assert result.structured_content["fix"]["entity_type"] == "subregion"
 
 
 # Local argument validation: every input cap
@@ -2785,19 +2710,7 @@ async def test_statistics_past_the_cap_never_fetches(monkeypatch: pytest.MonkeyP
 def _resolved_uganda() -> httpx2.Response:
     return httpx2.Response(
         200,
-        json={
-            "results": [
-                {
-                    "status": "resolved",
-                    "entity": {
-                        "dcid": "country/UGA",
-                        "name": "Uganda",
-                        "entity_type": "geo.country",
-                    },
-                    "confidence": 0.9,
-                }
-            ]
-        },
+        json={"results": [resolved_result("Uganda", "country/UGA")]},
     )
 
 
@@ -3290,24 +3203,40 @@ async def test_a_statistics_fetch_that_outruns_its_deadline_degrades(
     assert result == (None, True)
 
 
-async def test_statistics_fetch_passes_the_manifests_series_count_as_expected_rows(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("continuations", "continuing"),
+    [
+        pytest.param([], None, id="nothing-continued"),
+        pytest.param(
+            [{"axis": "measurementMethod", "method": "Estimated", "periods": ["2025", "2026"]}],
+            "Estimated",
+            id="continued",
+        ),
+    ],
+)
+async def test_statistics_fetch_passes_the_manifests_series_count_and_continuation(
+    monkeypatch: pytest.MonkeyPatch, continuations: list[dict[str, Any]], continuing: str | None
 ) -> None:
-    seen_expected_rows: list[int] = []
+    seen: list[tuple[int, str | None]] = []
 
-    async def fetch_statistics(*, expected_rows: int, **_: Any) -> list[SeriesStatisticsModel]:
-        seen_expected_rows.append(expected_rows)
+    async def fetch_statistics(
+        *, expected_series: int, continuing: str | None, **_: Any
+    ) -> list[SeriesStatisticsModel]:
+        seen.append((expected_series, continuing))
         return []
 
     monkeypatch.setattr(get_data_tool, "fetch_series_statistics", fetch_statistics)
     manifest = _statistics_manifest()
+    manifest = manifest.model_copy(
+        update={"trace": {**manifest.trace, "continuations": continuations}}
+    )
 
     result = await get_data_tool._fetch_statistics_for_digest(
         manifest, deadline=CallDeadline.after(60.0)
     )
 
     assert result == ([], False)
-    assert seen_expected_rows == [manifest.series_count]
+    assert seen == [(manifest.series_count, continuing)]
 
 
 async def test_a_row_count_mismatch_degrades_the_statistics_line(
@@ -3336,14 +3265,22 @@ def _summed_manifest_response(
     spec_id: str,
     content_version: str,
     artifact_digest: str = "sha256:" + "1" * 64,
-    contributing_member_count: int | None = 74,
+    contributing_member_count: int | None = None,
     stat_var_label: str | None = None,
 ) -> dict[str, Any]:
-    """A summed mint's manifest: the groupby rendering and, when more than one StatVar
-    contributed rows, dfo-apis' `stat_vars_summed` warning."""
+    """A summed mint's manifest: the groupby rendering, a trace listing two StatVars with
+    rows and one without, and, for a version stored before descriptions
+    (`contributing_member_count` set), dfo-apis' `stat_vars_summed` warning."""
     response = _manifest_response(
         spec_id=spec_id, content_version=content_version, artifact_digest=artifact_digest
     )
+    response["trace"] = {
+        "resolved_stat_vars": [
+            {"ref": "dcid:Grants_Primary", "observation_count": 4},
+            {"ref": "dcid:Grants_Secondary", "observation_count": 3},
+            {"ref": "dcid:Grants_Tertiary", "observation_count": 0},
+        ]
+    }
     response["artifacts"][0]["rendering"] = {
         "bundle": False,
         "format": "parquet",
@@ -3455,46 +3392,6 @@ async def test_one_mint_posts_the_sum_option() -> None:
     assert result.structured_content is not None
     assert result.structured_content["definition"]["spec_id"] == stored.spec_id
     assert "substitution" not in result.structured_content
-
-
-async def test_a_summed_result_reports_how_many_statvars_were_summed() -> None:
-    stored = _stored_definition()
-    handler = _mint_only_handler(
-        200,
-        _summed_manifest_response(
-            spec_id=stored.spec_id,
-            content_version="cv_2",
-            contributing_member_count=74,
-            stat_var_label="French education grants",
-        ),
-    )
-
-    result = await _call_get_data(
-        handler, _StubStore(stored), {"spec_id": stored.spec_id, "stat_vars": "sum"}
-    )
-
-    assert result.is_error is False
-    assert result.structured_content is not None
-    assert result.structured_content["summed_stat_var_count"] == 74
-    assert result.structured_content["summed_stat_var_label"] == "French education grants"
-
-
-async def test_a_summed_result_from_a_dfo_apis_that_omits_the_label_reports_none() -> None:
-    stored = _stored_definition()
-    response = _summed_manifest_response(spec_id=stored.spec_id, content_version="cv_2")
-    del response["warnings"][0]["stat_var_label"]
-    del response["warnings"][0]["contributing_member_count"]
-
-    result = await _call_get_data(
-        _mint_only_handler(200, response),
-        _StubStore(stored),
-        {"spec_id": stored.spec_id, "stat_vars": "sum"},
-    )
-
-    assert result.is_error is False
-    assert result.structured_content is not None
-    assert result.structured_content["summed_stat_var_count"] is None
-    assert result.structured_content["summed_stat_var_label"] is None
 
 
 async def test_an_unsummed_result_reports_no_summed_count() -> None:
@@ -3761,7 +3658,6 @@ class _RawAndSummedMint:
                     spec_id=self.spec_id,
                     content_version=self.summed_cv,
                     artifact_digest=self._digest(self.summed_cv),
-                    contributing_member_count=2,
                 ),
             )
         response = _manifest_response(
@@ -3794,7 +3690,8 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
     """The frame store is insert-only and keyed on `{spec_id, content_version}`: the
     raw frame is the raw version's canonical frame under its pair, and the summed
     frame, which dfo-apis minted as a version of its own, is held under the pair
-    naming its groupby, whichever call comes first."""
+    naming its groupby, whichever call comes first. The summed frame's family ref
+    marks it summed, with no warning or description."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
     upstream = _RawAndSummedMint(spec_id=stored.spec_id)
@@ -3816,6 +3713,12 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
         if result.structured_content is not None
     }
     assert cv_by_reading == {"separate": upstream.raw_cv, "sum": upstream.summed_cv}
+    summed_counts = {
+        reading: result.structured_content["summed_stat_var_count"]
+        for reading, result in zip(order, results, strict=True)
+        if result.structured_content is not None
+    }
+    assert summed_counts == {"separate": None, "sum": 2}
     assert sorted(upstream.fetched) == sorted([upstream.raw_cv, upstream.summed_cv])
     raw_ref = FrameRef(spec_id=stored.spec_id, content_version=upstream.raw_cv)
     summed_ref = frame_ref_for(
@@ -4093,7 +3996,7 @@ async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
     )
 
     assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [["kind"]]
+    assert [sent["columns"] for sent in options] == [["party_kind"]]
 
 
 async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_retry() -> None:
@@ -4293,16 +4196,21 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["financingProvider_type", "financingRecipient_type"]},
+            {"format": "parquet", "columns": ["party_kind"]},
+        ),
+        (
+            {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["kind"]},
+            {"format": "parquet", "columns": ["party_kind"]},
         ),
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet"},
-            {"format": "parquet", "columns": ["kind"]},
+            {"format": "parquet", "columns": ["party_kind"]},
         ),
         ({"recipient": ["country/KEN"]}, {"format": "parquet"}, {"format": "parquet"}),
     ],
-    ids=["flow-party-types", "flow-no-columns", "place-no-columns"],
+    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns", "place-no-columns"],
 )
 async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_them(
     monkeypatch: pytest.MonkeyPatch,
@@ -4311,7 +4219,7 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     minted: dict[str, Any],
 ) -> None:
     # A flow root recorded before kinds were served holds no kinds, and a sum across its
-    # parties would refuse; the replay mints and registers it with `["kind"]`.
+    # parties would refuse; the replay mints and registers it with `["party_kind"]`.
     stored = _stored_definition(entities=entities)
     registered: list[Mapping[str, Any]] = []
 

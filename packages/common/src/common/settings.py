@@ -32,20 +32,21 @@ class BaseServiceSettings(BaseSettings):
         (instance memory - idle - headroom) / worst bytes a row
 
     Worst bytes a row is the largest `delta_mb` / claimed rows among whole calls at
-    250,000 rows. On the run this default comes from, growth added
-    239.1 MiB over 250,000 rows, 1,003 bytes a row, and the largest join a caller can
-    complete added 461.1 MiB over its two inputs' 500,000 rows, 967 bytes a row. Idle
-    is assumed to be 400 MiB for ADK, the harness and three servers; the deployed
-    figure is unmeasured. Headroom is 300 MiB, which absorbs the freed Arrow pages a
-    long-lived allocator keeps. At 2 GiB the implied value is 1,348 MiB / 1,003 B =
-    1,409,452 rows.
+    250,000 rows, over frames that carry each flow party's kind, as
+    `get_data(place_types=True)` serves a flow retrieval a sum, a rank or a share reads.
+    On the run this default comes from, growth added 269.0 MiB over 250,000 rows, 1,128
+    bytes a row, and the largest join a caller can complete added 477.3 MiB over its two
+    inputs' 500,000 rows, 1,001 bytes a row. Idle is assumed to be 400 MiB for ADK, the
+    harness and three servers; the deployed figure is unmeasured. Headroom is 300 MiB,
+    which absorbs the freed Arrow pages a long-lived allocator keeps. At 2 GiB the
+    implied value is 1,348 MiB / 1,128 B = 1,252,788 rows.
 
     The default is the implied value less a 10% measurement margin, rounded down to the
-    next 100,000: 1,268,506 rounds to 1,200,000, four 250,000-row calls or two joins at
+    next 100,000: 1,127,509 rounds to 1,100,000, four 250,000-row calls or two joins at
     once. Recompute it by the same rule whenever `max_frame_rows`, the instance's
-    memory or the measured idle changes; the script exits 1 when this setting exceeds
-    the implied value. `FrameServiceSettings` refuses a value below twice
-    `max_frame_rows`.
+    memory, the measured idle or the columns a frame carries change; the script exits 1
+    when this setting exceeds the implied value. `FrameServiceSettings` refuses a value
+    below twice `max_frame_rows`.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
@@ -57,7 +58,7 @@ class BaseServiceSettings(BaseSettings):
     langfuse_base_url: str | None = None
     mcp_api_token: str | None = None
     mcp_auth_disabled: bool = False
-    frame_rows_in_flight_max: int = Field(default=1_200_000, ge=1)
+    frame_rows_in_flight_max: int = Field(default=1_100_000, ge=1)
 
     @field_validator("mcp_api_token", mode="before")
     @classmethod

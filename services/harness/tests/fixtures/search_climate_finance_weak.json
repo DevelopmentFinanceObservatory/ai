@@ -320,15 +320,15 @@
                 "shape_id": "undata/sdg/series-dc_fin_climb_value_measuredvalue",
                 "label": "Climate-specific financial support provided via bilateral, regional and other channels",
                 "population_type": {
-                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMB",
+                  "ref": "undata/sdg/SERIES-DC_FIN_CLIMB",
                   "label": "Climate-specific financial support provided via bilateral, regional and other channels"
                 },
                 "measured_property": {
-                  "dcid": "value",
+                  "ref": "value",
                   "label": "value"
                 },
                 "stat_type": {
-                  "dcid": "measuredValue",
+                  "ref": "measuredValue",
                   "label": "measuredValue"
                 },
                 "measurement_denominator_unresolved": false,
@@ -479,7 +479,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/p/SDG",
+                          "ref": "undata/p/SDG",
                           "label": "SDG Global Database"
                         },
                         "value_kind": "source"
@@ -495,7 +495,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "ref": "undata/UNIT_MEASURE-CR_USD",
                           "label": "United States dollars"
                         },
                         "value_kind": "enum_value"
@@ -607,7 +607,7 @@
                 "resolved_entities": [],
                 "resolved_sources": [
                   {
-                    "dcid": "undata/p/SDG",
+                    "ref": "undata/p/SDG",
                     "label": "SDG Global Database",
                     "source": {
                       "ref": "undata/p/SDG",
@@ -685,15 +685,15 @@
                 "shape_id": "undata/sdg/series-dc_fin_climt_value_measuredvalue",
                 "label": "Total climate-specific financial support provided",
                 "population_type": {
-                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMT",
+                  "ref": "undata/sdg/SERIES-DC_FIN_CLIMT",
                   "label": "Total climate-specific financial support provided"
                 },
                 "measured_property": {
-                  "dcid": "value",
+                  "ref": "value",
                   "label": "value"
                 },
                 "stat_type": {
-                  "dcid": "measuredValue",
+                  "ref": "measuredValue",
                   "label": "measuredValue"
                 },
                 "measurement_denominator_unresolved": false,
@@ -844,7 +844,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/p/SDG",
+                          "ref": "undata/p/SDG",
                           "label": "SDG Global Database"
                         },
                         "value_kind": "source"
@@ -860,7 +860,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "ref": "undata/UNIT_MEASURE-CR_USD",
                           "label": "United States dollars"
                         },
                         "value_kind": "enum_value"
@@ -972,7 +972,7 @@
                 "resolved_entities": [],
                 "resolved_sources": [
                   {
-                    "dcid": "undata/p/SDG",
+                    "ref": "undata/p/SDG",
                     "label": "SDG Global Database",
                     "source": {
                       "ref": "undata/p/SDG",
@@ -1050,15 +1050,15 @@
                 "shape_id": "undata/sdg/series-dc_fin_climm_value_measuredvalue",
                 "label": "Climate-specific financial support provided via multilateral channels",
                 "population_type": {
-                  "dcid": "undata/sdg/SERIES-DC_FIN_CLIMM",
+                  "ref": "undata/sdg/SERIES-DC_FIN_CLIMM",
                   "label": "Climate-specific financial support provided via multilateral channels"
                 },
                 "measured_property": {
-                  "dcid": "value",
+                  "ref": "value",
                   "label": "value"
                 },
                 "stat_type": {
-                  "dcid": "measuredValue",
+                  "ref": "measuredValue",
                   "label": "measuredValue"
                 },
                 "measurement_denominator_unresolved": false,
@@ -1209,7 +1209,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/p/SDG",
+                          "ref": "undata/p/SDG",
                           "label": "SDG Global Database"
                         },
                         "value_kind": "source"
@@ -1225,7 +1225,7 @@
                     {
                       "value": {
                         "ref": {
-                          "dcid": "undata/UNIT_MEASURE-CR_USD",
+                          "ref": "undata/UNIT_MEASURE-CR_USD",
                           "label": "United States dollars"
                         },
                         "value_kind": "enum_value"
@@ -1337,7 +1337,7 @@
                 "resolved_entities": [],
                 "resolved_sources": [
                   {
-                    "dcid": "undata/p/SDG",
+                    "ref": "undata/p/SDG",
                     "label": "SDG Global Database",
                     "source": {
                       "ref": "undata/p/SDG",

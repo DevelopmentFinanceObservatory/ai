@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_8b30871b147ff22e57f4002a49a59a15",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_8b30871b147ff22e57f4002a49a59a15: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/GHA\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialPosition\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"AmountOutstanding\",\"state\":\"value\"},\"property\":\"financialPositionType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"financingResource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"guaranteeStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsConcessionality\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsCreditorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsDebtorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"includesIMFCredit\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"interestRateVariability\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"maturityBand\"}]},\"spec_id\":\"spec_8b30871b147ff22e57f4002a49a59a15\"}"
+}

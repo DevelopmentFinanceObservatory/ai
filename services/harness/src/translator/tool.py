@@ -15,7 +15,7 @@ the run stopped on, flattened so its own `outcome`
 (`translator.referral.OUTCOME_OF`) is the verdict's: `choice_required` with
 the candidate sources, `invalid_input` for a requirement the planner repairs,
 `unsupported`, `transient` or `internal`. The referral is also saved in
-session state, for the planner seam's stall watchdog and `submit_plan`'s own
+session state, for the planner seam's stall watchdog and `declare_ready`'s
 gate. A plan that is not a translatable draft answers with the typed problem
 that says so.
 
@@ -222,6 +222,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             return IssueResolution.UNSUPPORTED
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
+            | CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS
             | CompileIssueCode.RANK_AXIS_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
@@ -240,6 +241,7 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.DEGENERATE_SIDES
             | CompileIssueCode.SUM_SIDES_OVERLAP
             | CompileIssueCode.SUM_OVERLAP_UNDECIDED
+            | CompileIssueCode.FAMILY_UNSUMMABLE
             | CompileIssueCode.SUM_UNITS_DIFFER
             | CompileIssueCode.SHARE_UNITS_DIFFER
             | CompileIssueCode.FRAME_UNITS_DIFFER
@@ -280,6 +282,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.INPUT_SHAPE_UNSUPPORTED: (
         "change the calculation, or the requirement it reads, so its input has a shape the "
         "calculation takes"
+    ),
+    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
+        "drop the filter's place_level predicate, or the filter when it states no other"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
@@ -340,6 +345,10 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "add two sources whose families bind one property to different codes, such as two "
         "sectors; to total entities of one series, aggregate it"
     ),
+    CompileIssueCode.FAMILY_UNSUMMABLE: (
+        "set the requirement's `stat_vars` to 'separate', or ask for a measure that names one "
+        "value on each axis the reason lists"
+    ),
     CompileIssueCode.SUM_UNITS_DIFFER: (
         "state the same unit on both sides' requirements, or on neither"
     ),
@@ -357,7 +366,7 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
         "on each requirement the reason names, state the unit it gives and leave its "
-        "`source_spec_id` unset, dropping any decision that fixes only that pin"
+        "`source_spec_id` unset"
     ),
     CompileIssueCode.PERIODS_DISJOINT: (
         "give the two sides' requirements periods that share at least one year"
@@ -641,7 +650,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         """Save a referral of the draft back to the planner and answer with it.
 
         The referral is saved to session state for the stall watchdog and
-        `submit_plan`'s own gate, and the plan is left untouched. A
+        `declare_ready`'s gate, and the plan is left untouched. A
         referral that may carry candidates takes them from the discovery
         log; `no_data`'s are the nearest real sources found instead, with
         the reason code, and a `requirement_unmeetable` one carries the
@@ -764,7 +773,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
 def _planner_answer(result: dict[str, object]) -> dict[str, object]:
     """Return the verdict the planner reads, given `run_translate`'s `result`.
 
-    A compiled plan answers `ok` alone. `submit_plan` reads the version,
+    A compiled plan answers `ok` alone. `declare_ready` reads the version,
     revision and warnings off the plan's record, and the user reads the
     sources and steps on the approval card. A referral answers as the
     referral itself, its `outcome` one of `OUTCOME_OF`'s. A problem answers

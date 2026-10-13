@@ -183,15 +183,6 @@ class ComposedUnit(_WireModel):
 type Unit = UnitName | StructuredUnit | ComposedUnit
 
 
-class Indicator(_WireModel):
-    """A statistical variable with its definition text -- what the More Info
-    panel renders."""
-
-    id: str
-    name: str
-    description: str
-
-
 class Attribution(_WireModel):
     """The always-visible source line, e.g. "OECD DAC · 4 indicators".
     Rendered on every card regardless of source count."""
@@ -309,7 +300,6 @@ class FactSummary(_WireModel):
     component_id: str
     revision: int = Field(ge=1)
     series: list[FactSeries]
-    indicators: list[Indicator]
     attribution: Attribution
     window: Window | None = None
     unit: Unit | None = None
@@ -583,7 +573,7 @@ def check_resolved_bounds(resolved: dict[str, Any]) -> None:
     _seed_count("resolved.shape.member_count", shape.get("member_count"))
     for index, slot in enumerate(_seed_items("resolved.slots", resolved.get("slots"))):
         prop = _seed_mapping(_seed_mapping(_seed_mapping(slot).get("key")).get("property"))
-        _seed_text(f"resolved.slots[{index}].key.property.dcid", prop.get("dcid"))
+        _seed_text(f"resolved.slots[{index}].key.property.ref", prop.get("ref"))
     for key in ("inapplicable_slots", "unresolved_slots"):
         for value in _seed_items(f"resolved.{key}", resolved.get(key)):
             _seed_text(f"resolved.{key}", value)
@@ -641,13 +631,20 @@ class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
     `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`).
+    when it bound the members (`planner.workflow.ResolvedGroup.total`). The
+    members are dfo-apis' `EntityGroup` fields, and any other key is refused,
+    so a block from an older Search wire fails rather than losing its `ref`.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
-    dcid: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+    ref: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
+    entity_type: str | None = Field(
+        default=None,
+        max_length=MAX_SEED_TEXT_CHARS,
+        exclude_if=lambda entity_type: entity_type is None,
+    )
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
     )
@@ -662,7 +659,8 @@ class SeedSpec(BaseModel):
     beside the identity and Search, which keeps only a set the graph
     confirms, names them again. Only a set on a role the identity binds, with
     a name Search would take, is kept; any other is dropped and the seed
-    stands without it, as `compiler.sources` drops a nameless one. Every other member, the rest of `resolved`
+    stands without it, as `compiler.sources` drops a nameless one. A set
+    carrying a key `SeedEntityGroup` does not know refuses the seed. Every other member, the rest of `resolved`
     among them, is dropped as the block is read, so nothing
     in the harness reads it from the browser: `harness.graph`'s `seed` node
     takes it from Search's own answer for the identity (`SpecBlock`), and
@@ -700,7 +698,12 @@ class SeedSpec(BaseModel):
                 continue
             try:
                 groups[role] = SeedEntityGroup.model_validate(group)
-            except ValidationError:
+            except ValidationError as exc:
+                unknown = [e["loc"][0] for e in exc.errors() if e["type"] == "extra_forbidden"]
+                if unknown:
+                    raise ValueError(
+                        f"resolved.entity_groups.{role} carries unknown keys {unknown}"
+                    ) from exc
                 continue
         return {**data, "entity_groups": groups or None}
 
@@ -1112,7 +1115,8 @@ class StepProgress(_WireModel):
 class ActivityStep(_WireModel):
     """One execution step -- the only progress channel (Activity tab and the
     "2/3 complete" line). A step-scoped failure surfaces here as
-    `status: "failed"` with the tool_error in `detail` prose, and the run
+    `status: "failed"`, a failed tool call's step with no `detail` (a
+    refusal's text is written for the agent and stays in the trace), and the run
     continues where the graph allows (delta 4); a stream-fatal problem is an
     `error` frame instead."""
 

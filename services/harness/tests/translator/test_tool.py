@@ -43,7 +43,6 @@ from planner.plan import (
     AggregateRequirement,
     Coverage,
     DatasetRequirement,
-    DecisionFixes,
     Entity,
     Period,
     PinSource,
@@ -76,6 +75,7 @@ from translator.tool import (
     permitted_repair,
 )
 
+from ..described_nodes import stat_var_node
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -146,13 +146,12 @@ _DESCRIBE_RESPONSE = ToolCallResult(
     is_error=False,
     structured_content={
         "nodes": [
-            {
-                "shape": "stat_var",
-                "dcid": "DebtServicePaid",
-                "label": "DebtServicePaid",
-                "definition": "External debt service a country pays to a foreign creditor.",
-                "roles": ["measure"],
-            }
+            stat_var_node(
+                "DebtServicePaid",
+                label="DebtServicePaid",
+                description="External debt service a country pays to a foreign creditor.",
+                roles=("measure",),
+            )
         ]
     },
 )
@@ -1031,22 +1030,21 @@ _AFRICA_BLOCK = _spec(
         {"role": "destination", "label": "Ghana", "ref": "country/GHA"},
         {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
     ],
-    entity_groups={"destination": {"label": "Africa", "dcid": "africa"}},
+    entity_groups={"destination": {"label": "Africa", "ref": "africa"}},
 )
 
 
-_GROUP_CLOSED = {"destination": {"label": "Africa", "dcid": "africa"}}
+_GROUP_CLOSED = {"destination": {"label": "Africa", "ref": "africa"}}
 
 
 @pytest.mark.parametrize(
-    ("entity_groups", "group_by", "fixes_across", "named"),
+    ("entity_groups", "group_by", "named"),
     [
-        (_GROUP_CLOSED, (GroupBy.PERIOD,), False, True),
-        ({}, (GroupBy.PERIOD,), False, False),
-        (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False, False),
-        (_GROUP_CLOSED, (GroupBy.PERIOD,), True, False),
+        (_GROUP_CLOSED, (GroupBy.PERIOD,), True),
+        ({}, (GroupBy.PERIOD,), False),
+        (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False),
     ],
-    ids=["group-closed", "member-closed", "summed-per-entity", "decision-fixes-across"],
+    ids=["group-closed", "member-closed", "summed-per-entity"],
 )
 async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin(
     real_schemas: list[ToolSchema],
@@ -1059,7 +1057,6 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     caplog: pytest.LogCaptureFixture,
     entity_groups: dict[str, Any],
     group_by: tuple[GroupBy, ...],
-    fixes_across: bool,
     named: bool,
 ) -> None:
     """A pin closed to Africa under `across: recipient` compiles with Africa named, no search.
@@ -1068,32 +1065,19 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
     for. A pin closed to named members alone: widening it to every recipient
     changes the scope, which the planner decides. A total per donor: France
     summed over its open recipients is one series, and Africa named would
-    keep one per African recipient. A cited decision that fixes `across`:
-    the rewritten plan would contradict it.
+    keep one per African recipient.
     """
     france = [Entity(name="France", role="donor")]
-    decisions = [pinning_decision(SPEC_AFRICA)]
     decision_ids = ["measure"]
-    if fixes_across:
-        decisions.append(
-            decision(
-                slot="recipients",
-                description="Which recipients France's aid is read for.",
-                options=["every recipient", "named recipients"],
-                chosen="every recipient",
-                fixes=DecisionFixes(across="recipient"),
-            )
-        )
-        decision_ids.append("recipients")
     context = context_holding(
         draft(
-            decisions=decisions,
+            decisions=[pinning_decision(SPEC_AFRICA)],
             evidence_requirements=[
                 requirement(
                     measure="official development assistance",
                     decision_ids=decision_ids,
                     entities=france,
-                    across="recipient",
+                    across=("recipient",),
                     source_spec_id=SPEC_AFRICA,
                     unit=None,
                 ),
@@ -1119,11 +1103,11 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
         for record in caplog.records
         if "does not validate" in record.getMessage()
     ]
-    assert bool(left_as_it_was) is fixes_across
+    assert not left_as_it_was
     if not named:
         assert surface.calls.get("search") == 1
         assert "named_in_place_of_across" not in answer
-        assert pinned.across == "recipient"
+        assert pinned.across == ("recipient",)
         assert [*pinned.entities] == france
         return
     assert "search" not in surface.calls
@@ -1136,7 +1120,7 @@ async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin
         }
     ]
     assert (stored.version, stored.status) == (1, PlanStatus.PENDING_APPROVAL)
-    assert pinned.across is None
+    assert pinned.across == ()
     assert [*pinned.entities] == [*france, Entity(name="Africa", role="recipient")]
     assert stored.workflow is not None
     assert [source.spec_id for source in stored.workflow.sources] == [SPEC_AFRICA]
@@ -1159,7 +1143,7 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     pinned = requirement(
         measure="official development assistance",
         entities=[Entity(name="France", role="donor")],
-        across="recipient",
+        across=("recipient",),
         source_spec_id=SPEC_AFRICA,
         unit=None,
     )

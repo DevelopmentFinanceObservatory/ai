@@ -1,0 +1,79 @@
+{
+  "id": "aggregate-total-debt-service-zambia",
+  "kind": "aggregate",
+  "origin": "authored",
+  "question": "How much external debt service did Zambia pay in total from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "How much external debt service did Zambia pay in total from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "external debt service",
+          "entities": [
+            {
+              "text": "Zambia"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "How much external debt service did Zambia pay in total from 2015 to 2022?",
+  "asks": [
+    "Zambia's total external debt service, 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "sum_of",
+    "distinction": "aggregate, not sum_of: it totals the years of one series and adds no second source"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "How much external debt service did Zambia pay in total from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Zambia",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_23cca17b0de08940477d7e335d225896"
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "debt_service",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

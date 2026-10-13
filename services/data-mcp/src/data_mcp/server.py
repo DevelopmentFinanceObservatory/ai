@@ -28,6 +28,7 @@ from starlette.responses import JSONResponse
 
 from data_mcp import search_tool
 from data_mcp.artifact_resource import serve_artifact
+from data_mcp.catalogue_counts import catalogue_counts
 from data_mcp.client import UpstreamClient
 from data_mcp.client_holder import aclose_client, set_client
 from data_mcp.definition_store import (
@@ -130,9 +131,9 @@ async def healthz(_request: Request) -> JSONResponse:
 # `compiler.capabilities`, which lists `get_skill` and `get_skill_file`
 # among the tools no workflow step calls. No `output_schema=`: each tool's
 # structured result is the full `Manifest`, and deriving and validating that
-# schema on every call is a risk left untaken here. `resolve_definition` is
-# the harness's: the combined server outside clients reach leaves it out
-# (`harness.combined_mcp`).
+# schema on every call is a risk left untaken here. `resolve_definition` and
+# `catalogue_counts` are the harness's: the combined server outside clients
+# reach leaves them out (`harness.combined_mcp`).
 mcp.tool(search_tool.search, version="1", title="Search DFO data", annotations=READ_ONLY_CATALOGUE)
 mcp.tool(get_data, version="1", title="Get data", annotations=READ_ONLY_CATALOGUE)
 mcp.tool(
@@ -155,6 +156,7 @@ mcp.tool(
     annotations=READ_ONLY_CATALOGUE,
 )
 mcp.tool(resolve_definition, version="1")
+mcp.tool(catalogue_counts, version="1")
 
 # A templated resource, not a tool -- it surfaces only via
 # `resources/templates/list` discovery, not `resources/list`, so ADK cannot

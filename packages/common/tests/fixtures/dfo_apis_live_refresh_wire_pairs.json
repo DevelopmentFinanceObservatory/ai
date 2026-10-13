@@ -103,16 +103,7 @@
                 "next_expected": null,
                 "partial_period": false
               },
-              "warnings": [
-                {
-                  "kind": "provisional",
-                  "detail": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
-                },
-                {
-                  "kind": "provisional",
-                  "detail": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
-                }
-              ],
+              "warnings": [],
               "generated_at": "<timestamp>",
               "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
               "refreshed_from": null
@@ -668,16 +659,7 @@
                 "next_expected": null,
                 "partial_period": false
               },
-              "warnings": [
-                {
-                  "kind": "provisional",
-                  "detail": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
-                },
-                {
-                  "kind": "provisional",
-                  "detail": "No live revision endpoint is available; graph_revision and source_revisions are a fixed sentinel, and a drift check against them cannot detect an upstream refresh mid-materialisation."
-                }
-              ],
+              "warnings": [],
               "generated_at": "<timestamp>",
               "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
               "refreshed_from": 1
@@ -1018,7 +1000,7 @@
                   "content_version": "ocv_00000000000000000000000000000002"
                 }
               ],
-              "execution_ref": null,
+              "execution_ref": "rpk_00000000000000000000000000000002",
               "sources": [
                 {
                   "id": "src_oecd_dac2a_6ec092e3",

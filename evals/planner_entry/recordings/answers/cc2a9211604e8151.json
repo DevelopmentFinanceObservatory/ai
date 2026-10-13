@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_86654634ca08bfaf7c5da09dcfef7989",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_86654634ca08bfaf7c5da09dcfef7989: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/GHA\",\"country/KEN\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialPosition\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"state\":\"unbound\"},\"property\":\"financialPositionType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"financingResource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"guaranteeStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsConcessionality\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsCreditorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsDebtorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"includesIMFCredit\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"interestRateVariability\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"maturityBand\"}]},\"spec_id\":\"spec_86654634ca08bfaf7c5da09dcfef7989\"}"
+}

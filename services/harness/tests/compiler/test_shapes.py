@@ -151,7 +151,7 @@ def test_retrieve_wraps_the_across_party_with_the_open_place_axis_column(
     requirement: RequirementFactory,
     place_scope_block: dict[str, Any],
 ) -> None:
-    req = requirement(measure="health spending per person", entities=[], across="country")
+    req = requirement(measure="health spending per person", entities=[], across=("country",))
     src = source_from_spec_block(place_scope_block)
 
     shapes, issues = _resolve(
@@ -177,7 +177,7 @@ def test_retrieve_keeps_the_named_entitys_column_then_the_open_axis_its_across_c
 ) -> None:
     # Education aid to Kenya from every donor: Kenya binds `destination`,
     # and the donors are the source's open `origin` axis.
-    req = requirement(entities=[Entity(name="Kenya", role="recipient")], across="donor")
+    req = requirement(entities=[Entity(name="Kenya", role="recipient")], across=("donor",))
     src = source(
         entities=(ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),),
         open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
@@ -201,7 +201,7 @@ def test_retrieve_builds_no_shape_when_no_open_axis_holds_the_across_party(
     # Every donor, against a source whose one open axis is the receiving
     # side: no column holds the donors, and the source's own evidence
     # finding is what reports it.
-    req = requirement(entities=[], across="donor")
+    req = requirement(entities=[], across=("donor",))
     src = source(
         entities=(), open_entity_axes=(OpenEntityAxis(column="destination", member_count=30),)
     )
@@ -1181,7 +1181,7 @@ def test_a_rank_over_the_open_place_axis_is_refused_until_a_filter_keeps_one_lev
     # "Top countries by health spending": the recorded block leaves
     # `observationAbout` open, and a retrieval naming no place holds every
     # level of place on it.
-    req = requirement(measure="health spending per person", entities=[], across="country")
+    req = requirement(measure="health spending per person", entities=[], across=("country",))
     src = source_from_spec_block(place_scope_block)
     fetch = _retrieve(spec_id=src.spec_id)
     countries = FilterOperation(

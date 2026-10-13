@@ -128,6 +128,11 @@ async def _holding(
             _DEFAULT_OPTIONS | {"columns": ["financingProvider_type"]},
         ),
         (
+            _typed(_OLDER, ("party_kind",)),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"]},
+        ),
+        (
             _typed(_OLDER, ("kind",)),
             _OLDER,
             _DEFAULT_OPTIONS | {"columns": ["kind"]},
@@ -144,6 +149,7 @@ async def _holding(
         "both-flow-party-types",
         "the-one-flow-party-type-a-table-serves",
         "flow-party-kinds",
+        "flow-party-kinds-under-the-earlier-token",
     ],
 )
 async def test_a_root_is_recovered_from_the_version_that_reproduces_its_pair(

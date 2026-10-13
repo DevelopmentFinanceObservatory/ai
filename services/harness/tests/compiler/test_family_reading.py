@@ -117,7 +117,7 @@ def _slot(block: dict[str, Any], prop: str) -> dict[str, Any]:
     return next(
         slot
         for slot in block["resolved"]["slots"]
-        if (slot["key"].get("property") or {}).get("dcid") == prop
+        if (slot["key"].get("property") or {}).get("ref") == prop
     )
 
 
@@ -349,7 +349,7 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
         "health",
         [],
         Period(start=2015, end=2022),
-        across="country",
+        across=("country",),
         **({} if requested is None else {"stat_vars": requested}),
     )
 
@@ -472,7 +472,7 @@ def test_a_family_with_no_open_axis_reads_separately() -> None:
     for slot in block["resolved"]["slots"]:
         slot.pop("expansion", None)
         if slot["binding"]["kind"] != "value" and slot["key"].get("property"):
-            slot["binding"] = {"kind": "value", "value": {"ref": {"dcid": "X"}}}
+            slot["binding"] = {"kind": "value", "value": {"ref": {"ref": "X"}}}
 
     source = source_from_spec_block(block)
 
@@ -932,31 +932,31 @@ def test_a_separate_reading_of_a_single_stat_var_source_feeds_an_aggregate(
     assert _step_args(result, "yearly_total")["group_by"] == ["time_period"]
 
 
-def test_an_explicit_total_asks_dfo_apis_for_the_sum_the_rule_would_not(
+_READ_AS_TOTAL = Decision(
+    slot="read_as_total",
+    description="Whether to read the flows as their total or one series each.",
+    options=["sum", "separate"],
+    chosen="sum",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The question asks for the total.",
+    fixes=DecisionFixes(stat_vars=StatVarReading.SUM),
+)
+
+
+def _compile_explicit_total(
     compile_question: Callable[..., CompileResult],
-) -> None:
-    """The question asks for "the total" of a family with an open netting
-    basis: the plan states `sum`, the compiler writes it, and dfo-apis
-    decides whether the family can be summed (`rollup_not_summable`)."""
-    source = _gross_and_net_kenya()
-    total = Decision(
-        slot="read_as_total",
-        description="Whether to read the flows as their total or one series each.",
-        options=["sum", "separate"],
-        chosen="sum",
-        resolved_by=ResolvedBy.PLANNER_DEFAULT,
-        rationale="The question asks for the total.",
-        fixes=DecisionFixes(stat_vars=StatVarReading.SUM),
-    )
+    source: SelectedSource,
+    entities: Sequence[Entity],
+) -> CompileResult:
+    """A yearly total over `source`'s family, the plan stating `stat_vars='sum'`."""
     oda = _dataset(
         "oda",
-        [Entity(name="Germany", role="donor"), Entity(name="Kenya", role="recipient")],
+        entities,
         Period(start=2000, end=2024),
         decision_ids=["measure", "read_as_total"],
         stat_vars=StatVarReading.SUM,
     )
-
-    result = compile_question(
+    return compile_question(
         [oda, _yearly_total("oda")],
         [
             RetrieveOperation(id="oda_op", requirement_id="oda", spec_id=source.spec_id),
@@ -964,12 +964,44 @@ def test_an_explicit_total_asks_dfo_apis_for_the_sum_the_rule_would_not(
         ],
         terminal=["yearly_total"],
         sources={"oda": source},
-        decisions=(_WHAT, total),
+        decisions=(_WHAT, _READ_AS_TOTAL),
+    )
+
+
+def test_an_explicit_total_is_written_as_the_plan_s_reading(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """The plan states `sum` over a family summable along every open axis:
+    the compiler writes it, and the source records the plan set it."""
+    source = _source("germany_bilateral_oda")
+
+    result = _compile_explicit_total(
+        compile_question, source, [Entity(name="Germany", role="donor")]
     )
 
     assert _step_args(result, "oda_op")["stat_vars"] == "sum"
     assert result.workflow is not None
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.PLAN
+
+
+def test_an_explicit_total_over_an_unsummable_axis_is_refused_at_compile_time(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """The question asks for "the total" of a family with an open netting
+    basis: the plan states `sum`, which `get_data` would refuse
+    `rollup_not_summable`, so compile refuses it before the user approves."""
+    source = _gross_and_net_kenya()
+
+    result = _compile_explicit_total(
+        compile_question,
+        source,
+        [Entity(name="Germany", role="donor"), Entity(name="Kenya", role="recipient")],
+    )
+
+    (issue,) = result.issues
+    assert issue.code is CompileIssueCode.FAMILY_UNSUMMABLE
+    assert (issue.operation_id, issue.requirement_id) == ("oda_op", "oda")
+    assert "nettingBasis" in issue.reason
 
 
 def test_male_and_female_population_charted_keeps_one_series_per_sex(
@@ -1005,8 +1037,8 @@ def test_a_comparison_over_a_family_read_separately_is_refused_at_compile_time(
     difference = ComparisonRequirement(
         id="difference",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="people"),
-        right=RequirementSide(input_id="life"),
+        minuend=RequirementSide(input_id="life"),
+        subtrahend=RequirementSide(input_id="people"),
     )
 
     result = compile_question(

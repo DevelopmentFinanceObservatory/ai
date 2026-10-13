@@ -33,6 +33,7 @@ _SPEC_KEYS = {
     "member_count",
     "member_count_exact",
     "varies_by",
+    "source_codes",
     "counted_as",
     "alternatives",
 }
@@ -146,12 +147,12 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     spec["resolved"]["shape"] = {"label": "population"}
     spec["resolved"]["slots"] = [
         {
-            "key": {"property": {"dcid": "gender", "label": "gender"}, "label": "sex"},
+            "key": {"property": {"ref": "gender", "label": "gender"}, "label": "sex"},
             "binding": {"kind": "unbound"},
         },
         {
-            "key": {"property": {"dcid": "age", "label": "age"}, "label": "age"},
-            "binding": {"kind": "value", "value": {"ref": {"dcid": "Years15Onwards"}}},
+            "key": {"property": {"ref": "age", "label": "age"}, "label": "age"},
+            "binding": {"kind": "value", "value": {"ref": {"ref": "Years15Onwards"}}},
         },
         {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}},
     ]
@@ -185,6 +186,20 @@ def test_a_spec_with_no_elected_stat_vars_states_no_count() -> None:
     spec = render_answer(_envelope("definite", spec=_spec()))["parts"][0]["specs"][0]
 
     assert "member_count" not in spec
+
+
+def test_a_spec_states_the_source_codes_of_its_family() -> None:
+    spec = _spec(
+        member_count=1,
+        facets={"provenance": {"ref": "provenance/IDS", "label": "World Bank IDS"}},
+    )
+    spec["resolved"]["stat_vars"]["source_codes"] = [
+        {"provenance": "provenance/IDS", "code": "DT.TDS.DEGG.CD"}
+    ]
+
+    answer = render_answer(_envelope("definite", spec=spec))["parts"][0]["specs"][0]
+
+    assert answer["source_codes"] == [{"code": "DT.TDS.DEGG.CD", "source": "World Bank IDS"}]
 
 
 def test_a_part_with_no_warnings_has_no_warnings_key() -> None:

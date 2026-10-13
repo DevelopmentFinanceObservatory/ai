@@ -1,0 +1,6 @@
+Source card listing 1 source (`cmp_Ab3dE5gH7k`, revision 2).
+
+- OECD Creditor Reporting System (CRS), licence OECD Terms and Conditions, retrieved 2026-09-28
+
+Last refreshed 2026-09-28; a newer source download on 2026-10-08 is not in this card; next update expected 2026-12.
+Source: OECD Creditor Reporting System (CRS) via ONE DFO, retrieved 2026-09-28

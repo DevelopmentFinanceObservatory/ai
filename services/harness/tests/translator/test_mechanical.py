@@ -508,7 +508,7 @@ async def test_a_no_data_referral_reaches_the_caller_with_its_nearest_sources_un
 async def test_a_compiled_plan_answers_the_outcome_alone(
     draft: DraftFactory, combined_surface: McpSurface, context_holding: ContextHolding
 ) -> None:
-    """The version, revision and warnings are `submit_plan`'s to answer, and
+    """The version, revision and warnings are `declare_ready`'s to answer, and
     the sources and steps are on the approval card, so the caller reads
     `ok` and nothing else."""
     plan = draft()
@@ -1070,6 +1070,55 @@ async def test_a_reused_block_whose_entities_miss_the_requirement_is_refused_at_
         assert result["referral"]["requirement_id"] == "annual_debt_service"
 
 
+async def test_a_pin_listing_a_shared_code_ends_in_the_refusal_the_code_search_returns(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    pinning_decision: PinningDecisionFactory,
+    core: TranslatorCore,
+    context_holding: ContextHolding,
+    search_calls: list[dict[str, Any]],
+) -> None:
+    """The dataset lists the code but is not that series, so the pin confirms
+    nothing and the code is searched; Search's refusal of the code reaches the
+    caller, not a claim that the pin was not found."""
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_KENYA)],
+            evidence_requirements=[
+                requirement(source_code="DT.NFL.MIDA.CD", source_spec_id=SPEC_KENYA),
+                derived_requirement(),
+            ],
+        )
+    )
+    block = _spec(
+        SPEC_KENYA,
+        "debt service paid by Kenya",
+        coverage={
+            "kind": "exact",
+            "has_data": True,
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+        stat_vars={
+            "member_count": 1,
+            "member_count_exact": True,
+            "served_count": 1,
+            "source_codes": [
+                {"provenance": "provenance/IDS", "code": "DT.NFL.MIDA.CD"},
+                {"provenance": "provenance/IDS", "code": "DT.NFL.IMFC.CD"},
+            ],
+        },
+    )
+    save_pin_sources(context.state, {SPEC_KENYA: PinSource(block=block, settled=True)})
+
+    result = await run_translate(context, core=core)
+
+    assert [call["parts"][0]["source_code"] for call in search_calls] == ["DT.NFL.MIDA.CD"]
+    assert result["outcome"] == "referred", result
+    assert result["referral"]["kind"] == ReferralKind.NO_DATA.value
+    assert result["referral"]["no_data_reason"] == "source_code_shares_variable"
+
+
 async def test_a_name_the_block_labels_otherwise_compiles_by_the_ref_the_graph_resolves_it_to(
     draft: DraftFactory,
     requirement: RequirementFactory,
@@ -1116,7 +1165,7 @@ async def test_a_name_the_block_labels_otherwise_compiles_by_the_ref_the_graph_r
 
 @pytest.mark.parametrize(
     "change",
-    [{"measure": "a different ask, never searched before"}, {"across": "creditor"}],
+    [{"measure": "a different ask, never searched before"}, {"across": ["creditor"]}],
     ids=["measure", "across-opening-a-role"],
 )
 async def test_a_requirement_whose_searched_content_changed_is_rediscovered(
@@ -1191,7 +1240,7 @@ async def test_a_requirement_stating_across_rediscovers_a_source_recorded_withou
     source that read them and found none open is reused: the compiler refuses
     it with what it states.
     """
-    across = requirement(across="bilateral creditor")
+    across = requirement(across=("bilateral creditor",))
     plan = draft(evidence_requirements=[across, derived_requirement()])
     context = context_holding(plan)
     _seed_settled(

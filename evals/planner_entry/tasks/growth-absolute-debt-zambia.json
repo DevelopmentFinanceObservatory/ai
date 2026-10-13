@@ -1,0 +1,77 @@
+{
+  "id": "growth-absolute-debt-zambia",
+  "kind": "growth",
+  "origin": "pilot",
+  "question": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
+  "searches": [
+    {
+      "query": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
+      "parts": [
+        {
+          "variable": "external debt stock",
+          "entities": [
+            {
+              "text": "Zambia"
+            }
+          ],
+          "time": "2012 to 2020",
+          "unit": "US dollars"
+        }
+      ]
+    }
+  ],
+  "brief": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
+  "asks": [
+    "Increase in Zambia's external debt stock in US dollars, 2012 to 2020"
+  ],
+  "required_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "the change of one series across a window, not the difference between two series"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt stock",
+        "entities": [
+          {
+            "name": "Zambia"
+          }
+        ],
+        "period": {
+          "start": 2012,
+          "end": 2020
+        }
+      },
+      {
+        "kind": "growth",
+        "id": "change",
+        "input_id": "debt",
+        "window_start": 2012,
+        "window_end": 2020,
+        "change": "absolute"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "change"
+        ]
+      }
+    ]
+  }
+}

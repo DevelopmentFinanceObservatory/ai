@@ -10,7 +10,9 @@ that commit (`rank`). It also holds the scripted plan with a decline
 aa8d7e1 serialised it before a growth, a rank and a period threshold gained
 `rolling` and a dataset requirement `period_end_open`, and the aggregate plan
 with its source binding a named set (`grouped`), as the code at 382d621
-serialised it before a named set gained `total`. Each plan's source is converted to the `SelectedSource` that
+serialised it before a named set gained `total`, and the aggregate plan
+holding one ask it answers (`asked`), as the code at fed6c635 serialised it
+before a plan gained the parties its asks break down by. Each plan's source is converted to the `SelectedSource` that
 keeps no member list (`stat_vars` and `stat_var_truncated` dropped, the one
 StatVar it bound stated as `served_count`), with the revisions recomputed.
 `fixtures/revision_base_fields.json` lists every field of every model a plan

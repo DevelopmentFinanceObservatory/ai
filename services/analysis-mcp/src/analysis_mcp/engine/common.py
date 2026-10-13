@@ -65,9 +65,11 @@ from common.place_type import (
     PARTY_KINDS,
     PARTY_ROLES,
     TOTAL_KIND,
+    TYPED_ROLES,
     UNTYPED,
     at_one_level,
     enrichment_columns,
+    enrichment_role,
     kind_column,
     type_column,
 )
@@ -149,7 +151,7 @@ class PlaceLevelsMixedError(Exception):
     with no level of `common.place_type.PLACE_LEVELS` among every one's
     levels. For a flow party role (`without_party_totals`), several parties
     of which one has no kind, every one a total on a pooled role, or
-    several parties with no `{role}_kind` column at all. `column` is the type or
+    several parties with no `{role}_party_kind` column at all. `column` is the type or
     kind column, and `types` its distinct cells, sorted and capped at
     `_PLACE_TYPE_CAP`, empty when the frame carries no such column.
     Maps to the tool boundary's `place_levels_mixed` refusal.
@@ -201,7 +203,7 @@ def without_party_totals(
     side: ExclusionSide | None = None,
 ) -> tuple[Frame, Exclusions]:
     """`frame` less the rows of every flow party in `columns` whose
-    `{role}_kind` cell is `total`, with one `party_total` exclusion per role
+    `{role}_party_kind` cell is `total`, with one `party_total` exclusion per role
     that lost rows, naming the totals left out and tagged `side`. Parties of
     kind `party` and `residual` stay.
 
@@ -234,11 +236,13 @@ def without_party_totals(
             "equal", table.column(kinds).combine_chunks(), pa.scalar(TOTAL_KIND, pa.string())
         )
         dropped = table.filter(is_total)
+        totals = distinct(dropped, column)
         exclusions = record_counted_exclusion(
             exclusions,
             reason="party_total",
             row_count=dropped.num_rows,
-            entities={column: distinct(dropped, column)},
+            entities={column: totals},
+            parties=tuple(totals),
             side=side,
         )
         table = table.filter(array_kernel("invert", is_total))
@@ -255,6 +259,18 @@ def role_columns(frame: Frame) -> tuple[str, ...]:
     return tuple(column for column in frame.columns if column not in _FIXED_COLUMNS)
 
 
+def entity_roles(frame: Frame) -> tuple[str, ...]:
+    """The role columns of `frame` that identify an entity: every role
+    column less the `{role}_type` and `{role}_party_kind` columns
+    (`common.place_type.enrichment_role`), which describe a place or party
+    another column names. A verb counts entities over these alone."""
+    return tuple(
+        column
+        for column in role_columns(frame)
+        if enrichment_role(column, roles=TYPED_ROLES) is None
+    )
+
+
 def frame_keeping_role_types(
     columns: Mapping[str, pa.Array | pa.ChunkedArray],
     *,
@@ -262,7 +278,7 @@ def frame_keeping_role_types(
     source: Frame,
 ) -> Frame:
     """An output frame of `columns` declaring `role_keys`, plus the
-    `{role}_type` and `{role}_kind` columns of every role in `role_keys` that
+    `{role}_type` and `{role}_party_kind` columns of every role in `role_keys` that
     `source`, the verb's `frame_ref` input, carries and `role_keys` leaves
     out (`common.place_type.enrichment_columns`).
 
@@ -309,6 +325,10 @@ class ExclusionRecord:
 
     `side` names which of a two-input verb's two sides these rows came from
     (see `ExclusionSide`), or `None` for a single-input verb.
+
+    `parties` is every distinct party the dropped rows name in their one
+    role column, uncapped, for the flow parties `without_party_totals` leaves
+    out, and `None` where the step keeps only the capped `entities`.
     """
 
     reason: ExclusionReason
@@ -316,6 +336,7 @@ class ExclusionRecord:
     entities: dict[str, tuple[str, ...]]
     entities_truncated: bool
     side: ExclusionSide | None = None
+    parties: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -453,12 +474,14 @@ def record_counted_exclusion(
     row_count: int,
     entities: Mapping[str, Iterable[str]],
     side: ExclusionSide | None = None,
+    parties: tuple[str, ...] | None = None,
 ) -> Exclusions:
     """`exclusions`, plus one more `ExclusionRecord` for `row_count`
     dropped rows under `reason`, for a step that counts its dropped rows
     without holding them. `entities` maps each role column the record
     names to the values its dropped rows carry there, in any order and
-    with repeats; each is cut to `smallest_distinct`.
+    with repeats; each is cut to `smallest_distinct`. `parties` is the
+    record's own (see `ExclusionRecord`).
     `exclusions` unchanged when `row_count` is zero."""
     if not row_count:
         return exclusions
@@ -469,6 +492,7 @@ def record_counted_exclusion(
         entities={column: values for column, (values, _) in named.items()},
         entities_truncated=any(truncated for _, truncated in named.values()),
         side=side,
+        parties=parties,
     )
     return Exclusions(records=(*exclusions.records, record))
 

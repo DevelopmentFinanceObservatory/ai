@@ -10,6 +10,7 @@ from common.mcp_telemetry import is_loopback_url
 from common.settings import BaseServiceSettings
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import NoDecode
+from submission.recipes import RECIPES
 
 # Mount prefixes for the data-mcp / analysis-mcp / presentation-mcp ASGI
 # apps that `harness.server.create_app` mounts in-process: the four
@@ -179,10 +180,42 @@ class Settings(BaseServiceSettings):
     once. The tools and the publish also claim the same rows from the
     process-wide budget (`frame_rows_in_flight_max`), and a root mint claims
     there only. The default of 500,000 is one two-input verb on two full frames,
-    the largest single claim, and leaves 700,000 of the process-wide 1,200,000
+    the largest single claim, and leaves 600,000 of the process-wide 1,100,000
     to Studio conversations and outside MCP callers. A claim the rows in flight
     leave no room for, in either budget, answers `pending`. A replay step whose
     rows exceed this whole budget is refused `rows_over_refresh_budget`.
+
+    The `turn_*` and `model_first_chunk_s` fields bound one request (one POST
+    to `/api/studio/turn` or `/api/studio/interrupt`) through
+    `harness.turn_budget.TurnBudget`, which every orchestrator and planner
+    model call reads (`harness.turn_budget.BoundedGemini`):
+
+    - `turn_model_time_s` (90) meters model time: the seconds the request's
+      model calls spend waiting on their streams, from the moment each request
+      is sent, genai's own HTTP retries included, to each chunk in turn. The
+      prefix cache's create does not count, and neither do the tools ADK runs
+      while a call waits at a response it has delivered. It ends 1 of 187 simple and 3 of 182 plan requests
+      measured on dev. It cuts a call that is still streaming.
+    - `turn_model_calls_max` (30) counts model calls, a first-chunk retry not
+      included. Dev's most in one request was 61, local runs' 29.
+    - `turn_wall_s` (600) meters wall-clock time from the request's start, tool
+      time included, below Cloud Run's 900 s request limit. It cuts only model
+      calls and the discovery calls inside a planner entry, which may take
+      what is left of it (`planner.plan.discovery_time_left`). Other tool
+      calls keep their own timeouts, and the next model call finds the bound
+      spent.
+    - `model_first_chunk_s` (12) is how long a streamed call may wait for its
+      first chunk, of any kind, before it is resent once. Only the first call
+      in a request to miss it is resent, and only before any chunk reached
+      the caller. 0.61% of dev calls waited longer.
+
+    A spent budget, cap or wall bound ends the request with its sentence
+    (`harness.sentences.SEAM_SENTENCES`) as the final message, with no further
+    model call, unless it closes a planner call while the last referral names
+    sources to choose from: the planner then asks the user to pick one
+    (`harness.planner_seam.PlannerSeam._after_planner_model`). `harness.graph.state.BUDGETS` counts tool calls apart from these.
+    The Edit Card's one model call (`harness.generative.GeminiEdit`) carries
+    `turn_model_time_s` as its HTTP timeout.
     """
 
     data_mcp_url: str = ""
@@ -213,6 +246,13 @@ class Settings(BaseServiceSettings):
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL
+    # The direct recipes (`submission.recipes.RECIPES`) the orchestrator may
+    # run without a plan through `submit_analysis` (`harness.direct_recipes`),
+    # as a comma-separated env value (`ORCHESTRATOR_DIRECT_RECIPES`). Empty
+    # removes the tool; an id no recipe has is refused at startup.
+    orchestrator_direct_recipes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["growth"]
+    )
     # Browser origins the server answers CORS preflights for, as a
     # comma-separated env value (a locally served page testing against the
     # real agent on another port). Empty sends no CORS headers: the deployed
@@ -239,6 +279,11 @@ class Settings(BaseServiceSettings):
     live_refresh_burst: int = Field(default=20, ge=1)
     live_refresh_max_in_flight: int = Field(default=8, ge=1)
     live_refresh_rows_in_flight_max: int = Field(default=500_000, ge=1)
+    # One request's model-call bounds; see the class docstring.
+    turn_model_time_s: float = Field(default=90.0, gt=0, allow_inf_nan=False)
+    turn_model_calls_max: int = Field(default=30, ge=1)
+    turn_wall_s: float = Field(default=600.0, gt=0, allow_inf_nan=False)
+    model_first_chunk_s: float = Field(default=12.0, gt=0, allow_inf_nan=False)
 
     @field_validator(
         "mcp_call_timeout_s",
@@ -289,12 +334,20 @@ class Settings(BaseServiceSettings):
             return None
         return value
 
-    @field_validator("studio_cors_origins", mode="before")
+    @field_validator("studio_cors_origins", "orchestrator_direct_recipes", mode="before")
     @classmethod
-    def _split_origins(cls, value: object) -> object:
+    def _split_list(cls, value: object) -> object:
         if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
+            return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("orchestrator_direct_recipes")
+    @classmethod
+    def _known_recipes(cls, value: list[str]) -> list[str]:
+        unknown = sorted(set(value) - set(RECIPES))
+        if unknown:
+            raise ValueError(f"no direct recipe is named {unknown}; known: {sorted(RECIPES)}")
+        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def _refuse_one_value_for_both_studio_credentials(self) -> Settings:

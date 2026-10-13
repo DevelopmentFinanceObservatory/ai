@@ -133,6 +133,19 @@ OUTCOME_OF: Mapping[ReferralKind, Outcome] = {
     ReferralKind.INTERNAL_FAILURE: Outcome.INTERNAL,
 }
 
+# The kinds that hand a requirement back because what it asks for cannot be done
+# or names a source that could be several, so what to change is the user's to
+# choose. `planner.agent` holds a plan over one of these until the user has
+# answered, and `harness.planner_seam` asks the user itself when one carries
+# candidates to pick from.
+USER_DECIDES = frozenset(
+    {
+        ReferralKind.REQUIREMENT_UNMEETABLE,
+        ReferralKind.UNSUPPORTED_ASK,
+        ReferralKind.SOURCE_NAME_AMBIGUOUS,
+    }
+)
+
 
 ABOUT_A_REQUIREMENT = frozenset(
     {
@@ -227,9 +240,9 @@ def dropped_scope(held: SelectedSource, found: SelectedSource) -> tuple[str, ...
 
 
 def closing_group(held: SelectedSource, across: str) -> str | None:
-    """The label of the one group `held` holds the side of a flow `across` names to, or `None`.
+    """The label of the one group `held` holds the side of a flow the `across` word names to, or `None`.
 
-    `None` when `across` names no side of a flow, or `held` names no group,
+    `None` when the word names no side of a flow, or `held` names no group,
     or several, on that side.
     """
     side = flow_side(across)
@@ -240,13 +253,13 @@ def closing_group(held: SelectedSource, across: str) -> str | None:
 
 
 def scope_repair(held: SelectedSource, across: str) -> str | None:
-    """The change to a requirement that restates the scope `held` keeps on the side `across` opens, or `None`.
+    """The change to a requirement that restates the scope `held` keeps on the side the `across` word opens, or `None`.
 
     `held` is a pinned dataset's source set aside because it holds that side
     closed. When it holds the side to one group, or to one entity, the
     requirement can name that member under the side's `PARTY_ROLES` word and
-    drop `across`, which brings the pinned source's scope back. Several
-    named members, or an `across` naming no single role, give `None`.
+    drop the word from `across`, which brings the pinned source's scope back.
+    Several named members, or a word naming no single role, give `None`.
     """
     role = party_role(across)
     side = flow_side(across)
@@ -258,7 +271,7 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     if len(labels) != 1:
         return None
     (label,) = labels
-    return f"name {label!r} as {role} in `entities` and drop `across`"
+    return f"name {label!r} as {role} in `entities` and drop {across!r} from `across`"
 
 
 class StalePin(StrictModel):

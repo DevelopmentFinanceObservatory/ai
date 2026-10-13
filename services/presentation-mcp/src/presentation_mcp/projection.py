@@ -6,7 +6,7 @@ rule calls for it. It is built from the
 envelope alone: a one-line description derived from the component's
 structured fields, stamped with the component id and revision; the
 model-authored title, announced as the model's; a table of the visible data;
-and the provenance footer (freshness, warnings, citation). A projection
+and the footer (freshness, warnings, citation, as `card_facts` reads them). A projection
 without its data table keeps every line but the line_chart, bar_chart, and
 table bodies, and says where the table is (`ROWLESS_NOTICE`, or
 `UNKNOWN_HOST_ROWLESS_NOTICE` for a client whose capabilities the server
@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 MAX_ROWS = 20
@@ -75,7 +76,8 @@ def text_projection(envelope: Mapping[str, Any], *, rowless_notice: str | None =
 
     Args:
         envelope: The resolved revision, `{schema_version, catalog_version,
-            component_id, revision, provenance, component}`.
+            component_id, revision, provenance, component}`, with a
+            `description` on a described card.
         rowless_notice: Text put in place of a line_chart, bar_chart, or
             table body, or `None` to keep the body. Other types project
             whole either way.
@@ -85,6 +87,7 @@ def text_projection(envelope: Mapping[str, Any], *, rowless_notice: str | None =
     """
     component = envelope["component"]
     provenance = envelope["provenance"]
+    facts = card_facts(envelope)
     stamp = f"`{envelope['component_id']}`, revision {envelope['revision']}"
     lines = [f"{_md(describe(component))} ({stamp})."]
     title = title_text(component)
@@ -95,12 +98,14 @@ def text_projection(envelope: Mapping[str, Any], *, rowless_notice: str | None =
     if rowless_notice is not None and component["type"] in _DATA_TABLE_TYPES:
         lines.extend(["", rowless_notice])
     elif body is not None:
-        body_lines, cuts = body(component, provenance)
+        body_lines, cuts = body(component, facts)
         lines.extend(["", *body_lines])
         if cuts:
             lines.extend(["", _cut_line(cuts, provenance)])
 
-    lines.extend(["", *_footer(provenance)])
+    footer = _footer(facts)
+    if footer:
+        lines.extend(["", *footer])
     return _bounded("\n".join(lines))
 
 
@@ -253,36 +258,157 @@ def shared_unit(units: Sequence[Any]) -> str | None:
     return texts.pop() if len(texts) == 1 else None
 
 
-def sources_for(
-    provenance: Mapping[str, Any], refs: Sequence[str] | None = None
-) -> list[Mapping[str, Any]]:
-    """The provenance sources, in order, restricted to `refs` when given."""
-    sources = provenance["sources"]
+@dataclass(frozen=True)
+class Source:
+    """A source a card names. `key` is what a component's `source_ref` or
+    `source_refs` entry points at: a `provenance.sources` id, or a description
+    source's `ref`, which is `None` for an input whose id is unknown."""
+
+    key: str | None
+    name: str
+    licence: str | None
+    retrieved: str | None
+    url: str | None
+
+
+@dataclass(frozen=True)
+class Freshness:
+    """How current a card's data is, each date `None` where the card states none.
+
+    `newer_download` is a source download after `last_refreshed` that the card's data
+    does not hold.
+    """
+
+    data_through: str | None
+    partial_period: bool
+    last_refreshed: str | None
+    next_expected: str | None
+    newer_download: str | None
+
+
+@dataclass(frozen=True)
+class Caveat:
+    """A warning or caveat: its kind, and the sentence saying what it covers."""
+
+    kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class CardFacts:
+    """What a card says about its data: its sources, freshness, caveats, and
+    citation. A narration note, which draws no data, states none of them."""
+
+    sources: tuple[Source, ...]
+    freshness: Freshness | None
+    caveats: tuple[Caveat, ...]
+    citation: str | None
+
+
+def card_facts(envelope: Mapping[str, Any]) -> CardFacts:
+    """The card's sources, freshness, caveats, and citation.
+
+    A card with a `description` keeps lineage alone in `provenance`, so they
+    come from the description: its `sources`, each retrieved on the `cite`
+    date and linked to no URL; its `freshness`, whose latest period is the
+    data-through period, whose source download at mint is the last refresh,
+    whose later download is a newer download the card does not hold, and whose
+    next release is the next update; its `caveats` with their
+    `text`; and `cite.text`. A card without one reads them from `provenance`,
+    where a narration note carries none.
+    """
+    description = envelope.get("description")
+    if description is not None:
+        return _described_facts(description)
+    provenance = envelope["provenance"]
+    freshness = provenance.get("freshness")
+    return CardFacts(
+        sources=tuple(
+            Source(
+                key=source["id"],
+                name=source["name"],
+                licence=source["licence"],
+                retrieved=source["retrieved"],
+                url=source["url"],
+            )
+            for source in provenance.get("sources", ())
+        ),
+        freshness=None
+        if freshness is None
+        else Freshness(
+            data_through=freshness["data_through"],
+            partial_period=freshness["partial_period"],
+            last_refreshed=freshness["last_refreshed"],
+            next_expected=freshness["next_expected"],
+            newer_download=None,
+        ),
+        caveats=tuple(
+            Caveat(kind=warning["kind"], detail=warning["detail"])
+            for warning in provenance.get("warnings", ())
+        ),
+        citation=provenance.get("citation"),
+    )
+
+
+def _described_facts(description: Mapping[str, Any]) -> CardFacts:
+    cite = description["cite"]
+    freshness = description["freshness"]
+    return CardFacts(
+        sources=tuple(
+            Source(
+                key=source["ref"],
+                name=source["label"],
+                licence=source.get("licence"),
+                retrieved=cite.get("retrieved"),
+                url=None,
+            )
+            for source in description["sources"]
+        ),
+        freshness=Freshness(
+            data_through=freshness.get("latest_period"),
+            partial_period=False,
+            last_refreshed=freshness.get("source_downloaded_at_mint"),
+            next_expected=freshness.get("next_release"),
+            newer_download=freshness.get("source_downloaded_since"),
+        ),
+        caveats=tuple(
+            Caveat(kind=caveat["kind"], detail=caveat["text"]) for caveat in description["caveats"]
+        ),
+        citation=cite["text"],
+    )
+
+
+def sources_for(facts: CardFacts, refs: Sequence[str] | None = None) -> list[Source]:
+    """The card's sources, in order, restricted to `refs` when given."""
     if refs is None:
-        return list(sources)
-    by_id = {source["id"]: source for source in sources}
-    return [by_id[ref] for ref in refs if ref in by_id]
+        return list(facts.sources)
+    by_key = {source.key: source for source in facts.sources}
+    return [by_key[ref] for ref in refs if ref in by_key]
 
 
-def source_url(source: Mapping[str, Any]) -> str | None:
+def source_url(source: Source) -> str | None:
     """A source's URL where it is https and short enough to show whole."""
-    url = source["url"]
-    if len(url) > MAX_URL_CHARS or _HTTPS_URL.fullmatch(url) is None:
+    url = source.url
+    if url is None or len(url) > MAX_URL_CHARS or _HTTPS_URL.fullmatch(url) is None:
         return None
     return url
 
 
-def freshness_text(provenance: Mapping[str, Any]) -> str | None:
-    """The freshness line, or `None` when the provenance states none."""
-    freshness = provenance["freshness"]
+def freshness_text(facts: CardFacts) -> str | None:
+    """The freshness line, or `None` when the card states none."""
+    freshness = facts.freshness
+    if freshness is None:
+        return None
     parts = []
-    if freshness["data_through"]:
-        partial = ", the last period partial" if freshness["partial_period"] else ""
-        parts.append(f"Data through {freshness['data_through']}{partial}")
-    if freshness["last_refreshed"]:
-        parts.append(f"last refreshed {freshness['last_refreshed']}")
-    if freshness["next_expected"]:
-        parts.append(f"next update expected {freshness['next_expected']}")
+    if freshness.data_through:
+        partial = ", the last period partial" if freshness.partial_period else ""
+        parts.append(f"Data through {freshness.data_through}{partial}")
+    if freshness.last_refreshed:
+        parts.append(f"last refreshed {freshness.last_refreshed}")
+    if freshness.newer_download:
+        parts.append(f"a newer source download on {freshness.newer_download} is not in this card")
+    if freshness.next_expected:
+        parts.append(f"next update expected {freshness.next_expected}")
     if not parts:
         return None
     text = "; ".join(parts)
@@ -290,7 +416,7 @@ def freshness_text(provenance: Mapping[str, Any]) -> str | None:
 
 
 def warning_texts(
-    provenance: Mapping[str, Any],
+    facts: CardFacts,
     *,
     limit: int | None = MAX_TEXT_CHARS,
     count: int | None = MAX_WARNINGS,
@@ -300,11 +426,11 @@ def warning_texts(
 
     Each detail is clipped to `limit` characters, or kept whole for `None`.
     """
-    warnings = provenance["warnings"]
+    warnings = facts.caveats
     shown = warnings if count is None else warnings[:count]
     texts = [
-        f"{warning['kind'].replace('_', ' ')}: "
-        f"{warning['detail'] if limit is None else _clip(warning['detail'], limit)}"
+        f"{warning.kind.replace('_', ' ')}: "
+        f"{warning.detail if limit is None else _clip(warning.detail, limit)}"
         for warning in shown
     ]
     if len(warnings) > len(shown):
@@ -312,9 +438,9 @@ def warning_texts(
     return texts
 
 
-def citation_text(provenance: Mapping[str, Any]) -> str:
-    """The citation, clipped."""
-    return _clip(provenance["citation"], MAX_TEXT_CHARS)
+def citation_text(facts: CardFacts) -> str | None:
+    """The citation, clipped, or `None` for a card that cites nothing."""
+    return None if facts.citation is None else _clip(facts.citation, MAX_TEXT_CHARS)
 
 
 # --- bodies -------------------------------------------------------------------
@@ -322,9 +448,9 @@ def citation_text(provenance: Mapping[str, Any]) -> str:
 type _Body = tuple[list[str], list[str]]
 
 
-def _series_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
+def _series_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
     """A period-by-series table, latest periods first to be kept."""
-    del provenance
+    del facts
     series = component["series"]
     shown = series[:MAX_VALUE_COLUMNS]
     cells = [{point["period"]: cell_text(point) for point in one["points"]} for one in shown]
@@ -342,12 +468,12 @@ def _series_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) ->
     return [*table, *unit_lines], [*cuts, *unit_cuts]
 
 
-def _bar_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
+def _bar_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
     """Entity mode as one row per bar, units named for the bars kept; period
     mode as a series table."""
     axis = component["category_axis"]
     if axis["mode"] != "entity":
-        return _series_body(component, provenance)
+        return _series_body(component, facts)
     series = component["series"]
     header = [axis["category_dimension"], component["value_axis"]["label"]]
     rows = [[one["label"], cell_text(one["points"][0])] for one in series]
@@ -357,9 +483,9 @@ def _bar_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _B
     return [*table, *unit_lines], [*cuts, *unit_cuts]
 
 
-def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
+def _table_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
     """The table's own columns and rows, dimension columns capped first."""
-    del provenance
+    del facts
     columns = component["columns"]
     dimensions = [column for column in columns if column["key"] not in ("period", "value")]
     shown = [
@@ -390,9 +516,9 @@ def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> 
     return lines, cuts
 
 
-def _stat_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
+def _stat_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
     """The headline value with its unit and period, then its change."""
-    del provenance
+    del facts
     unit = unit_text(component["unit"])
     value = number_text(component["value"])
     lines = [f"Value: **{value}**{f' {_md(unit)}' if unit else ''}, {component['period']}."]
@@ -402,29 +528,31 @@ def _stat_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _
     return lines, []
 
 
-def _note_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
+def _note_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
     """The narration's text, labelled as the model's."""
-    del provenance
+    del facts
     return [f"Model narration: {_md(_clip(component['text'], MAX_NOTE_CHARS))}"], []
 
 
-def _source_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
-    """One bullet per listed source: name, licence, retrieval date, and link."""
-    sources = sources_for(provenance, component["source_refs"])
+def _source_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
+    """One bullet per listed source: name, licence, retrieval date, and link,
+    each but the name where the card states it."""
+    sources = sources_for(facts, component["source_refs"])
     lines = []
     for source in sources[:MAX_SOURCES]:
+        parts = [_md(_clip(source.name, MAX_TEXT_CHARS))]
+        if source.licence:
+            parts.append(f"licence {_md(_clip(source.licence, MAX_TEXT_CHARS))}")
+        if source.retrieved:
+            parts.append(f"retrieved {source.retrieved}")
         url = source_url(source)
         link = f": <{url}>" if url else ""
-        lines.append(
-            f"- {_md(_clip(source['name'], MAX_TEXT_CHARS))}, licence "
-            f"{_md(_clip(source['licence'], MAX_TEXT_CHARS))}, retrieved {source['retrieved']}"
-            f"{link}"
-        )
+        lines.append(f"- {', '.join(parts)}{link}")
     cuts = [f"{MAX_SOURCES} of {len(sources)} sources"] if len(sources) > MAX_SOURCES else []
     return lines, cuts
 
 
-_BODIES: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], _Body]] = {
+_BODIES: dict[str, Callable[[Mapping[str, Any], CardFacts], _Body]] = {
     "line_chart": _series_body,
     "bar_chart": _bar_body,
     "table": _table_body,
@@ -540,13 +668,15 @@ def _cut_line(cuts: Sequence[str], provenance: Mapping[str, Any]) -> str:
     return f"Showing {' and '.join(cuts)}{where}."
 
 
-def _footer(provenance: Mapping[str, Any]) -> list[str]:
+def _footer(facts: CardFacts) -> list[str]:
     lines = []
-    freshness = freshness_text(provenance)
+    freshness = freshness_text(facts)
     if freshness is not None:
         lines.append(freshness)
-    lines.extend(f"Warning, {_md(text)}" for text in warning_texts(provenance))
-    lines.append(f"Source: {_md(citation_text(provenance))}")
+    lines.extend(f"Warning, {_md(text)}" for text in warning_texts(facts))
+    citation = citation_text(facts)
+    if citation is not None:
+        lines.append(f"Source: {_md(citation)}")
     return lines
 
 

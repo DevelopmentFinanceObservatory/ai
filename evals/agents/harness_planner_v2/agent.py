@@ -14,10 +14,14 @@ from __future__ import annotations
 from planner.agent import create_planner_agent
 from planner.settings import AgentSettings
 
-# The same field the deployed planner is built from, so this scores the model
-# the service runs; `PLANNER_MODEL_NAME` overrides it here exactly as it does
-# there. Evaluating a model the env can't change would mean evaluating one the
+# The same fields the deployed planner is built from, so this scores the model
+# and schema delivery the service runs; `PLANNER_MODEL_NAME` and
+# `PLANNER_SCHEMA_DELIVERY` override them here exactly as they do there.
+# Evaluating a model the env can't change would mean evaluating one the
 # harness may not be running.
-_MODEL_NAME = AgentSettings().planner_model_name
+_AGENT_SETTINGS = AgentSettings()
 
-root_agent = create_planner_agent(model_name=_MODEL_NAME)
+root_agent = create_planner_agent(
+    model_name=_AGENT_SETTINGS.planner_model_name,
+    schema_delivery=_AGENT_SETTINGS.planner_schema_delivery,
+)

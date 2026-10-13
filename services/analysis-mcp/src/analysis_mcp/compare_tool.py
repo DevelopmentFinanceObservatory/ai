@@ -1,10 +1,12 @@
 """The `compare` tool: op-spec in, deterministic engine execution over two
 stored-frame slices, a `{spec_id, content_version}` pair and a trace out.
 
-Flow mirrors `aggregate_tool.aggregate`: parse/validate the op-spec ->
-resolve the left `frame_ref` via the shared `analysis_mcp.frame_ref_resolution`
-helpers, and the right `right_frame_ref` too when it names a different
-result (left alone stands for "two slices of one frame_ref" -- see
+Flow mirrors `aggregate_tool.aggregate`: parse/validate the op-spec -> mint
+the op-spec hash, which names the result's `stat_var` (`dcid:<op_spec_hash>`)
+as `sum_of_tool.sum_of` names a sum's -> resolve the left
+`frame_ref` via the shared `analysis_mcp.frame_ref_resolution` helpers, and
+the right `right_frame_ref` too when it names a different result (left alone
+stands for "two slices of one frame_ref"; see
 `analysis_mcp.engine.compare`'s own docstring) -> run the engine
 (`analysis_mcp.engine.compare.run_compare`), translating each of its typed
 exceptions to its own refusal -> mint identity, build the trace, write the
@@ -17,6 +19,9 @@ An exception outside that set would escape this function; `server.py`'s
 registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
 this backstop complements the typed handling below rather than replacing it.
+
+The stored step (`_compare_step`) counts the periods the comparison keeps
+and the periods one side alone reports, which it leaves out.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from analysis_mcp.engine.compare import (
     CompareAmbiguousSliceError,
     CompareFacetMismatchError,
     CompareNonFiniteResultError,
+    CompareResult,
     CompareUnitMismatchError,
     CompareUnitUnboundError,
     ComparisonPeriodsDisjointError,
@@ -48,15 +54,18 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merge_derived_markers,
     merged_time,
+    op_spec_hash_or_refusal,
     read_derived_marker,
     resolve_input_frames,
 )
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import CompareOpSpec, PinnedUnit, SumOfOpSpec
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import LeftOut, Step, build_step, left_out_from_exclusions, shared_step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -193,6 +202,32 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     return refusal
 
 
+def _compare_step(
+    op_spec: CompareOpSpec, result: CompareResult, *, trace: Trace, ratio: tuple[bool, bool]
+) -> Step:
+    """The step record of `result`, stored on `trace`: the periods it
+    compared, the periods one side alone reports, the unit both sides share
+    (`shared_step_unit`, with each side's `ratio` flag), and the entities
+    each side holds."""
+    one_sided = len(set(result.left_periods) ^ set(result.right_periods))
+    return build_step(
+        op="compare",
+        trace=trace,
+        inputs={"left": op_spec.frame_ref, "right": op_spec.right_frame_ref or op_spec.frame_ref},
+        kept={"periods": len(result.intersected_periods)},
+        left_out=[
+            *(
+                [LeftOut(reason="period_unmatched", count=one_sided, of="periods")]
+                if one_sided
+                else []
+            ),
+            *left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
+        ],
+        unit=shared_step_unit(result.left_resolved_unit, result.right_resolved_unit, ratio=ratio),
+        sides={"left": result.left_entities, "right": result.right_entities},
+    )
+
+
 async def resolve_slice_pair(
     op_spec: CompareOpSpec | SumOfOpSpec,
 ) -> tuple[AdmittedFrame, AdmittedFrame, list[str]] | ToolResult:
@@ -286,8 +321,8 @@ async def compare(
     intersection of what each side actually offers; an empty intersection
     refuses (`comparison_periods_disjoint`), naming each side's own
     available periods. `delta` is `right - left` at each intersected
-    period. Use `join` instead to combine two different variables for one
-    entity.
+    period. The result is a variable of its own, right minus left. Use
+    `join` instead to combine two different variables for one entity.
 
     Args:
         frame_ref: The left side's frame_ref.
@@ -322,6 +357,9 @@ async def compare(
     )
     if isinstance(op_spec, ToolResult):
         return op_spec
+    op_spec_hash = op_spec_hash_or_refusal(op_spec)
+    if isinstance(op_spec_hash, ToolResult):
+        return op_spec_hash
 
     sides = await resolve_slice_pair(op_spec)
     if isinstance(sides, ToolResult):
@@ -339,6 +377,7 @@ async def compare(
         result = run_compare(
             left_frame,
             right_frame,
+            stat_var=f"dcid:{op_spec_hash}",
             left_entity=canonical_entity_binding(op_spec.left_entity),
             right_entity=canonical_entity_binding(op_spec.right_entity),
             left_pinned_unit=op_spec.left_unit,
@@ -352,37 +391,25 @@ async def compare(
         return identity
     op_spec_hash, execution_identity, content_version = identity
 
-    # The output frame's own `stat_var` (set above by `run_compare`) always
-    # carries the left side's -- when a period's right-side `stat_var`
-    # differs, the delta is a movement between two different StatVars
-    # labelled as if it were one, so `compare` sets its own
-    # `inherited_stat_var` marker in that case (unset when both sides agree,
-    # which is honest as-is). Merged with whichever informational marker
-    # either side already carries (`growth`'s or `share_of`'s own
-    # `dimensionless`/`inherited_stat_var`) via `merge_derived_markers` and
-    # routed through `derived_marker_detail` so neither side's own marker is
-    # silently dropped from this call's own output (see
-    # `frame_ref_resolution.derived_marker_detail`'s own docstring).
     detail: dict[str, object] = {
         "left_periods": list(result.left_periods),
         "right_periods": list(result.right_periods),
         "intersected_periods": list(result.intersected_periods),
         "left_coverage_fraction": result.left_coverage_fraction,
         "right_coverage_fraction": result.right_coverage_fraction,
+        "left_stat_vars": list(result.left_stat_vars),
+        "right_stat_vars": list(result.right_stat_vars),
         "right_resolved_unit": unit_json(result.right_resolved_unit),
         "right_resolved_facets": {
             selection.axis: selection.ref for selection in result.right_facet_selections
         },
     }
-    own_inherited_stat_var = any(
-        comparison.left_stat_var != comparison.right_stat_var
-        for comparison in result.period_comparisons
-    )
+    # `compare` sets no marker of its own, since the result's `stat_var` is its
+    # own. A marker either side carries is passed on.
     derived = derived_marker_detail(
         inherited=merge_derived_markers(
             read_derived_marker(left_trace), read_derived_marker(right_trace)
-        ),
-        inherited_stat_var=own_inherited_stat_var,
+        )
     )
     if derived is not None:
         detail["derived"] = derived
@@ -391,9 +418,9 @@ async def compare(
     # of two already-finite floats.
     time_fact = merged_time(own_interval=None, inherited=[left, right])
 
-    # The left side's own upstream_trace is carried forward -- the same
+    # The left side's own upstream_trace is carried forward, the same
     # "left is the reference" choice `run_compare`'s own output frame
-    # already makes for stat_var/unit/facets. Both sides' own frames are
+    # makes for unit/facets. Both sides' own frames are
     # bound into `content_version` via `input_content_versions` above, and
     # carried onto the trace's own `input_content_versions` field verbatim.
     output_trace = Trace(
@@ -423,7 +450,12 @@ async def compare(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[left_trace, right_trace],
+        step=_compare_step(
+            op_spec,
+            result,
+            trace=output_trace,
+            ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
+        ),
         digest=lambda: render_compare_digest(
             result=result,
             op_spec_hash=op_spec_hash,

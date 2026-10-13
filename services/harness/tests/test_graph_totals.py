@@ -1,9 +1,7 @@
 """Tests for what `harness.graph` says about a summed family of StatVars.
 
 `_carried_retrievals` picks the retrievals whose StatVars a terminal frame
-carries, which the card counts its indicators from, and `_own_stat_vars`
-the retrievals under each side of a sum or a quotient, which the card names
-its StatVar by. `_stat_var_totals`
+carries, which the card counts its indicators from. `_stat_var_totals`
 writes the sentence `plan_done` hands the agent for each summed family an
 answer frame carries, and `_dropped_key_sentences` the one for each step
 under an answer frame that left keys out.
@@ -21,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -34,10 +33,10 @@ from data_mcp.server import mcp as data_mcp
 from executor.outcomes import Accepted, EvidenceRecord, StepRecord
 from harness.conversation import current_conversation_id
 from harness.graph.answer import (
+    _carried_parts,
     _carried_retrievals,
     _dropped_key_sentences,
     _group_column,
-    _own_stat_vars,
     _stat_var_totals,
     answer_notes,
     link_evidence_to_terminal_frames,
@@ -63,6 +62,7 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
+    DecisionDraft,
     DecisionFixes,
     Entity,
     EvidenceRequirement,
@@ -77,6 +77,7 @@ from planner.plan import (
     RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
+    settle_decisions,
 )
 from planner.records import GroupBy, Period, PeriodThreshold, Reduction, StatVarReading
 from planner.workflow import (
@@ -211,7 +212,9 @@ def _compiled(
         plan=draft, translation=translation, schemas=dict(schemas), discovered=dict(discovered)
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 def _digest(step_id: str) -> str:
@@ -449,15 +452,25 @@ async def test_germany_s_oda_to_kenya_names_its_recipient_and_states_no_regional
 async def test_a_reading_the_user_settled_says_so_and_the_planners_own_says_nothing(
     schemas: dict[str, ToolSchema],
 ) -> None:
-    settled = Decision(
+    """The user's decision is built as `propose_plan` builds it: the draft
+    names `stat_vars` and its value comes off the requirement citing it."""
+    draft = DecisionDraft(
         slot="reading",
         description="Read the aid family summed or as separate series",
         options=["sum", "separate"],
         chosen="sum",
         resolved_by=ResolvedBy.USER,
         rationale="The user asked for one total",
-        fixes=DecisionFixes(stat_vars=StatVarReading.SUM),
+        fixes=("stat_vars",),
     )
+    citing = _dataset(
+        "oda",
+        [Entity(name="Germany", role="donor")],
+        Period(start=2000, end=2026),
+        decision_ids=["measure", "reading"],
+        stat_vars=StatVarReading.SUM,
+    )
+    (settled,) = settle_decisions([draft], [citing])
     user_plan = _germany_bilateral_oda(
         schemas,
         decision_ids=["measure", "reading"],
@@ -493,8 +506,8 @@ def _two_sided(
             derived = ComparisonRequirement(
                 id="combined",
                 decision_ids=["measure"],
-                left=RequirementSide(input_id="left"),
-                right=RequirementSide(input_id="right"),
+                minuend=RequirementSide(input_id="right"),
+                subtrahend=RequirementSide(input_id="left"),
             )
             operation = CompareOperation(
                 id="combined",
@@ -534,31 +547,12 @@ KENYA_ROLE_KEYS = ("financingRecipient",)
 KENYA_DIMENSIONS = ({"label": "financingRecipient", "count": 1, "axis": "destination"},)
 
 
-async def test_a_summed_family_that_only_supplies_values_gets_no_sentence(
-    schemas: dict[str, ToolSchema],
-) -> None:
-    """A `compare`'s right side is summed, but the answer frame carries none
-    of its StatVars, so no total is stated for it."""
-    plan = _two_sided(schemas, "compare", _single("a", "Grants"), _family("b", "Loans"))
-    assert plan.workflow is not None
-    assert plan.workflow.source_of("right_op").stat_var_reading is StatVarReading.SUM
-
-    surface, outcome = _run(
-        plan,
-        summed={"right_op": 3},
-        role_keys={"combined": KENYA_ROLE_KEYS},
-        retrieval_role_keys=KENYA_ROLE_KEYS,
-    )
-
-    assert _stat_var_totals(surface, outcome, plan=plan) == []
-
-
-@pytest.mark.parametrize("kind", ["join", "share_of"])
+@pytest.mark.parametrize("kind", ["join", "share_of", "compare"])
 async def test_two_summed_families_on_both_sides_get_one_sentence_each_naming_its_family(
     schemas: dict[str, ToolSchema], kind: str
 ) -> None:
-    """A join and a share carry both sides' StatVars, so each summed side's
-    family gets its own sentence."""
+    """A join, a share and a compare carry both sides' StatVars, so each
+    summed side's family gets its own sentence."""
     plan = _two_sided(schemas, kind, _family("a", "Grants"), _family("b", "Loans"))
 
     surface, outcome = _run(
@@ -901,7 +895,9 @@ def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = No
     )
 
 
-def test_a_join_or_sum_carries_both_sides_and_a_compare_only_its_left() -> None:
+def test_a_join_sum_or_compare_carries_both_sides() -> None:
+    """A compare writes a StatVar of its own, so a frame over it carries that
+    one StatVar in place of the retrievals under its sides."""
     steps = {
         step.id: step
         for step in (
@@ -929,9 +925,12 @@ def test_a_join_or_sum_carries_both_sides_and_a_compare_only_its_left() -> None:
 
     assert carried("joined") == {"left", "right"}
     assert carried("summed") == {"left", "right"}
-    assert carried("compared") == {"left"}
-    assert carried("yearly") == {"left"}
+    assert carried("compared") == {"left", "right"}
+    assert carried("yearly") == {"left", "right"}
     assert carried("right") == {"right"}
+    assert _carried_parts(
+        "yearly", steps_by_id=steps, retrieval_step_ids=frozenset({"left", "right"})
+    ) == (frozenset(), frozenset({"compared"}))
 
 
 def test_a_quotient_and_a_share_carry_both_sides() -> None:
@@ -959,81 +958,6 @@ def test_a_quotient_and_a_share_carry_both_sides() -> None:
     assert carried("yearly") == {"left", "right"}
     assert carried("one_frame") == {"left"}
     assert carried("shared") == {"left", "right"}
-
-
-@pytest.mark.parametrize(
-    ("tool", "second_frame"),
-    [
-        ("sum_of", "right_frame_ref"),
-        ("quotient_of", "denominator_frame_ref"),
-        ("share_of", "denominator_frame_ref"),
-    ],
-)
-def test_a_verbs_own_ref_maps_to_its_tool_and_the_retrievals_under_each_side(
-    tool: str, second_frame: str
-) -> None:
-    """A sum or a quotient read by an aggregate is named wherever its ref is
-    drawn; one over two slices of one frame lists that retrieval on both
-    sides. A side resting on an earlier verb's frame lists that verb's own
-    ref, which the card names by that verb's sides. A side resting on a
-    `compare` names only the compare's left frame."""
-    workflow_steps = (
-        _step("left", "get_data"),
-        _step("right", "get_data"),
-        _step("summed", tool, frame_bindings={"frame_ref": "left", second_frame: "right"}),
-        _step("yearly", "aggregate", frame_bindings={"frame_ref": "summed"}),
-        _step("one_frame", tool, frame_bindings={"frame_ref": "left"}),
-        _step("nested", tool, frame_bindings={"frame_ref": "yearly", second_frame: "right"}),
-        _step(
-            "compared", "compare", frame_bindings={"frame_ref": "left", "right_frame_ref": "right"}
-        ),
-        _step(
-            "over_compare", tool, frame_bindings={"frame_ref": "compared", second_frame: "right"}
-        ),
-    )
-    frames = {
-        step.id: FrameRef(spec_id=f"spec_{index:032d}", content_version=f"cv_{index:032d}")
-        for index, step in enumerate(workflow_steps)
-    }
-    outcome = Accepted(
-        revision="r",
-        evidence=tuple(
-            EvidenceRecord(
-                requirement_id=step_id,
-                step_id=step_id,
-                frame_ref=frames[step_id],
-                spec_id=frames[step_id].spec_id,
-                stat_vars=(),
-                window=None,
-                gaps=(),
-                citation="c",
-            )
-            for step_id in ("left", "right")
-        ),
-        steps=tuple(
-            StepRecord(
-                step_id=step.id, tool=step.tool, attempts=1, frame_ref=frames[step.id], digest="d"
-            )
-            for step in workflow_steps
-        ),
-        results={"yearly": frames["yearly"], "one_frame": frames["one_frame"]},
-    )
-
-    sides = _own_stat_vars(
-        outcome,
-        steps_by_id={step.id: step for step in workflow_steps},
-        retrieval_step_ids=frozenset({"left", "right"}),
-        step_order={step.id: index for index, step in enumerate(workflow_steps)},
-    )
-
-    left, right = (frames[step_id].model_dump() for step_id in ("left", "right"))
-    summed_ref = f"dcid:{frames['summed'].spec_id}"
-    assert sides == {
-        summed_ref: (tool, [left], [right]),
-        f"dcid:{frames['one_frame'].spec_id}": (tool, [left], [left]),
-        f"dcid:{frames['nested'].spec_id}": (tool, [summed_ref], [right]),
-        f"dcid:{frames['over_compare'].spec_id}": (tool, [left], [right]),
-    }
 
 
 _ODA_FAMILY = tuple(f"ODA_{index}" for index in range(12))

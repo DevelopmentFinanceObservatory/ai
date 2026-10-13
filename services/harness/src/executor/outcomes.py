@@ -1,8 +1,10 @@
 """What a run produces: accepted evidence, a choice for the planner, or a refusal.
 
 Every outcome carries the plan revision it ran, so a reader can tie it to
-exactly what was approved, and every refusal says which step or requirement
-it is about and what the tool or the check said.
+exactly what was approved, and the id of the run the ledger recorded it under
+(`executor.ledger`), `None` only for a refusal made before admission. Every
+refusal says which step or requirement it is about and what the tool or the
+check said.
 """
 
 from __future__ import annotations
@@ -39,6 +41,10 @@ class RefusalKind(StrEnum):
     SHAPE_MISMATCH = "shape_mismatch"
     COLUMN_UNBOUND = "column_unbound"
     ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    AUTHORISATION_EXPIRED = "authorisation_expired"
+    MANIFEST_OUTSIDE_AUTHORISATION = "manifest_outside_authorisation"
+    AUTHORISATION_MISMATCH = "authorisation_mismatch"
+    RUN_ABANDONED = "run_abandoned"
 
 
 class LeftOutSeries(StrictModel):
@@ -133,6 +139,7 @@ class Accepted(StrictModel):
 
     kind: Literal["accepted"] = "accepted"
     revision: str
+    run_id: str | None = None
     evidence: tuple[EvidenceRecord, ...]
     steps: tuple[StepRecord, ...]
     results: dict[str, FrameRef]
@@ -155,6 +162,7 @@ class MethodChoiceNeeded(StrictModel):
 
     kind: Literal["method_choice_needed"] = "method_choice_needed"
     revision: str
+    run_id: str | None = None
     step_id: Identifier
     tool: ToolId
     code: str
@@ -182,6 +190,7 @@ class Refused(StrictModel):
 
     kind: Literal["refused"] = "refused"
     revision: str
+    run_id: str | None = None
     refusal: RefusalKind
     detail: str
     step_id: Identifier | None = None
@@ -215,6 +224,7 @@ class RediscoveryNeeded(StrictModel):
 
     kind: Literal["rediscovery_needed"] = "rediscovery_needed"
     revision: str
+    run_id: str | None = None
     step_id: Identifier
     tool: ToolId
     requirement_id: Identifier
@@ -236,6 +246,13 @@ RunOutcome = Annotated[
 ]
 
 _OUTCOME_ADAPTER: TypeAdapter[Any] = TypeAdapter(RunOutcome)
+
+
+def outcome_from_json(
+    raw: JsonValue,
+) -> Accepted | MethodChoiceNeeded | Refused | RediscoveryNeeded:
+    """The outcome a run record holds (`executor.ledger.RunRecord.outcome`)."""
+    return _OUTCOME_ADAPTER.validate_python(raw)
 
 
 def load_outcome(

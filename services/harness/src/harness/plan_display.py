@@ -2,11 +2,15 @@
 
 `step_rows`, `requirement_rows`, `operation_rows` and `ask_rows` are pure
 functions from `planner.plan.Plan` to plain dicts, `shown_decisions` the
-decisions the card and the plan record list, and `with_source_names` a
-decision's text with each spec_id in it named in words. This module reads
-`planner.plan`, `planner.operations`, `planner.records` and
-`planner.workflow` only, so it can be written and tested before `harness.wire` carries the fields these
-rows fill, and it stays usable from `harness.wire`, `harness.studio_translate`
+decisions the card and the plan record list, `with_source_names` a
+decision's text with each spec_id in it named in words, and `answer_scopes`
+how many figures each answering requirement's result gives, read off its
+shape. A step
+whose result answers ends its description with that count. This module
+reads `planner.plan`, `planner.operations`, `planner.records`,
+`planner.shapes`, `planner.workflow` and `harness.sentences` only, so it can
+be written and tested before `harness.wire` carries the fields these rows
+fill, and it stays usable from `harness.wire`, `harness.studio_translate`
 and `planner.agent` alike without any of them importing each other through
 here.
 
@@ -37,7 +41,7 @@ import re
 import typing
 from collections.abc import Sequence
 
-from compiler.evidence import open_axis_for
+from compiler.evidence import open_axes_for
 from compiler.sources import stat_var_count
 from planner.parties import across_party, singular
 from planner.phrasing import (
@@ -67,7 +71,8 @@ from planner.plan import (
     RankRequirement,
     ShareOfRequirement,
     SumOfRequirement,
-    UnsupportedOperation,
+    answering_results,
+    frame_shapes,
     is_search_pin,
 )
 from planner.records import (
@@ -83,22 +88,16 @@ from planner.records import (
     StatVarReading,
     ValueThreshold,
 )
-from planner.workflow import OpenEntityAxis, ReadingSetBy, SelectedSource
+from planner.shapes import FrameShape, RoleDimension, TimeLabel
+from planner.workflow import ReadingSetBy, SelectedSource
+
+from harness.sentences import DECLINE_REASONS
 
 _REDUCTION_WORDS: dict[Reduction, str] = {
     Reduction.SUM: "total",
     Reduction.MEAN: "average",
     Reduction.MAX: "highest",
     Reduction.MIN: "lowest",
-}
-
-# Why the plan does not compute an ask, by its decline code, in the user's terms.
-DECLINE_REASONS: dict[UnsupportedOperation, str] = {
-    UnsupportedOperation.CALCULATION_OVER_COMBINED: (
-        "the system cannot calculate further on a comparison or a combined table"
-    ),
-    UnsupportedOperation.NO_OPERATION_COVERS: "the system has no calculation that does this",
-    UnsupportedOperation.UNSUPPORTED_ASK: "the data found cannot answer this as asked",
 }
 
 _THRESHOLD_WORDS: dict[str, str] = {
@@ -117,7 +116,9 @@ def step_rows(plan: Plan) -> list[dict[str, object]]:
     Each row is the step's `id`, a composed `label` and `description`
     (`_label` and `_sentence`, read off the requirement the step's
     operation carries out), and `args`, the step's own literal arguments,
-    unchanged.
+    unchanged. The description of a step whose result answers
+    (`answer_scopes`) ends with how many figures that result gives, so the
+    card the user approves states the result's scope.
 
     Requires a plan carrying a `translation` and a `workflow`. A step is
     something a compiled plan has, between `with_translation` and `approve`.
@@ -125,15 +126,19 @@ def step_rows(plan: Plan) -> list[dict[str, object]]:
     assert plan.translation is not None, "step_rows needs a plan carrying a translation"
     assert plan.workflow is not None, "step_rows needs a plan carrying a workflow"
     operations_by_id = {operation.id: operation for operation in plan.translation.operations}
+    scopes = answer_scopes(plan)
     rows: list[dict[str, object]] = []
     for step in plan.workflow.steps:
         operation = operations_by_id[step.operation_id]
         requirement = plan.requirement(operation.requirement_id)
+        description = _sentence(requirement, plan)
+        if requirement.id in scopes:
+            description = f"{description} Result: {scopes[requirement.id]}."
         rows.append(
             {
                 "id": step.id,
                 "label": _label(requirement, plan),
-                "description": _sentence(requirement, plan),
+                "description": description,
                 "args": dict(step.args),
             }
         )
@@ -220,7 +225,7 @@ def ask_rows(plan: Plan) -> list[dict[str, object]]:
 
     Each row is the `ask`, `answered_by`, the ids of the workflow steps
     whose results answer it, `declined`, the code it was declined under,
-    `reason`, that code's `DECLINE_REASONS` entry, and `not_computed`, the
+    `reason`, that code's `harness.sentences.DECLINE_REASONS` entry, and `not_computed`, the
     part the decline names in the user's words. The last three are `None`
     for an ask the plan answers whole; an ask answered in part carries
     both `answered_by` and a decline. A step's id is that of the operation
@@ -247,6 +252,59 @@ def ask_rows(plan: Plan) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def answer_scopes(plan: Plan) -> dict[str, str]:
+    """How many figures each answering result gives, and over which years, in words, by id.
+
+    Those are the requirements `planner.plan.answering_results` names, the
+    set the result-scope rule checks.
+    """
+    shapes = frame_shapes(plan.evidence_requirements)
+    return {output: _scope_phrase(shapes[output], plan) for output in answering_results(plan)}
+
+
+def _scope_phrase(shape: FrameShape, plan: Plan) -> str:
+    """How many figures a result of `shape` gives, and over which years, in words.
+
+    Read off the result's shape (`planner.plan.frame_shapes`): one figure
+    per member of each party it keeps apart, per year when it keeps a
+    series of years, then the years it covers. "one figure per donor,
+    2015-2022" is a growth kept per member of an `across`; "one figure,
+    2015-2022" is the same growth over their sum. A party is kept apart
+    when its members are open (`across`) or a breakdown's codes, or when
+    the requirement names several of them or a set's members.
+    """
+    per = [
+        singular(role.role) if role.role is not None else "place"
+        for role in shape.roles
+        if _kept_apart(role, plan)
+    ]
+    if (
+        shape.time is TimeLabel.OBSERVATION
+        and shape.period is not None
+        and (shape.period.start != shape.period.end)
+    ):
+        per.append("year")
+    phrase = "one figure" + "".join(f" per {word}" for word in per)
+    if shape.period is None:
+        return phrase
+    years = (
+        str(shape.period.start)
+        if shape.period.start == shape.period.end
+        else f"{shape.period.start}-{shape.period.end}"
+    )
+    return f"{phrase}, {years}"
+
+
+def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
+    """Whether a result keeps one figure per member of `role`'s party."""
+    if role.open or role.breakdown:
+        return True
+    dataset = plan.requirement(role.requirement_id)
+    assert isinstance(dataset, DatasetRequirement)
+    named = [entity for entity in dataset.entities if entity.role == role.role]
+    return len(named) > 1 or any(entity.members for entity in named)
 
 
 def _group_by_phrase(group_by: Sequence[GroupBy], *, breakdown: Breakdown | None = None) -> str:
@@ -283,6 +341,8 @@ def _breakdown_clause(breakdown: Breakdown) -> str:
 # What follows a year, or a span of years, that moves with the newest year the
 # data holds. The years beside it are the ones the plan read.
 _FOLLOWING = ", following the newest year"
+# The same, after a selected source's sentence, which states the years it read.
+_FOLLOWING_YEARS = "the years follow the newest year"
 
 
 def _following(rolling: RollingWindow | None) -> str:
@@ -327,9 +387,9 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
     ):
         return _measure_of(plan.requirement(requirement.input_id), plan)
     if isinstance(requirement, ComparisonRequirement):
-        left = _measure_of(plan.requirement(requirement.left.input_id), plan)
-        right = _measure_of(plan.requirement(requirement.right.input_id), plan)
-        return f"{right} against {left}"
+        minuend = _measure_of(plan.requirement(requirement.minuend.input_id), plan)
+        subtrahend = _measure_of(plan.requirement(requirement.subtrahend.input_id), plan)
+        return f"{minuend} against {subtrahend}"
     if isinstance(requirement, SumOfRequirement):
         left = _measure_of(plan.requirement(requirement.left.input_id), plan)
         right = _measure_of(plan.requirement(requirement.right.input_id), plan)
@@ -397,7 +457,7 @@ def _axis_role(requirement: RankRequirement, plan: Plan) -> str | None:
     datasets = datasets_of(requirement, plan)
     roles = sorted(
         {entity.role for dataset in datasets for entity in dataset.entities if entity.role}
-        | {dataset.across for dataset in datasets if dataset.across is not None}
+        | {word for dataset in datasets for word in dataset.across}
     )
     return roles[0] if len(roles) == 1 else None
 
@@ -429,8 +489,26 @@ def _kept_phrase(requirement: RankRequirement, limit: int, plan: Plan) -> str:
 
 
 def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
-    parties = entities_phrase(requirement.entities, across=requirement.across)
-    return f"Fetch {requirement.measure} for {parties}"
+    """The retrieval named by what it fetches and for whom.
+
+    A compiled plan names its selected source, as `_sentence_dataset` does:
+    the source's `measure_label` and how many members the source holds on
+    each axis `across` covers (`_population_count`), since the requirement's
+    `measure` and `across` are the planner's words for what it asked: "every
+    recipient" over a source of 50 countries. Before compile, or where the
+    source states no label or count, the label keeps the requirement's words.
+    """
+    source = _selected_source(requirement.id, plan)
+    measure = requirement.measure
+    if source is not None and source.measure_label is not None:
+        measure = source.measure_label
+    counts = {
+        word: count
+        for word in requirement.across
+        if (count := _population_count(requirement, word, plan)) is not None
+    }
+    parties = entities_phrase(requirement.entities, across=requirement.across, member_counts=counts)
+    return f"Fetch {measure} for {parties}"
 
 
 def _label_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
@@ -449,9 +527,9 @@ def _label_growth(requirement: GrowthRequirement, plan: Plan) -> str:
 
 
 def _label_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
-    left = plan.requirement(requirement.left.input_id)
-    right = plan.requirement(requirement.right.input_id)
-    return f"Compare {_measure_of(right, plan)} to {_measure_of(left, plan)}"
+    minuend = plan.requirement(requirement.minuend.input_id)
+    subtrahend = plan.requirement(requirement.subtrahend.input_id)
+    return f"Compare {_measure_of(minuend, plan)} to {_measure_of(subtrahend, plan)}"
 
 
 def _label_sum_of(requirement: SumOfRequirement, plan: Plan) -> str:
@@ -571,26 +649,38 @@ def _card_order(plan: Plan) -> list[EvidenceRequirement]:
 
 
 def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
-    """The retrieval in words, with how it reads a family of StatVars. The
+    """The retrieval in words, with how it reads a family of StatVars.
+
+    A compiled plan states its selected source's own `sentence`, Search's
+    account of what the source holds, since the requirement's `measure`
+    and `across` are the planner's words for what it asked, which a source
+    over fewer parties does not meet: "every recipient" over a source of 50
+    countries. Before compile the requirement is stated in those words. The
     selected source's `describe` definition stays out: for a StatVar it is
     the graph's constraint encoding ("mp=count,pt=Person"), which the
     planner model reads and a user cannot."""
     source = _selected_source(requirement.id, plan)
-    # A breakdown sums the family within each code, so no reading of its members applies.
-    reading = (
-        _reading_clause(source) if source is not None and requirement.breakdown is None else None
-    )
-    parties = entities_phrase(requirement.entities, across=requirement.across)
-    clauses = [
-        f"Retrieves {requirement.measure} for {parties}",
-        f"{requirement.period.start}-{requirement.period.end}"
-        + (_FOLLOWING if requirement.period_end_open else ""),
-    ]
+    clauses: list[str] = []
     if requirement.breakdown is not None:
         clauses.append(_breakdown_clause(requirement.breakdown))
-    if reading:
+    # A breakdown sums the family within each code, so no reading of its members applies.
+    elif source is not None and (reading := _reading_clause(source)):
         clauses.append(reading)
-    return ", ".join(clauses) + "."
+    if source is not None:
+        stated = source.sentence.strip()
+        if not stated.endswith("."):
+            stated += "."
+        if requirement.period_end_open:
+            clauses.insert(0, _FOLLOWING_YEARS)
+        if not clauses:
+            return stated
+        read = ", ".join(clauses)
+        return f"{stated} {read[0].upper()}{read[1:]}."
+    parties = entities_phrase(requirement.entities, across=requirement.across)
+    period = f"{requirement.period.start}-{requirement.period.end}" + (
+        _FOLLOWING if requirement.period_end_open else ""
+    )
+    return ", ".join([f"Retrieves {requirement.measure} for {parties}", period, *clauses]) + "."
 
 
 def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:
@@ -612,17 +702,20 @@ def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:
     return plan.workflow.source_of(step_id) if step_id is not None else None
 
 
-def _population_count(requirement: DatasetRequirement, plan: Plan) -> int | None:
-    """How many members the selected source holds on the axis `requirement.across` covers.
+def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) -> int | None:
+    """How many members the selected source holds on the axis the `across` word `word` covers.
 
     `None` before compile, when no source is selected yet, and when
-    `compiler.evidence.open_axis_for` matches the word to no open axis.
+    `compiler.evidence.open_axes_for` matches `requirement.across` to no
+    set of open axes.
     """
     source = _selected_source(requirement.id, plan)
-    if source is None or requirement.across is None:
+    if source is None or word not in requirement.across:
         return None
-    axis = open_axis_for(requirement.across, source.open_entity_axes)
-    return axis.member_count if isinstance(axis, OpenEntityAxis) else None
+    axes = open_axes_for(requirement.across, source.open_entity_axes)
+    if isinstance(axes, str):
+        return None
+    return axes[requirement.across.index(word)].member_count
 
 
 def _reading_clause(source: SelectedSource) -> str | None:
@@ -677,10 +770,10 @@ def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:
 
 
 def _sentence_comparison(requirement: ComparisonRequirement, plan: Plan) -> str:
-    left = plan.requirement(requirement.left.input_id)
-    right = plan.requirement(requirement.right.input_id)
+    minuend = plan.requirement(requirement.minuend.input_id)
+    subtrahend = plan.requirement(requirement.subtrahend.input_id)
     return (
-        f"{_measure_of(right, plan).capitalize()} minus {_measure_of(left, plan)}, at every "
+        f"{_measure_of(minuend, plan).capitalize()} minus {_measure_of(subtrahend, plan)}, at every "
         "period the two share."
     )
 
@@ -698,7 +791,7 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
     role = _axis_role(requirement, plan)
     datasets = datasets_of(requirement, plan)
     covering = next(
-        (dataset for dataset in datasets if dataset.across is not None and dataset.across == role),
+        (dataset for dataset in datasets if role is not None and role in dataset.across),
         None,
     )
     # A breakdown's codes are every code the source holds at its level, uncounted.
@@ -713,7 +806,9 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
         requirement.among,
         across=(level or role) if covering is not None or by_breakdown else None,
         member_count=(
-            _population_count(covering, plan) if covering is not None and level is None else None
+            _population_count(covering, role, plan)
+            if covering is not None and role is not None and level is None
+            else None
         ),
     )
     per_period_text = per_period_phrase(

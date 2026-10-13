@@ -25,6 +25,9 @@ dependencies = [
     # `chart_image` rasterises its SVG with resvg. The package is pre-1.0, so
     # a minor release may change its API, and the cap holds it to 0.5.
     "resvg-py>=0.5.0,<0.6",
+    # `frame_publish` counts a step list's bytes as JCS, as the kit's step
+    # bound does.
+    "rfc8785>=0.1.4",
 ]
 
 [project.scripts]

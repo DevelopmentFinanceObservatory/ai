@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_85d01c1e679faeff87fb4416692ea6e2",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_85d01c1e679faeff87fb4416692ea6e2: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"DACAfrica\"],\"origin\":[\"GroupOfSeven\"]},\"facets\":{\"unit\":{\"request\":{\"base_year\":2024,\"currency\":\"USD\",\"prices\":\"constant\"},\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Gross\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_85d01c1e679faeff87fb4416692ea6e2\"}"
+}

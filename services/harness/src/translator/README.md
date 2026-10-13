@@ -29,7 +29,7 @@ closed set, which `propose_plan` returns under `translation`:
 
 | Outcome           | Meaning                                                                        |
 | ----------------- | ------------------------------------------------------------------------------ |
-| `ok`              | The plan compiled; `submit_plan` reads the summary off the plan's own record.  |
+| `ok`              | The plan compiled; `declare_ready` reads the summary off the plan's record.    |
 | `choice_required` | Several sources answer a requirement; the referral carries the candidates.     |
 | `invalid_input`   | A requirement the planner repairs or the user amends; the referral says which. |
 | `unsupported`     | No operation or search serves what the requirement asks.                       |
@@ -124,13 +124,13 @@ what a `definite` or `candidates` answer recorded for it (pinning is how a
 user settles a `source_ambiguous` referral), and never from a `no_data`
 answer's nearest series; when the pin was never named, discovery says so with a
 `pinned_source_not_found` action. When discovery read the pin's own source
-and set it aside because it holds closed the side `across` asks for, a source
+and set it aside because it holds closed a side `across` asks for, a source
 the fresh search finds that drops that source's scope (a group or named
 members on a role it leaves open or binds in part) goes under the referral's
 `withheld`, never under `candidates`, so the planner cannot pin it. The
 referral's `repair` then names the change that keeps that scope, when the
 pinned source held the side to one group or one entity ("name 'Africa' as
-recipient in `entities` and drop `across`"). The pin's source is read for
+recipient in `entities` and drop 'recipient' from `across`"). The pin's source is read for
 this check from the discovery log too, when a search the translator ran found
 it. A pin `propose_plan` moved to a copy over the requirement's period, or a
 pin whose identity a search in the conversation recorded over that period,

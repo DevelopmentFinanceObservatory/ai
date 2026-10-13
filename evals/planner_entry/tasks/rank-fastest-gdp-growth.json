@@ -1,0 +1,111 @@
+{
+  "id": "rank-fastest-gdp-growth",
+  "kind": "rank",
+  "origin": "pilot",
+  "question": "Which five countries had the fastest GDP growth between 2015 and 2022?",
+  "searches": [
+    {
+      "query": "Which five countries had the fastest GDP growth between 2015 and 2022?",
+      "parts": [
+        {
+          "variable": "GDP",
+          "time": "2015 to 2022",
+          "entities": [
+            {
+              "text": "World",
+              "members": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Which five countries had the fastest GDP growth between 2015 and 2022?",
+  "asks": [
+    "The five countries with the fastest GDP growth from 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "filter",
+    "growth",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "filter",
+    "growth",
+    "rank"
+  ],
+  "reference_payload": {
+    "question": "Which five countries had the fastest GDP growth between 2015 and 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_country",
+        "description": "Which countries the ranking compares.",
+        "options": [
+          "every country with data",
+          "a named list of countries"
+        ],
+        "chosen": "every country with data",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every member is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "across": [
+          "country"
+        ]
+      },
+      {
+        "kind": "filter",
+        "id": "countries",
+        "input_id": "gdp",
+        "predicates": [
+          {
+            "kind": "place_level",
+            "level": "Country"
+          }
+        ]
+      },
+      {
+        "kind": "growth",
+        "id": "growth",
+        "input_id": "countries",
+        "window_start": 2015,
+        "window_end": 2022
+      },
+      {
+        "kind": "rank",
+        "id": "fastest",
+        "input_id": "growth",
+        "direction": "highest_first",
+        "among": "population",
+        "limit": 5,
+        "decision_ids": [
+          "every_country"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "fastest"
+        ]
+      }
+    ]
+  }
+}

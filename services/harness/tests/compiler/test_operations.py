@@ -449,8 +449,8 @@ def test_mismatches_checks_a_comparisons_sides() -> None:
     requirement = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
-        right=RequirementSide(input_id="annual_gdp"),
+        minuend=RequirementSide(input_id="annual_gdp"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
     )
     matching = CompareOperation(
         id="gap_op",
@@ -461,10 +461,10 @@ def test_mismatches_checks_a_comparisons_sides() -> None:
     assert mismatches(requirement, matching, SATISFIED_BY) == []
 
     wrong_left_entity = matching.model_copy(update={"left": Side(input="debt", entity="Ghana")})
-    assert mismatches(requirement, wrong_left_entity, SATISFIED_BY) == ["left"]
+    assert mismatches(requirement, wrong_left_entity, SATISFIED_BY) == ["subtrahend"]
 
     wrong_right_input = matching.model_copy(update={"right": Side(input="ghost")})
-    assert mismatches(requirement, wrong_right_input, SATISFIED_BY) == ["right"]
+    assert mismatches(requirement, wrong_right_input, SATISFIED_BY) == ["minuend"]
 
 
 def test_mismatches_checks_a_share_ofs_sides() -> None:

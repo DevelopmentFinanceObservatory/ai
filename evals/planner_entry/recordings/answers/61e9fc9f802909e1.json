@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_fb9f34fff379f1b30ccddc62fea052de",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_fb9f34fff379f1b30ccddc62fea052de: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/KEN\",\"country/TZA\",\"country/UGA\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialFlow\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"DAC2aAidType206\",\"state\":\"value\"},\"property\":\"dac2aAidType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"dacTypeOfFinance\"},{\"binding\":{\"ref\":\"Disbursement\",\"state\":\"value\"},\"property\":\"financialFlowType\"},{\"binding\":{\"ref\":\"Gross\",\"state\":\"value\"},\"property\":\"nettingBasis\"}]},\"spec_id\":\"spec_fb9f34fff379f1b30ccddc62fea052de\"}"
+}
