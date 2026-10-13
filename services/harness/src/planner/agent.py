@@ -230,7 +230,10 @@ _PLANNING = (
     "`per_period` on the rank for each year's ranking side by side, or "
     "read a `growth` over the aggregate between the two years for each "
     "sector's change. A derived requirement's figures are what a question "
-    "about a value, a growth, a share or a rank asks for.\n\n"
+    "about a value, a growth, a share or a rank asks for. Which members, "
+    "or how many, meet a condition is a `filter` with a `value_threshold` "
+    "over one figure per member, and a `period_threshold` for the year; "
+    "the members it keeps are the answer and their count.\n\n"
     "When the answer is one total of two different sources, such as "
     "bilateral aid plus imputed multilateral aid, state a `sum_of`, "
     "naming each side's `entity` when its requirement names several on "
@@ -1057,13 +1060,15 @@ _PROPOSE_PLAN_ARGUMENTS = {
     ),
     "declined": (
         "Each part of the question no operation computes, one per `code` and "
-        "`ask_ref`. Only an `unsupported` answer earns a decline, with that "
+        "`ask_ref`. An `unsupported` answer earns a decline, with that "
         "answer's code: one `propose_plan` answered, itself or in its `translation`, "
         "or a run-time refusal the plan is replanned from that names the code. A "
         "`requirement_unmeetable` translation whose `reason` says it earns a "
         "decline earns that code too, which the plan may make or leave out. "
         "`breakdown_not_kept` is earned when an `ask_role_dropped` problem names "
-        "the ask and the source its answer pins cannot hold that party open."
+        "the ask and the source its answer pins cannot hold that party open. A "
+        "first plan may also decline as `no_operation_covers` an ask no "
+        "requirement kind or chain of them states."
     ),
     "answered": (
         "When the brief lists asks, the requirements that answer each one, "
