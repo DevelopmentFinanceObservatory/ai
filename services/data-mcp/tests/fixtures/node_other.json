@@ -1,0 +1,14 @@
+{
+  "ref": "dc/base/OECD_DAC2A_Unit",
+  "label": "OECD DAC2a unit note",
+  "types": [
+    "Thing"
+  ],
+  "description": null,
+  "links": {},
+  "gaps": [],
+  "built_from": {
+    "code_index": "952a221e6d43254927fcb75abbf12ce7ba03285fbfeef7d9913e2ddcf49f904c"
+  },
+  "kind": "other"
+}

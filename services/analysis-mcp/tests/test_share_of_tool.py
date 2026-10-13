@@ -25,12 +25,7 @@ from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
-from common.materialisation import (
-    ComposedStatVar,
-    FrameRef,
-    InMemoryMaterialisationStore,
-    set_store,
-)
+from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
 from fastmcp import Client
 
@@ -401,14 +396,6 @@ async def test_two_measures_from_two_sources_divide_with_both_sources_on_the_tra
     assert frame.table.column("value").to_pylist() == [debt_service / gdp * 100] * 55
     assert {row[frame.columns.index("unit")] for row in frame.rows} == {"Percent"}
     assert set(frame.table.column("stat_var").to_pylist()) == {own_stat_var}
-    assert trace.composed_stat_vars == (
-        ComposedStatVar(
-            stat_var=own_stat_var,
-            relation="share",
-            first=("dcid:DebtService",),
-            second=("dcid:Amount_EconomicActivity_GDP",),
-        ),
-    )
     assert trace.applied_policy.resolved_unit == "Percent"
     assert trace.applied_policy.detail["numerator_resolved_unit"] == "dcid:USDollar"
     assert trace.applied_policy.detail["derived"] == {"dimensionless": True}

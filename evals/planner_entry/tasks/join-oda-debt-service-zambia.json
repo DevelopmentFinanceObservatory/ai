@@ -1,0 +1,117 @@
+{
+  "id": "join-oda-debt-service-zambia",
+  "kind": "join",
+  "origin": "authored",
+  "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
+  "searches": [
+    {
+      "query": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Zambia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022"
+        },
+        {
+          "variable": "external debt service",
+          "entities": [
+            {
+              "text": "Zambia"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
+  "asks": [
+    "One table of Zambia's ODA received and external debt service, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "join"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "join"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "join, not comparison: two different measures in one table, with no difference asked for"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA received",
+        "entities": [
+          {
+            "name": "Zambia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_77ec17295bcfb8fc376f3abe67d10931",
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "oda_total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Zambia",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_23cca17b0de08940477d7e335d225896"
+      },
+      {
+        "kind": "join",
+        "id": "table",
+        "left_id": "oda_total",
+        "right_id": "debt_service"
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "table"
+        ]
+      }
+    ]
+  }
+}

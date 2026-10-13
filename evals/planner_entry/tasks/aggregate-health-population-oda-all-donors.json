@@ -1,0 +1,127 @@
+{
+  "id": "aggregate-health-population-oda-all-donors",
+  "kind": "aggregate",
+  "origin": "trace 0ad20d27-e07c-427d-b5b6-02d71b958a14",
+  "question": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors",
+  "searches": [
+    {
+      "query": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors",
+      "parts": [
+        {
+          "variable": "gross ODA disbursements for health including population policy and reproductive health",
+          "entities": [
+            {
+              "text": "all donors"
+            }
+          ],
+          "time": "2015 to 2024"
+        }
+      ]
+    },
+    {
+      "query": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors",
+      "parts": [
+        {
+          "variable": "gross ODA disbursements for health including population policy and reproductive health",
+          "time": "2015 to 2024",
+          "entities": [
+            {
+              "text": "all donors"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "query": "Gross ODA disbursements for health and population policies from 2015 to 2024 total for all donors",
+      "parts": [
+        {
+          "time": "2015 to 2024",
+          "sources": [
+            {
+              "text": "OECD Creditor Reporting System"
+            }
+          ],
+          "open_roles": [
+            "donor"
+          ],
+          "variable": "gross ODA disbursements for health and population policies"
+        }
+      ]
+    },
+    {
+      "query": "gross ODA disbursements 2015 to 2024",
+      "parts": [
+        {
+          "sources": [
+            {
+              "text": "OECD Creditor Reporting System"
+            }
+          ],
+          "variable": "gross ODA disbursements",
+          "time": "2015 to 2024"
+        }
+      ]
+    }
+  ],
+  "brief": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors.",
+  "asks": [
+    {
+      "text": "Gross ODA disbursements for health (including population policies and reproductive health) from 2015 to 2024 for all donors",
+      "over": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "sum_of",
+    "distinction": "aggregate, not sum_of: health and population policy come in one CRS retrieval, so the total sums its donors and recipients by year, with no second source to add"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda_health",
+        "measure": "gross ODA disbursements for health and population policy, programme and reproductive health",
+        "entities": [],
+        "period": {
+          "start": 2015,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_cacb1731d27248637380de7c7bd68f44"
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda_health",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

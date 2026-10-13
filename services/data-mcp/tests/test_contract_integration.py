@@ -11,14 +11,25 @@ error, e.g.:
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import httpx2
 import jsonschema
 import pytest
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.node_lookup import EntityNode, SourceNode, StatVarNode, _outcome_from_response
+from data_mcp.graph_wire import (
+    CountryNode,
+    DatasetNode,
+    NodeResponse,
+    ProvenanceNode,
+    SourceNode,
+    StatVarNode,
+)
 from data_mcp.search_tool import SearchPart, SearchSource, to_wire_request
+
+_GRAPH_SCHEMA_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "graph_api_schema.json"
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DFO_APIS_URL"),
@@ -92,21 +103,31 @@ async def test_healthz_endpoint_is_reachable() -> None:
     assert response.json().get("status") == "ok"
 
 
-# Graph node door: validates a real node response against this service's own
-# models, distinct from the fixture round-trips in test_node_lookup.py, which
-# are authored against this contract rather than captured from upstream.
+# Graph node door: validates a real node response against the generated wire models,
+# distinct from the fixture round-trips in test_node_lookup.py, which replay dfo-apis'
+# documented examples.
 
 
-async def test_live_node_door_country_ken_validates_as_entity_node() -> None:
+async def test_live_graph_schema_matches_the_committed_snapshot() -> None:
+    """A difference means `just graph-schema` and `just graph-models` are due."""
+    base_url = os.environ["DFO_APIS_URL"]
+    async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
+        response = await client.get("/api/graph/schema")
+
+    response.raise_for_status()
+    assert response.json() == json.loads(_GRAPH_SCHEMA_SNAPSHOT.read_text())
+
+
+async def test_live_node_door_country_ken_validates_as_country_node() -> None:
     base_url = os.environ["DFO_APIS_URL"]
     async with httpx2.AsyncClient(base_url=base_url, timeout=10.0) as client:
         response = await client.get("/api/graph/node/country/KEN")
 
     response.raise_for_status()
-    node = _outcome_from_response(response.json())
+    node = NodeResponse.model_validate(response.json()).root
 
-    assert isinstance(node, EntityNode)
-    assert node.contained_in
+    assert isinstance(node, CountryNode)
+    assert node.country.contained_in
 
 
 @pytest.mark.skipif(
@@ -120,10 +141,10 @@ async def test_live_node_door_stat_var_validates_with_nonempty_roles() -> None:
         response = await client.get(f"/api/graph/node/{dcid}")
 
     response.raise_for_status()
-    node = _outcome_from_response(response.json())
+    node = NodeResponse.model_validate(response.json()).root
 
     assert isinstance(node, StatVarNode)
-    assert node.roles
+    assert node.stat_var.definition.roles
 
 
 @pytest.mark.skipif(
@@ -142,13 +163,14 @@ async def test_live_node_door_source_reports_licence_and_freshness_presence() ->
         response = await client.get(f"/api/graph/node/{dcid}")
 
     response.raise_for_status()
-    node = _outcome_from_response(response.json())
+    node = NodeResponse.model_validate(response.json()).root
 
-    assert isinstance(node, SourceNode)
-    print(f"license={node.license!r} license_type={node.license_type!r}")
+    assert isinstance(node, SourceNode | DatasetNode | ProvenanceNode)
+    block = getattr(node, node.kind)
+    print(f"license={block.license!r} license_type={block.license_type!r}")
     print(
-        f"freshness.release_frequency={node.freshness.release_frequency!r} "
-        f"freshness.refresh_schedule={node.freshness.refresh_schedule!r}"
+        f"freshness.release_frequency={block.freshness.release_frequency!r} "
+        f"freshness.refresh_type={block.freshness.refresh_type!r}"
     )
 
 

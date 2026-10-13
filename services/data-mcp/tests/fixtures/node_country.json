@@ -1,0 +1,23 @@
+{
+  "ref": "country/KEN",
+  "label": "Kenya",
+  "types": [
+    "Country"
+  ],
+  "description": null,
+  "links": {},
+  "gaps": [],
+  "built_from": {
+    "code_index": "952a221e6d43254927fcb75abbf12ce7ba03285fbfeef7d9913e2ddcf49f904c"
+  },
+  "kind": "country",
+  "country": {
+    "contained_in": [
+      {
+        "ref": "africa",
+        "label": "Africa"
+      }
+    ],
+    "membership": null
+  }
+}

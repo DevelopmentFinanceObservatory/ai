@@ -24,7 +24,7 @@ The card follows a dfo-website Studio card. Its face holds one title (the
 model-authored title, or the derived description for a member without
 one); for a line or bar chart, a caption under it naming the value axis's
 metric and the series' shared unit; the body; and a footer row: the source
-names, with a count of caveats where the provenance carries warnings, on
+names, with a count of caveats where the card carries any, on
 the left and a "Built with" DFO mark on the right. The source line opens an
 accordion below it holding the rest: the description, a table's shared
 unit, each source with its licence, retrieval date, and link, the freshness
@@ -96,6 +96,9 @@ from prefab_ui.components.control_flow import If
 
 from presentation_mcp.projection import (
     MAX_SOURCES,
+    CardFacts,
+    Source,
+    card_facts,
     change_text,
     citation_text,
     describe,
@@ -230,7 +233,7 @@ def chart_model(envelope: Mapping[str, Any]) -> ChartModel | None:
         axis_min=bounds.get("min"),
         axis_max=bounds.get("max"),
         rows=rows,
-        source_line=_source_label(envelope["provenance"]),
+        source_line=_source_label(card_facts(envelope)),
     )
 
 
@@ -248,7 +251,8 @@ def app_shell(envelope: Mapping[str, Any], *, base_url: str) -> dict[str, Any]:
 
     Args:
         envelope: The resolved revision, `{schema_version, catalog_version,
-            component_id, revision, provenance, component}`.
+            component_id, revision, provenance, component}`, with a
+            `description` on a described card.
         base_url: The public URL the view's theme stylesheet is served under.
 
     Returns:
@@ -256,7 +260,7 @@ def app_shell(envelope: Mapping[str, Any], *, base_url: str) -> dict[str, Any]:
     """
     envelope = _inert(envelope)
     component = envelope["component"]
-    provenance = envelope["provenance"]
+    facts = card_facts(envelope)
     title = title_text(component)
     head: list[Component] = [H3(title or describe(component), css_class="dfo-title")]
     chart = chart_model(envelope)
@@ -268,11 +272,11 @@ def app_shell(envelope: Mapping[str, Any], *, base_url: str) -> dict[str, Any]:
     else:
         body = _BODIES.get(component["type"])
         if body is not None:
-            children.extend(body(component, provenance))
+            children.extend(body(component, facts))
     data = _data(component, chart)
     if data is not None:
         children.append(If("!loaded", children=[Muted(_NO_DATA)]))
-    children.append(_footer(component, provenance, described=title is None))
+    children.append(_footer(component, facts, described=title is None))
     if data is None:
         card = Column(children=children, css_class="dfo-card")
         return themed_app(card, base_url=base_url).to_json()
@@ -341,8 +345,8 @@ def _chart_body(chart: ChartModel) -> _Body:
     return [_legend(chart.series), plot] if chart.legend else [plot]
 
 
-def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
-    del provenance
+def _table_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
+    del facts
     rows = component["rows"]
     columns = component["columns"]
     headers = [column["label"] for column in columns]
@@ -355,8 +359,8 @@ def _table_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> 
     return [table]
 
 
-def _stat_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
-    del provenance
+def _stat_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
+    del facts
     amount = Text(
         Span(_bound("value")),
         Span(_bound("unit"), css_class="dfo-stat-unit"),
@@ -366,16 +370,16 @@ def _stat_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _
     return [amount, Muted(component["period"]), *change]
 
 
-def _note_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
-    del provenance
+def _note_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
+    del facts
     return [Text(component["text"])]
 
 
-def _source_body(component: Mapping[str, Any], provenance: Mapping[str, Any]) -> _Body:
-    return _source_lines(sources_for(provenance, component["source_refs"]))
+def _source_body(component: Mapping[str, Any], facts: CardFacts) -> _Body:
+    return _source_lines(sources_for(facts, component["source_refs"]))
 
 
-_BODIES: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], _Body]] = {
+_BODIES: dict[str, Callable[[Mapping[str, Any], CardFacts], _Body]] = {
     "table": _table_body,
     "stat_card": _stat_body,
     "note_narration": _note_body,
@@ -563,30 +567,34 @@ def _half_up(value: Decimal, places: int) -> Decimal:
     return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP, context=_EXACT)
 
 
-def _source_label(provenance: Mapping[str, Any]) -> str:
+def _source_label(facts: CardFacts) -> str:
     """The footer's source names, or "More info" for a card without sources,
-    then the count of caveats where the provenance carries warnings.
+    then the count of caveats where the card carries any.
 
     The website adds the count of indicators behind the card. The envelope
     names none, so the label counts caveats in its place.
     """
-    names = [source["name"] for source in sources_for(provenance)]
+    names = [source.name for source in sources_for(facts)]
     parts = names[:MAX_SOURCES] or ["More info"]
     if len(names) > MAX_SOURCES:
         parts.append(f"{len(names) - MAX_SOURCES} more sources")
-    caveats = len(provenance["warnings"])
+    caveats = len(facts.caveats)
     if caveats:
         parts.append(f"{caveats} caveat{'' if caveats == 1 else 's'}")
     return " · ".join(parts)
 
 
-def _source_lines(sources: Sequence[Mapping[str, Any]]) -> list[Component]:
-    """Each source's name, licence, and retrieval date, linked where https."""
+def _source_lines(sources: Sequence[Source]) -> list[Component]:
+    """Each source's name, licence, and retrieval date, each but the name
+    where the card states it, linked where https."""
     lines: list[Component] = []
     for source in sources[:MAX_SOURCES]:
-        lines.append(
-            Small(f"{source['name']}, licence {source['licence']}, retrieved {source['retrieved']}")
-        )
+        parts = [source.name]
+        if source.licence:
+            parts.append(f"licence {source.licence}")
+        if source.retrieved:
+            parts.append(f"retrieved {source.retrieved}")
+        lines.append(Small(", ".join(parts)))
         url = source_url(source)
         if url is not None:
             lines.append(Link(url, href=url))
@@ -595,33 +603,36 @@ def _source_lines(sources: Sequence[Mapping[str, Any]]) -> list[Component]:
     return lines
 
 
-def _footer(component: Mapping[str, Any], provenance: Mapping[str, Any], *, described: bool) -> Div:
+def _footer(component: Mapping[str, Any], facts: CardFacts, *, described: bool) -> Div:
     """The footer row: the source line, which opens the card's details, and
     the "Built with" mark. The details are the description (unless the title
     already is it), a table's shared unit (a chart's is in its caption),
     sources (a source card lists its own on the face), freshness, every
-    warning, and the citation."""
+    warning, and the citation. A card with no details, a narration note that
+    carries lineage alone, gets the mark without the source line."""
     details: list[Component] = [] if described else [Muted(f"{describe(component)}.")]
     rows = component.get("rows") if component["type"] == "table" else None
     unit = shared_unit([row["unit"] for row in rows]) if rows else None
     if unit:
         details.append(Muted(f"Unit: {unit}."))
     if component["type"] != "source_card":
-        details.extend(_source_lines(sources_for(provenance)))
-    freshness = freshness_text(provenance)
+        details.extend(_source_lines(sources_for(facts)))
+    freshness = freshness_text(facts)
     if freshness is not None:
         details.append(Muted(freshness))
-    details.extend(Muted(text) for text in warning_texts(provenance, limit=None, count=None))
-    details.append(Muted(citation_text(provenance)))
+    details.extend(Muted(text) for text in warning_texts(facts, limit=None, count=None))
+    citation = citation_text(facts)
+    if citation is not None:
+        details.append(Muted(citation))
+    mark = Span("Built with", css_class="dfo-built-with")
+    if not details:
+        return Div(css_class="dfo-chrome", children=[mark])
     item = AccordionItem(
-        _source_label(provenance), children=[Column(children=details, css_class="dfo-details")]
+        _source_label(facts), children=[Column(children=details, css_class="dfo-details")]
     )
     return Div(
         css_class="dfo-chrome",
-        children=[
-            Accordion(children=[item], css_class="dfo-more"),
-            Span("Built with", css_class="dfo-built-with"),
-        ],
+        children=[Accordion(children=[item], css_class="dfo-more"), mark],
     )
 
 

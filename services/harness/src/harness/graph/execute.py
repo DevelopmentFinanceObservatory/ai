@@ -5,6 +5,7 @@ outcome onto the node's `ok` and `replan` edges.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import (
     AsyncIterator,
     Callable,
@@ -23,6 +24,14 @@ from executor.classify import (
     candidates_of,
     classify_refusal,
 )
+from executor.completion import ResultPublisher, run_hand_back, unrecorded_hand_back
+from executor.ledger import (
+    LedgerUnavailableError,
+    RunLedger,
+    RunRecord,
+    RunStatus,
+    store_faults,
+)
 from executor.outcomes import (
     Accepted,
     MethodChoiceNeeded,
@@ -37,18 +46,25 @@ from executor.run import (
 )
 from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
+from planner.plan import plan_revision
 
 from harness import plan_display
+from harness.conversation import conversation_of
 from harness.graph.answer import (
     answer_frames,
     answer_notes,
+    link_accepted_run,
     link_evidence_to_terminal_frames,
+    presentable_steps,
+    store_run_plan,
 )
 from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     STEP_PROGRESS_KEY,
     readable_plan,
 )
+
+logger = logging.getLogger(__name__)
 
 # Execution-triggered replans per turn. Each one is a new plan card and a new
 # approval; past this the turn closes and names the step that could not run.
@@ -219,8 +235,8 @@ def _mark_masked_step_failed(
     is a bare `ToolSurface` in tests with no recorder around it, and a step
     whose own call already failed is a no-op there), the same duck-typed
     opt-in `_RecordingExecutor.aclose` uses. Each stop's own `_failed_step`
-    supplies the `code`/`message` the Activity feed's refusal shows, naming
-    the actual check that fired (e.g. `source_pin_mismatch`).
+    supplies the `code`/`message` the step's record keeps for the trace,
+    naming the actual check that fired (e.g. `source_pin_mismatch`).
     """
     mark = getattr(tool_surface, "mark_step_failed", None)
     if mark is None:
@@ -229,11 +245,14 @@ def _mark_masked_step_failed(
         if stopped.step_id is None:
             continue
         failed = _failed_step(stopped)
+        # The step's record is the run's record of the stop, so a stop the
+        # orchestrator is told of by its kind alone keeps its own detail there.
+        by_kind = isinstance(stopped, Refused) and stopped.payload is None and not stopped.issues
         mark(
             step_id=stopped.step_id,
             tool=tools.get(stopped.step_id, ""),
             code=failed["code"],
-            detail=failed["message"],
+            detail=stopped.detail if by_kind else failed["message"],
         )
 
 
@@ -257,13 +276,13 @@ def _kept_asks(
 ) -> dict[str, Any]:
     """`kept` with each ask `outcome`'s run computed (`_computed_asks`) set to
     that run's answer frames for it: per answering step its id, tool, frame
-    ref and digest, the notes on how those frames were computed
+    ref, store ref and digest, the notes on how those frames were computed
     (`answer_notes`: family totals and keys left out), and for an ask
     `plan` answers in part, the part not computed with its reason, as
     `_ask_status` reports it. A plan call's asks are fixed (`plan_start`), so
     an ask's number names the same ask in every plan the call runs."""
     answers = answer_frames(outcome)
-    records = {record.step_id: record for record in outcome.completed}
+    records = {record.step_id: record for record in presentable_steps(outcome)}
     rows = plan_display.ask_rows(plan)
     kept = dict(kept or {})
     for number in _computed_asks(plan, answers):
@@ -274,7 +293,8 @@ def _kept_asks(
                 {
                     "step_id": step,
                     "tool": records[step].tool.name,
-                    "frame_ref": answers[step].model_dump(),
+                    "frame_ref": answers[step].presented.model_dump(),
+                    "store_ref": answers[step].store.model_dump(),
                     "digest": records[step].digest,
                 }
                 for step in steps
@@ -287,6 +307,32 @@ def _kept_asks(
                 "reason": row["reason"],
             }
     return kept
+
+
+# What the orchestrator is told of a stop no tool refused and no evidence check
+# explains, by its kind. `Refused.detail` stays out of the hand-back: it can
+# quote an exception, the ledger's failure reason or literal spec ids, so it is
+# logged instead.
+STOP_MESSAGES: dict[RefusalKind, str] = {
+    RefusalKind.NOT_APPROVED: "the calculation was not approved",
+    RefusalKind.STALE_REVISION: "the calculation changed after it was approved",
+    RefusalKind.SURFACE_CHANGED: "a tool the calculation uses changed after it was approved",
+    RefusalKind.TRANSPORT_FAILED: "a data service could not be reached in time",
+    RefusalKind.BINDING_INVALID: "a step's input could not be passed on to the next step",
+    RefusalKind.STEP_REFUSED: "a tool refused the step",
+    RefusalKind.STEP_RESULT_UNUSABLE: "a step returned a result that could not be used",
+    RefusalKind.REQUIREMENT_UNMET: "the data retrieved does not meet what the calculation asked for",
+    RefusalKind.EMPTY_ANSWER: "the step's result holds no rows",
+    RefusalKind.SHAPE_MISMATCH: "a step's result does not have the shape the calculation expects",
+    RefusalKind.COLUMN_UNBOUND: "a step names a column its input does not have",
+    RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET: (
+        "the latest period asked for falls outside the dataset"
+    ),
+    RefusalKind.AUTHORISATION_EXPIRED: "the approval has expired, so the plan needs approving again",
+    RefusalKind.MANIFEST_OUTSIDE_AUTHORISATION: "the run read data the approval does not cover",
+    RefusalKind.AUTHORISATION_MISMATCH: "the approval names other work than the run",
+    RefusalKind.RUN_ABANDONED: "the run failed before it came to a result",
+}
 
 
 def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
@@ -314,9 +360,9 @@ def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> d
     # every `STEP_REFUSED` stop, carries the tool's own `code` and
     # `message` straight from its `ToolFailure`; a `Refused` raised for any
     # other reason (`EMPTY_ANSWER`, `SHAPE_MISMATCH`, ...) has no tool call
-    # to report and keeps today's `refusal.value`/`detail` fallback -- unless
-    # it carries `issues` (`executor.run._Run._check_evidence`'s
-    # `REQUIREMENT_UNMET`, today's only source of them): `outcome.detail`
+    # to report and is told by its kind (`STOP_MESSAGES`) -- unless it
+    # carries `issues` (`executor.run._Run._check_evidence`'s
+    # `REQUIREMENT_UNMET`, the only source of them): `outcome.detail`
     # there is the generic "requirement X is not met by what Y returned",
     # naming neither which of `check_evidence`'s ten sub-checks fired nor
     # what it found versus what the plan required, so the specific
@@ -331,11 +377,18 @@ def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> d
             "code": failing[0].code.value,
             "message": "; ".join(issue.detail for issue in failing),
         }
+    logger.warning(
+        "execute: run %s stopped at step %s as %s: %s",
+        outcome.run_id,
+        outcome.step_id,
+        outcome.refusal.value,
+        outcome.detail,
+    )
     return {
         "step_id": outcome.step_id,
         "tool": None,
         "code": outcome.refusal.value,
-        "message": outcome.detail,
+        "message": STOP_MESSAGES[outcome.refusal],
     }
 
 
@@ -360,31 +413,77 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
     return failed
 
 
+def _without_figures(plan_version: int, *, run: dict[str, Any]) -> dict[str, Any]:
+    """`execute`'s output for a run whose progress the ledger could not
+    record or read, standing as `run`: no frame, summary or note for the
+    agent to quote or chart."""
+    return {
+        "frame_refs": [],
+        "frame_ref_steps": [],
+        "plan_version": plan_version,
+        "step_summaries": [],
+        "stat_var_totals": [],
+        "run": run,
+    }
+
+
 def execute_node(
     *,
     tool_surface: ToolSurface | None,
+    run_ledger: RunLedger,
+    publisher: ResultPublisher | None,
     max_concurrent_steps: int,
     fetch_series_stats: FetchSeriesStats,
 ) -> Callable[[Context, Any], AsyncIterator[Any]]:
-    """The `execute` node, running the approved plan against `tool_surface`."""
+    """The `execute` node, running the approved plan against `tool_surface`
+    as a run of `run_ledger`, its derived results published through
+    `publisher`."""
 
     async def execute(ctx: Context, node_input: Any) -> AsyncIterator[Any]:
         """Run the approved plan's compiled workflow through the tool surface.
 
-        `execute_approved_plan` owns the run: per-step retry, the
-        per-capability transport policy, and the checks that turn a step's
-        own declared shape into a refusal. This node only reads what came
-        back and maps it onto the graph's two outgoing edges.
-        An `Accepted` run first aliases each terminal frame's provenance to
-        the retrieval(s) that actually feed it, per frame
-        (`link_evidence_to_terminal_frames`), then routes "ok" with the
-        terminal steps' frame refs (`workflow.terminal_steps`).
+        `execute_approved_plan` owns the run: its admission to `run_ledger`
+        under the user's approval of the revision (the turn's user approved it
+        at `approve`), keyed on the conversation
+        (`harness.conversation.conversation_of`) so a later turn executing
+        the same revision carries the run on; per-step retry, the
+        per-capability transport policy, the checks that turn a step's own
+        declared shape into a refusal, and the completion gate. This node only
+        reads what came back and maps it onto the graph's two outgoing edges.
+        Before the run, the plan is stored in `run_ledger` under its revision
+        (`store_run_plan`), so a later turn that completes the run lists its
+        notes.
+        An `Accepted` run routes "ok" with its presentable terminal steps'
+        frame refs (`answer_frames`) and summaries (`presentable_steps`) and,
+        when the ledger holds it, the run's standing under `run`
+        (`executor.completion.run_hand_back`). A completed run presents every
+        terminal step: it first aliases each terminal frame's provenance to
+        the retrieval(s) that actually feed it, per frame, after restoring
+        from the ledger the lineage of a run an earlier turn or another
+        process computed (`link_accepted_run`); `plan_done` decides its
+        delivery once it has described its frames. A run
+        whose derived results are not all published with their replay
+        recipes, standing `pending` with its run ID or `failed` with the
+        publication's code, presents only its retrieved terminal frames,
+        restored and linked the same way, so the agent states no derived
+        figure the run has not completed. A run whose progress the
+        ledger's store could not record or read (`LedgerUnavailableError`)
+        routes "ok" with no frames, standing `unfinished`
+        (`executor.completion.unrecorded_hand_back`): it is left for the
+        conversation's next turn to carry on, no replan is spent, and the
+        plan is left `EXECUTING`. A run the store could not admit stands
+        `not_started` (`run_not_started`): nothing was run, nothing carries
+        on, and the plan is left as approved.
         `MethodChoiceNeeded` and `RediscoveryNeeded` route "replan" while the budget allows and "ok"
         with `failed_step` once it is spent, the same as any other
-        `Refused`. A stopped run's answer frames (`answer_frames`) have
-        their provenance linked as an accepted run's are, and the asks they
-        compute are kept for the plan call (`_kept_asks`), so `plan_done`
-        can list them whichever later run or planner refusal ends the call.
+        `Refused`. A stopped run hands back only its presentable steps'
+        frames and summaries (`presentable_steps`: its retrieved ones, since
+        its derived ones are never published, so a finished derived terminal
+        is withheld and `plan_done` reports it `not_run`); its answer frames
+        have their provenance linked as an accepted run's are, and the asks
+        they compute are kept for the plan call (`_kept_asks`), so
+        `plan_done` can list them whichever later run, unfinished run or
+        planner refusal ends the call.
         The "ok" route carries those frames as final; the "replan" refusal
         names the asks they compute (`computed_asks`), since the new plan
         runs from the start.
@@ -424,10 +523,15 @@ def execute_node(
             yield Event(output={"unreadable_plan": True}, route="replan")
             return
         tools = {step.id: step.tool.name for step in plan.workflow.steps} if plan.workflow else {}
+        await store_run_plan(run_ledger, revision=plan_revision(plan), plan=plan)
         task, relay = _start_relayed(
             lambda on_progress: execute_approved_plan(
                 plan,
                 surface=tool_surface,
+                ledger=run_ledger,
+                publisher=publisher,
+                approver=ctx.user_id,
+                conversation_id=conversation_of(ctx.session.id),
                 max_concurrent_steps=max_concurrent_steps,
                 fetch_series_stats=fetch_series_stats,
                 on_progress=on_progress,
@@ -437,20 +541,49 @@ def execute_node(
             async for report in relay.latest():
                 yield _step_progress_event(report, tool=tools.get(report.step_id, ""))
             finished, outcome = await task
+        except LedgerUnavailableError as exc:
+            if exc.run_id is not None:
+                # The run started and is unfinished: the plan is executing.
+                ctx.state["plan"] = plan.start_execution().model_dump_json()
+            yield Event(
+                output=_without_figures(plan.version, run=unrecorded_hand_back(exc.run_id)),
+                route="ok",
+            )
+            return
         finally:
             await _stop(task)
         ctx.state["plan"] = finished.model_dump_json()
         workflow = plan.workflow
         assert workflow is not None, "an approved plan always carries a workflow"
+        run: RunRecord | None = None
+        try:
+            if outcome.run_id is not None:
+                async with store_faults(outcome.run_id):
+                    run = await run_ledger.get(outcome.run_id)
+            published = run is None or run.status is RunStatus.COMPLETED
+            if isinstance(outcome, Accepted):
+                await link_accepted_run(
+                    tool_surface,
+                    outcome,
+                    workflow=workflow,
+                    ledger=run_ledger,
+                    published=published,
+                )
+        except LedgerUnavailableError as exc:
+            yield Event(
+                output=_without_figures(finished.version, run=unrecorded_hand_back(exc.run_id)),
+                route="ok",
+            )
+            return
         if isinstance(outcome, Accepted):
-            link_evidence_to_terminal_frames(tool_surface, outcome, workflow=workflow)
             step_order = {record.step_id: index for index, record in enumerate(outcome.steps)}
-            answers = answer_frames(outcome)
+            answers = answer_frames(outcome, published=published)
             yield Event(
                 output={
-                    "frame_refs": [ref.model_dump() for ref in answers.values()],
+                    "frame_refs": [frame.presented.model_dump() for frame in answers.values()],
                     # Parallel to frame_refs above: which plan step (id and
-                    # tool) produced each ref, and that it is final.
+                    # tool) produced each ref, the pair the store holds its
+                    # frame under (`store_ref`), and that it is final.
                     # `outcome.results` is keyed over `workflow.terminal_steps`
                     # (`executor.run._Run.execute`), so every entry here is a
                     # terminal step's; a DAG can have more than one.
@@ -458,13 +591,21 @@ def execute_node(
                         {
                             "step_id": step_id,
                             "tool": outcome.steps[step_order[step_id]].tool.name,
+                            "store_ref": frame.store.model_dump(),
                             "is_final_step": True,
                         }
-                        for step_id in answers
+                        for step_id, frame in answers.items()
                     ],
                     "plan_version": finished.version,
-                    "step_summaries": [step.digest for step in outcome.steps if step.digest],
-                    "stat_var_totals": answer_notes(tool_surface, outcome, plan=finished),
+                    "step_summaries": [
+                        step.digest
+                        for step in presentable_steps(outcome, published=published)
+                        if step.digest
+                    ],
+                    "stat_var_totals": answer_notes(
+                        tool_surface, outcome, plan=finished, terminals=answers
+                    ),
+                    **({"run": run_hand_back(run)} if run is not None else {}),
                 },
                 route="ok",
             )
@@ -497,12 +638,13 @@ def execute_node(
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}
             yield Event(output=output, route="replan")
             return
-        completed = outcome.completed
+        presentable = presentable_steps(outcome)
         yield Event(
             output={
-                "frame_refs": [step.presented_ref.model_dump() for step in completed],
+                "frame_refs": [step.presented_ref.model_dump() for step in presentable],
                 # Parallel to frame_refs above: which plan step (id and tool)
-                # produced each ref, and whether it is final. A terminal step
+                # produced each ref, the pair the store holds its frame under
+                # (`store_ref`), and whether it is final. A terminal step
                 # that finished before the stop is final (`answer_frames`):
                 # its frame answers the asks it serves, so `plan_done` takes it
                 # as it would on an accepted run. Any other step's frame is an
@@ -511,12 +653,13 @@ def execute_node(
                     {
                         "step_id": step.step_id,
                         "tool": step.tool.name,
+                        "store_ref": step.frame_ref.model_dump(),
                         "is_final_step": step.step_id in answers,
                     }
-                    for step in completed
+                    for step in presentable
                 ],
                 "plan_version": finished.version,
-                "step_summaries": [step.digest for step in completed if step.digest],
+                "step_summaries": [step.digest for step in presentable if step.digest],
                 "stat_var_totals": answer_notes(tool_surface, outcome, plan=finished),
                 "failed_step": _failed_step(outcome),
             },

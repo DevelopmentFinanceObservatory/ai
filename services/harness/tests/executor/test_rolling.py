@@ -11,6 +11,7 @@ answer for it fails the call, so a run that reaches it unasked does not pass.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -166,7 +167,9 @@ def rolling_plan(
             discovered=discovered,
         )
         assert compiled.workflow is not None, compiled.issues
-        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=datetime.now(UTC)
+        )
 
     return _plan
 

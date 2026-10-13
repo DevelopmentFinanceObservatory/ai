@@ -88,6 +88,7 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
 )
+from harness.turn_budget import start_turn_budget
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     ActivityStep,
@@ -934,6 +935,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             current_conversation_key.set((principal, body.conversation_id))
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
+            # This request's model-call bounds, read by every model call the
+            # streamed run makes (`harness.turn_budget`).
+            start_turn_budget(settings)
             # The segment lease: claimed on the live state before the claim
             # save below persists it, so the save's own compare-and-swap
             # covers both in one write. `SegmentBusy` means a live segment,
@@ -1294,8 +1298,21 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             else:
                 answer = {"spec_id": body.payload}
         elif body.decision is InterruptDecision.APPROVE:
-            # The plan is keyed on its revision hash (`plan_revision`).
+            # The plan is keyed on its revision hash (`plan_revision`), and
+            # the approval dated by the record of its first answer, so a
+            # retry resuming the same answer later approves as of the same
+            # moment. The graph's `approve` node approves nothing without it.
             answer = {"approved": pending.plan_revision}
+            recorded = next(
+                (
+                    r
+                    for r in reversed(conversation.approvals)
+                    if r.interrupt_id == body.interrupt_id
+                ),
+                None,
+            )
+            if recorded is not None:
+                answer["at"] = recorded.at.isoformat()
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
         if body.payload and body.decision in (InterruptDecision.ANSWER, InterruptDecision.AMEND):
@@ -1307,6 +1324,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         current_conversation_key.set((principal, body.conversation_id))
         current_earlier_block.set(conversation.earlier_block)
         current_recorded_identity.set(conversation.recorded_identity)
+        start_turn_budget(settings)
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])

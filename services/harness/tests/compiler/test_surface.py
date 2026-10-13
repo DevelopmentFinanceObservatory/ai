@@ -52,6 +52,7 @@ async def test_the_real_surface_covers_retrieval_and_the_analysis_verbs() -> Non
 
     assert names == [
         "aggregate",
+        "catalogue_counts",
         "compare",
         "describe",
         "filter",

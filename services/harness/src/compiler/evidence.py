@@ -69,12 +69,14 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Literal, NamedTuple, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from common.price_basis import price_basis_reading
 from data_mcp.manifest import Manifest
+from data_mcp.series_statistics import continuing_method, series_index
 from dfo_frame_grammar.columnar import array_kernel, scalar_kernel, unit_codes
 from planner.parties import Party, across_party, flow_side, place_qualified_party
 from planner.phrasing import pluralize
@@ -135,10 +137,13 @@ class RetrievalEvidence(StrictModel):
     `None` when the trace states none, as a dfo-apis that predates the
     fields does and as one that cannot state the whole family does.
 
-    `series` is the manifest's statistics artifact itself, one row a series
-    in `data_mcp.series_statistics.SERIES_STATISTICS_ARROW_SCHEMA`, kept as
-    Arrow: a retrieval can carry tens of thousands of series, and the checks
-    read them column by column.
+    `series` is the manifest's statistics artifact itself, in
+    `data_mcp.series_statistics.SERIES_STATISTICS_ARROW_SCHEMA` plus a
+    `series` column, kept as Arrow: a retrieval can carry tens of thousands
+    of series, and the checks read them column by column. A row is one series
+    under one method, so a series the mint's estimates continue holds two
+    rows; `series` names each row's series by its head row's position
+    (`data_mcp.series_statistics.series_index`).
 
     `open_entity_axes` are the axes the source states it left open, discovery's
     alone: a manifest names the entities it returned, and the approved
@@ -259,7 +264,11 @@ def evidence_from_manifest(
         provenance_label="; ".join(one.label for one in sources) or None,
         window=_window_of(series_stats),
         rows=manifest.coverage.rows,
-        series=series_stats,
+        series=None
+        if series_stats is None
+        else series_stats.append_column(
+            "series", series_index(series_stats, continuing=continuing_method(manifest))
+        ),
         identity=cast(dict[str, JsonValue], dict(manifest.definition.identity)) or None,
     )
 
@@ -456,70 +465,148 @@ def _roles_conflict(phrase: str, column: str) -> bool:
     return phrase_side is not None and column_side is not None and phrase_side != column_side
 
 
-def open_axis_for(
-    across: str, open_entity_axes: Sequence[OpenEntityAxis] | None
-) -> OpenEntityAxis | str:
-    """The open entity axis whose column holds the population `across` names, or why none does.
+def open_axes_for(
+    across: Sequence[str], open_entity_axes: Sequence[OpenEntityAxis] | None
+) -> tuple[OpenEntityAxis, ...] | str:
+    """The open entity axis each `across` word covers, in `across` order, or why no such set exists.
 
-    The one place a plan's party word ("donor", "country") is matched to a
-    source's open column. `planner.parties.across_party` reads the word: a
-    side of a flow, or the place, which is the subject axis `observationAbout`
-    holds ("country", "economy"). A word it cannot read describes a narrower
+    The one place a plan's party words ("donor", "country") are matched to a
+    source's open columns. `planner.parties.across_party` reads each word: a
+    side of a flow, or the place. A word it cannot read describes a narrower
     population than a party ("African country", "bilateral donor", "donor
     countries"), which an open axis does not hold: the axis ranks every
     member.
 
-    Exactly one open axis has to sit on the word's own party, and it has to
-    hold at least two members by the source's own count: an axis `search`
-    did not count, or one holding a single member, is no population. Every
-    other open axis has to hold exactly one member. One holding several, or
-    an uncounted one, is a party the requirement neither names nor states,
-    and every row of the population would repeat once per member of it.
-    `open_entity_axes` of `None`, a source whose axes were never read, matches
-    nothing.
+    A word naming a side of a flow covers the one open axis on that side. A
+    place word covers the source's place axis, `observationAbout`, when that
+    axis is open over several members. Otherwise it covers the one open
+    flow axis holding several members that no other word covers, which is
+    how a source keyed by debtor or recipient states its countries. Every
+    covered axis has to hold at least two members by the source's own count:
+    an axis `search` did not count, or one holding a single member, is no
+    population. Every open axis no word covers has to hold exactly one
+    member. One holding several, or an uncounted one, is a party the
+    requirement neither names nor states, and every row of the population
+    would repeat once per member of it. `open_entity_axes` of `None`, a
+    source whose axes were never read, matches nothing.
 
     Returns:
-        The matching `OpenEntityAxis`, or the reason no axis matches, as a sentence
-        a finding can carry.
+        The covered `OpenEntityAxis` of each word, or the reason no set of axes
+        matches, as a sentence a finding can carry.
     """
-    party = across_party(across)
-    if party is None:
-        return _not_a_party_reason(across)
+    parties: list[Party] = []
+    for word in across:
+        party = across_party(word)
+        if party is None:
+            return _not_a_party_reason(word)
+        parties.append(party)
     if open_entity_axes is None:
         return (
             "the source was recorded without the axes it leaves open, so whether it holds "
-            f"every {across!r} is unknown; discover the source again"
+            f"every {_quoted(across)} is unknown; discover the source again"
         )
-    matching = [axis for axis in open_entity_axes if _axis_party(axis.column) == party]
-    if len(matching) != 1:
-        return _off_party_reason(across, party, open_entity_axes)
-    (axis,) = matching
-    return _no_population_reason(across, axis, open_entity_axes) or axis
+    covered: dict[str, OpenEntityAxis] = {}
+    for word, party in zip(across, parties, strict=True):
+        if party == "place":
+            continue
+        matching = [axis for axis in open_entity_axes if _axis_party(axis.column) == party]
+        if len(matching) != 1:
+            return _off_party_reason(word, party, open_entity_axes)
+        covered[word] = matching[0]
+    for word, party in zip(across, parties, strict=True):
+        if party == "place":
+            place = _place_axis(word, open_entity_axes, taken=covered.values())
+            if isinstance(place, str):
+                return place
+            covered[word] = place
+    axes = tuple(covered[word] for word in across)
+    return _no_population_reason(across, axes, open_entity_axes) or axes
+
+
+def _place_axis(
+    word: str, open_entity_axes: Sequence[OpenEntityAxis], *, taken: Iterable[OpenEntityAxis]
+) -> OpenEntityAxis | str:
+    """The open axis the place `word` covers (`open_axes_for`), or why no one axis is it.
+
+    `observationAbout`, open over several members, holds the places a measure
+    is about, at every level. Without it the word names the open party of a
+    flow, the one flow axis open over several members that no other word
+    covers, as IDS holds its debtors on `destination`. That axis keeps its
+    flow role, and every member it holds stays in, organisations included.
+    A CRS donor axis covered by "country" holds the agencies beside the
+    donor countries. Party kinds keep its totals and residuals out of a sum
+    or a rank. Two such flow axes leave the word naming neither, and the
+    reason asks for each party to be stated.
+    """
+    if not open_entity_axes:
+        return f"the source leaves no axis open, so it holds no population of every {word!r}"
+    place = next((axis for axis in open_entity_axes if _axis_party(axis.column) == "place"), None)
+    if place is not None and place.member_count != 1:
+        return place
+    taken_columns = {axis.column for axis in taken}
+    flows = [
+        axis
+        for axis in open_entity_axes
+        if axis.member_count != 1
+        and axis.column not in taken_columns
+        and _axis_party(axis.column) is not None
+    ]
+    if len(flows) == 1:
+        return flows[0]
+    columns = ", ".join(repr(axis.column) for axis in open_entity_axes)
+    if flows:
+        return (
+            f"the source leaves {columns} open, each over several members, so {word!r} could "
+            "be any of them; state each party the requirement covers in `across`, such as "
+            "'donor' and 'recipient'"
+        )
+    # A place axis holding one place is named, so the population check says why it is none.
+    if place is not None:
+        return place
+    return (
+        f"the source leaves {columns} open, and none of them holds several places a "
+        f"requirement over every {word!r} could cover"
+    )
 
 
 def _no_population_reason(
-    across: str, axis: OpenEntityAxis, open_entity_axes: Sequence[OpenEntityAxis]
+    across: Sequence[str],
+    axes: Sequence[OpenEntityAxis],
+    open_entity_axes: Sequence[OpenEntityAxis],
 ) -> str | None:
-    """Why the open `axis` holds no population of every `across` on its own, or `None` when it does."""
-    if any(other.member_count != 1 for other in open_entity_axes if other is not axis):
-        columns = ", ".join(repr(one.column) for one in open_entity_axes)
+    """Why the open `axes` the `across` words cover hold no population of every member, or `None`."""
+    covered = {axis.column for axis in axes}
+    if extra := [
+        axis for axis in open_entity_axes if axis.column not in covered and axis.member_count != 1
+    ]:
+        columns = ", ".join(repr(axis.column) for axis in extra)
         return (
-            f"the source leaves {columns} open, and `across` states one party; name the "
-            f"members of the other, so each {across!r} is not repeated once per member of it"
+            f"the source also leaves {columns} open over several members, a party `across` "
+            f"does not state; add its party word to `across` to cover every member of it too, "
+            f"or name the members the answer needs in `entities`, so each {_quoted(across)} is "
+            "not repeated once per member of it"
         )
-    if axis.member_count is None:
-        return (
-            f"the source does not count the members of its open axis {axis.column!r}, so it "
-            f"cannot be shown to hold every {across!r}; name the entities the answer needs in "
-            "`entities` instead of stating `across`"
-        )
-    if axis.member_count < _POPULATION_MINIMUM:
-        return (
-            f"the source holds {axis.member_count} member{'' if axis.member_count == 1 else 's'} "
-            f"on its open axis {axis.column!r}, which is no population of every {across!r}; "
-            "name the entities the answer needs in `entities` instead of stating `across`"
-        )
+    for word, axis in zip(across, axes, strict=True):
+        if axis.member_count is None:
+            return (
+                f"the source does not count the members of its open axis {axis.column!r}, so "
+                f"it cannot be shown to hold every {word!r}; name the entities the answer needs "
+                "in `entities` instead of stating that party in `across`"
+            )
+        if axis.member_count < _POPULATION_MINIMUM:
+            return (
+                f"the source holds {axis.member_count} "
+                f"member{'' if axis.member_count == 1 else 's'} on its open axis "
+                f"{axis.column!r}, which is no population of every {word!r}; name the entities "
+                "the answer needs in `entities` instead of stating that party in `across`"
+            )
     return None
+
+
+def _quoted(across: Sequence[str]) -> str:
+    """The `across` words for a sentence: "'donor'" or "'donor' and 'recipient'"."""
+    quoted = [repr(word) for word in across]
+    return quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
 
 
 def _axis_party(column: str) -> Party | None:
@@ -528,7 +615,7 @@ def _axis_party(column: str) -> Party | None:
 
 
 def _not_a_party_reason(across: str) -> str:
-    """Why `across` names no party an open axis holds whole."""
+    """Why the `across` word names no party an open axis holds whole."""
     party_word = place_qualified_party(across)
     if party_word is not None:
         return (
@@ -538,7 +625,7 @@ def _not_a_party_reason(across: str) -> str:
         )
     return (
         f"{across!r} is not a party a source's open axis holds: an open axis ranks every "
-        "member it holds, and `across` states that whole party in one word, such as "
+        "member it holds, and each `across` word states that whole party, such as "
         "'donor', 'recipient' or 'country'; a narrower population (a region, an income "
         "group, a donor type) needs its members named in `entities`, or a filter the plan "
         "can express"
@@ -546,14 +633,14 @@ def _not_a_party_reason(across: str) -> str:
 
 
 def _off_party_reason(across: str, party: Party, open_entity_axes: Sequence[OpenEntityAxis]) -> str:
-    """Why `across`, naming `party`, is not the population one open axis of the source holds."""
+    """Why the `across` word, naming the `party` side of a flow, matches no one open axis of the source."""
     if not open_entity_axes:
         return f"the source leaves no axis open, so it holds no population of every {across!r}"
     if len(open_entity_axes) > 1:
         columns = ", ".join(repr(axis.column) for axis in open_entity_axes)
         return (
             f"the source leaves {columns} open, and exactly one of them has to hold the "
-            f"party {across!r} names"
+            f"{party} side of the flow {across!r} names"
         )
     column = open_entity_axes[0].column
     column_party = _axis_party(column)
@@ -561,12 +648,6 @@ def _off_party_reason(across: str, party: Party, open_entity_axes: Sequence[Open
         return (
             f"the source's one open axis, {column!r}, is a column no party word names, so it "
             f"cannot be read as holding every {across!r}"
-        )
-    if party == "place":
-        return (
-            f"the source's one open axis, {column!r}, is the {column_party} side of a flow, "
-            f"and {across!r} names neither side; state the party, such as 'donor' or "
-            "'recipient'"
         )
     if column_party == "place":
         return (
@@ -660,7 +741,7 @@ def _entity_issues(
 ) -> list[EvidenceIssue]:
     """The findings on the entities `requirement` names and the population it leaves open."""
     issues = _named_entity_issues(requirement, evidence, approved) if requirement.entities else []
-    if requirement.across is not None:
+    if requirement.across:
         issues.extend(_open_axis_issues(requirement, requirement.across, evidence, approved))
     else:
         issues.extend(_unstated_place_issues(requirement, evidence, approved))
@@ -673,7 +754,7 @@ def opens_place_axis(open_entity_axes: Sequence[OpenEntityAxis] | None) -> bool:
     Such a retrieval holds every place with data at every level, the world,
     regions, countries and their subdivisions, so a rank, a total or a share
     over it keeps one level first (`planner.shapes`). The place axis is the
-    one `observationAbout` holds, the column `open_axis_for` reads as the
+    one `observationAbout` holds, the column `open_axes_for` reads as the
     place party. One member is a single place, such as Earth for a worldwide
     total, and an uncounted axis may hold every place.
     """
@@ -716,51 +797,62 @@ def _unstated_place_issues(
 
 def _open_axis_issues(
     requirement: DatasetRequirement,
-    across: str,
+    across: Sequence[str],
     evidence: RetrievalEvidence,
     approved: SelectedSource | None,
 ) -> list[EvidenceIssue]:
-    """Whether the source holds every member of the population `across` names.
+    """Whether the source holds every member of each population `across` names.
 
-    At discovery the source's own open entity axes have to answer `across`.
-    A manifest states none, so at run time the approved source's answer it,
-    and the retrieval has to hold at least two distinct entities under the
-    column it carries that axis in (`_retrieved_column`), the fewest a
-    population has. The count is not compared with the axis's
+    At discovery the source's own open entity axes have to answer `across`
+    (`open_axes_for`). A manifest states none, so at run time the approved
+    source's answer it, and the retrieval has to hold at least two distinct
+    entities under the column it carries each covered axis in
+    (`_retrieved_column`), the fewest a population has. Each axis holding
+    fewer is its own finding. The count is not compared with the axis's
     `member_count`: `search` counts members over every year, and the
     requirement's period may hold fewer.
     """
     open_entity_axes = (
         approved.open_entity_axes if approved is not None else evidence.open_entity_axes
     )
-    axis = open_axis_for(across, open_entity_axes)
-    if isinstance(axis, str):
-        detail, found = axis, [one.column for one in open_entity_axes or ()]
-    elif evidence.origin == "discovery":
+    axes = open_axes_for(across, open_entity_axes)
+    if isinstance(axes, str):
+        return [
+            EvidenceIssue(
+                code=EvidenceIssueCode.OPEN_AXIS_UNRESOLVED,
+                severity=Severity.ERROR,
+                requirement_id=requirement.id,
+                detail=axes,
+                found=[one.column for one in open_entity_axes or ()],
+                required=list(across),
+            )
+        ]
+    if evidence.origin == "discovery":
         return []
-    else:
+    issues: list[EvidenceIssue] = []
+    for word, axis in zip(across, axes, strict=True):
         column = _retrieved_column(axis.column, evidence)
         found = sorted({one.ref for one in evidence.entities if one.role == column})
         if len(found) >= _POPULATION_MINIMUM:
-            return []
+            continue
         held = (
             "no entity" if not found else f"{len(found)} entit{'y' if len(found) == 1 else 'ies'}"
         )
         where = f"under the {column!r} column" if column else f"on the {axis.column!r} axis"
-        detail = (
-            f"the retrieval holds {held} {where}, which the plan was approved to read as "
-            f"every {across!r}; a population holds at least {_POPULATION_MINIMUM}"
+        issues.append(
+            EvidenceIssue(
+                code=EvidenceIssueCode.OPEN_AXIS_UNRESOLVED,
+                severity=Severity.ERROR,
+                requirement_id=requirement.id,
+                detail=(
+                    f"the retrieval holds {held} {where}, which the plan was approved to read "
+                    f"as every {word!r}; a population holds at least {_POPULATION_MINIMUM}"
+                ),
+                found=found,
+                required=word,
+            )
         )
-    return [
-        EvidenceIssue(
-            code=EvidenceIssueCode.OPEN_AXIS_UNRESOLVED,
-            severity=Severity.ERROR,
-            requirement_id=requirement.id,
-            detail=detail,
-            found=found,
-            required=across,
-        )
-    ]
+    return issues
 
 
 def _retrieved_column(column: str, evidence: RetrievalEvidence) -> str | None:
@@ -1513,7 +1605,13 @@ def _mentions(field: str | None, wanted: str) -> bool:
 
 
 def source_requirement_matches(*, requirement: DatasetRequirement, source: SelectedSource) -> bool:
-    """Whether this source already confirms the requirement's source constraint."""
+    """Whether this source already confirms the requirement's source constraint and series code.
+
+    A requirement stating a `source_code` is confirmed only by a source whose
+    `exact_codes` hold it. A source that states no exact codes confirms none.
+    """
+    if requirement.source_code is not None and requirement.source_code not in source.exact_codes:
+        return False
     return not _source_issues(requirement, evidence_from_source(source))
 
 
@@ -2022,15 +2120,41 @@ def _series_units(series: pa.Table) -> set[str | Unit]:
 
 def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvidence]:
     """The series whose reach misses `period` or whose count differs from its
-    span, in `series`' own order: the only ones `_series_issues` reports on.
+    span, in the order of their head rows: the only ones `_series_issues`
+    reports on.
 
-    A series whose first or last period names no year is left out, since
-    neither check can run on it. The rest are selected column by column, and
-    only the selected rows become `SeriesEvidence`.
+    A series' rows (`RetrievalEvidence.series`) are read together: it reaches
+    from its rows' earliest first year to their latest last year, and counts
+    their observations summed, so a series and the estimates continuing it are
+    held to the period as one. A series with a first or last period that
+    names no year is left out, since neither check can run on it. The rest
+    are selected column by column, and only the selected series become
+    `SeriesEvidence`.
     """
-    first = _years(_column(series, "first_period"))
-    latest = _years(_column(series, "latest_period"))
-    observations = _column(series, "observations")
+    unskipped = pc.ScalarAggregateOptions(skip_nulls=False)
+    folded = (
+        pa.table(
+            {
+                "series": _column(series, "series"),
+                "first_year": _years(_column(series, "first_period")),
+                "latest_year": _years(_column(series, "latest_period")),
+                "observations": _column(series, "observations"),
+            }
+        )
+        .group_by("series", use_threads=False)
+        .aggregate(
+            [
+                ("first_year", "min", unskipped),
+                ("latest_year", "max", unskipped),
+                ("observations", "sum"),
+            ]
+        )
+        .sort_by("series")
+    )
+    heads = _column(folded, "series")
+    first = _column(folded, "first_year_min")
+    latest = _column(folded, "latest_year_max")
+    observations = _column(folded, "observations_sum")
     covers = array_kernel(
         "and_",
         array_kernel("less_equal", first, period.start),
@@ -2041,11 +2165,12 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
     flagged = array_kernel(
         "or_", array_kernel("invert", covers), array_kernel("not_equal", observations, span)
     )
-    rows = array_kernel("filter", pa.array(range(series.num_rows), pa.int64()), flagged)
+    rows = array_kernel("filter", pa.array(range(folded.num_rows), pa.int64()), flagged)
+    selected_heads = array_kernel("take", heads, rows)
     selected = pa.table(
         {
-            "stat_var": array_kernel("take", _column(series, "stat_var"), rows),
-            "entities": array_kernel("take", _column(series, "entities"), rows),
+            "stat_var": array_kernel("take", _column(series, "stat_var"), selected_heads),
+            "entities": array_kernel("take", _column(series, "entities"), selected_heads),
             "first_year": array_kernel("take", first, rows),
             "latest_year": array_kernel("take", latest, rows),
             "observations": array_kernel("take", observations, rows),

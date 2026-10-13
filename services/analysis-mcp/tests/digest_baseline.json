@@ -9,12 +9,16 @@
       "digest_chars": 1191
     },
     {
+      "id": "compare_2000_stat_vars_per_side",
+      "digest_chars": 716
+    },
+    {
       "id": "compare_capped_25_periods",
-      "digest_chars": 1218
+      "digest_chars": 1313
     },
     {
       "id": "compare_single_period",
-      "digest_chars": 580
+      "digest_chars": 675
     },
     {
       "id": "empty_group_by",
@@ -107,6 +111,10 @@
     {
       "id": "sparse_coverage",
       "digest_chars": 720
+    },
+    {
+      "id": "sum_of_2000_stat_vars_per_side",
+      "digest_chars": 740
     },
     {
       "id": "sum_of_capped_25_periods_25_left_only",

@@ -2,8 +2,12 @@
 
 Each answers from fixed data with no LLM, no MCP call and no upstream:
 `ScriptedExecutor` (the agent's and the canvas's tool calls),
-`ScriptedPlannerModel` (the planner) and `ScriptedSurface` (an approved
-plan's steps). Every frame is the one Kenyan life-expectancy series.
+`ScriptedPlannerModel` (the planner), `ScriptedSurface` (an approved
+plan's steps) and `scripted_publish_result` (the completion gate's
+publisher). Every frame is the one Kenyan life-expectancy series.
+`use_compiled_proposals` gives a real planner a `propose_plan` that declares
+the plan already on record ready, for a scripted planner model that drives no
+translation.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.materialisation import FrameRef
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import (
     ProgressCallback,
@@ -20,8 +25,14 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
     deliver_progress,
 )
+from executor.completion import FramePublished
 from google.adk import Context
-from planner.plan import plan_revision
+from google.adk.agents import LlmAgent
+from google.adk.tools.function_tool import FunctionTool
+from google.adk.tools.tool_context import ToolContext
+from planner.agent import declare_ready
+from planner.plan import load_plan, plan_revision
+from planner.tool_results import ok
 from planner.workflow import ToolId
 
 from harness.scripted_plan import (
@@ -51,13 +62,6 @@ _FACT_SUMMARY = {
             },
             "first": 48.5,
             "last": 63.6,
-        }
-    ],
-    "indicators": [
-        {
-            "id": "dcid:LifeExpectancy_Person",
-            "name": "Life Expectancy",
-            "description": "mp=lifeExpectancy,pt=Person",
         }
     ],
     "attribution": {
@@ -116,6 +120,12 @@ _ENVELOPE_PROVENANCE = {
 }
 _UNIT = "Year"
 _Y_LABEL = "Life expectancy"
+
+
+async def scripted_publish_result(frame: FrameRef) -> FramePublished:
+    """Publish every frame at once, under a replay key read off its content
+    version: there is no dfo-apis to publish to."""
+    return FramePublished(replay_key=f"rpk_{frame.content_version.removeprefix('ocv_')}")
 
 
 def _points(first: float, last: float, *, start: int, end: int) -> list[dict[str, Any]]:
@@ -230,6 +240,33 @@ class ScriptedExecutor:
                 WRITE_TOKEN_KEY: "cmw_scripted0002",
             }
         raise ValueError(f"no scripted answer for {tool!r}")
+
+
+def use_compiled_proposals(agent: LlmAgent) -> None:
+    """Replace `agent`'s `propose_plan` with one that records nothing and
+    answers as a proposal whose translation compiled the plan on record.
+
+    The answer goes through `planner.agent.declare_ready`, so a plan on
+    record that is `PENDING_APPROVAL` is declared ready and ends the run, as
+    a compiled proposal does, and any other is refused under `submission`.
+    """
+
+    def propose_plan(tool_context: ToolContext) -> dict[str, object]:
+        plan = load_plan(tool_context.state)
+        assert plan is not None, "use_compiled_proposals needs a plan on record"
+        answer = ok(
+            status=plan.status.value,
+            version=plan.version,
+            previous_version=plan.previous_version,
+            question=plan.question,
+            translation=ok(),
+        )
+        return declare_ready(answer, tool_context)
+
+    agent.tools = [
+        FunctionTool(propose_plan) if getattr(tool, "name", None) == "propose_plan" else tool
+        for tool in agent.tools
+    ]
 
 
 class ScriptedPlannerModel:

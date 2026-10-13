@@ -15,6 +15,7 @@ test needs a result no real verb returns.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -189,7 +190,7 @@ def _family_frame(
     purpose slot tells the family's members apart. With `kinds`, each role's kind
     column too, every party of kind `party`, as `get_data(place_types=true)` serves it.
     """
-    kind_columns = [f"{provider_column}_kind", f"{RECIPIENT}_kind"] if kinds else []
+    kind_columns = [f"{provider_column}_party_kind", f"{RECIPIENT}_party_kind"] if kinds else []
     return Frame.build(
         role_keys=[provider_column, RECIPIENT, *kind_columns, *_SLOT_COLUMNS],
         rows=[
@@ -408,7 +409,9 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             discovered=discovered or {"oda": _source()},
         )
         assert compiled.workflow is not None, compiled.issues
-        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=datetime.now(UTC)
+        )
 
     return _plan
 
@@ -602,8 +605,8 @@ def _compare_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> P
     compared = ComparisonRequirement(
         id="compared",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="oda", entity="Germany"),
-        right=RequirementSide(input_id="oda", entity="France"),
+        minuend=RequirementSide(input_id="oda", entity="France"),
+        subtrahend=RequirementSide(input_id="oda", entity="Germany"),
     )
     return plan_for(
         [_requirement(), compared],
@@ -778,7 +781,7 @@ async def test_a_rank_over_every_donor_the_source_leaves_open_ranks_the_frames_p
         decision_ids=["measure"],
         measure="bilateral ODA",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2000, end=2023),
     )
     fields: dict[str, Any] = {
@@ -828,8 +831,8 @@ def _sector_frame(*, spec_id: str, totals: Mapping[tuple[ResolvedEntity, str], f
         role_keys=[
             PROVIDER,
             RECIPIENT,
-            f"{PROVIDER}_kind",
-            f"{RECIPIENT}_kind",
+            f"{PROVIDER}_party_kind",
+            f"{RECIPIENT}_party_kind",
             "stat_var_crsPurpose",
         ],
         rows=[
@@ -837,8 +840,8 @@ def _sector_frame(*, spec_id: str, totals: Mapping[tuple[ResolvedEntity, str], f
                 "stat_var": f"dcid:{spec_id}",
                 PROVIDER: provider.ref,
                 RECIPIENT: KENYA.ref,
-                f"{PROVIDER}_kind": "party",
-                f"{RECIPIENT}_kind": "party",
+                f"{PROVIDER}_party_kind": "party",
+                f"{RECIPIENT}_party_kind": "party",
                 "stat_var_crsPurpose": sector,
                 "time_period": "2024",
                 "value": value,
@@ -873,7 +876,7 @@ async def test_which_sectors_received_the_most_aid_in_kenya_ranks_the_frames_sec
         decision_ids=["measure"],
         measure="bilateral ODA",
         entities=[Entity(name="Kenya", role="recipient")],
-        across="donor",
+        across=("donor",),
         period=Period(start=2024, end=2024),
         stat_vars=StatVarReading.SEPARATE,
         breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0),
@@ -1423,7 +1426,7 @@ _TYPED_CONTENT_VERSION = "cv_" + "7" * 32
 
 def _donors_frame(*, typed: bool) -> Frame:
     """Every donor's yearly aid to Kenya since 2000, with each donor's kind when `typed`."""
-    provider_kind = f"{PROVIDER}_kind"
+    provider_kind = f"{PROVIDER}_party_kind"
     return Frame.build(
         role_keys=[PROVIDER, RECIPIENT, *([provider_kind] if typed else [])],
         rows=[
@@ -1482,7 +1485,7 @@ async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
                 decision_ids=["measure"],
                 measure="bilateral ODA",
                 entities=[Entity(name="Kenya", role="recipient")],
-                across="donor",
+                across=("donor",),
                 period=Period(start=2000, end=2023),
             ),
             AggregateRequirement(

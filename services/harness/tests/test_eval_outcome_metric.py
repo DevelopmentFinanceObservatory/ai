@@ -2,8 +2,8 @@
 
 Fabricated `Invocation`s, model-free: this pins the metric's own matching
 logic (subset comparison, `sources` in any order, exclusivity between a
-proposal and a referral and between a rejection and an accepted
-`submit_plan`, "last response with the stated outcome wins") independently
+proposal and a referral and between a rejection and a proposal that
+declared its plan ready, "last response with the stated outcome wins") independently
 of whether the eval sets that configure it are internally consistent -- that
 is `test_eval_sets.py`'s job, and `test_eval_outcomes.py` proves each case's
 expected outcome is reachable.
@@ -95,8 +95,10 @@ def _plan_proposal(**fields: object) -> genai_types.FunctionResponse:
     )
 
 
-def _submit_plan(response: dict[str, object]) -> genai_types.FunctionResponse:
-    return genai_types.FunctionResponse(name="submit_plan", response=response)
+def _compiled_proposal(**fields: object) -> genai_types.FunctionResponse:
+    """A `propose_plan` whose translation compiled, with what
+    `planner.agent.declare_ready` added: `summary` or a blocked `submission`."""
+    return _plan_proposal(version=1, translation={"outcome": "ok"}, **fields)
 
 
 _COMPILE_FAILED = genai_types.FunctionResponse(
@@ -104,8 +106,8 @@ _COMPILE_FAILED = genai_types.FunctionResponse(
 )
 _EXPECTED_STEPS = [{"tool": "data-mcp.get_data"}, {"tool": "analysis-mcp.aggregate"}]
 _EXPECTED_SOURCES = [{"spec_id": DEBT_SPEC}]
-_REFUSED_SUBMISSION = {"outcome": "refused", "code": "workflow_missing"}
-_ACCEPTED_SUBMISSION = {"outcome": "ok", "version": 1, "revision": "r1", "summary": "..."}
+_BLOCKED_SUBMISSION = {"outcome": "refused", "code": "plan_rejected"}
+_SUMMARY = {"version": 1, "revision": "r1", "warnings": []}
 
 
 def test_matches_subset_ignores_keys_and_extra_fields_the_expectation_does_not_name() -> None:
@@ -338,6 +340,39 @@ def test_a_matching_plan_proposal_scores_one() -> None:
     assert result.per_invocation_results[0].score == 1.0
 
 
+def _submitted(outcome: str, **fields: object) -> genai_types.FunctionResponse:
+    """A `submit_analysis` answer, as a compact-delivery run records it."""
+    return genai_types.FunctionResponse(
+        name="submit_analysis", response={"outcome": outcome, "status": "draft", **fields}
+    )
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "score"),
+    [
+        (_plan_proposal(version=2), _submitted("recorded", version=2), 1.0),
+        (_plan_proposal(), _submitted("ready_for_review", version=1), 1.0),
+        (_plan_proposal(), _submitted("needs_fields"), 0.0),
+        (
+            _ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES),
+            _submitted(
+                "ready_for_review",
+                version=1,
+                translation=_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES).response,
+            ),
+            1.0,
+        ),
+    ],
+    ids=["recorded", "ready-for-review", "needs-fields", "translation"],
+)
+def test_a_submit_analysis_answer_is_graded_as_the_proposal_it_records(
+    expected: genai_types.FunctionResponse, actual: genai_types.FunctionResponse, score: float
+) -> None:
+    result = workflow_outcome(_metric(), [_invocation(actual)], [_invocation(expected)], None)
+
+    assert result.per_invocation_results[0].score == score
+
+
 def test_a_plan_amendment_is_graded_by_the_version_the_case_states() -> None:
     # `version: 2` asserts the revision amended the first plan rather than
     # starting a fresh one, which no rubric can read off the trace.
@@ -351,13 +386,11 @@ def test_a_plan_amendment_is_graded_by_the_version_the_case_states() -> None:
     )
 
 
-def test_a_submit_plan_answer_alongside_the_expected_plan_proposal_does_not_hedge() -> None:
-    # `submit_plan` approves nothing and executes nothing itself -- calling
-    # it in the same turn as `propose_plan` is the trajectory a plan's
-    # readiness is keyed on, not a way to have it both ways, so a
-    # plan-proposal case has no hedge to check against it.
+def test_a_proposal_declared_ready_matches_the_expected_plan_proposal() -> None:
+    # Declaring a plan ready approves nothing and executes nothing itself,
+    # so a plan-proposal case has no hedge to check against it.
     expected = [_invocation(_plan_proposal())]
-    actual = [_invocation(_plan_proposal(version=1), _submit_plan(_ACCEPTED_SUBMISSION))]
+    actual = [_invocation(_compiled_proposal(summary=_SUMMARY))]
 
     result = workflow_outcome(_metric(), actual, expected, None)
 
@@ -386,7 +419,7 @@ def test_a_matching_rejection_scores_one() -> None:
     assert result.per_invocation_results[0].score == 1.0
 
 
-def test_an_accepted_submit_plan_alongside_the_expected_rejection_scores_zero() -> None:
+def test_a_proposal_declared_ready_alongside_the_expected_rejection_scores_zero() -> None:
     # The reject case's exclusivity check: an agent cannot both record a
     # rejection and declare the same plan ready for the user's answer.
     expected = [
@@ -401,7 +434,7 @@ def test_an_accepted_submit_plan_alongside_the_expected_rejection_scores_zero() 
             genai_types.FunctionResponse(
                 name="reject_plan", response={"outcome": "ok", "status": "rejected"}
             ),
-            _submit_plan(_ACCEPTED_SUBMISSION),
+            _compiled_proposal(summary=_SUMMARY),
         )
     ]
 
@@ -410,10 +443,10 @@ def test_an_accepted_submit_plan_alongside_the_expected_rejection_scores_zero() 
     assert result.per_invocation_results[0].score == 0.0
 
 
-def test_a_refused_submit_plan_alongside_the_expected_rejection_does_not_hedge() -> None:
-    # A `submit_plan` the tool refused -- here blocked by the very rejection
-    # it is paired with -- declared nothing, so there is nothing to hedge
-    # with. Only a response whose outcome is `ok` counts.
+def test_a_blocked_declaration_alongside_the_expected_rejection_does_not_hedge() -> None:
+    # A compiled proposal whose readiness the gate refused -- here blocked by
+    # the very rejection it is paired with -- declared nothing, so there is
+    # nothing to hedge with. Only an answer carrying `summary` counts.
     expected = [
         _invocation(
             genai_types.FunctionResponse(
@@ -426,7 +459,7 @@ def test_a_refused_submit_plan_alongside_the_expected_rejection_does_not_hedge()
             genai_types.FunctionResponse(
                 name="reject_plan", response={"outcome": "ok", "status": "rejected"}
             ),
-            _submit_plan(_REFUSED_SUBMISSION),
+            _compiled_proposal(submission=_BLOCKED_SUBMISSION),
         )
     ]
 

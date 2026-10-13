@@ -81,6 +81,7 @@ from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 from planner.plan import (
+    MAX_ACROSS_WORDS,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_DECISION_OPTIONS,
     MAX_DECISION_RATIONALE_CHARS,
@@ -438,8 +439,8 @@ def field_limits_record() -> dict[str, Any]:
     description and a rationale at their limits and `fixes` stating
     `MAX_ENTITIES` entities, eight predicates and the other fields a
     requirement compares. Twenty-four requirements, each citing all twenty-four
-    decisions: eight datasets with `MAX_ENTITIES` entities and an `across`
-    apiece, nine filters with eight predicates apiece, and one of every other kind (aggregate,
+    decisions: eight datasets with `MAX_ENTITIES` entities and
+    `MAX_ACROSS_WORDS` `across` words apiece, nine filters with eight predicates apiece, and one of every other kind (aggregate,
     growth, rank, share_of, quotient_of, comparison, join). Every string is at its limit;
     those the seam renders as JSON are made of `ASTRAL_CHAR`, and a predicate
     lists every entity name. Each decision and requirement validates on its
@@ -448,7 +449,10 @@ def field_limits_record() -> dict[str, Any]:
     """
     slots = tuple(f"slot_{index:02d}" for index in range(MAX_PLAN_DECISIONS))
     role = ASTRAL_CHAR * MAX_ENTITY_ROLE_CHARS
-    across = padded("across", MAX_ENTITY_ROLE_CHARS, ASTRAL_CHAR)
+    across = tuple(
+        padded(f"across{index}", MAX_ENTITY_ROLE_CHARS, ASTRAL_CHAR)
+        for index in range(MAX_ACROSS_WORDS)
+    )
     entities = tuple(
         Entity(name=padded(f"{index:02d}", MAX_ENTITY_NAME_CHARS, ASTRAL_CHAR), role=role)
         for index in range(MAX_ENTITIES)
@@ -549,8 +553,8 @@ def field_limits_record() -> dict[str, Any]:
         ComparisonRequirement(
             id="comparison",
             decision_ids=slots,
-            left=RequirementSide(input_id="totals", entity=names[1]),
-            right=RequirementSide(input_id="filter_1", entity=names[1]),
+            minuend=RequirementSide(input_id="filter_1", entity=names[1]),
+            subtrahend=RequirementSide(input_id="totals", entity=names[1]),
         ),
         JoinRequirement(id="joined", decision_ids=slots, left_id="filter_2", right_id="filter_3"),
     ]
@@ -658,8 +662,8 @@ def plan_record(
         ComparisonRequirement(
             id="comparison",
             decision_ids=cites(22),
-            left=RequirementSide(input_id="totals"),
-            right=RequirementSide(input_id="filter_1"),
+            minuend=RequirementSide(input_id="filter_1"),
+            subtrahend=RequirementSide(input_id="totals"),
         ),
         JoinRequirement(
             id="joined", decision_ids=cites(23), left_id="filter_2", right_id="filter_3"

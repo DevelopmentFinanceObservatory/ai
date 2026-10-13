@@ -1,0 +1,104 @@
+{
+  "id": "comparison-debt-stock-gdp-ghana",
+  "kind": "comparison",
+  "origin": "authored",
+  "question": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
+  "searches": [
+    {
+      "query": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
+      "parts": [
+        {
+          "variable": "external debt stock",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2015 to 2022"
+        },
+        {
+          "variable": "GDP",
+          "entities": [
+            {
+              "text": "Ghana"
+            }
+          ],
+          "time": "2015 to 2022"
+        }
+      ]
+    }
+  ],
+  "brief": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
+  "asks": [
+    "How many US dollars Ghana's GDP exceeded its external debt stock, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "comparison"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "comparison"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "comparison, not quotient_of: by how many dollars one exceeds the other is a difference, not a ratio"
+  },
+  "unit_asked": true,
+  "reference_payload": {
+    "question": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt",
+        "measure": "external debt stock",
+        "entities": [
+          {
+            "name": "Ghana",
+            "role": "debtor"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_cc34c1cb567ce34e1e378b144378f9a2"
+      },
+      {
+        "kind": "dataset",
+        "id": "gdp",
+        "measure": "GDP",
+        "entities": [
+          {
+            "name": "Ghana"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "source_spec_id": "spec_9c495a2de1bbf6789e34b6100781e71d"
+      },
+      {
+        "kind": "comparison",
+        "id": "gap",
+        "minuend": {
+          "input_id": "gdp"
+        },
+        "subtrahend": {
+          "input_id": "debt"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "gap"
+        ]
+      }
+    ]
+  }
+}

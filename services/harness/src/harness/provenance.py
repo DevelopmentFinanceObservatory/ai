@@ -22,7 +22,7 @@ declared count says: a summed retrieval's frame holds one family ref that
 stands for every StatVar the sum added up, and so does any frame derived
 from it, so that ref counts as those StatVars, each counted once however
 many carried retrievals hold it (`_carried_stat_var_count`). The frame of a
-verb that writes its own StatVar (`BOTH_SIDES_VERBS`: `sum_of`,
+verb that writes its own StatVar (`BOTH_SIDES_VERBS`: `compare`, `sum_of`,
 `quotient_of`, `share_of`) holds that one ref, which counts as the distinct
 StatVars of the retrievals under its sides. Both writers store a manifest
 with its whole `trace.resolved_stat_vars`, read back first when the
@@ -69,72 +69,27 @@ _FrameKey = tuple[str | None, str | None]
 
 
 @dataclass(frozen=True, slots=True)
-class OwnStatVar:
-    """How a card names the StatVar a verb writes for its own result:
-    `joiner` goes between the two sides' names, and `description` says what
-    the verb did with them. `equal_sides` goes before the one name of two
-    sides holding the same StatVars, in place of the joined form. dfo-apis
-    words the label of a published frame the same way
-    (`presentation_store.composed_stat_vars`)."""
-
-    joiner: str
-    description: str
-    equal_sides: str
-
-
-@dataclass(frozen=True, slots=True)
 class BothSidesVerb:
     """A verb whose result carries the StatVars of both frames it reads.
 
     `second_frame` is the argument it takes its second frame under, absent
-    from a step whose two sides read one frame. `own_stat_var` is set for a
-    verb that writes every result row under `dcid:<its spec_id>`, a ref no
-    graph node describes, which stands for the StatVars under both sides.
+    from a step whose two sides read one frame. `writes_own_stat_var` is set
+    for a verb that writes every result row under `dcid:<its spec_id>`, a ref
+    no graph node describes, which stands for the StatVars under both sides.
     """
 
     second_frame: str
-    own_stat_var: OwnStatVar | None = None
+    writes_own_stat_var: bool = False
 
 
-# The analysis-mcp verbs whose result carries both sides' StatVars, by tool
-# name. `compare`'s right side supplies values only, so it is not here.
+# The analysis-mcp verbs whose result carries both sides' StatVars, by tool name.
 BOTH_SIDES_VERBS: Mapping[str, BothSidesVerb] = {
+    "compare": BothSidesVerb(second_frame="right_frame_ref", writes_own_stat_var=True),
     "join": BothSidesVerb(second_frame="right_frame_ref"),
-    "sum_of": BothSidesVerb(
-        second_frame="right_frame_ref",
-        own_stat_var=OwnStatVar(
-            joiner=" plus ",
-            description="The two added together for each year both report.",
-            equal_sides="",
-        ),
-    ),
-    "quotient_of": BothSidesVerb(
-        second_frame="denominator_frame_ref",
-        own_stat_var=OwnStatVar(
-            joiner=" per ",
-            description="The first divided by the second for each year both report.",
-            equal_sides="Ratio of ",
-        ),
-    ),
-    "share_of": BothSidesVerb(
-        second_frame="denominator_frame_ref",
-        own_stat_var=OwnStatVar(
-            joiner=" as a share of ",
-            description="The first as a share of the second, in per cent, for each year both "
-            "report.",
-            equal_sides="Share of ",
-        ),
-    ),
+    "sum_of": BothSidesVerb(second_frame="right_frame_ref", writes_own_stat_var=True),
+    "quotient_of": BothSidesVerb(second_frame="denominator_frame_ref", writes_own_stat_var=True),
+    "share_of": BothSidesVerb(second_frame="denominator_frame_ref", writes_own_stat_var=True),
 }
-
-# One part of a verb's side: a retrieval's frame key, or the StatVar ref an
-# earlier verb wrote for its own result, itself a key of `OwnStatVars`.
-type SidePart = _FrameKey | str
-
-# The StatVar ref a verb wrote for its own result (`BothSidesVerb
-# .own_stat_var`), mapped to the verb's tool name and the parts of its first
-# side and of its second.
-type OwnStatVars = Mapping[str, tuple[str, tuple[SidePart, ...], tuple[SidePart, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,13 +122,10 @@ type Lineage = tuple[ProvenanceInput, ...]
 @dataclass(frozen=True, slots=True)
 class _Entry:
     """What the store holds for one frame: its lineage, the distinct
-    StatVars the frame carries when its producing step declared a count,
-    and the StatVar refs the verbs of the frame's run wrote for their own
-    results."""
+    StatVars the frame carries when its producing step declared a count."""
 
     lineage: Lineage
     stat_var_count: int | None = None
-    own_stat_vars: OwnStatVars | None = None
 
 
 class ProvenanceStore:
@@ -239,7 +191,6 @@ class ProvenanceStore:
         stat_var_count: int | None = None,
         carried: Sequence[_FrameKey] = (),
         summed: Sequence[Sequence[_FrameKey]] = (),
-        own_stat_vars: OwnStatVars | None = None,
     ) -> bool:
         """Write the lineage of the frame `(spec_id, content_version)` from the frames in `sources`.
 
@@ -255,7 +206,7 @@ class ProvenanceStore:
         wrote for its own result (a `sum_of`'s, a `quotient_of`'s, a
         `share_of`'s) that the frame carries, the retrievals among `sources`
         under that verb's sides, and the count takes that ref as their
-        distinct StatVars. `own_stat_vars` is held for `own_stat_vars` to read back.
+        distinct StatVars.
 
         The lineage is every `sources` lineage flattened in order, with a
         retrieval that appears twice kept once. All-or-nothing: when any
@@ -289,7 +240,7 @@ class ProvenanceStore:
         self._store(
             conversation=conversation,
             key=(spec_id, content_version),
-            entry=_Entry(tuple(members.values()), stat_var_count, own_stat_vars),
+            entry=_Entry(tuple(members.values()), stat_var_count),
         )
         return True
 
@@ -340,16 +291,6 @@ class ProvenanceStore:
         its manifest resolved or summed."""
         entry = self._entry(conversation, (spec_id, content_version))
         return entry.stat_var_count if entry is not None else None
-
-    def own_stat_vars(
-        self, *, conversation: str, spec_id: str | None, content_version: str | None
-    ) -> OwnStatVars:
-        """Each StatVar ref a verb of the run behind the frame
-        `(spec_id, content_version)` wrote for its own result, with the
-        verb's tool name and the parts of its first and second side
-        (`SidePart`), as `alias` recorded them. Empty when there are none."""
-        entry = self._entry(conversation, (spec_id, content_version))
-        return (entry.own_stat_vars if entry is not None else None) or {}
 
     def _entry(self, conversation: str, key: _FrameKey) -> _Entry | None:
         """The entry held for `key`, marked most recently used."""

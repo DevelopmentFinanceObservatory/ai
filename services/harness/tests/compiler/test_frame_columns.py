@@ -223,7 +223,7 @@ def test_any_other_verb_must_declare_its_predicted_roles_as_the_frame_spells_the
     ) == ("financingProvider", "financingRecipient")
 
 
-@pytest.mark.parametrize("suffix", ["_type", "_kind"])
+@pytest.mark.parametrize("suffix", ["_type", "_party_kind"])
 def test_a_verb_keeping_a_role_declares_the_roles_enrichment_column_its_input_carries(
     suffix: str,
 ) -> None:
@@ -250,18 +250,15 @@ def test_the_prediction_stands_when_the_frame_is_unknown() -> None:
     )
 
 
-@pytest.mark.parametrize("verb", ["growth", "rank", "share_of", "quotient_of", "sum_of"])
+@pytest.mark.parametrize("verb", ["growth", "rank", "share_of", "quotient_of", "sum_of", "compare"])
 @pytest.mark.parametrize("input_count", [1, 461, None])
 def test_a_verb_reading_one_stat_var_declares_one(verb: str, input_count: int | None) -> None:
     assert bound_stat_var_count(_analysis(verb), {}, input_stat_var_count=input_count) == 1
 
 
-@pytest.mark.parametrize("verb", ["filter", "compare"])
 @pytest.mark.parametrize("input_count", [1, 461, None])
-def test_a_verb_keeping_rows_of_its_input_declares_at_most_its_inputs_stat_vars(
-    verb: str, input_count: int | None
-) -> None:
-    assert bound_stat_var_count(_analysis(verb), {}, input_stat_var_count=input_count) == (
+def test_a_filter_declares_at_most_its_inputs_stat_vars(input_count: int | None) -> None:
+    assert bound_stat_var_count(_analysis("filter"), {}, input_stat_var_count=input_count) == (
         input_count
     )
 

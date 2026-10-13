@@ -10,6 +10,7 @@ import pytest
 from compiler.sources import (
     DiscoveryStatus,
     is_family,
+    measure_named_by_query,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
@@ -26,6 +27,9 @@ _PLACE_SCOPE_BLOCK = Path(__file__).parent.parent / "fixtures" / "search_spec_pl
 
 
 _ROLE_OPEN_BLOCK = Path(__file__).parent.parent / "fixtures" / "search_spec_role_open.json"
+
+
+_MEASURE_NAMED_BLOCKS = Path(__file__).parent.parent / "fixtures" / "search_measure_named.json"
 
 
 def _place_scope_block() -> dict[str, Any]:
@@ -349,8 +353,8 @@ def test_an_entity_without_its_role_is_refused() -> None:
 # --- Whether a source mints as one StatVar ------------------------------------------
 
 _GENDER_BLOCK_SLOT = {
-    "key": {"axis": "how", "property": {"dcid": "gender", "label": "gender"}},
-    "binding": {"kind": "value", "value": {"ref": {"dcid": "Female", "label": "Female"}}},
+    "key": {"axis": "how", "property": {"ref": "gender", "label": "gender"}},
+    "binding": {"kind": "value", "value": {"ref": {"ref": "Female", "label": "Female"}}},
 }
 
 
@@ -402,7 +406,7 @@ def test_only_a_pinned_identity_names_its_statvar(
 
 
 _AGE_UNBOUND = {
-    "key": {"axis": "how", "property": {"dcid": "age", "label": "age"}},
+    "key": {"axis": "how", "property": {"ref": "age", "label": "age"}},
     "binding": {"kind": "unbound"},
 }
 _PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}}
@@ -413,7 +417,7 @@ _PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbou
     [
         pytest.param(_GENDER_BLOCK_SLOT, {"gender": ("Female",)}, id="one-code"),
         pytest.param(
-            {**_GENDER_BLOCK_SLOT, "expansion": {"added": [{"dcid": "Female_Adult"}]}},
+            {**_GENDER_BLOCK_SLOT, "expansion": {"added": [{"ref": "Female_Adult"}]}},
             {"gender": ("Female", "Female_Adult")},
             id="a-value-and-its-descendants",
         ),
@@ -422,7 +426,7 @@ _PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbou
                 **_GENDER_BLOCK_SLOT,
                 "binding": {
                     "kind": "set",
-                    "values": [{"ref": {"dcid": "Male"}}, {"ref": {"dcid": "Female"}}],
+                    "values": [{"ref": {"ref": "Male"}}, {"ref": {"ref": "Female"}}],
                 },
             },
             {"gender": None},
@@ -431,8 +435,8 @@ _PLACE = {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbou
         pytest.param(
             {
                 **_GENDER_BLOCK_SLOT,
-                "binding": {"kind": "set", "values": [{"ref": {"dcid": "Female"}}]},
-                "expansion": {"added": [{"dcid": "Female_Adult"}]},
+                "binding": {"kind": "set", "values": [{"ref": {"ref": "Female"}}]},
+                "expansion": {"added": [{"ref": "Female_Adult"}]},
             },
             {"gender": ("Female", "Female_Adult")},
             id="a-set-and-its-descendants",
@@ -593,12 +597,12 @@ def test_a_block_stating_no_scope_and_no_role_axis_fact_opens_nothing() -> None:
 # total, and the G7 read as its members, as dfo-apis states `entity_groups`.
 _GROUPS = {
     "destination": {
-        "dcid": "africa",
+        "ref": "africa",
         "label": "Africa",
         "entity_type": "Continent",
         "total": "DACAfrica",
     },
-    "origin": {"dcid": None, "label": "G7", "entity_type": None, "total": None},
+    "origin": {"ref": None, "label": "G7", "entity_type": None, "total": None},
 }
 _ENTITIES = [
     {"role": "destination", "label": "Africa, Total", "ref": "DACAfrica"},
@@ -619,7 +623,7 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
     source = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
 
     assert wire_groups(source.groups) == {
-        "destination": {"label": "Africa", "dcid": "africa"},
+        "destination": {"label": "Africa", "ref": "africa"},
         "origin": {"label": "G7"},
     }
 
@@ -697,6 +701,31 @@ def test_a_block_stating_no_measure_label_elects_no_measure() -> None:
     )
 
     assert source_from_spec_block(block).elected_measure is None
+
+
+def _measure_block(variable: str) -> dict[str, Any]:
+    """dev `search`'s own block for `variable` from Japan to Kenya, gross disbursements elected."""
+    return json.loads(_MEASURE_NAMED_BLOCKS.read_text())["blocks"][variable]
+
+
+def _untraced(block: dict[str, Any]) -> dict[str, Any]:
+    return {**block, "resolved": {k: v for k, v in block["resolved"].items() if k != "trace"}}
+
+
+@pytest.mark.parametrize(
+    ("block", "named"),
+    [
+        (_measure_block("gross ODA disbursements"), True),
+        (_measure_block("ODA disbursements"), False),
+        (_measure_block("gross ODA"), True),
+        (_untraced(_measure_block("gross ODA disbursements")), False),
+    ],
+    ids=["gross-disbursements", "disbursements", "gross-oda", "no-trace"],
+)
+def test_the_query_names_the_measure_only_where_its_words_set_every_differing_slot(
+    block: dict[str, Any], named: bool
+) -> None:
+    assert measure_named_by_query(block) is named
 
 
 def test_ignored_source_constraints_are_not_saved_as_applied():

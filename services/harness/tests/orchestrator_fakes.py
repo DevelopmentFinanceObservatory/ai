@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx2
@@ -36,7 +37,13 @@ from harness.graph.state import AGENT_NAME, frame_id_for
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_seam import PlannerSeamError
-from harness.scripted import SCRIPTED_CV, SCRIPTED_SPEC, ScriptedExecutor, ScriptedPlannerModel
+from harness.scripted import (
+    SCRIPTED_CV,
+    SCRIPTED_SPEC,
+    ScriptedExecutor,
+    ScriptedPlannerModel,
+    scripted_publish_result,
+)
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
@@ -46,7 +53,7 @@ from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
-from planner.plan import load_asks
+from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks
 from pydantic import Field
 
 from .data_mcp_definitions import DataMcpDefinitions
@@ -77,7 +84,9 @@ class ScriptLlm(BaseLlm):
 class FailingPlanner:
     """A planner seam that raises `PlannerSeamError`, the way `PlannerSeam` fails."""
 
-    def __init__(self, message: str = "You have not called submit_plan.") -> None:
+    def __init__(
+        self, message: str = "the planner seam ran past 60 events without settling"
+    ) -> None:
         self.message = message
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
@@ -91,12 +100,14 @@ class RefusingPlanner:
         self.questions: list[str] = []
         self.readings: list[Any] = []
         self.asks: list[tuple[str, ...]] = []
+        self.breakdowns: list[tuple[AskBreakdown, ...]] = []
         self.final = final
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         self.questions.append(kwargs["question"])
         self.readings.append(kwargs.get("readings"))
         self.asks.append(load_asks(kwargs["ctx"].state))
+        self.breakdowns.append(load_ask_breakdowns(kwargs["ctx"].state))
         return {"refused": {"text": "the planner ran out of rounds", "final": self.final}}
 
 
@@ -199,6 +210,12 @@ def plan_call(brief: str, *asks: str) -> types.Part:
     return call("plan", brief=brief, asks=list(asks))
 
 
+def approve_answer(revision: object, *, at: datetime | None = None) -> dict[str, Any]:
+    """An answer approving the plan card that names `revision`, given at `at`
+    (now by default), as the studio's interrupt route builds it."""
+    return {"approved": revision, "at": (at or datetime.now(UTC)).isoformat()}
+
+
 def create_request_input_response(interrupt_id: str, response: dict[str, Any]) -> types.Part:
     """The user's answer to a pause, as ADK's `adk_request_input` tool reads it."""
     return types.Part(
@@ -241,13 +258,17 @@ def orchestrator_runner(
     executor: Any = None,
     resolver: Any = None,
     definition_surface: Any = None,
+    publisher: Any = scripted_publish_result,
+    run_ledger: Any = None,
 ) -> tuple[Runner, ScriptLlm]:
     """The root workflow on the orchestrator topology under a bare ADK
     `Runner` (app `t`), its model answering from `script`. The planner
     refuses unless one is given; search and every executor call fail the
     test unless a resolver or executor is given. `definition_surface`
     resolves seeds, data-mcp over a Search API that serves nothing unless
-    one is given."""
+    one is given. `publisher` publishes a run's derived results, all of
+    them at once by default, and `run_ledger` keeps its runs, the
+    workflow's in-memory ledger by default."""
     model = ScriptLlm(script=list(script))
     agent = create_orchestrator_agent(
         model_name="unused",
@@ -261,6 +282,8 @@ def orchestrator_runner(
         executor=executor or no_executor,
         tool_surface=tool_surface,
         definition_surface=definition_surface or DataMcpDefinitions(),
+        publisher=publisher,
+        run_ledger=run_ledger,
         fetch_series_stats=scripted_fetch_series_stats,
     )
     runner = Runner(
@@ -306,6 +329,8 @@ def orchestrator_app(
     settings: Settings | None = None,
     edit_model: Any = None,
     served: Sequence[Mapping[str, Any]] = (),
+    publisher: Any = scripted_publish_result,
+    run_ledger: Any = None,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the orchestrator topology, and the agent's model.
 
@@ -320,6 +345,9 @@ def orchestrator_app(
     plans (`ScriptedPlannerModel` by default). `tool_surface` runs an
     approved plan's steps, and with `None` `execute` refuses. `served` are
     the seeds or Spec blocks data-mcp's definition lookup answers with.
+    `publisher` publishes a run's derived results, all at once by default,
+    and `run_ledger` keeps its runs, the workflow's in-memory ledger by
+    default.
     """
     session_service = session_service or InMemorySessionService()
     store = store or StudioStore(session_service, app_name=AGENT_NAME)
@@ -344,6 +372,8 @@ def orchestrator_app(
             executor=recorder,
             tool_surface=surface_recorder,
             definition_surface=DataMcpDefinitions(served=served),
+            publisher=publisher,
+            run_ledger=run_ledger,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
         )

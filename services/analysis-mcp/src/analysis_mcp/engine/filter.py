@@ -207,7 +207,8 @@ class FilterResult:
     """Everything `filter_tool.py` needs to mint identity, write the store,
     and render the digest -- the frame is here for the store write and
     replay; the digest itself renders from `kept_row_summaries`, never
-    `frame.rows`."""
+    `frame.rows`. `units` is every distinct unit the kept rows declare, with
+    `None` for rows that declare none."""
 
     frame: Frame
     total_row_count: int
@@ -215,6 +216,7 @@ class FilterResult:
     dropped_row_count: int
     kept_row_summaries: tuple[FilterRowSummary, ...]
     exclusions: Exclusions = field(default_factory=Exclusions)
+    units: tuple[UnitCell | None, ...] = ()
 
 
 def _predicate_columns(predicates: Sequence[Predicate]) -> tuple[str, ...]:
@@ -462,4 +464,5 @@ def run_filter(
         dropped_row_count=table.num_rows - kept.num_rows,
         kept_row_summaries=kept_row_summaries,
         exclusions=exclusions,
+        units=tuple(units.cells),
     )

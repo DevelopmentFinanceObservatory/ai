@@ -5,10 +5,11 @@
 #   just PORT=9000 dev
 #   just GCP_PROJECT=other-project env
 
-# Passes recipe parameters to a shebang recipe's shell as "$1", "$2", ...
-# instead of only via {{...}} text substitution. `ask` relies on this to
-# forward its variadic ARGS through "$@" without ever re-interpreting the
-# question text as shell.
+# Passes recipe parameters to a recipe's shell as "$1", "$2", ... besides
+# {{...}} text substitution. Recipes forward their arguments as "$@", which
+# keeps each one whole and leaves shell metacharacters inert. `{{args}}` joins
+# them with spaces for the shell to split again, which breaks a quoted
+# argument such as a Langfuse experiment name.
 set positional-arguments := true
 
 # Configuration (override any of these from the command line)
@@ -362,6 +363,28 @@ eval-studio: _check-env
     uv run --env-file {{ENV_FILE}} --package harness python evals/studio/run.py \
         --mode live --url http://localhost:{{PORT}} --judge
 
+# Calls the live planner model; see evals/planner_entry/README.md. `arm` names
+# one in evals/planner_entry/arms.py.
+# Run a planner arm against the baseline on every task and write a summary
+eval-planner-entry arm *args: _check-env
+    uv run --env-file {{ENV_FILE}} --package harness python evals/planner_entry/run.py "$@"
+
+# No model and no network. CI runs the same check via
+# services/harness/tests/test_planner_entry_eval.py.
+# Check every planner-entry task's plans and the set's coverage
+eval-planner-entry-validate *args:
+    uv run --package harness python evals/planner_entry/validate.py "$@"
+
+# Needs the dfo-apis at DFO_APIS_URL.
+# Record search and skill answers for planner-entry tasks lacking a current recording
+eval-planner-entry-record *args: _check-env
+    uv run --env-file {{ENV_FILE}} --package harness python evals/planner_entry/record.py "$@"
+
+# Needs the LANGFUSE_* keys in .env; see evals/planner_entry/README.md.
+# Push a planner-entry run directory's records to Langfuse
+eval-planner-entry-push run: _check-env
+    uv run --env-file {{ENV_FILE}} --package harness python evals/planner_entry/langfuse_store.py push "$@"
+
 # ── Quality ──────────────────────────────────────────
 
 # Lint (no fixes) + format check, across the whole workspace
@@ -442,7 +465,16 @@ test-presentation-mcp:
 # budget they imply at `--memory-mib` (default 2048). Pass `--out FILE` to keep the JSON,
 # `--rows N` or `--steps a,b` to narrow it (see scripts/bench_frames.py)
 bench-frames *args:
-    uv run python scripts/bench_frames.py {{args}}
+    uv run python scripts/bench_frames.py "$@"
+
+# Regenerate data-mcp's Graph API wire models from the committed schema snapshot
+graph-models:
+    GRAPH_WIRE_UPDATE=1 uv run pytest services/data-mcp/tests/test_graph_wire.py -q
+
+# Refresh the Graph API schema and capabilities snapshots from a deployed dfo-apis (then `just graph-models`)
+graph-schema url=DFO_APIS_URL:
+    curl -fsS "{{url}}/api/graph/schema" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_schema.json
+    curl -fsS "{{url}}/api/graph/capabilities" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_capabilities.json
 
 # Re-measure the digest corpus and rewrite the committed baseline
 digest-baseline:

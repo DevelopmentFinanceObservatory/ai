@@ -686,7 +686,8 @@ def translation_stops_on_a_repeated_failure(evidence: Evidence) -> list[str]:
     """Once a translation fails the same way it failed before, nothing is
     translated again in that planner entry. The plan did not change where it
     failed, so a further attempt reaches the same stop. A translation is the
-    `translation` an accepted `propose_plan` answers with."""
+    `translation` an accepted proposal answers with, `propose_plan`'s or
+    `submit_analysis`'s, read off the response as `harness.planner_seam` reads it."""
     if missing := _need_log(evidence, "translation_stops_on_a_repeated_failure"):
         return missing
     translations = [
@@ -694,7 +695,6 @@ def translation_stops_on_a_repeated_failure(evidence: Evidence) -> list[str]:
         for entry in evidence.log or []
         if entry["kind"] == "call"
         and entry["layer"] == "planner"
-        and entry["tool"] == "propose_plan"
         and isinstance(entry["response"].get("translation"), dict)
     ]
     repeated = next(
@@ -815,6 +815,83 @@ def every_ask_accounted_for(evidence: Evidence) -> list[str]:
     return violations
 
 
+def _direct_answers(evidence: Evidence) -> list[dict[str, Any]]:
+    """Every answer the orchestrator's `submit_analysis` gave, in order, each
+    once, as the requests after it show it."""
+    answers: list[dict[str, Any]] = []
+    for request in _requests(evidence, agent="orchestrator"):
+        for content in request["contents"]:
+            for part in content.get("parts", []):
+                response = part.get("function_response")
+                if response and response["name"] == "submit_analysis":
+                    answer = response.get("response") or {}
+                    if answer not in answers:
+                        answers.append(answer)
+    return answers
+
+
+def _retrievals(evidence: Evidence) -> list[str]:
+    return [
+        str(entry["arguments"].get("spec_id"))
+        for entry in evidence.log or []
+        if entry["kind"] == "call" and entry.get("layer") == "step" and entry["tool"] == "get_data"
+    ]
+
+
+def direct_run_completed(evidence: Evidence) -> list[str]:
+    """A `submit_analysis` call answered `completed`, its run completed, with a
+    frame the orchestrator can chart, and no plan was proposed."""
+    if missing := _need_log(evidence, "direct_run_completed"):
+        return missing
+    answers = _direct_answers(evidence)
+    if not answers:
+        return ["direct_run_completed: the orchestrator never called submit_analysis"]
+    completed = [
+        answer
+        for answer in answers
+        if answer.get("outcome") == "completed"
+        and (answer.get("run") or {}).get("status") == "completed"
+        and answer.get("frames")
+    ]
+    violations = (
+        []
+        if completed
+        else [f"direct_run_completed: no submit_analysis answer completed with frames: {answers}"]
+    )
+    proposed = sum(
+        1 for turn in evidence.turn_frames for frame in turn if frame["event"] == "plan.proposed"
+    )
+    if proposed:
+        violations.append(f"direct_run_completed: {proposed} plan card(s) were proposed")
+    return violations
+
+
+def unverified_source_refused(evidence: Evidence) -> list[str]:
+    """A `submit_analysis` call naming a spec_id no search settled on is
+    answered `needs_fields` for that spec_id, and nothing is retrieved."""
+    if missing := _need_log(evidence, "unverified_source_refused"):
+        return missing
+    answers = _direct_answers(evidence)
+    if not answers:
+        return ["unverified_source_refused: the orchestrator never called submit_analysis"]
+    refused = [
+        answer
+        for answer in answers
+        if answer.get("outcome") == "needs_fields"
+        and any(
+            error.get("field") == "spec_id" and error.get("code") == "unverified_source"
+            for error in answer.get("errors") or []
+        )
+    ]
+    violations = (
+        [] if refused else [f"unverified_source_refused: no answer refused the spec_id: {answers}"]
+    )
+    violations.extend(
+        f"unverified_source_refused: {spec_id} was retrieved" for spec_id in _retrievals(evidence)
+    )
+    return violations
+
+
 CASE_CHECKS: dict[str, Callable[[Evidence], list[str]]] = {
     "approval_payload_absent_after_approval": approval_payload_absent_after_approval,
     "no_relay_marker": no_relay_marker,
@@ -826,6 +903,8 @@ CASE_CHECKS: dict[str, Callable[[Evidence], list[str]]] = {
     "translation_stops_on_a_repeated_failure": translation_stops_on_a_repeated_failure,
     "blocked_reading_is_searched_again": blocked_reading_is_searched_again,
     "every_ask_accounted_for": every_ask_accounted_for,
+    "direct_run_completed": direct_run_completed,
+    "unverified_source_refused": unverified_source_refused,
 }
 # The checks that read the scripted orchestrator's request log.
 REQUEST_CHECKS = frozenset(CASE_CHECKS) - {"no_repeated_failed_step"}

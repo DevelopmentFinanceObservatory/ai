@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from common.place_type import PLACE_ROLE
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -43,6 +44,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     keeps_one_level,
+    names_no_place,
     states_period_threshold,
 )
 from planner.records import (
@@ -75,7 +77,7 @@ from planner.shapes import shared as _shared
 from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
-from compiler.evidence import named_members, named_refs, open_axis_for, opens_place_axis
+from compiler.evidence import named_members, named_refs, open_axes_for, opens_place_axis
 from compiler.sources import stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
@@ -269,7 +271,7 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
 # --- Per-verb resolution -----------------------------------------------------
 
 
-def _unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
+def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
     """The open axes of `source`'s family that dfo-apis may not sum over, or `None` when it has none.
 
     A family varying along no open axis differs in something no slot
@@ -307,12 +309,12 @@ def _retrieve_resolved(
     members on (`compiler.evidence.named_members`, a named set's members on
     its role column), in the source's order, as `compile._role_columns`
     reads them,
-    then the open entity axis `compiler.evidence.open_axis_for` matches to
-    its `across`, marked `open`. A column an entity stating no role resolves
+    then the open entity axis `compiler.evidence.open_axes_for` matches to
+    each `across` word, marked `open`. A column an entity stating no role resolves
     under, or one under a place phrase, is marked `place`, as
     `planner.plan._dataset_shape` marks the dimension. A requirement with no `across` falls back
     to every column the source resolves when none of its entities do. An
-    `across` no open entity axis matches builds no shape:
+    `across` no set of open entity axes matches builds no shape:
     `compile._check_sources` reports it as the source's
     `open_axis_unresolved` finding. A column is `surplus` when the source
     resolves an entity on it whose ref none of the requirement's entities
@@ -322,12 +324,14 @@ def _retrieve_resolved(
     (`breakdown_column`), a role nothing in the source resolves and so no
     surplus. A family read separately carries the measures its source counts
     (`_separate_measures`) and the axes it may not be summed over
-    (`_unsummable_axes`). A summed family, a breakdown (which sums the family
+    (`unsummable_axes`). A summed family, a breakdown (which sums the family
     within each code), and a source binding one StatVar carry one. A source
-    that leaves its place axis open carries every level of place (`compiler.evidence.opens_place_axis`), and
-    `compiler.evidence` refuses one under a requirement whose `across` does
-    not name the place party, so the plan's own reading
-    (`planner.plan.names_no_place`) agrees.
+    that leaves its place axis open carries every level of place
+    (`compiler.evidence.opens_place_axis`), and `compiler.evidence` refuses
+    one under a requirement whose `across` does not name the place party. A
+    place-level filter may read a requirement whose `across` names the place
+    (`planner.plan.names_no_place`), but `compile._check_level_filters`
+    refuses one whose place word covers a flow axis.
     """
     source = sources.get(operation.id)
     requirement = requirements.get(operation.requirement_id)
@@ -349,22 +353,27 @@ def _retrieve_resolved(
             else:
                 phrase_by_column.setdefault(column, entity.role)
     chosen = [column for column in every_column if column in wanted]
-    open_column: str | None = None
-    if requirement.across is None:
+    open_columns: set[str] = set()
+    if not requirement.across:
         chosen = chosen or every_column
     else:
-        axis = open_axis_for(requirement.across, source.open_entity_axes)
-        if isinstance(axis, str):
+        axes = open_axes_for(requirement.across, source.open_entity_axes)
+        if isinstance(axes, str):
             return None
-        open_column = axis.column
-        chosen.append(open_column)
-        phrase_by_column[axis.column] = requirement.across
+        for word, axis in zip(requirement.across, axes, strict=True):
+            open_columns.add(axis.column)
+            chosen.append(axis.column)
+            phrase_by_column[axis.column] = word
     columns: list[ResolvedRole] = []
     dims: list[RoleDimension] = []
     for column in chosen:
         phrase = phrase_by_column.get(column, column)
-        is_open = column == open_column
-        is_place = column in unplaced or place_role(phrase_by_column.get(column, column))
+        is_open = column in open_columns
+        # A place word covering a flow axis names that open party, which keeps its flow
+        # role. Only `observationAbout` holds places at levels (`open_axes_for`).
+        is_place = column in unplaced or (
+            column == PLACE_ROLE if is_open else place_role(phrase_by_column.get(column, column))
+        )
         surplus = any(
             entity.role == column and entity.ref not in named for entity in source.entities
         )
@@ -410,8 +419,9 @@ def _retrieve_resolved(
         roles=tuple(dims),
         period=requirement.period,
         measures=_separate_measures(source) if separate else 1,
-        unsummable_axes=_unsummable_axes(source) if separate else None,
-        names_no_place=opens_place_axis(source.open_entity_axes),
+        unsummable_axes=unsummable_axes(source) if separate else None,
+        place_typed=names_no_place(requirement),
+        mixed_levels=opens_place_axis(source.open_entity_axes),
     )
     return ResolvedShape(shape=shape, columns=tuple(columns))
 

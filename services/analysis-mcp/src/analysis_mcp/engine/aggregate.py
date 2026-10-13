@@ -62,6 +62,7 @@ from dfo_frame_grammar.grammar import (
 
 from analysis_mcp.engine.columnar import (
     distinct,
+    entity_counts,
     group_members,
     group_rows,
     repeated,
@@ -71,6 +72,7 @@ from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     combine_exclusions,
+    entity_roles,
     facet_columns,
     frame_keeping_role_types,
     narrow_and_resolve,
@@ -235,6 +237,15 @@ class AggregateResult:
     `None` otherwise. `aggregate_tool.py` passes `collapsed_periods` to
     `frame_ref_resolution.build_interval` as `observed` when that label
     collapses more than one point, to say whether the span is contiguous.
+
+    `entity_count` is how many output entities hold a total: the distinct
+    value combinations across the entity roles (`common.entity_roles`) in
+    `group_by`, and `None` when `group_by` names none. `period_entities`
+    maps each of `collapsed_periods` to how many input entities its totals
+    pool: the distinct value combinations, across all groups, of the entity
+    roles outside `group_by`, or of the grouped ones when every one is
+    grouped, since each total then pools only its own entity. A place's
+    type or a party's kind describes an entity and counts as none.
     """
 
     frame: Frame
@@ -248,6 +259,8 @@ class AggregateResult:
     group_summaries: tuple[GroupSummary, ...]
     collapsed_periods: tuple[str, ...] = ()
     period_label: str | None = None
+    entity_count: int | None = None
+    period_entities: tuple[tuple[str, int], ...] = ()
     exclusions: Exclusions = field(default_factory=Exclusions)
 
 
@@ -394,6 +407,10 @@ def run_aggregate(
         present_cell_count / expected_cell_count if expected_cell_count else 1.0
     )
 
+    roles = entity_roles(frame)
+    grouped = tuple(column for column in roles if column in key_columns)
+    pooled = tuple(column for column in roles if column not in key_columns)
+    per_period = entity_counts(table, keys=(TIME_PERIOD_COLUMN,), entity_columns=pooled or grouped)
     return AggregateResult(
         frame=output_frame,
         resolved_unit=resolved.unit,
@@ -406,5 +423,9 @@ def run_aggregate(
         group_summaries=tuple(sorted(summaries, key=lambda summary: summary.group_key)),
         collapsed_periods=tuple(members.periods),
         period_label=period_label,
+        entity_count=(
+            entity_counts(table, keys=(), entity_columns=grouped).get((), 0) if grouped else None
+        ),
+        period_entities=tuple((period, per_period[(period,)]) for period in members.periods),
         exclusions=exclusions,
     )

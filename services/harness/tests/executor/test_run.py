@@ -13,12 +13,14 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx2
 import pyarrow as pa
 import pytest
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from common.materialisation import FrameRef
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import compile_plan
 from compiler.surface import (
@@ -36,11 +38,13 @@ from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import BACKOFF_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_delay
+from executor.completion import FramePublished, ResultPublisher
+from executor.ledger import Attempt, InMemoryRunLedger, RunChange, RunRecord
 from executor.outcomes import Accepted, MethodChoiceNeeded, RediscoveryNeeded, RefusalKind, Refused
 from executor.run import (
     EVIDENCE_ALLOWANCE_S,
     MAX_ATTEMPTS_PER_STEP,
-    _run_workflow,
+    RunAbandonedError,
     current_step_deadline,
     default_fetch_series_stats,
     execute_approved_plan,
@@ -141,15 +145,31 @@ async def test_a_run_binds_the_retrieved_frame_into_the_verb_and_is_accepted(
     assert [gap.code.value for gap in evidence.gaps] == ["unit_price_basis_unverified"]
 
 
+async def _published(frame: FrameRef) -> FramePublished:
+    return FramePublished(replay_key="rpk_" + "e" * 64)
+
+
+@pytest.mark.parametrize(
+    ("publisher", "status"),
+    [(_published, PlanStatus.COMPLETED), (None, PlanStatus.EXECUTING)],
+    ids=["published", "publication_unfinished"],
+)
 async def test_execute_approved_plan_records_the_run_in_the_plans_status(
-    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    publisher: ResultPublisher | None,
+    status: PlanStatus,
 ) -> None:
     finished, outcome = await execute_approved_plan(
-        approved_plan(), surface=_surface(real_schemas, manifest()), sleep=_Sleeps()
+        approved_plan(),
+        surface=_surface(real_schemas, manifest()),
+        publisher=publisher,
+        sleep=_Sleeps(),
     )
 
     assert isinstance(outcome, Accepted)
-    assert finished.status is PlanStatus.COMPLETED
+    assert finished.status is status
 
 
 async def test_execute_approved_plan_refuses_a_plan_that_is_not_approved(
@@ -573,6 +593,35 @@ async def test_a_retrieval_that_never_answers_stops_at_its_step_budget(
     assert [name for name, _ in surface.calls] == ["get_data"]
 
 
+class _SlowAttempts(InMemoryRunLedger):
+    """Takes 300ms to record each attempt, longer than `short_budget`'s step budget."""
+
+    async def record(self, run_id: str, change: RunChange) -> RunRecord:
+        if isinstance(change, Attempt):
+            await asyncio.sleep(0.3)
+        return await super().record(run_id, change)
+
+
+async def test_a_slow_attempt_record_spends_none_of_the_step_budget(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    short_budget: tuple[ToolCapability, ...],
+) -> None:
+    outcome = await asyncio.wait_for(
+        _run(
+            approved_plan(),
+            surface=_surface(real_schemas, manifest()),
+            sleep=_Sleeps(),
+            capabilities=short_budget,
+            ledger=_SlowAttempts(),
+        ),
+        timeout=5,
+    )
+
+    assert isinstance(outcome, Accepted), outcome
+
+
 async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
@@ -815,13 +864,21 @@ async def test_an_unexpected_exception_in_one_step_waits_for_its_wave_before_pro
     # exception `_attempt` never caught (anything but `_Stopped`) must still
     # let the wave's other step run to completion, not abandon it unawaited
     # the moment the first exception surfaces.
+    # The run is recorded failed, and what is raised names it, the defect
+    # its cause.
     surface = _RacingSurface(real_schemas, manifest_for(population_source()))
+    ledger = InMemoryRunLedger()
 
-    with pytest.raises(RuntimeError, match="boom"):
-        await execute_approved_plan(two_source_plan(), surface=surface, sleep=_Sleeps())
+    with pytest.raises(RunAbandonedError) as raised:
+        await execute_approved_plan(
+            two_source_plan(), surface=surface, ledger=ledger, sleep=_Sleeps()
+        )
 
     assert {name for name, _ in surface.calls} == {"get_data"}
     assert surface.population_completed is True
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    run = await ledger.get(raised.value.run_id)
+    assert run is not None and run.failure is not None and run.failure.code == "internal_error"
 
 
 async def test_a_retrieval_reminted_under_another_id_is_still_checked_against_its_source(
@@ -975,7 +1032,7 @@ async def test_a_terminal_step_that_produced_no_frame_is_refused_not_a_crash(
             "status": PlanStatus.PENDING_APPROVAL,
             "approved_revision": None,
         }
-    ).approve()
+    ).approve(at=datetime.now(UTC))
     surface = _surface(real_schemas, manifest())
 
     finished, outcome = await execute_approved_plan(plan, surface=surface, sleep=_Sleeps())
@@ -1128,15 +1185,6 @@ async def test_execute_approved_plan_marks_a_refused_run_failed(
     assert finished.status is PlanStatus.FAILED
 
 
-async def test_run_workflow_refuses_a_plan_that_is_not_executing(
-    approved_plan: PlanFactory, real_schemas: list[ToolSchema]
-) -> None:
-    plan = approved_plan()  # APPROVED, not EXECUTING: only execute_approved_plan may run it
-
-    with pytest.raises(ValueError, match="not executing"):
-        await _run_workflow(plan, surface=ScriptedSurface(schemas=real_schemas, responses={}))
-
-
 async def test_an_unreadable_surface_stops_the_run_before_any_call(
     approved_plan: PlanFactory, real_schemas: list[ToolSchema]
 ) -> None:
@@ -1204,7 +1252,9 @@ def three_step_plan(
         discovered={"annual_debt_service": source()},
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_zero_row_terminal_result_is_refused(
@@ -1605,7 +1655,9 @@ def six_step_plan(
         discovered=sources,
     )
     assert compiled.workflow is not None, compiled.issues
-    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve()
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
 
 
 async def test_a_wave_wider_than_the_bound_queues_at_the_point_of_call(
@@ -1627,7 +1679,7 @@ async def test_a_wave_wider_than_the_bound_queues_at_the_point_of_call(
 # default_fetch_series_stats: the row-count check
 
 
-async def test_default_fetch_series_stats_passes_the_manifests_series_count_as_expected_rows(
+async def test_default_fetch_series_stats_passes_the_manifests_series_count_and_continuation(
     monkeypatch: pytest.MonkeyPatch, manifest: ManifestFactory
 ) -> None:
     captured: dict[str, Any] = {}
@@ -1638,10 +1690,27 @@ async def test_default_fetch_series_stats_passes_the_manifests_series_count_as_e
 
     monkeypatch.setattr("executor.run.fetch_series_statistics_table", fake_fetch)
     stripped = strip_manifest(manifest())
+    stripped = stripped.model_copy(
+        update={
+            "trace": {
+                **stripped.trace,
+                "continuations": [
+                    {
+                        "axis": "measurementMethod",
+                        "method": "Estimated",
+                        "periods": ["2025", "2026"],
+                    }
+                ],
+            }
+        }
+    )
 
     await default_fetch_series_stats(stripped)
 
-    assert captured["expected_rows"] == stripped.series_count
+    assert (captured["expected_series"], captured["continuing"]) == (
+        stripped.series_count,
+        "Estimated",
+    )
 
 
 async def test_default_fetch_series_stats_reads_the_artifact_when_series_count_is_missing(
@@ -1664,7 +1733,7 @@ async def test_default_fetch_series_stats_reads_the_artifact_when_series_count_i
     result = await default_fetch_series_stats(stripped)
     assert result is not None
     assert result.num_rows == 0
-    assert captured["expected_rows"] is None
+    assert captured["expected_series"] is None
 
 
 async def test_default_fetch_series_stats_answers_none_for_an_old_record(

@@ -548,8 +548,7 @@ class DerivedMarker:
     combination without its help.
 
     `inherited_stat_var` is set when `growth`'s output inherits its input's
-    `stat_var` (always) and when `compare`'s two sides' `stat_var`s differ.
-    It is carried for a human reading the trace, and no
+    `stat_var` (always). It is carried for a human reading the trace, and no
     verb refuses on it.
 
     `ordinal` -- a per-period `rank` with no `limit` carries the rank
@@ -596,6 +595,13 @@ def read_derived_marker(trace: StoredFrameTrace) -> DerivedMarker | None:
     )
 
 
+def holds_ratio(trace: StoredFrameTrace) -> bool:
+    """Whether `trace`'s values are a ratio already: its derived marker is
+    `dimensionless`."""
+    marker = read_derived_marker(trace)
+    return marker is not None and marker.dimensionless
+
+
 def derived_marker_detail(
     *,
     inherited: DerivedMarker | None,
@@ -610,10 +616,9 @@ def derived_marker_detail(
     carry, and can set flags of its own: `rank` (`ordinal` when
     `per_period=True` with no `limit`), `growth` (`inherited_stat_var`,
     unconditional, and `dimensionless` for a relative change), `share_of`
-    (`dimensionless`, unconditional), `compare` (`inherited_stat_var`, only
-    when its two sides' `stat_var`s differ).
-    `aggregate`, `filter`, `join`, `sum_of` and `quotient_of` call this with
-    none of these, a pure passthrough of whatever `inherited` already carries.
+    (`dimensionless`, unconditional). `aggregate`, `compare`, `filter`, `join`,
+    `sum_of` and `quotient_of` call this with none of these, a pure passthrough
+    of whatever `inherited` already carries.
 
     Merges rather than overwrites: every verb must carry its input's marker
     onward on its own output, merged with whatever flags it sets itself, or

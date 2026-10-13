@@ -37,7 +37,6 @@ from compiler.sources import member_digest, source_from_spec_block
 from compiler.surface import ToolSchema
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
-from planner.agent import _synthesize_source_decisions
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -501,8 +500,8 @@ def test_comparing_two_entities_of_one_retrieval_binds_each_side_by_role_and_ref
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
     )
 
     result = build(
@@ -532,8 +531,8 @@ def test_comparing_two_retrievals_binds_both_frames(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service"),
-        right=RequirementSide(input_id="annual_gdp"),
+        minuend=RequirementSide(input_id="annual_gdp"),
+        subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
     plan = _draft([decision()], [requirement(), gdp, comparison])
     gap = CompareOperation(
@@ -556,6 +555,41 @@ def test_comparing_two_retrievals_binds_both_frames(
         "right_frame_ref": Binding(from_step="gdp", output=ArtifactKind.FRAME_REF),
     }
     assert [s.spec_id for s in result.workflow.sources] == [SPEC_KENYA, SPEC_OTHER]
+
+
+def test_a_difference_subtracts_its_subtrahend_from_its_minuend(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # "Disbursements minus debt service". analysis-mcp's `compare` takes its
+    # right frame minus its left, so the minuend's retrieval binds
+    # `right_frame_ref` and the subtrahend's binds `frame_ref`.
+    disbursements = requirement(id="disbursements", measure="disbursements")
+    debt_service = requirement(id="debt_service", measure="external debt service paid")
+    net = ComparisonRequirement(
+        id="net",
+        decision_ids=["measure"],
+        minuend=RequirementSide(input_id="disbursements"),
+        subtrahend=RequirementSide(input_id="debt_service"),
+    )
+    plan = _draft([decision()], [disbursements, debt_service, net])
+    sources = {"disbursements": source(spec_id=SPEC_OTHER), "debt_service": source()}
+    translation = build_translation(
+        plan, {requirement_id: s.spec_id for requirement_id, s in sources.items()}
+    )
+
+    result = build(plan, translation, discovered=sources)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    (step,) = [step for step in result.workflow.steps if step.id == "net"]
+    assert step.tool.name == "compare"
+    assert step.bindings == {
+        "frame_ref": Binding(from_step="debt_service", output=ArtifactKind.FRAME_REF),
+        "right_frame_ref": Binding(from_step="disbursements", output=ArtifactKind.FRAME_REF),
+    }
 
 
 def test_a_rank_step_writes_the_sources_role_columns_as_rank_by(
@@ -1000,8 +1034,8 @@ def test_a_side_naming_a_group_of_several_members_is_refused(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Africa"),
-        right=RequirementSide(input_id="annual_debt_service", entity="G7"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="G7"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Africa"),
     )
     plan = _draft([decision()], [_g7_to_africa_requirement(requirement), comparison])
     gap = CompareOperation(
@@ -1380,8 +1414,8 @@ def test_an_aggregate_a_growth_and_a_filter_reading_a_join_or_a_comparison_are_t
         terminal_req = ComparisonRequirement(
             id="term",
             decision_ids=["measure"],
-            left=RequirementSide(input_id="annual_debt_service"),
-            right=RequirementSide(input_id="annual_gdp"),
+            minuend=RequirementSide(input_id="annual_gdp"),
+            subtrahend=RequirementSide(input_id="annual_debt_service"),
         )
         terminal_op = CompareOperation(
             id="term", requirement_id="term", left=Side(input="debt"), right=Side(input="gdp")
@@ -1753,8 +1787,8 @@ def test_an_operation_reading_a_comparison_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
     )
     plan = _two_country_plan(decision, requirement, comparison, derived_requirement())
     gap = CompareOperation(
@@ -1965,8 +1999,8 @@ def test_a_spec_id_discovered_for_another_requirement_is_refused(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service"),
-        right=RequirementSide(input_id="annual_gdp"),
+        minuend=RequirementSide(input_id="annual_gdp"),
+        subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
     plan = _draft([decision()], [requirement(), gdp, comparison])
     retrieve_gdp = _retrieve(id="gdp", requirement_id="annual_gdp", spec_id=SPEC_KENYA)
@@ -2099,8 +2133,8 @@ def test_a_whole_side_from_a_wider_source_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service"),
-        right=RequirementSide(input_id="annual_gdp"),
+        minuend=RequirementSide(input_id="annual_gdp"),
+        subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
     plan = _draft([decision()], [requirement(), gdp, comparison])
     gap = CompareOperation(
@@ -2249,7 +2283,7 @@ def _whole_side_of(kind: str, filtered: str) -> tuple[EvidenceRequirement, Opera
     if kind == "compare":
         return (
             ComparisonRequirement(
-                id="gap", decision_ids=["measure"], left=plan_whole, right=plan_gdp
+                id="gap", decision_ids=["measure"], minuend=plan_gdp, subtrahend=plan_whole
             ),
             CompareOperation(id="gap", requirement_id="gap", left=whole, right=gdp),
         )
@@ -2425,8 +2459,8 @@ def test_a_two_branch_graph_reports_source_width_once_not_once_per_path(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="from_2018"),
-        right=RequirementSide(input_id="just_period"),
+        minuend=RequirementSide(input_id="just_period"),
+        subtrahend=RequirementSide(input_id="from_2018"),
     )
     plan = _draft([decision()], [requirement(), from_2018, filter_req, comparison])
     from_2018_op = FilterOperation(
@@ -2535,8 +2569,8 @@ def test_a_side_naming_an_entity_the_requirement_lacks_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
     )
 
     result = build(
@@ -2563,8 +2597,8 @@ def test_a_whole_side_from_a_requirement_with_several_entities_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="annual_debt_service"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
 
     result = build(
@@ -2635,8 +2669,8 @@ def test_comparing_a_side_with_itself_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
-        right=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        minuend=RequirementSide(input_id="annual_debt_service", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="annual_debt_service", entity="Kenya"),
     )
 
     result = build(
@@ -2699,8 +2733,8 @@ def test_two_sides_of_one_retrieval_naming_different_entities_are_not_degenerate
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure", "comparison"],
-        left=RequirementSide(input_id="by_entity_a", entity="Kenya"),
-        right=RequirementSide(input_id="by_entity_b", entity="Ghana"),
+        minuend=RequirementSide(input_id="by_entity_b", entity="Ghana"),
+        subtrahend=RequirementSide(input_id="by_entity_a", entity="Kenya"),
     )
     plan = _two_country_plan(
         decision,
@@ -2741,8 +2775,8 @@ def test_comparing_requirements_whose_periods_share_no_year_is_reported(
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="annual_debt_service"),
-        right=RequirementSide(input_id="old_gdp"),
+        minuend=RequirementSide(input_id="old_gdp"),
+        subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
     plan = _draft([decision()], [requirement(), old, comparison])
     gap = CompareOperation(
@@ -3316,7 +3350,7 @@ def _two_sided(
         )
     elif verb == "compare":
         derived = ComparisonRequirement(
-            id="two", decision_ids=["measure"], left=sides[0], right=sides[1]
+            id="two", decision_ids=["measure"], minuend=sides[1], subtrahend=sides[0]
         )
         operation = CompareOperation(id="two", requirement_id="two", left=debt, right=gdp)
     else:
@@ -4304,7 +4338,7 @@ def _every_country(**overrides: Any) -> DatasetRequirement:
         "id": "health",
         "decision_ids": ["measure"],
         "measure": "health spending per person",
-        "across": "country",
+        "across": ["country"],
         "period": Period(start=2015, end=2024),
     }
     return DatasetRequirement(**(fields | overrides))
@@ -4384,6 +4418,97 @@ def test_top_countries_by_health_spending_ranks_by_the_open_place_axis(
     assert rank.expected_role_keys == _frame_role_columns(["observationAbout"])
 
 
+def test_a_rank_over_the_open_place_axis_without_a_level_filter_is_refused(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    place_scope_block: dict[str, Any],
+) -> None:
+    # The plan cannot know which axis "country" covers, so compile, which
+    # does, refuses a rank over every level of place.
+    open_place = source_from_spec_block(place_scope_block)
+    rank_req, ranked = _rank_over("health", axis="country")
+    plan = _draft([decision(), _population_decision(decision)], [_every_country(), rank_req])
+    fetch = RetrieveOperation(id="fetch", requirement_id="health", spec_id=open_place.spec_id)
+
+    result = build(
+        plan,
+        _translation(fetch, ranked, terminal=["ranked"]),
+        discovered={"health": open_place},
+    )
+
+    assert _codes(result) == [Code.INPUT_SHAPE_UNSUPPORTED]
+    assert "holds every place with data at every level" in result.issues[0].reason
+
+
+# IDS leaves its debtors open on `destination` and no `observationAbout`
+# (dev, the total series and its by-creditor twin alike).
+_IDS_DEBTORS = OpenEntityAxis(column="destination", member_count=134)
+
+
+def _ids_debt_total(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    *,
+    level_filter: bool,
+) -> CompileResult:
+    """A total over every IDS debtor, `across=('country',)`, with or without a level filter."""
+    ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
+    countries_req, countries = _countries_of("health")
+    reads = "countries" if level_filter else "fetch"
+    total_req = AggregateRequirement(
+        id="totals",
+        decision_ids=["measure"],
+        input_id=reads if level_filter else "health",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    total = AggregateOperation(
+        id="totals",
+        requirement_id="totals",
+        input=reads,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    requirements = [_every_country(), *([countries_req] if level_filter else []), total_req]
+    operations = [
+        RetrieveOperation(id="fetch", requirement_id="health", spec_id=ids.spec_id),
+        *([countries] if level_filter else []),
+        total,
+    ]
+    return build(
+        _draft([decision()], requirements),
+        _translation(*operations, terminal=["totals"]),
+        discovered={"health": ids},
+    )
+
+
+def test_a_total_over_ids_debtors_by_country_needs_no_level_filter(
+    build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
+) -> None:
+    # "country" covers the debtors' flow axis, which keeps its role: it holds
+    # parties, whose kinds keep the World Bank group totals out of the sum.
+    result = _ids_debt_total(build, decision, source, level_filter=False)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    retrieve, total = result.workflow.steps
+    assert retrieve.args["place_types"] is True
+    assert total.args["group_by"] == ["time_period"]
+
+
+def test_a_level_filter_over_ids_debtors_is_refused_with_its_own_code(
+    build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
+) -> None:
+    result = _ids_debt_total(build, decision, source, level_filter=True)
+
+    assert _codes(result) == [Code.LEVEL_FILTER_ON_FLOW_AXIS]
+    assert (result.issues[0].operation_id, result.issues[0].requirement_id) == (
+        "countries",
+        "health",
+    )
+
+
 def test_a_series_of_every_place_asks_for_no_place_types(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
@@ -4409,7 +4534,7 @@ def _kenya_from_every_donor(party: str = "donor") -> DatasetRequirement:
         decision_ids=["measure"],
         measure="education aid",
         entities=[Entity(name="Kenya", role="recipient")],
-        across=party,
+        across=(party,),
         period=Period(start=2015, end=2023),
     )
 
@@ -4543,7 +4668,7 @@ def test_top_creditors_nigeria_pays_rank_over_the_open_creditor_axis(
         decision_ids=["measure"],
         measure="debt service on PPG external debt",
         entities=[Entity(name="Nigeria", role="debtor")],
-        across="creditor",
+        across=("creditor",),
         period=Period(start=2024, end=2024),
     )
     fields: dict[str, Any] = {
@@ -4636,7 +4761,7 @@ def test_a_narrower_or_other_population_is_refused_over_the_open_place_axis(
     rank_req, ranked = _rank_over("health", axis=population)
     plan = _draft(
         [decision(), _population_decision(decision)],
-        [_every_country(across=population), rank_req],
+        [_every_country(across=(population,)), rank_req],
     )
 
     result = build(
@@ -4757,7 +4882,7 @@ def test_grouping_by_entity_over_an_open_axis_naming_no_entity_is_refused(
         id="aid",
         decision_ids=["measure"],
         measure="education aid",
-        across="donor",
+        across=("donor",),
         period=Period(start=2015, end=2024),
     )
     total = AggregateRequirement(
@@ -4874,7 +4999,7 @@ def test_an_open_axis_with_an_unknown_count_or_one_below_two_is_source_unusable(
     assert result.ok is not refused
     if refused:
         assert "its open axis 'observationAbout'" in result.issues[0].reason
-        assert "instead of stating `across`" in result.issues[0].reason
+        assert "instead of stating that party in `across`" in result.issues[0].reason
 
 
 def test_an_axis_less_share_of_over_an_open_axis_is_share_axis_required(
@@ -4950,8 +5075,8 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
     gap = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="kenya_health"),
-        right=RequirementSide(input_id="health"),
+        minuend=RequirementSide(input_id="health"),
+        subtrahend=RequirementSide(input_id="kenya_health"),
     )
     plan = _draft([decision()], [kenya, _every_country(), gap])
     compare = CompareOperation(
@@ -4996,7 +5121,7 @@ def test_a_donor_across_a_lone_open_destination_is_source_unusable(
         id="aid",
         decision_ids=["measure"],
         measure="education aid",
-        across="donor",
+        across=("donor",),
         period=Period(start=2015, end=2024),
     )
     rank_req, ranked = _rank_over("aid", axis="donor")
@@ -5026,13 +5151,14 @@ def _rank_every_donor_with_destination_open(
     decision: DecisionFactory,
     source: SourceFactory,
     recipients: int | None,
+    across: tuple[str, ...] = ("donor",),
 ) -> CompileResult:
     """A rank over every donor, compiled against a source that also leaves `destination` open."""
     every_donor = DatasetRequirement(
         id="aid",
         decision_ids=["measure"],
         measure="education aid",
-        across="donor",
+        across=across,
         period=Period(start=2015, end=2024),
     )
     rank_req, ranked = _rank_over("aid", axis="donor")
@@ -5068,8 +5194,20 @@ def test_a_source_leaving_both_flow_sides_open_is_source_unusable(
     result = _rank_every_donor_with_destination_open(build, decision, source, recipients)
 
     assert _codes(result) == [Code.SOURCE_UNUSABLE]
-    assert "'destination', 'origin' open" in result.issues[0].reason
-    assert "name the members of the other" in result.issues[0].reason
+    assert "also leaves 'destination' open over several members" in result.issues[0].reason
+    assert "add its party word to `across`" in result.issues[0].reason
+
+
+def test_a_source_leaving_both_flow_sides_open_compiles_when_across_states_both(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    result = _rank_every_donor_with_destination_open(
+        build, decision, source, 140, across=("donor", "recipient")
+    )
+
+    assert _codes(result) == []
 
 
 def test_a_second_open_axis_holding_one_member_leaves_the_rank_to_compile(
@@ -5106,8 +5244,8 @@ def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_entity_required
     gap = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="aid"),
-        right=RequirementSide(input_id="uganda_aid"),
+        minuend=RequirementSide(input_id="uganda_aid"),
+        subtrahend=RequirementSide(input_id="aid"),
     )
     plan = _draft([decision()], [_kenya_from_every_donor(), uganda, gap])
 
@@ -5224,17 +5362,12 @@ def _drc_sources(source: SourceFactory) -> dict[str, SelectedSource]:
 
 
 def _replayed(arguments: dict[str, Any]) -> Plan:
-    """The draft `propose_plan` records from `arguments`, each pinned source settled by a search."""
+    """The draft `propose_plan` records from `arguments`."""
     requirements = TypeAdapter(list[EvidenceRequirement]).validate_python(
         arguments["evidence_requirements"]
     )
     drafts = TypeAdapter(list[DecisionDraft]).validate_python(arguments["decisions"])
-    decisions, requirements = _synthesize_source_decisions(
-        settle_decisions(drafts, requirements),
-        requirements,
-        previous=None,
-        settled_spec_ids={SPEC_US_TO_DRC, SPEC_EVERY_DONOR_TO_DRC},
-    )
+    decisions = settle_decisions(drafts, requirements)
     # An amendment states no question, so the plan keeps the first draft's.
     return Plan(
         question=_DRC_PLANS["plan_v1"]["question"],
@@ -5339,7 +5472,7 @@ def test_grouping_by_entity_writes_the_named_party_and_sums_the_open_one(
         decision_ids=["measure"],
         measure="official development assistance",
         entities=[named],
-        across=across,
+        across=(across,),
         period=Period(start=2015, end=2024),
     )
     total = AggregateRequirement(
@@ -5588,7 +5721,7 @@ def test_a_keyed_quotient_over_an_open_axis_on_both_sides_divides_member_by_memb
         decision_ids=["measure"],
         measure="aid given",
         entities=[Entity(name="United States", role="donor")],
-        across="recipient",
+        across=("recipient",),
         period=Period(start=2015, end=2024),
     )
     population = _every_country(id="population", measure="population")
@@ -6025,7 +6158,7 @@ def _reading_the_division(kind: str) -> tuple[EvidenceRequirement, Operation]:
     if kind == "compare":
         return (
             ComparisonRequirement(
-                id="picked", decision_ids=["measure"], left=sides[0], right=sides[1]
+                id="picked", decision_ids=["measure"], minuend=sides[1], subtrahend=sides[0]
             ),
             CompareOperation(id="picked", requirement_id="picked", left=kenya, right=uganda),
         )
@@ -6112,8 +6245,8 @@ def test_an_entity_a_keyed_division_dropped_the_column_of_is_referred(
     compared = ComparisonRequirement(
         id="picked",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="divided", entity="United States"),
-        right=RequirementSide(input_id="divided", entity="Kenya"),
+        minuend=RequirementSide(input_id="divided", entity="Kenya"),
+        subtrahend=RequirementSide(input_id="divided", entity="United States"),
     )
     compare = CompareOperation(
         id="picked",
@@ -6163,8 +6296,8 @@ def test_whole_sides_of_two_keyed_quotients_are_entity_required(
     compared = ComparisonRequirement(
         id="picked",
         decision_ids=["measure"],
-        left=RequirementSide(input_id="divided"),
-        right=RequirementSide(input_id="inverse"),
+        minuend=RequirementSide(input_id="inverse"),
+        subtrahend=RequirementSide(input_id="divided"),
     )
     compare = CompareOperation(
         id="picked",
@@ -6491,8 +6624,8 @@ def test_a_quotient_pairs_with_another_quotient_and_no_measured_side(
         paired = ComparisonRequirement(
             id="paired",
             decision_ids=["measure"],
-            left=RequirementSide(input_id=plan_sides[0]),
-            right=RequirementSide(input_id=plan_sides[1]),
+            minuend=RequirementSide(input_id=plan_sides[1]),
+            subtrahend=RequirementSide(input_id=plan_sides[0]),
         )
         pairing = CompareOperation(
             id="paired",
@@ -6686,8 +6819,8 @@ def test_an_absolute_change_in_a_quotient_reads_as_the_quotient_does(
         reading_req = ComparisonRequirement(
             id="reading",
             decision_ids=["measure"],
-            left=RequirementSide(input_id=plan_reads, entity=kenya),
-            right=RequirementSide(input_id=other, entity=uganda),
+            minuend=RequirementSide(input_id=other, entity=uganda),
+            subtrahend=RequirementSide(input_id=plan_reads, entity=kenya),
         )
         reading = CompareOperation(
             id="reading",
@@ -6825,8 +6958,8 @@ def _two_per_head_figures(
             ComparisonRequirement(
                 id="paired",
                 decision_ids=["measure"],
-                left=RequirementSide(input_id=sides[0]),
-                right=RequirementSide(input_id=sides[1]),
+                minuend=RequirementSide(input_id=sides[1]),
+                subtrahend=RequirementSide(input_id=sides[0]),
             )
         )
         operations.append(
@@ -7218,8 +7351,8 @@ def test_a_share_pairs_only_with_another_side_in_percent(
                     else ComparisonRequirement(
                         id="again",
                         decision_ids=["measure"],
-                        left=RequirementSide(input_id=left_req),
-                        right=RequirementSide(input_id=right_req),
+                        minuend=RequirementSide(input_id=right_req),
+                        subtrahend=RequirementSide(input_id=left_req),
                     )
                 ),
             ],

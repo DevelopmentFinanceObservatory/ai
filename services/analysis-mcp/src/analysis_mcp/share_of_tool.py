@@ -10,20 +10,22 @@ same unification `CompareOpSpec`'s own docstring explains) -> run the engine
 exceptions to its own refusal -> mint identity, build the trace, write the
 store under the result's own pair -> render the digest. The result's rows sit
 under `dcid:<op_spec_hash>`, the operation's own StatVar, so the hash is minted
-before the engine runs, and the stored trace describes that StatVar as a
-`ComposedStatVar` with relation `share`. Every typed failure this
+before the engine runs. Every typed failure this
 function itself anticipates is returned via `to_tool_result`, never raised.
 An exception outside that set would escape this function; `server.py`'s
 registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
 this backstop complements the typed handling below rather than replacing it.
+
+The stored step (`_share_step`) counts the numerator keys and periods the
+share keeps, the entities each period's denominator sums, and the values one
+side alone reports, which it leaves out.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated
 
-from common.materialisation import ComposedStatVar
 from common.unit_refs import PERCENT_UNIT
 from fastmcp.tools import ToolResult
 from pydantic import Field
@@ -70,6 +72,7 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import PinnedUnit, ShareOfOpSpec
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -262,6 +265,29 @@ async def _resolve_sides(
         return ordinal_refusal
 
     return numerator, denominator, input_content_versions
+
+
+def _share_step(op_spec: ShareOfOpSpec, result: ShareOfResult, *, trace: Trace) -> Step:
+    """The step record of `result`, stored on `trace`: the numerator keys and
+    periods it kept, each period's denominator coverage, the values it left
+    out, and per cent."""
+    coverage = result.coverage
+    return build_step(
+        op="share",
+        trace=trace,
+        inputs={
+            "numerator": op_spec.frame_ref,
+            "denominator": op_spec.denominator_frame_ref or op_spec.frame_ref,
+        },
+        kept={
+            "entities": coverage.entities,
+            "periods": coverage.periods,
+            "entities_with_fewer_periods": coverage.entities_with_fewer_periods,
+        },
+        left_out=left_out_from_exclusions(result.exclusions),
+        unit=step_unit(PERCENT_UNIT),
+        period_entities=coverage.period_entities,
+    )
 
 
 def _share_or_refusal(
@@ -554,13 +580,7 @@ async def share_of(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[numerator_trace, denominator_trace],
-        own_composed_stat_var=ComposedStatVar(
-            stat_var=result.stat_var,
-            relation="share",
-            first=(result.numerator_stat_var,),
-            second=(result.denominator_stat_var,),
-        ),
+        step=_share_step(op_spec, result, trace=output_trace),
         digest=lambda: render_share_of_digest(
             result=result,
             op_spec_hash=op_spec_hash,

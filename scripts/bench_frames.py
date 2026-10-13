@@ -107,11 +107,11 @@ from analysis_mcp.share_of_tool import share_of
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, MaterialisationTrace, StoredFrameTrace, set_store
 from common.materialisation.gcs_store import GcsMaterialisationStore
+from common.place_type import kind_column
 from common.row_budget import RowBudget, row_budget, set_row_budget
 from common.settings import BaseServiceSettings
 from data_mcp.frame_materialisation import (
     _frame_from_parquet_bytes,
-    _select_parquet_artifact,
     _verify_parse_and_register,
 )
 from data_mcp.manifest import strip_manifest
@@ -143,6 +143,9 @@ UNBOUNDED_BYTES = 2**33
 
 CRS_ROLES = ("financingProvider", "financingRecipient")
 SECTOR_ROLES = (*CRS_ROLES, "sector")
+# Each party's kind, as `get_data(place_types=True)` serves it: the verbs that pool or rank
+# several parties refuse a frame without it. Role keys of the frame, never ranked or grouped.
+KIND_COLUMNS = tuple(kind_column(role) for role in CRS_ROLES)
 SECTOR_A = "dcid:bench_sv_a"
 SECTOR_B = "dcid:bench_sv_b"
 
@@ -192,7 +195,7 @@ def _values(rng: random.Random, n: int) -> pa.Array:
 
 def _crs_table(n: int) -> pa.Table:
     """`n` distinct (StatVar, provider, recipient, year) rows with non-round float values,
-    built as Arrow columns from small integer codes."""
+    built as Arrow columns from small integer codes, every party of kind `party`."""
     space = N_STAT_VARS * N_PROVIDERS * N_RECIPIENTS * len(YEARS)
     if n > space:
         raise SystemExit(f"{n} rows exceed the {space}-cell CRS grain")
@@ -214,13 +217,15 @@ def _crs_table(n: int) -> pa.Table:
             "time_period": _take(pa.array(YEARS, type=pa.string()), years),
             "value": _values(rng, n),
             "unit": pa.repeat("dcid:USD", n),
+            **_party_kinds(n),
         }
     )
 
 
 def _sector_table(n: int, *, stat_var: str) -> pa.Table:
     """`n` rows of one StatVar: every year for each of `n / 10` (provider, recipient, sector)
-    entities, in shuffled order, so growth and share_of find no gap years."""
+    entities, in shuffled order, so growth and share_of find no gap years, every party of
+    kind `party`."""
     if n % len(YEARS):
         raise SystemExit(f"{n} rows is not a multiple of the {len(YEARS)} years")
     rng = random.Random(SEED)
@@ -244,16 +249,23 @@ def _sector_table(n: int, *, stat_var: str) -> pa.Table:
             "time_period": _take(pa.array(YEARS, type=pa.string()), years),
             "value": _values(rng, n),
             "unit": pa.repeat("dcid:USD", n),
+            **_party_kinds(n),
         }
     )
 
 
+def _party_kinds(n: int) -> dict[str, pa.Array]:
+    return {column: pa.repeat("party", n) for column in KIND_COLUMNS}
+
+
 def _crs_frame(n: int) -> Frame:
-    return build_frame_from_arrow(_crs_table(n), role_keys=CRS_ROLES)
+    return build_frame_from_arrow(_crs_table(n), role_keys=(*CRS_ROLES, *KIND_COLUMNS))
 
 
 def _sector_frame(n: int, *, stat_var: str) -> Frame:
-    return build_frame_from_arrow(_sector_table(n, stat_var=stat_var), role_keys=SECTOR_ROLES)
+    return build_frame_from_arrow(
+        _sector_table(n, stat_var=stat_var), role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)
+    )
 
 
 def _artifact_bytes(n: int) -> bytes:
@@ -431,8 +443,8 @@ def _join_inputs(n: int) -> _Inputs:
     right = right.set_column(right.schema.get_field_index("sector"), "sector", renamed)
     return _stored_inputs(
         {
-            "sector_a": build_frame_from_arrow(left, role_keys=SECTOR_ROLES),
-            "sector_b": build_frame_from_arrow(right, role_keys=SECTOR_ROLES),
+            "sector_a": build_frame_from_arrow(left, role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)),
+            "sector_b": build_frame_from_arrow(right, role_keys=(*SECTOR_ROLES, *KIND_COLUMNS)),
         }
     )
 
@@ -556,6 +568,7 @@ def _setup_share_of(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
         run_share_of(
             frame,
             frame,
+            stat_var=SECTOR_A,
             numerator_entity=SHARE_NUMERATOR,
             denominator_entity={},
             numerator_by=SHARE_BY,
@@ -635,6 +648,8 @@ def _setup_wire(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
 
 def _setup_get_data(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
     ref = _ref("get_data")
+    digest = f"sha256:{hashlib.sha256(inputs.artifact).hexdigest()}"
+    rendering = {"bundle": False, "format": "parquet"}
     manifest = strip_manifest(
         {
             "schema_version": 1,
@@ -645,8 +660,8 @@ def _setup_get_data(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
             "warnings": [],
             "artifacts": [
                 {
-                    "artifact_digest": f"sha256:{hashlib.sha256(inputs.artifact).hexdigest()}",
-                    "rendering": {"bundle": False, "format": "parquet"},
+                    "artifact_digest": digest,
+                    "rendering": rendering,
                     "bytes": len(inputs.artifact),
                     "media_type": "application/vnd.apache.parquet",
                     "created_at": "2026-09-30T00:00:00+00:00",
@@ -661,12 +676,16 @@ def _setup_get_data(store: GcsMaterialisationStore, inputs: _Inputs) -> _Run:
     def run() -> dict[str, int]:
         # A copy, as the fetch allocates the artifact's bytes afresh.
         fetched = bytes(memoryview(inputs.artifact))
+        # Read as a requested rendering, which validates every cell. The canonical path
+        # trusts the cells but needs a content version minted from the frame's hash.
         outcome = asyncio.run(
             _verify_parse_and_register(
                 fetched=fetched,
-                artifact=_select_parquet_artifact(manifest),
+                artifact_digest=digest,
+                canonical=False,
                 ref=ref,
                 manifest=manifest,
+                options=rendering,
                 settings=settings,
                 writer="bench",
                 store=store,

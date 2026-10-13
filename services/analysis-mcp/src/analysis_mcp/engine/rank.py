@@ -151,6 +151,9 @@ class EntityRank:
     shared by every entity. It defaults to the empty string only so a
     hand-built `EntityRank` in a test that doesn't care about it (e.g.
     `digest_corpus.py`) need not set it.
+
+    `period_count` is how many of the window's `RankResult.window_period_count`
+    periods the entity holds, the count `coverage_fraction` divides.
     """
 
     entity_key: tuple[tuple[str, str], ...]
@@ -159,6 +162,7 @@ class EntityRank:
     row_count: int
     coverage_fraction: float
     time_period: str = ""
+    period_count: int = 0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -169,6 +173,9 @@ class RankResult:
     `entity_ranks` is the whole ranking; `kept_ranks` is the part of it
     the output frame holds, every entity within `limit`. `ordinal` is
     whether the output frame's `value` is the rank position.
+    `window_period_count` is how many periods the window holds before
+    unit-less rows are left out, the periods each entity's coverage is
+    measured against.
     """
 
     frame: Frame
@@ -186,6 +193,7 @@ class RankResult:
     per_period: bool = False
     limit: int | None = None
     exclusions: Exclusions = field(default_factory=Exclusions)
+    window_period_count: int = 0
 
     @property
     def kept_ranks(self) -> tuple[EntityRank, ...]:
@@ -372,6 +380,7 @@ def _rank_per_period(
     entity_members: dict[tuple[str, ...], _Members],
     periods: Sequence[str],
     entity_coverage: dict[tuple[str, ...], float],
+    entity_present_periods: dict[tuple[str, ...], tuple[str, ...]],
     rank_by: Sequence[str],
     aggregation: str | None,
     ascending: bool,
@@ -384,8 +393,8 @@ def _rank_per_period(
     with none, `_reduced_cell_value` raises `RankAmbiguousEntityError`
     exactly as the collapsing path does), and competition ranking
     (`_competition_rank`) runs independently per period, so a tie inside
-    one period cannot affect another's. Row counts and `entity_coverage`
-    stay entity-wide -- unaffected by this per-period grouping, since
+    one period cannot affect another's. Row counts, `entity_coverage` and
+    `entity_present_periods` stay entity-wide -- unaffected by this per-period grouping, since
     coverage is still measured against the whole window, not one period at
     a time. `periods` names the period codes in `entity_members`.
 
@@ -421,6 +430,7 @@ def _rank_per_period(
                     row_count=len(entity_members[key][0]),
                     coverage_fraction=entity_coverage[key],
                     time_period=period,
+                    period_count=len(entity_present_periods[key]),
                 )
             )
     return entity_ranks
@@ -557,6 +567,7 @@ def run_rank(
             entity_members=entity_members,
             periods=members.periods,
             entity_coverage=entity_coverage,
+            entity_present_periods=entity_present_periods,
             rank_by=rank_by,
             aggregation=aggregation,
             ascending=ascending,
@@ -588,6 +599,7 @@ def run_rank(
                     row_count=len(entity_members[key][0]),
                     coverage_fraction=entity_coverage[key],
                     time_period=window_label,
+                    period_count=len(entity_present_periods[key]),
                 )
             )
 
@@ -651,4 +663,5 @@ def run_rank(
         overall_coverage_fraction=overall_coverage_fraction,
         entity_ranks=tuple(entity_ranks),
         exclusions=exclusions,
+        window_period_count=pre_exclusion_period_count,
     )

@@ -183,7 +183,7 @@ def _structured(refusal: ToolRefusal) -> dict[str, Any]:
 
 def _refuse_compare(left: Frame, right: Frame) -> dict[str, Any]:
     with pytest.raises(typing.get_args(compare_tool._EngineError)) as caught:
-        run_compare(left, right, left_entity={}, right_entity={})
+        run_compare(left, right, stat_var="dcid:ops_" + "d" * 32, left_entity={}, right_entity={})
     return _structured(compare_tool._refusal_for_engine_error(caught.value))
 
 
@@ -284,7 +284,11 @@ def test_a_cross_side_mismatch_with_a_unit_object_refuses_by_its_label(
 
 def test_two_sides_with_equal_composed_units_compare() -> None:
     result = run_compare(
-        _frame(USD_PER_PERSON), _frame(USD_PER_PERSON), left_entity={}, right_entity={}
+        _frame(USD_PER_PERSON),
+        _frame(USD_PER_PERSON),
+        stat_var="dcid:ops_" + "d" * 32,
+        left_entity={},
+        right_entity={},
     )
 
     assert result.left_resolved_unit == USD_PER_PERSON

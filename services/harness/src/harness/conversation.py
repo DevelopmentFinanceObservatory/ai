@@ -39,8 +39,16 @@ def current_conversation_caller() -> str | None:
     return None if conversation == NO_CONVERSATION else conversation_caller(conversation)
 
 
+def conversation_of(session_id: str) -> str:
+    """The conversation a turn whose ADK session is `session_id` belongs to:
+    the studio's, which spans its turns, or outside the studio the session's."""
+    conversation = current_conversation_id.get()
+    return session_id if conversation == NO_CONVERSATION else conversation
+
+
 __all__ = [
     "NO_CONVERSATION",
+    "conversation_of",
     "current_conversation_caller",
     "current_conversation_id",
     "current_conversation_key",

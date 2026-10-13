@@ -725,6 +725,59 @@ def test_a_card_without_sources_counts_its_caveats_after_more_info() -> None:
     assert _source_line(_shell(envelope)) == "More info · 2 caveats"
 
 
+_CRS = "OECD Creditor Reporting System (CRS)"
+_CRS_SOURCE = f"{_CRS}, licence OECD Terms and Conditions, retrieved 2026-09-28"
+_CRS_CITATION = f"{_CRS} via ONE DFO, retrieved 2026-09-28"
+
+
+@pytest.mark.parametrize(
+    ("fixture", "source_line", "last_details"),
+    [
+        (
+            "line_chart_description",
+            f"{_CRS} · 1 caveat",
+            [
+                _CRS_SOURCE,
+                "Data through 2024.",
+                "provisional: Values of infectious disease control in 2024 are provisional.",
+                _CRS_CITATION,
+            ],
+        ),
+        (
+            "source_card_description",
+            _CRS,
+            [
+                "Last refreshed 2026-09-28; a newer source download on 2026-10-08 is not in this card; next update expected 2026-12.",
+                _CRS_CITATION,
+            ],
+        ),
+    ],
+)
+def test_a_card_with_lineage_alone_in_its_provenance_reads_its_description(
+    fixture: str, source_line: str, last_details: list[str]
+) -> None:
+    envelope = resolved_revision(fixture)
+
+    view = _shell(envelope)
+
+    details = _details(view)
+    assert _source_line(view) == source_line
+    assert details[len(details) - len(last_details) :] == last_details
+    if envelope["component"]["type"] == "source_card":
+        assert _CRS_SOURCE in _face_texts(view)
+    model = chart_model(envelope)
+    assert model is None or model.source_line == source_line
+
+
+def test_a_narration_note_with_lineage_alone_draws_the_mark_without_more_info() -> None:
+    view = _shell(resolved_revision("note_narration_lineage"))
+
+    footer = view["view"]["children"][0]["children"][-1]
+    assert footer["cssClass"] == "dfo-chrome"
+    assert [node["type"] for node in _nodes(footer)] == ["Div", "Span"]
+    assert not any(node["type"] == "Accordion" for node in _nodes(view["view"]))
+
+
 def test_a_non_https_source_is_named_but_not_linked() -> None:
     envelope = resolved_revision("line_chart")
     envelope["provenance"]["sources"][0]["url"] = "javascript:alert(1)"

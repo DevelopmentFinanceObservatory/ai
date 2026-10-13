@@ -333,11 +333,17 @@ Notes on specific fields:
   always has.
 - `activity.step.status` is one of `pending`, `running`, `complete`,
   `failed`, `skipped`. A `failed` step is recoverable; the turn continues.
-  `detail` holds a one-line result on success; a card's step (labelled
-  with the card's kind and title) carries none. On a failed step it is
-  `<code>: <message>` from the refusal, or the message alone when the
-  failure has no code, cut at 400 characters, for a reader diagnosing
-  the turn. `produced` (`{component_id, revision}`)
+  `detail` holds a one-line result on success in plain words: a plan's
+  fetch step carries the retrieval's summary (observations, years,
+  source, series), as a fetch does; a plan's analysis step and a card's
+  step (labelled with the card's kind and title) carry none. A tool
+  call's failed step, a plan step's, an agent tool's or an edit's, carries
+  none: a refusal's code and message are written for the agent and stay in
+  the trace. A failed "Receive the datasets from Search" step says in plain
+  words that the datasets the user brought could not be used, a "Making N
+  charts" step keeps its `detail` (below), and a step still running when a
+  turn is stopped or fails closes `failed` with a plain reason such as
+  "Stopped before this step finished". `produced` (`{component_id, revision}`)
   links a step to its card. In a data turn, the agent's reply says why a
   card it asked for was not drawn. An edit turn whose write is refused
   closes with "The edit was refused: <message>", quoting the refusal's own
@@ -385,17 +391,18 @@ Notes on specific fields:
   summary (observations, years, series), with each measure named when
   there are several. The line completes when the next thing happens: a
   tool call, answer text, a hand-off, or the end of the stream. A plan
-  hand-back that carries no plan shows a `failed` "The planner could not
-  make a plan", then "Reading the planner's answer"; the closing message
+  hand-back that carries no plan shows a `failed` "No plan could be
+  made", then "Reading why no plan was made"; the closing message
   then says what could not be calculated. No model thought text is sent.
-- The agent shows one step per tool call: "Searching for data" (detail: the query, then what it found and did not find),
+- The agent shows one step per tool call: "Searching for data" (detail: the query, then what it found, named by the reading each measure resolved to, and what it did not find),
   "Fetching <measure>" (detail: the retrieval's summary), "Making N
   charts", and one step per card written ("Line chart: <title>"). The
   calls a fetch makes on its own behalf (retrieving and checking the
   data), skill reads and the hand-off to the planner are not shown when
   they succeed; each still shows as a `failed` step when it fails. A
   "Making N charts" step is `failed` when any chart it asked for was not
-  drawn, with `detail` naming how many and why; the cards it did draw
+  drawn, with `detail` naming how many and the titles of the refused
+  ones; the cards it did draw
   still arrive.
 - `component.created.payload` is the platform's resolved revision, `{schema_version, catalog_version, component_id, revision, provenance, component}`, as dfo-spec-kit's envelope schema defines it. `payload.component` holds everything the card draws, points included (see "Point data" below), and its title at `payload.component.title.text` (a note or a source card has none). `payload.provenance` is the platform's provenance for this revision and is authoritative for the card's back. Take the headline values and attribution from `fact_summary`.
 
@@ -423,8 +430,7 @@ The frame is published to the platform, but
 `GET /api/datasets/{spec_id}/{content_version}` answers 404 `not_found` for
 it, so its raw frame is not served. The card's own points are in `payload.component` either way.
 
-- `fact_summary` holds `component_id`, `revision`, `series[]` (`{id, label, point_count, coordinates?, first?, first_period?, last?, last_period?, change?}`; `first_period` and `last_period` are the periods of the first and last drawn points that hold a value; each is absent when its point carries no period, and both are absent for a stat card or table, which draw no series), `indicators[]`
-  (`{id, name, description}`), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?` (the unit slot of the card's payload, repeated as the platform states it, with its shape below),
+- `fact_summary` holds `component_id`, `revision`, `series[]` (`{id, label, point_count, coordinates?, first?, first_period?, last?, last_period?, change?}`; `first_period` and `last_period` are the periods of the first and last drawn points that hold a value; each is absent when its point carries no period, and both are absent for a stat card or table, which draw no series), `attribution` (`{label, source_count, indicator_count, source_detail_url?}`), `window?`, `unit?` (the unit slot of the card's payload, repeated as the platform states it, with its shape below),
   `series_truncated?`, `countries?`, `defaults?` (`[{pointer, detail}]`: the choices the platform made where the card's intent left one open, each naming the intent field it filled by JSON Pointer; absent means it made none). By design, the numbers in the message
   text come from fact summaries; the models are constrained to them. A chart's `window` is the one the
   platform states, or else the periods its axis draws: a bar chart of
@@ -612,9 +618,6 @@ from (`min_catalog_version` currently equals it).
 ## 11. Known limits in this version
 
 - `suggestions.items` is always empty.
-- `indicators[].description` is a technical property string (for example
-  `mp=lifeExpectancy,pt=Person`) or empty. Prose definitions
-  wait on the upstream platform (`docs/upstream-asks.md`).
 - Some searches refuse with `capability_unavailable` ("identity does not
   reproduce spec_id"). This is a known upstream data gap. The search step
   shows `failed` and the agent answers without that data; a retry will not

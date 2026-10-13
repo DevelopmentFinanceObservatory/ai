@@ -380,12 +380,43 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     part = _definite("spec_a")
     part["spec"]["resolved"] |= {
         "entities": [{"role": "origin", "ref": "GroupOfSeven", "label": "G7 countries, Total"}],
-        "entity_groups": {"origin": {"dcid": None, "label": "G7", "total": total}},
+        "entity_groups": {"origin": {"ref": None, "label": "G7", "total": total}},
     }
 
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert summary.get("group_readings") == readings
+
+
+@pytest.mark.parametrize(
+    ("facets", "codes"),
+    [
+        (
+            {"provenance": {"ref": "provenance/IDS", "label": "World Bank IDS"}},
+            [{"code": "DT.TDS.DEGG.CD", "source": "World Bank IDS"}],
+        ),
+        (
+            {"provenance": {"ref": "provenance/OECDDAC1", "label": "OECD DAC1"}},
+            [{"code": "DT.TDS.DEGG.CD"}],
+        ),
+        ({}, [{"code": "DT.TDS.DEGG.CD"}]),
+    ],
+    ids=["named", "other-source-bound", "no-source-bound"],
+)
+def test_a_part_summary_lists_the_source_codes_of_what_search_found(
+    facets: dict[str, Any], codes: list[dict[str, str]]
+) -> None:
+    part = _definite("spec_a")
+    plain = graph_envelope({"parts": [part]})["part_digests"][0]
+    part["spec"]["resolved"]["facets"] = facets
+    part["spec"]["resolved"]["stat_vars"]["source_codes"] = [
+        {"provenance": "provenance/IDS", "code": "DT.TDS.DEGG.CD"}
+    ]
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert "source_codes" not in plain
+    assert summary["source_codes"] == codes
 
 
 def test_unsupported_part_carries_its_detail_as_a_warning() -> None:
@@ -768,7 +799,7 @@ def test_a_catalogue_answer_is_unsupported_with_searchs_reading_as_its_warning()
     digest = graph_envelope(
         {
             "kind": "catalogue",
-            "scope": {"place": {"dcid": "country/KEN", "label": "Kenya"}},
+            "scope": {"place": {"ref": "country/KEN", "label": "Kenya"}},
             "diagnostics": {"warnings": []},
         }
     )

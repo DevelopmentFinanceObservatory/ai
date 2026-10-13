@@ -16,13 +16,6 @@
         "point_count": 9
       }
     ],
-    "indicators": [
-      {
-        "id": "BX.GRT.EXTA.CD.DT",
-        "name": "Grants, Excluding Technical Cooperation (current US$)",
-        "description": "Grants are legally binding commitments with no repayment requirement."
-      }
-    ],
     "attribution": {
       "label": "World Bank IDS · 1 indicator",
       "source_count": 1,

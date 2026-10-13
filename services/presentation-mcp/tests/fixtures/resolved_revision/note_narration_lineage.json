@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.10.0",
+  "component_id": "cmp_01j9zc4a1qm4p7q9r1t2",
+  "revision": 1,
+  "provenance": {
+    "inputs": [],
+    "execution_ref": null,
+    "generated_at": "2026-07-14T10:02:00Z",
+    "refreshed_from": null
+  },
+  "component": {
+    "type": "note_narration",
+    "text": "Malaria grant disbursements to Ethiopia held broadly steady from 2019 to 2024, after a dip in 2018.",
+    "authorship": "model"
+  }
+}

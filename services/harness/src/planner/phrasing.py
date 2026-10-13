@@ -19,7 +19,7 @@ card states a measure for a share_of's denominator.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from planner.parties import across_party, singular
 from planner.plan import (
@@ -83,28 +83,39 @@ def level_noun(level: PlaceType) -> str:
 
 
 def entities_phrase(
-    entities: Sequence[Entity], *, across: str | None = None, level: PlaceType | None = None
+    entities: Sequence[Entity],
+    *,
+    across: Sequence[str] = (),
+    level: PlaceType | None = None,
+    member_counts: Mapping[str, int] | None = None,
 ) -> str:
-    """Join entity names in the order given, deduplicated, then "every {across}" when `across` is set.
+    """Join entity names in the order given, deduplicated, then "every {word}" for each `across` word.
 
-    The parts read "a", "a and b" or "a, b and c", and `across` reads in the
-    singular, so "donors" gives "every donor". An `across` naming the place
-    party reads `EVERY_PLACE`, since such a retrieval holds every level of
-    place, or "every {level}" when a filter downstream of it keeps `level`
-    (`kept_level`): "every country". A `DatasetRequirement` always names an
-    entity or states `across`, so one of the two is set. An entity with
-    `members` set reads "each member of {name}", so a card tells the set's
-    members from the set's own figure.
+    The parts read "a", "a and b" or "a, b and c", and an `across` word reads
+    in the singular, so "donors" gives "every donor". `member_counts` maps an
+    `across` word to how many members the selected source holds on the axis
+    it covers, and a word with a count reads "all 50 recipients". A word
+    naming the place party reads `EVERY_PLACE`, since such a retrieval holds
+    every level of place and its count spans them all, or "every {level}"
+    when a filter downstream of it keeps `level` (`kept_level`): "every
+    country". A `DatasetRequirement` always names an entity or states
+    `across`, so one of the two is set. An entity with `members` set reads
+    "each member of {name}", so a card tells the set's members from the set's
+    own figure.
     """
     parts: list[str] = []
     for entity in entities:
         name = f"each member of {entity.name}" if entity.members else entity.name
         if name not in parts:
             parts.append(name)
-    if across is not None and across_party(across) == "place":
-        parts.append(EVERY_PLACE if level is None else f"every {level_noun(level)}")
-    elif across is not None:
-        parts.append(f"every {singular(across)}")
+    for word in across:
+        count = (member_counts or {}).get(word)
+        if across_party(word) == "place":
+            parts.append(EVERY_PLACE if level is None else f"every {level_noun(level)}")
+        elif count is not None:
+            parts.append(f"all {count:,} {pluralize(singular(word))}")
+        else:
+            parts.append(f"every {singular(word)}")
     if len(parts) == 1:
         return parts[0]
     return ", ".join(parts[:-1]) + f" and {parts[-1]}"
@@ -123,7 +134,11 @@ def datasets_of(requirement: EvidenceRequirement, plan: Plan) -> tuple[DatasetRe
         requirement, (AggregateRequirement, GrowthRequirement, RankRequirement, FilterRequirement)
     ):
         return datasets_of(plan.requirement(requirement.input_id), plan)
-    if isinstance(requirement, ComparisonRequirement | SumOfRequirement):
+    if isinstance(requirement, ComparisonRequirement):
+        return datasets_of(plan.requirement(requirement.minuend.input_id), plan) + datasets_of(
+            plan.requirement(requirement.subtrahend.input_id), plan
+        )
+    if isinstance(requirement, SumOfRequirement):
         return datasets_of(plan.requirement(requirement.left.input_id), plan) + datasets_of(
             plan.requirement(requirement.right.input_id), plan
         )
@@ -198,8 +213,9 @@ def among_phrase(
 ) -> str:
     """What a rank's `among` claims about the entities it ranks, in words.
 
-    `across` is the party the rank's axis covers whole, when that axis is a
-    requirement's `across`; no entity on it is named, so there is no focus.
+    `across` is the party the rank's axis covers whole, when that axis is one
+    of a requirement's `across` words; no entity on it is named, so there is
+    no focus.
     `member_count` is how many members the selected source holds on that
     axis, stated when known: "ranks all 55 donors the source holds".
     """

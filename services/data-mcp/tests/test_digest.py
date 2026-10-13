@@ -44,7 +44,7 @@ def _spec(
 
 def _facet_option(dcid: str, label: str) -> dict[str, Any]:
     """One `SlotOption`-shaped facet option value, keyed by dcid and label."""
-    return {"value": {"ref": {"dcid": dcid, "label": label}, "value_kind": "enum_value"}}
+    return {"value": {"ref": {"ref": dcid, "label": label}, "value_kind": "enum_value"}}
 
 
 def _part(
@@ -232,7 +232,7 @@ def test_definite_digest_facet_option_falls_back_to_dcid_when_no_label() -> None
             facet_options=[
                 {
                     "axis": "measurementMethod",
-                    "options": [{"value": {"ref": {"dcid": "dcid:CensusACS1yr"}}}],
+                    "options": [{"value": {"ref": {"ref": "dcid:CensusACS1yr"}}}],
                     "truncated": False,
                     "source": "observed",
                 }
@@ -445,15 +445,15 @@ def test_a_spec_states_its_measure_count_and_axes_and_names_no_member(
     spec["resolved"]["shape"] = {"label": "population"}
     spec["resolved"]["slots"] = [
         {
-            "key": {"property": {"dcid": "gender", "label": "gender"}, "label": "sex"},
+            "key": {"property": {"ref": "gender", "label": "gender"}, "label": "sex"},
             "binding": {"kind": "unbound"},
         },
         {
-            "key": {"property": {"dcid": "age", "label": "age"}, "label": "age"},
-            "binding": {"kind": "value", "value": {"ref": {"dcid": "Years15Onwards"}}},
+            "key": {"property": {"ref": "age", "label": "age"}, "label": "age"},
+            "binding": {"kind": "value", "value": {"ref": {"ref": "Years15Onwards"}}},
         },
         {
-            "key": {"property": {"dcid": "religion", "label": "religion"}},
+            "key": {"property": {"ref": "religion", "label": "religion"}},
             "binding": {"kind": "unbound"},
         },
         {"key": {"axis": "where", "label": "place"}, "binding": {"kind": "unbound"}},
@@ -1219,7 +1219,7 @@ def test_a_catalogue_answer_states_searchs_reading_and_points_at_sources() -> No
 
 def test_a_catalogue_answer_names_the_confirmed_country() -> None:
     envelope = _kind_envelope(
-        "catalogue", scope={"place": {"dcid": "country/KEN", "label": "Kenya"}}
+        "catalogue", scope={"place": {"ref": "country/KEN", "label": "Kenya"}}
     )
 
     text = render_digest(envelope)
@@ -1229,7 +1229,7 @@ def test_a_catalogue_answer_names_the_confirmed_country() -> None:
         "kind": "catalogue",
         "status": None,
         "parts": [],
-        "scope": {"place": {"dcid": "country/KEN", "label": "Kenya"}},
+        "scope": {"place": {"ref": "country/KEN", "label": "Kenya"}},
     }
 
 
@@ -1441,3 +1441,35 @@ def test_ambiguous_source_candidates_are_capped_with_a_count_of_the_rest() -> No
 
     assert "Source 5 (dc/s/5, source), and 2 more." in digest
     assert "Source 6" not in digest
+
+
+_IDS_REF = "provenance/WorldBankInternationalDebtStatistics"
+
+
+@pytest.mark.parametrize(
+    ("facets", "line"),
+    [
+        (
+            {"provenance": {"ref": _IDS_REF, "label": "World Bank IDS"}},
+            "2 StatVars · Source codes: World Bank IDS DT.TDS.DEGG.CD, DT.TDS.DEGG.KD.",
+        ),
+        (
+            {"provenance": {"ref": "provenance/OECDDAC1", "label": "OECD DAC1"}},
+            "2 StatVars · Source codes: DT.TDS.DEGG.CD, DT.TDS.DEGG.KD.",
+        ),
+        ({}, "2 StatVars · Source codes: DT.TDS.DEGG.CD, DT.TDS.DEGG.KD."),
+    ],
+    ids=["named", "other-source-bound", "no-source-bound"],
+)
+def test_the_measure_line_names_the_family_source_codes(facets: dict[str, Any], line: str) -> None:
+    spec = _spec(member_count=2, facets=facets)
+    spec["resolved"]["stat_vars"]["source_codes"] = [
+        {"provenance": _IDS_REF, "code": "DT.TDS.DEGG.CD"},
+        {"provenance": _IDS_REF, "code": "DT.TDS.DEGG.KD"},
+    ]
+
+    assert line in render_digest(_envelope("definite", spec=spec))
+
+
+def test_a_spec_with_no_source_codes_states_none() -> None:
+    assert "Source codes" not in render_digest(_envelope("definite", spec=_spec(member_count=2)))

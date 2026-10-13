@@ -1,0 +1,102 @@
+{
+  "id": "share-nigeria-world-population",
+  "kind": "share_of",
+  "origin": "pilot",
+  "question": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
+  "searches": [
+    {
+      "query": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
+      "parts": [
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "Nigeria"
+            }
+          ],
+          "time": "2000 to 2023",
+          "separate": true
+        },
+        {
+          "variable": "population",
+          "entities": [
+            {
+              "text": "World"
+            }
+          ],
+          "time": "2000 to 2023",
+          "separate": true
+        }
+      ]
+    }
+  ],
+  "brief": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
+  "asks": [
+    "Nigeria's share of world population, each year 2000 to 2023"
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "share_of, not quotient_of: Nigeria is a part of the world total, both counted in people"
+  },
+  "reference_payload": {
+    "question": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "pop_nigeria",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "Nigeria"
+          }
+        ],
+        "period": {
+          "start": 2000,
+          "end": 2023
+        }
+      },
+      {
+        "kind": "dataset",
+        "id": "pop_world",
+        "measure": "population",
+        "entities": [
+          {
+            "name": "World"
+          }
+        ],
+        "period": {
+          "start": 2000,
+          "end": 2023
+        }
+      },
+      {
+        "kind": "share_of",
+        "id": "share",
+        "numerator": {
+          "input_id": "pop_nigeria"
+        },
+        "denominator": {
+          "input_id": "pop_world"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "share"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "id": "growth-decline-german-oda",
+  "kind": "growth",
+  "origin": "trace b1c06b22-69af-42c2-a01f-527ffb8b46df",
+  "question": "Show the decline in German ODA from 2023 to 2025",
+  "searches": [
+    {
+      "query": "Show the decline in German ODA from 2023 to 2025",
+      "parts": [
+        {
+          "variable": "ODA",
+          "entities": [
+            {
+              "text": "Germany",
+              "role": "from"
+            }
+          ],
+          "time": "2023 to 2025"
+        }
+      ]
+    }
+  ],
+  "brief": "Show the decline in German ODA from 2023 to 2025",
+  "asks": [
+    "German ODA in 2023",
+    "German ODA in 2024",
+    "German ODA in 2025",
+    "Decline in German ODA from 2023 to 2025"
+  ],
+  "required_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "growth"
+  ],
+  "neighbour": {
+    "kind": "comparison",
+    "distinction": "growth, not comparison: the decline is one series' change between two years, where a comparison takes the difference of two series"
+  },
+  "unit_asked": false,
+  "reference_payload": {
+    "question": "Show the decline in German ODA from 2023 to 2025",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Germany",
+            "role": "donor"
+          }
+        ],
+        "period": {
+          "start": 2023,
+          "end": 2025
+        },
+        "source_spec_id": "spec_313a1317f35d812b920635b771b1abf9"
+      },
+      {
+        "kind": "growth",
+        "id": "decline",
+        "input_id": "oda",
+        "window_start": 2023,
+        "window_end": 2025
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 1,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 2,
+        "outputs": [
+          "oda"
+        ]
+      },
+      {
+        "ask": 3,
+        "outputs": [
+          "decline"
+        ]
+      }
+    ]
+  }
+}

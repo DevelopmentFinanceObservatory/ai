@@ -8,6 +8,7 @@ each group's rows keep their order in the input table.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
@@ -98,6 +99,24 @@ class GroupMembers:
         """Group `group`'s member values and period codes, in row order."""
         start, end = self.offsets[group], self.offsets[group + 1]
         return self.values[start:end], self.period_codes[start:end]
+
+
+def entity_counts(
+    table: pa.Table, *, keys: Sequence[str], entity_columns: Iterable[str]
+) -> dict[tuple[str, ...], int]:
+    """How many entities each group of `table` under `keys` holds: the
+    distinct value combinations across `entity_columns` among its rows, one
+    when `entity_columns` names no column outside `keys`. A group with no row
+    is absent."""
+    combined = group_rows(table, tuple(dict.fromkeys((*keys, *entity_columns))))
+    if not combined.count:
+        return {}
+    if not keys:
+        return {(): combined.count}
+    groups = zip(
+        *(cast("list[str]", combined.keys.column(key).to_pylist()) for key in keys), strict=True
+    )
+    return dict(Counter(groups))
 
 
 def keys_unique(table: pa.Table, keys: Sequence[str]) -> bool:

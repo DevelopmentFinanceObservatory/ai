@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx2
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import rfc8785
 from common.materialisation import (
@@ -158,13 +159,15 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The `options.columns` of a flow table's mint. dfo-apis expands a bare `kind` to a
-# `{column}_kind` column for every entity column the table has, the sides its identity
+# The `options.columns` of a flow table's mint. dfo-apis expands a bare `party_kind` to a
+# `{column}_party_kind` column for every entity column the table has, the sides its identity
 # leaves unnamed among them.
-KIND_COLUMNS: tuple[str, ...] = ("kind",)
+KIND_COLUMNS: tuple[str, ...] = ("party_kind",)
 
-# The type columns of a flow's parties, which a recorded selection may hold.
-_FLOW_TYPE_COLUMNS = frozenset(type_column(role) for role in PARTY_ROLES)
+# The columns a recorded selection may hold that `replayed_mint_options` replaces with
+# `KIND_COLUMNS`: a flow party's type column, and `kind`, the earlier token for the
+# party kind that old recorded selections carry.
+_REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind"))
 
 
 def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -187,13 +190,14 @@ def replayed_mint_options(
     """`options` as `get_data` sends them for a root of `identity`.
 
     A flow root (`place_type_columns_for(identity)` is `KIND_COLUMNS`) recorded with no
-    `columns`, and any root recorded with a flow party's type column, mint with
-    `KIND_COLUMNS`. Every other selection is unchanged. A flow frame minted without
-    kinds holds none, and a sum across its parties refuses without them.
+    `columns`, and any root recorded with a flow party's type column or the earlier
+    token `kind`, mint with `KIND_COLUMNS`. Every other selection is unchanged. A flow
+    frame minted without kinds holds none, and a sum across its parties refuses without
+    them.
     """
     columns = options.get("columns")
     if columns:
-        upgraded = not _FLOW_TYPE_COLUMNS.isdisjoint(columns)
+        upgraded = not _REPLACED_COLUMNS.isdisjoint(columns)
     else:
         upgraded = place_type_columns_for(identity) == KIND_COLUMNS
     return {**options, "columns": list(KIND_COLUMNS)} if upgraded else options
@@ -230,10 +234,11 @@ class MaterialisationOutcome:
     `status == "refused"`, and `degraded_reason` only when `status == "degraded"`. A
     `"store_write"` degrade's worker thread may still land the write. `role_keys` and
     `stat_var_count` are the frame's own role columns and distinct StatVars
-    (`observed_shape`), both set whenever this call read the held frame or parsed the
-    fetched one: on every `"registered"` outcome and on a `"store_write"` degrade.
-    `frame_ref` is the reference the frame is held under (`frame_ref_for`), set on
-    every outcome but a refusal.
+    (`observed_shape`), and `family_summed` whether its `stat_var` column holds the
+    family ref `dcid:<spec_id>` (`holds_family_ref`), all three set whenever this call
+    read the held frame or parsed the fetched one: on every `"registered"` outcome and
+    on a `"store_write"` degrade. `frame_ref` is the reference the frame is held under
+    (`frame_ref_for`), set on every outcome but a refusal.
     """
 
     status: Literal["registered", "degraded", "refused"]
@@ -242,6 +247,7 @@ class MaterialisationOutcome:
     degraded_reason: DegradedReason | None = None
     role_keys: tuple[str, ...] | None = None
     stat_var_count: int | None = None
+    family_summed: bool | None = None
     frame_ref: FrameRef | None = None
 
 
@@ -512,7 +518,7 @@ async def _check_store(
     )
     try:
         async with asyncio.timeout(_seconds_left(read_deadline)):
-            held_shape = await _read_held(store, ref, max_frame_rows=max_frame_rows)
+            held = await _read_held(store, ref, max_frame_rows=max_frame_rows)
     except TimeoutError:
         logger.warning(
             "materialise_and_register: the store read for %s/%s ran out of deadline; "
@@ -552,23 +558,14 @@ async def _check_store(
             attempts=0,
             refusal=ToolRefusal.over_ceiling(detail=exc.reason, ceiling_kind="bytes"),
         )
-    return (
-        "fetch"
-        if held_shape is None
-        else MaterialisationOutcome(
-            status="registered",
-            attempts=0,
-            role_keys=held_shape[0],
-            stat_var_count=held_shape[1],
-        )
-    )
+    return "fetch" if held is None else held
 
 
 async def _read_held(
     store: MaterialisationStore, ref: FrameRef, *, max_frame_rows: int
-) -> tuple[tuple[str, ...], int] | None:
-    """The held frame's role keys and StatVar count (`observed_shape`), or `None` when
-    the store does not hold `ref`. The frame is read in full under a claim on its rows
+) -> MaterialisationOutcome | None:
+    """The no-op outcome of the frame the store holds under `ref` (`_read_outcome`), or
+    `None` when the store does not hold `ref`. The frame is read in full under a claim on its rows
     so a cache hit passes every check a read makes, the store's content-version check
     included, and is then discarded.
 
@@ -592,7 +589,7 @@ async def _read_held(
     rows = max_frame_rows if held.num_rows is None else held.num_rows
     with row_budget().claim(rows) as claim:
         frame, _trace = await claim.hold_through(held.read(max_rows=rows))
-    return observed_shape(frame)
+    return _read_outcome(frame, ref=ref, attempts=0)
 
 
 def _seconds_left(deadline: CallDeadline | None) -> float | None:
@@ -768,14 +765,7 @@ async def _parse_and_register(
             ref.spec_id,
             ref.content_version,
         )
-        role_keys, stat_var_count = observed_shape(frame)
-        return MaterialisationOutcome(
-            status="degraded",
-            attempts=1,
-            degraded_reason="store_write",
-            role_keys=role_keys,
-            stat_var_count=stat_var_count,
-        )
+        return _read_outcome(frame, ref=ref, attempts=1, degraded_reason="store_write")
     except FrameTooLarge as exc:
         # `_verify_parse_and_register`'s row_count check bounds against this
         # service's own `settings.max_frame_rows`; the store's own `_max_frame_rows`
@@ -789,9 +779,22 @@ async def _parse_and_register(
             attempts=1,
             refusal=ToolRefusal.over_ceiling(detail=exc.reason, ceiling_kind="rows"),
         )
+    return _read_outcome(frame, ref=ref, attempts=1)
+
+
+def _read_outcome(
+    frame: Frame, *, ref: FrameRef, attempts: int, degraded_reason: DegradedReason | None = None
+) -> MaterialisationOutcome:
+    """The outcome of a call that read or parsed `frame`, registered unless
+    `degraded_reason` says otherwise, carrying what the frame itself shows."""
     role_keys, stat_var_count = observed_shape(frame)
     return MaterialisationOutcome(
-        status="registered", attempts=1, role_keys=role_keys, stat_var_count=stat_var_count
+        status="registered" if degraded_reason is None else "degraded",
+        attempts=attempts,
+        degraded_reason=degraded_reason,
+        role_keys=role_keys,
+        stat_var_count=stat_var_count,
+        family_summed=holds_family_ref(frame, spec_id=ref.spec_id),
     )
 
 
@@ -1192,6 +1195,15 @@ def observed_shape(frame: Frame) -> tuple[tuple[str, ...], int]:
     return role_keys, len(frame.table.column(STAT_VAR_COLUMN).unique())
 
 
+def holds_family_ref(frame: Frame, *, spec_id: str) -> bool:
+    """Whether `frame`'s `stat_var` column holds the family ref `dcid:<spec_id>`.
+
+    dfo-apis writes that ref only on the series of a `groupby` that summed the family's
+    StatVars (`datasets_api.render`), so it marks a summed frame whatever the version's
+    description or warnings say."""
+    return pc.index(frame.table.column(STAT_VAR_COLUMN), f"dcid:{spec_id}").as_py() >= 0
+
+
 def _frame_from_parquet_bytes(data: bytes) -> Frame:
     """Parse `data` (a whole Parquet file's bytes) into a `Frame`.
 
@@ -1209,7 +1221,7 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`).
 
-    A `{role}_type` or `{role}_kind` column, which `get_data(place_types=True)` asks for,
+    A `{role}_type` or `{role}_party_kind` column, which `get_data(place_types=True)` asks for,
     is a role key too, with each empty cell written `UNTYPED` (`_with_untyped_places`).
     """
     table = _with_untyped_places(pq.read_table(io.BytesIO(data)))

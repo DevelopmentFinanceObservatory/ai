@@ -1699,7 +1699,8 @@ def _every_place() -> FrameShape:
         roles=(_role(role="country", open=True),),
         period=_PERIOD,
         measures=1,
-        names_no_place=True,
+        place_typed=True,
+        mixed_levels=True,
     )
 
 

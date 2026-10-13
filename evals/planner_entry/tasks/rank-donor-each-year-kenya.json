@@ -1,0 +1,109 @@
+{
+  "id": "rank-donor-each-year-kenya",
+  "kind": "rank",
+  "origin": "pilot",
+  "question": "Which donor gave Kenya the most ODA in each year from 2018 to 2022?",
+  "searches": [
+    {
+      "query": "Which donor gave Kenya the most ODA in each year from 2018 to 2022?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2018 to 2022",
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Which donor gave Kenya the most ODA in each year from 2018 to 2022?",
+  "asks": [
+    {
+      "text": "The donor that gave Kenya the most ODA in each year 2018 to 2022",
+      "by": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "who led in each year is a rank per period; collapsing the window into donor totals answers a different question"
+  },
+  "reference_payload": {
+    "question": "Which donor gave Kenya the most ODA in each year from 2018 to 2022?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "every_donor",
+        "description": "Which donors the ranking compares.",
+        "options": [
+          "every donor",
+          "a named list of donors"
+        ],
+        "chosen": "every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every member is ranked.",
+        "fixes": [
+          "among"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2018,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "rank",
+        "id": "leader",
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "per_period": true,
+        "limit": 1,
+        "decision_ids": [
+          "every_donor"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "leader"
+        ]
+      }
+    ]
+  }
+}

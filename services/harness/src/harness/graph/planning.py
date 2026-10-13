@@ -11,6 +11,7 @@ from collections.abc import (
     Callable,
     Iterator,
 )
+from datetime import datetime
 from typing import Any
 
 from common.telemetry import record_span
@@ -18,6 +19,7 @@ from google.adk import Context, Event
 from google.adk.events import RequestInput
 from google.adk.workflow._errors import NodeInterruptedError
 from planner.plan import (
+    ASK_BREAKDOWNS_STATE_KEY,
     ASKS_STATE_KEY,
     PlanStatus,
     plan_revision,
@@ -266,10 +268,18 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     `{"unreadable_plan": True}`, and `planner` drafts the question from
     the start.
 
-    The `"approved"` route records a `plan.approved` span (nesting under
-    the turn span `harness.studio_state.begin_turn` opens) and a matching
-    log line with the same facts, `plan_version` and `amended`, off the
-    `Plan` just approved.
+    An answer approves when it names the revision and says, under `at`, when
+    the user gave it, as an ISO 8601 time with its offset: the studio's
+    interrupt route sends the time it recorded the first answer to this
+    interrupt (`harness.approval.ApprovalRecord.at`), so a retry resuming
+    the same answer later approves as of the same moment. The `"approved"`
+    route stamps that time on the plan (`Plan.approved_at`), from which the
+    approval's lifetime runs. An answer with no such time approves nothing
+    and routes `"amend"` as one naming another revision does. It
+    records a `plan.approved` span (nesting under the turn span
+    `harness.studio_state.begin_turn` opens) and a matching log line with
+    the same facts, `plan_version` and `amended`, off the `Plan` just
+    approved.
     """
     answer = (ctx.resume_inputs or {}).get(APPROVE_INTERRUPT)
     if not (ctx.state.get("awaiting_approve") and answer is not None):
@@ -291,8 +301,9 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
         yield Event(output={"unreadable_plan": True}, route="amend")
         return
     key: Any = plan_revision(plan)
-    if approved_answer == key:
-        approved = plan.approve()
+    approved_at = _answered_at(answer)
+    if approved_answer == key and approved_at is not None:
+        approved = plan.approve(at=approved_at)
         ctx.state["plan"] = approved.model_dump_json()
         plan_version = approved.version
         amended = plan_version > 1
@@ -306,13 +317,28 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     )
 
 
+def _answered_at(answer: object) -> datetime | None:
+    """When an approve answer says the user gave it, or `None` when it states
+    no timezone-aware ISO 8601 time under `at`."""
+    raw = answer.get("at") if isinstance(answer, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        at = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else None
+
+
 def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
     """Hand the agent's brief to the planner under the orchestrator's own
-    key. This call's asks go under `ASKS_STATE_KEY`, cleared when it
+    key. This call's asks go under `ASKS_STATE_KEY` and the parties they
+    break down by under `ASK_BREAKDOWNS_STATE_KEY`, each cleared when it
     lists none so no plan is held to an earlier call's asks, and no
     earlier call's kept asks are listed. The planner's first-draft entry
     is an empty payload."""
     ctx.state[ORCHESTRATOR_BRIEF_KEY] = node_input["brief"]
     ctx.state[ASKS_STATE_KEY] = node_input.get("asks") or None
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
     return {}

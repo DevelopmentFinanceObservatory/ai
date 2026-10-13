@@ -333,6 +333,7 @@ async def test_materialise_and_register_registers_a_real_frame() -> None:
         refusal=None,
         role_keys=("observationAbout",),
         stat_var_count=1,
+        family_summed=False,
         frame_ref=_FRAME_REF,
     )
     stored = await get_frame_store().get(
@@ -357,8 +358,28 @@ def _family_parquet_bytes() -> bytes:
     )
 
 
-async def test_a_fetched_frames_stat_var_count_is_read_off_its_rows() -> None:
-    data = _family_parquet_bytes()
+def _summed_parquet_bytes() -> bytes:
+    """Two rows of one series under the family ref, as a summed retrieval's artifact
+    holds them."""
+    return _parquet_bytes(
+        role_values=["country/FRA"] * 2,
+        time_periods=["2020", "2021"],
+        values=[8.0, 2.0],
+        stat_vars=[f"dcid:{_SPEC_ID}"] * 2,
+    )
+
+
+_FRAME_STAT_VARS = pytest.mark.parametrize(
+    ("data", "stat_var_count", "family_summed"),
+    [(_family_parquet_bytes(), 3, False), (_summed_parquet_bytes(), 1, True)],
+    ids=["family", "summed"],
+)
+
+
+@_FRAME_STAT_VARS
+async def test_a_fetched_frames_stat_vars_are_read_off_its_rows(
+    data: bytes, stat_var_count: int, family_summed: bool
+) -> None:
     digest = _digest_for(data)
 
     def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
@@ -379,13 +400,16 @@ async def test_a_fetched_frames_stat_var_count_is_read_off_its_rows() -> None:
         )
 
     assert outcome.status == "registered"
-    assert outcome.stat_var_count == 3
+    assert (outcome.stat_var_count, outcome.family_summed) == (stat_var_count, family_summed)
 
 
-async def test_a_held_frames_stat_var_count_is_read_off_its_rows() -> None:
+@_FRAME_STAT_VARS
+async def test_a_held_frames_stat_vars_are_read_off_its_rows(
+    data: bytes, stat_var_count: int, family_summed: bool
+) -> None:
     ref = FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)
     store = _RecordingMaterialisationStore()
-    store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(_family_parquet_bytes()))
+    store.seed(ref, frame=frame_materialisation._frame_from_parquet_bytes(data))
     set_frame_store(store)
 
     def unreachable(_request: httpx2.Request) -> httpx2.Response:
@@ -402,7 +426,7 @@ async def test_a_held_frames_stat_var_count_is_read_off_its_rows() -> None:
         )
 
     assert outcome.attempts == 0
-    assert outcome.stat_var_count == 3
+    assert (outcome.stat_var_count, outcome.family_summed) == (stat_var_count, family_summed)
 
 
 async def test_already_held_pair_is_a_no_op_fetch() -> None:
@@ -436,6 +460,7 @@ async def test_already_held_pair_is_a_no_op_fetch() -> None:
         refusal=None,
         role_keys=("observationAbout",),
         stat_var_count=1,
+        family_summed=False,
         frame_ref=_FRAME_REF,
     )
     # No fetch and no `put` on this path. The held pair is read once, so it passes every
@@ -833,6 +858,7 @@ async def test_a_cache_hit_by_a_second_caller_is_still_a_no_op_fetch() -> None:
         refusal=None,
         role_keys=("observationAbout",),
         stat_var_count=1,
+        family_summed=False,
         frame_ref=_FRAME_REF,
     )
     assert get_calls == 1
@@ -1533,6 +1559,7 @@ async def test_a_store_read_that_outruns_the_deadline_counts_as_a_miss() -> None
         attempts=1,
         role_keys=("observationAbout",),
         stat_var_count=1,
+        family_summed=False,
         frame_ref=_FRAME_REF,
     )
     assert store.put_calls == [FrameRef(spec_id=_SPEC_ID, content_version=_CONTENT_VERSION)]
@@ -1591,6 +1618,7 @@ async def test_a_store_write_that_outruns_the_deadline_degrades_unconfirmed() ->
         degraded_reason="store_write",
         role_keys=("observationAbout",),
         stat_var_count=1,
+        family_summed=False,
         frame_ref=_FRAME_REF,
     )
     assert store.put_calls == []
@@ -2216,7 +2244,7 @@ def test_a_place_type_column_is_a_role_and_an_empty_cell_reads_untyped() -> None
     }
 
 
-@pytest.mark.parametrize("described", ["financingRecipient_kind", "financingRecipient_type"])
+@pytest.mark.parametrize("described", ["financingRecipient_party_kind", "financingRecipient_type"])
 def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> None:
     # dfo-apis leaves the kind cell empty for a party it declares no kind for. Filled, the
     # frame registers, and a sum across the parties refuses `place_levels_mixed`.
@@ -2228,7 +2256,7 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
             "time_period": pa.array(["2022"] * 3),
             "value": pa.array([1.0, 2.0, 3.0]),
             described: pa.array(["party", "total", None]),
-            "financingProvider_kind": pa.array([""] * 3),
+            "financingProvider_party_kind": pa.array([""] * 3),
         }
     )
     buf = io.BytesIO()
@@ -2244,7 +2272,7 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
         )
     )
     assert cells == {"country/KEN": "party", "DACAfrica": "total", "dcid:Unknown": "untyped"}
-    assert set(frame.table.column("financingProvider_kind").to_pylist()) == {"untyped"}
+    assert set(frame.table.column("financingProvider_party_kind").to_pylist()) == {"untyped"}
 
 
 @pytest.mark.parametrize(
@@ -2252,7 +2280,9 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     [{"entities": {"origin": ["country/FRA"]}}, {"entities": {"recipient": ["country/KEN"]}}, None],
     ids=["flow", "place", "unheld"],
 )
-@pytest.mark.parametrize("recorded", frame_materialisation.TYPE_COLUMN_SELECTIONS, ids="+".join)
+@pytest.mark.parametrize(
+    "recorded", (*frame_materialisation.TYPE_COLUMN_SELECTIONS, ("kind",)), ids="+".join
+)
 def test_a_replayed_selection_asks_a_flow_root_for_kinds(
     recorded: tuple[str, ...], identity: dict[str, Any] | None
 ) -> None:
@@ -2262,10 +2292,10 @@ def test_a_replayed_selection_asks_a_flow_root_for_kinds(
 
     replayed = frame_materialisation.replayed_mint_options(options, identity=identity)
 
-    party_typed = {"financingProvider_type", "financingRecipient_type"} & set(recorded)
+    party_typed = {"financingProvider_type", "financingRecipient_type", "kind"} & set(recorded)
     flow_unselected = not recorded and identity is not None and "origin" in identity["entities"]
     if party_typed or flow_unselected:
-        assert replayed == options | {"columns": ["kind"]}
+        assert replayed == options | {"columns": ["party_kind"]}
     else:
         assert replayed == options
 

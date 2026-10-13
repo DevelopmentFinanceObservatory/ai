@@ -190,7 +190,6 @@ def _planned_app() -> Any:
     planner, then answers once the approved plan is handed back."""
     app, _model = orchestrator_app(
         plan_call(QUESTION),
-        types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="Life expectancy in Kenya rose."),
         executor=ScriptedExecutor(),
         tool_surface=ScriptedSurface(),

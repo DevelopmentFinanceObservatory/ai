@@ -64,7 +64,12 @@ def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], Asyn
         else:
             yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"})
         answer = await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)
-        yield Event(output=answer)
+        # A turn that ends on an `ask_user` or `plan` hand-off ends on the
+        # tool's result, with no text (`orchestrator_tools._pend`), so the
+        # agent's output is None. ADK records no output for an event whose
+        # output is None, and a resume could not replay past this node, so
+        # the node outputs empty text instead.
+        yield Event(output=answer if answer is not None else "")
 
     return orchestrate
 

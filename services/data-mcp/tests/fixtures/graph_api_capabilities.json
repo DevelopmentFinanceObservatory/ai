@@ -1,0 +1,83 @@
+{
+  "build": "24d159fd860bdc63edfe1a517a2a1392e5a9186a",
+  "capability_version": "graph_b042a2941aff8fd3",
+  "caps": {
+    "max_dcid_chars": 512,
+    "max_node_batch_dcids": 50,
+    "node_pool_size": 4,
+    "node_timeout_seconds": 10,
+    "resolve_timeout_seconds": 30
+  },
+  "data_builds": {
+    "code_index": null,
+    "coverage_index": null,
+    "graph_generation": null,
+    "origin_catalogue": null
+  },
+  "doors": [
+    {
+      "live": true,
+      "name": "resolve"
+    },
+    {
+      "live": true,
+      "name": "node"
+    },
+    {
+      "live": true,
+      "name": "members"
+    },
+    {
+      "live": true,
+      "name": "roots"
+    },
+    {
+      "live": true,
+      "name": "sources"
+    },
+    {
+      "live": true,
+      "name": "schema"
+    }
+  ],
+  "kinds": [
+    "country",
+    "continent",
+    "subregion",
+    "continental_union",
+    "place_other",
+    "aggregate",
+    "organisation",
+    "group",
+    "stat_var",
+    "code_system",
+    "code",
+    "unit",
+    "source",
+    "dataset",
+    "provenance",
+    "other"
+  ],
+  "node_shape_gaps": [
+    "stat_var.definition.measure.definition"
+  ],
+  "recipe_classes": [],
+  "resolve_kinds": [
+    "country",
+    "continent",
+    "subregion",
+    "continental_union",
+    "organisation",
+    "aggregate",
+    "place_other",
+    "group",
+    "code",
+    "other"
+  ],
+  "source_catalogue_curated": true,
+  "source_document_gaps": [
+    "scope_and_units.countries",
+    "usage.api_access",
+    "usage.python"
+  ]
+}

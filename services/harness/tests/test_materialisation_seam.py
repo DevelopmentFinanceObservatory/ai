@@ -23,8 +23,6 @@ import httpx2
 import pytest
 from common.materialisation import frame_to_parquet_bytes
 from data_mcp import client_holder, frame_materialisation
-from data_mcp.client import UpstreamClient
-from data_mcp.settings import Settings as DataMcpSettings
 from dfo_frame_grammar import Frame, frame_sha256, mint_content_version
 from fastapi import FastAPI
 from fastmcp import Client
@@ -32,6 +30,8 @@ from fastmcp.client.transports import StreamableHttpTransport
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from mcp.shared._httpx_utils import McpHttpClientFactory
+
+from .replay_support import data_mcp_client
 
 _SPEC_ID = "spec_" + "5" * 32
 
@@ -217,9 +217,7 @@ async def test_a_frame_data_mcp_registers_resolves_through_a_mounted_analysis_mc
             return httpx2.Response(200, json=snapshot)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
-    client_holder.set_client(
-        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(mint_handler))
-    )
+    client_holder.set_client(data_mcp_client(mint_handler))
 
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 

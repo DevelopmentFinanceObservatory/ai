@@ -593,6 +593,34 @@ def _comparison_line(comparison: PeriodComparison) -> str:
     )
 
 
+def _difference_label(result: CompareResult) -> str:
+    """What `result`'s StatVar measures, in the order `delta` subtracts.
+
+    Two sides holding different StatVars read "<right> minus <left>". Two
+    sides holding one StatVar read "<StatVar>, <right entity> minus <left
+    entity>" when exactly one entity column both sides hold
+    (`CompareResult.left_entities`, `right_entities`) holds a different
+    value on each, and "difference in <StatVar>" otherwise. A side names its
+    first StatVar and how many more it measured (`_side_refs`).
+    """
+    left = _side_refs(result.left_stat_vars)
+    right = _side_refs(result.right_stat_vars)
+    if result.left_stat_vars != result.right_stat_vars:
+        return f"{right} minus {left}"
+    differing = [
+        column
+        for column, value in result.left_entities.items()
+        if result.right_entities.get(column, value) != value
+    ]
+    if len(differing) == 1:
+        (column,) = differing
+        return (
+            f"{left}, {truncate_value(result.right_entities[column])} minus "
+            f"{truncate_value(result.left_entities[column])}"
+        )
+    return f"difference in {left}"
+
+
 def render_compare_digest(
     *,
     result: CompareResult,
@@ -604,11 +632,13 @@ def render_compare_digest(
     time: Time | None = None,
 ) -> str:
     """Render `result` (from `analysis_mcp.engine.compare.run_compare`) into
-    the digest text a successful `compare` tool call returns."""
+    the digest text a successful `compare` tool call returns. The label line
+    names the result's StatVar by what it subtracts (`_difference_label`)."""
     header = (
         f"compare: {len(result.intersected_periods)} intersected period(s) "
         f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
     )
+    label_line = f"stat_var {result.stat_var}: {_difference_label(result)}"
 
     # Magnitude, not positional: `period_comparisons` is ordered
     # chronologically, not by the caller's own criterion. A magnitude cap
@@ -631,7 +661,7 @@ def render_compare_digest(
         f"right unit: {_unit_text(result.right_resolved_unit)}"
     )
 
-    sections = [header, comparisons_block, coverage_line, unit_line]
+    sections = [header, label_line, comparisons_block, coverage_line, unit_line]
     if result.warnings:
         sections.append(
             "\n".join(
@@ -712,9 +742,8 @@ def render_sum_of_digest(
         f"(left offered {len(result.left_periods)}, right offered {len(result.right_periods)})"
     )
     label_line = (
-        f"stat_var {result.stat_var}: sum of "
-        f"{', '.join(truncate_value(ref) for ref in result.left_stat_vars)} and "
-        f"{', '.join(truncate_value(ref) for ref in result.right_stat_vars)}"
+        f"stat_var {result.stat_var}: sum of {_side_refs(result.left_stat_vars)} and "
+        f"{_side_refs(result.right_stat_vars)}"
     )
 
     # Magnitude, not positional, as `render_compare_digest` caps its periods.

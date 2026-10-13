@@ -136,7 +136,8 @@ def test_a_summed_family_beside_a_single_stat_var_counts_the_union() -> None:
 
 
 def test_a_summed_retrieval_the_frame_does_not_carry_keeps_the_declared_count() -> None:
-    """A compare's right side or a share's denominator supplies values only."""
+    """A retrieval the frame rests on without carrying its StatVars leaves the
+    declared count alone."""
     store = ProvenanceStore()
     _put(store, "spec_abc", _traced({"A": 4, "B": 2, "C": 1}, summed=3))
     _put(store, "spec_d", _traced({"D": 5}))

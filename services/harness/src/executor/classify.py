@@ -185,7 +185,6 @@ STOP_CODES = frozenset(
         "spec_not_exportable",
         "capability_unavailable",
         "entity_not_found",
-        "entity_out_of_scope",
         "node_not_held",
         # dfo-apis cannot sum the family a `get_data` asked to sum (a gross/net
         # pair, a code it cannot decode, sources that disagree). `do_not_retry`

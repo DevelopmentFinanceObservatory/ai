@@ -3,15 +3,16 @@
 The workflow is the deterministic spine around the orchestrator agent:
 routing, approval, retries and execution are code; only the orchestrator and
 the planner (`PlannerModel`, implemented by `harness.planner_seam`) generate.
-A turn runs `seed` (any datasets the user brought from Search) ->
+A turn runs `seed` (the runs an earlier turn left unfinished, carried on,
+and any datasets the user brought from Search) ->
 `orchestrate` (the agent and its tools, `harness.orchestrator_tools`) ->
 `route`, which takes the one action the agent asked for: `ask` puts its
 question to the user, and `plan_start` hands its brief to `planner` ->
 `approve` -> `execute`, whose result `plan_done` hands back to the agent.
 
 Everything external is injected (`executor`, `tool_surface`,
-`definition_surface`). The seams are async: ADK runs a sync function node
-inline on the event loop, and the real implementations (`harness.mcp_client`)
+`definition_surface`, `run_ledger`, `publisher`). The seams are async: ADK
+runs a sync function node inline on the event loop, and the real implementations (`harness.mcp_client`)
 call the loopback MCP mounts over HTTP on that same loop -- a sync seam would
 block the loop and deadlock the loopback request.
 
@@ -34,11 +35,16 @@ Behavioral guarantees the topology encodes:
   either, so `execute` closes the plan immediately with the refusal's own
   remedy rather than spending a replan reproducing the identical failing
   call.
+* Every run is admitted to the run ledger before its first dispatch, and an
+  accepted run is handed back as computed only once each derived result is
+  published with its replay recipe; otherwise `plan_done` hands back the
+  run's ID as `pending` or `failed` and no figure.
 * Execution-triggered replanning is bounded: after `MAX_REPLANS` rounds the
   plan closes with what ran, naming the step that could not.
 
 One approval gate: the workflow's own `approve` interrupt. The planner's
-`submit_plan` tool (`planner.agent`) declares the plan ready for the user's
-answer and gates nothing itself -- only this workflow's `execute` node,
-reached downstream of `approve`, runs a step against a real server.
+`propose_plan` declares a compiled plan ready for the user's answer
+(`planner.agent.declare_ready`) and gates nothing itself. Only this
+workflow's `execute` node, reached downstream of `approve`, runs a step
+against a real server.
 """

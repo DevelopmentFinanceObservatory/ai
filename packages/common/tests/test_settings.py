@@ -76,7 +76,7 @@ def test_subclass_adds_service_specific_fields(monkeypatch) -> None:
 
 
 def test_frame_rows_in_flight_max_defaults_to_the_two_gib_derivation() -> None:
-    assert BaseServiceSettings().frame_rows_in_flight_max == 1_200_000
+    assert BaseServiceSettings().frame_rows_in_flight_max == 1_100_000
 
 
 def test_frame_rows_in_flight_max_refuses_a_budget_below_one_row(

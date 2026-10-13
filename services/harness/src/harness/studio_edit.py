@@ -117,16 +117,17 @@ async def _edit_flow(
         step_id: str,
         label: str,
         *,
-        failed: str | None = None,
+        failed: bool = False,
         produced: StepProduced | None = None,
     ) -> ActivityStep:
+        # A refusal's text is written for the agent: the step shows the
+        # failure alone, and the closing message says why.
         return ActivityStep(
             event="activity.step",
             seq=c.next_seq(),
             step_id=step_id,
             label=label,
             status=StepStatus.FAILED if failed else StepStatus.COMPLETE,
-            detail=failed,
             produced=produced,
         )
 
@@ -146,7 +147,7 @@ async def _edit_flow(
     described = await recorder(tool="describe_component", args={"component_id": component_id})
     recorder.drain(current_conversation_id.get())
     if described.get("outcome") != "ok":
-        yield _step("e1", "Read the card", failed=_refusal_text(described))
+        yield _step("e1", "Read the card", failed=True)
         for frame in _close(f"I couldn't open that card: {_refusal_text(described)}."):
             yield frame
         return
@@ -187,7 +188,7 @@ async def _edit_flow(
         moved = (written.get("refusal") or {}).get("code") == ROLLING_SELECT_NEEDS_NEW_FRAME
     if patch and write_token and not moved:
         if written.get("outcome") != "ok" or not written.get("component"):
-            yield _step("e2", "Apply the edit", failed=_refusal_text(written))
+            yield _step("e2", "Apply the edit", failed=True)
             frames = _close(f"The edit was refused: {_refusal_text(written)}.")
         elif int(written["component"]["revision"]) <= current_revision:
             # The platform treats an effectively-equal patch as a no-op.
@@ -215,7 +216,7 @@ async def _edit_flow(
         named = next((field for field in _CREATE_ONLY_FIELDS if field in patch), None)
         if named is not None:
             refusal = f"{named!r} is create-only and cannot be revised"
-            yield _step("e2", "Apply the edit", failed=refusal)
+            yield _step("e2", "Apply the edit", failed=True)
             for frame in _close(f"The edit was refused: {refusal}."):
                 yield frame
             return
@@ -234,7 +235,7 @@ async def _edit_flow(
     written = await recorder(tool="write_component", args={"intent": intent})
     recorder.drain(current_conversation_id.get())
     if written.get("outcome") != "ok" or not written.get("component"):
-        yield _step("e2", step_label, failed=_refusal_text(written))
+        yield _step("e2", step_label, failed=True)
         for frame in _close(f"The edit was refused: {_refusal_text(written)}."):
             yield frame
         return

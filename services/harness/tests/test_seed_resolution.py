@@ -46,6 +46,7 @@ from .orchestrator_fakes import (
     CannedSearch,
     RefusingPlanner,
     ScriptLlm,
+    approve_answer,
     call,
     create_request_input_response,
     fetch_call,
@@ -485,7 +486,7 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
     assert taken.seed.spec.entity_groups["observationAbout"].total == "DACAfrica"
     (posted,) = search.posted
     assert posted["input"]["entries"][0]["entity_groups"] == {
-        "observationAbout": {"label": "Africa", "dcid": "africa"}
+        "observationAbout": {"label": "Africa", "ref": "africa"}
     }
     source = source_from_spec_block(resolved_spec(part, spec_id=block["spec_id"]))
     assert [(group.label, group.total) for group in source.groups] == [("Africa", "DACAfrica")]
@@ -713,7 +714,7 @@ def _ask_user_answer(pause: types.FunctionCall) -> dict[str, Any]:
 
 def _approval(pause: types.FunctionCall) -> dict[str, Any]:
     assert pause.id == APPROVE_INTERRUPT
-    return {"result": {"approved": pause.args["payload"]["revision"]}}
+    return {"result": approve_answer(pause.args["payload"]["revision"])}
 
 
 _PAUSES = {
@@ -744,7 +745,6 @@ async def test_a_seeded_turn_takes_its_seeds_once_across_a_pause(
     steps = _Describes()
     runner, model = orchestrator_runner(
         pausing_call(),
-        types.Part.from_text(text="Paused."),
         types.Part.from_text(text="Here are the donors."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -780,7 +780,6 @@ async def test_a_turn_paused_without_a_seed_node_run_resumes_without_taking_its_
             question="Which donors?",
             options=[{"label": "DAC members"}, {"label": "All"}],
         ),
-        types.Part.from_text(text="Asked."),
         types.Part.from_text(text="Here are the donors."),
         executor=steps,
         definition_surface=DataMcpDefinitions(served=[_KENYA]),

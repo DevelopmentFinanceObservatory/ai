@@ -62,7 +62,6 @@ class ProblemCode(StrEnum):
     PLAN_MISSING = "plan_missing"
     PLAN_NOT_DRAFT = "plan_not_draft"
     WORKFLOW_MISSING = "workflow_missing"
-    VERSION_STALE = "version_stale"
     PLAN_REJECTED = "plan_rejected"
     REFERRAL_PENDING = "referral_pending"
     TRANSITION_REFUSED = "transition_refused"
@@ -80,7 +79,6 @@ class ProblemCode(StrEnum):
     SURFACE_UNAVAILABLE = "surface_unavailable"
     NO_CANDIDATES_RECORDED = "no_candidates_recorded"
     ASK_NOT_UNDERSTOOD = "ask_not_understood"
-    ELECTION_UNTRACEABLE = "election_untraceable"
     SOURCE_NOT_OFFERED = "source_not_offered"
     COMBINATION_UNASKED = "combination_unasked"
     OPERATION_UNSUPPORTED = "operation_unsupported"
@@ -88,8 +86,12 @@ class ProblemCode(StrEnum):
     DECLINE_UNEARNED = "decline_unearned"
     NOTHING_TO_PLAN = "nothing_to_plan"
     ASKS_UNACCOUNTED = "asks_unaccounted"
-    FIX_UNSTATED = "fix_unstated"
-    FIX_DISAGREES = "fix_disagrees"
+    ASK_ROLE_DROPPED = "ask_role_dropped"
+    RESULT_SCOPE_UNSTATED = "result_scope_unstated"
+    USER_DECISION_CONTRADICTED = "user_decision_contradicted"
+    USER_DECISION_DROPPED = "user_decision_dropped"
+    SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    CATALOGUE_STALE = "catalogue_stale"
 
 
 class Action(StrictModel):

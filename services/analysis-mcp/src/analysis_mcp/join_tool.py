@@ -13,6 +13,9 @@ An exception outside that set would escape this function; `server.py`'s
 registration-site wrapper is the backstop that turns it into an
 `internal_error` refusal instead of a raw traceback reaching the wire;
 this backstop complements the typed handling below rather than replacing it.
+
+The stored step (`_join_step`) counts the key-period pairs the join keeps
+and the values it leaves out, unmatched or unit-less.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from analysis_mcp.engine.join import (
     JoinAmbiguousKeyError,
     JoinNoCommonKeyColumnsError,
     JoinOutputCollisionError,
+    JoinResult,
     JoinResultTooLargeError,
     JoinUnknownKeyError,
     run_join,
@@ -42,6 +46,7 @@ from analysis_mcp.frame_ref_resolution import (
     derive_frame_content_version,
     derived_marker_detail,
     holds_input_rows,
+    holds_ratio,
     input_content_version,
     merge_derived_markers,
     merged_time,
@@ -51,6 +56,7 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import JoinOpSpec, PinnedUnit
 from analysis_mcp.settings import Settings
+from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, shared_step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -144,6 +150,26 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     else:
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     return refusal
+
+
+def _join_step(
+    op_spec: JoinOpSpec, result: JoinResult, *, trace: Trace, ratio: tuple[bool, bool]
+) -> Step:
+    """The step record of `result`, stored on `trace`: the key-period pairs
+    it matched, the values each side holds that the other does not match or
+    that declare no unit, and the unit both sides share (`shared_step_unit`,
+    with each side's `ratio` flag). Sides in different units each keep their
+    own, so the step names none."""
+    return build_step(
+        op="join",
+        trace=trace,
+        inputs={"left": op_spec.frame_ref, "right": op_spec.right_frame_ref},
+        kept={"entity_periods": len(result.matched_keys)},
+        left_out=left_out_from_exclusions(
+            result.exclusions, row_reasons=("unit_unbound", "unmatched_key")
+        ),
+        unit=shared_step_unit(result.left_resolved_unit, result.right_resolved_unit, ratio=ratio),
+    )
 
 
 @holds_input_rows
@@ -358,7 +384,12 @@ async def join(
     return await store_result_and_render(
         frame=result.frame,
         trace=output_trace,
-        input_traces=[left_trace, right_trace],
+        step=_join_step(
+            op_spec,
+            result,
+            trace=output_trace,
+            ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
+        ),
         digest=lambda: render_join_digest(
             join_keys=result.join_keys,
             result=result,

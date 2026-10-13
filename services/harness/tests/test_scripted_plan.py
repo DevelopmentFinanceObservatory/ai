@@ -11,6 +11,7 @@ pins are load-bearing rather than merely present.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -100,7 +101,9 @@ async def test_the_workflows_pins_match_the_surfaces_declared_schemas() -> None:
     plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
     _, outcome = await execute_approved_plan(
-        plan.approve(), surface=ScriptedSurface(), fetch_series_stats=scripted_fetch_series_stats
+        plan.approve(at=datetime.now(UTC)),
+        surface=ScriptedSurface(),
+        fetch_series_stats=scripted_fetch_series_stats,
     )
 
     assert isinstance(outcome, Accepted), outcome
@@ -109,7 +112,9 @@ async def test_the_workflows_pins_match_the_surfaces_declared_schemas() -> None:
 async def test_a_changed_declared_schema_makes_the_surface_check_refuse() -> None:
     plan = scripted_plan("What is life expectancy in Kenya?", spec_id=SCRIPTED_SPEC)
 
-    _, outcome = await execute_approved_plan(plan.approve(), surface=_DriftedSurface())
+    _, outcome = await execute_approved_plan(
+        plan.approve(at=datetime.now(UTC)), surface=_DriftedSurface()
+    )
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.SURFACE_CHANGED

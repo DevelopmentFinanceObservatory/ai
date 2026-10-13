@@ -53,7 +53,7 @@
               "rubric_id": "pair-reads-the-translation",
               "type": "TOOL_USE_QUALITY",
               "rubric_content": {
-                "text_property": "Did the agent act on the `translation` its last accepted `propose_plan` answered with, rather than proceeding as though the plan had compiled? This property always applies and is never inapplicable. `propose_plan`'s own function response carries the verdict under `translation`: `{\"outcome\": \"ok\"}` when the plan compiled, or the referral itself. Acting on it means calling `submit_plan` on an `ok`, or recording a `Decision` that settles the referral before proposing again. A run that ignores what the translation answered fails this property."
+                "text_property": "Did the agent act on the `translation` its last accepted `propose_plan` answered with, rather than proceeding as though the plan had compiled? This property always applies and is never inapplicable. `propose_plan`'s own function response carries the verdict under `translation`: `{\"outcome\": \"ok\"}` when the plan compiled, or the referral itself. On an `ok` the plan goes to the user and the run ends; acting on a referral means recording a `Decision` that settles the referral before proposing again. A run that ignores what the translation answered fails this property."
               },
               "description": "The planner learns whether its plan compiled from the `translation` in `propose_plan`'s own function response, which carries either the ok or the referral. Ignoring that answer is how a plan reaches approval without the source question it raised ever being settled."
             },
@@ -61,17 +61,9 @@
               "rubric_id": "pair-invents-no-tools",
               "type": "TOOL_USE_QUALITY",
               "rubric_content": {
-                "text_property": "Did every function the agent invoked come from its declared tool list -- adk_request_input, propose_plan, reject_plan, and submit_plan? Tool names appearing inside a plan's contents or in the agent's prose are not invocations."
+                "text_property": "Did every function the agent invoked come from its declared tool list -- adk_request_input, propose_plan, and reject_plan? Tool names appearing inside a plan's contents or in the agent's prose are not invocations."
               },
               "description": "The planner names no MCP tool: which data and operations carry out a decision is translation's business, run inside propose_plan."
-            },
-            {
-              "rubric_id": "pair-declares-the-plan-ready",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent call submit_plan after the translation compiled a workflow? This property always applies and is never inapplicable. Judge only the functions the agent actually invoked; tool names appearing inside a plan's contents or in the agent's prose are not invocations. If submit_plan does not appear among them, the verdict is no."
-              },
-              "description": "The user asked to have the plan ready to approve, and submit_plan is what declares a compiled plan ready for their answer. An agent that compiles a workflow and stops leaves the turn short of what was asked."
             }
           ]
         }
@@ -118,14 +110,6 @@
                 "text_property": "Did the agent stop on the referral its last `propose_plan` answered with under `translation`, and tell the user the reason that referral carried? This property always applies and is never inapplicable. A run that receives a `requirement_unmeetable` referral and then proposes again with something else standing in or reports success fails this property."
               },
               "description": "A `requirement_unmeetable` referral carries the reason the requirement could not compile. That reason is what the user needs, and it arrives in the `translation` of `propose_plan`'s own function response."
-            },
-            {
-              "rubric_id": "unmeetable-does-not-execute",
-              "type": "TOOL_USE_QUALITY",
-              "rubric_content": {
-                "text_property": "Did the agent refrain from calling submit_plan? This property always applies and is never inapplicable. The referral leaves the plan without a compiled workflow, so there is nothing ready to declare, and any submit_plan call fails this property."
-              },
-              "description": "The one outcome that would matter in production: declaring a plan ready to approve when a requirement cannot be carried out."
             },
             {
               "rubric_id": "unmeetable-names-the-price-basis",
