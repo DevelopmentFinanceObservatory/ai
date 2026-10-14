@@ -117,7 +117,7 @@ The server answers its first request only after startup ends. What happens when 
 
 ## Error handling and refusals
 
-A refusal reaches the caller as an MCP error result, `isError: true`. Its `content` and `structuredContent` carry the same envelope of `error`, `retry`, and `detail` fields, plus `fix` and `pointer` when the refusal has a correction to offer, `retry_after_s` when it names a wait, and `platform_trace_id` on a coded platform refusal whose body carried a trace id.
+A refusal reaches the caller as an MCP error result, `isError: true`. Its `content` and `structuredContent` carry the same envelope of `error`, `retry`, and `detail` fields, plus `fix` and `pointer` when the refusal has a correction to offer, and `retry_after_s` when it names a wait. A coded platform refusal whose body carried a trace id logs it as a warning and leaves it out of the envelope.
 
 Callers that previously received refusals as non-error results should pass `raise_on_error=False` to `client.call_tool` and read the envelope from `structuredContent`. FastMCP otherwise raises `ToolError` for an `isError` result.
 

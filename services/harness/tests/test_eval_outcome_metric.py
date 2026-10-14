@@ -340,39 +340,6 @@ def test_a_matching_plan_proposal_scores_one() -> None:
     assert result.per_invocation_results[0].score == 1.0
 
 
-def _submitted(outcome: str, **fields: object) -> genai_types.FunctionResponse:
-    """A `submit_analysis` answer, as a compact-delivery run records it."""
-    return genai_types.FunctionResponse(
-        name="submit_analysis", response={"outcome": outcome, "status": "draft", **fields}
-    )
-
-
-@pytest.mark.parametrize(
-    ("expected", "actual", "score"),
-    [
-        (_plan_proposal(version=2), _submitted("recorded", version=2), 1.0),
-        (_plan_proposal(), _submitted("ready_for_review", version=1), 1.0),
-        (_plan_proposal(), _submitted("needs_fields"), 0.0),
-        (
-            _ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES),
-            _submitted(
-                "ready_for_review",
-                version=1,
-                translation=_ok_proposal(_EXPECTED_STEPS, _EXPECTED_SOURCES).response,
-            ),
-            1.0,
-        ),
-    ],
-    ids=["recorded", "ready-for-review", "needs-fields", "translation"],
-)
-def test_a_submit_analysis_answer_is_graded_as_the_proposal_it_records(
-    expected: genai_types.FunctionResponse, actual: genai_types.FunctionResponse, score: float
-) -> None:
-    result = workflow_outcome(_metric(), [_invocation(actual)], [_invocation(expected)], None)
-
-    assert result.per_invocation_results[0].score == score
-
-
 def test_a_plan_amendment_is_graded_by_the_version_the_case_states() -> None:
     # `version: 2` asserts the revision amended the first plan rather than
     # starting a fresh one, which no rubric can read off the trace.

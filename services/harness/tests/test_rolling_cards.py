@@ -26,12 +26,6 @@ from dfo_frame_grammar import Frame
 from harness import rolling_cards
 from harness.recipe_replay import RESUME_RETRY_AFTER_S, Pending, Refused, Replayed
 from harness.rolling_cards import (
-    RELATIVE_PERIOD_ON_CLOSED_WINDOW,
-    ROLLING_REPLAY_NOT_CONFIGURED,
-    ROLLING_REPLAY_PENDING,
-    ROLLING_REPLAY_REFUSED,
-    ROLLING_SELECT_NEEDS_NEW_FRAME,
-    TITLE_QUOTES_ROLLING_PERIOD,
     WITHHELD_FOR_S,
     CardWithheld,
     RollingCards,
@@ -40,6 +34,7 @@ from harness.rolling_cards import (
     title_refusal,
     written_title_refusal,
 )
+from harness.tool_contracts import HarnessCode
 
 from .replay_support import REPORTERS, SPEC, STAT_VAR, reporter_frame, reporter_rows, yearly
 from .test_recipe_replay import Scene
@@ -289,7 +284,10 @@ def test_a_title_is_refused_for_naming_a_period_the_card_resolved(
         assert refusal is None
     else:
         assert refusal is not None
-        assert (refusal["code"], refusal["fix"]) == (TITLE_QUOTES_ROLLING_PERIOD, {"period": named})
+        assert (refusal["code"], refusal["fix"]) == (
+            HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
+            {"period": named},
+        )
         assert named in refusal["message"]
 
 
@@ -422,7 +420,7 @@ async def test_a_relative_period_is_refused_on_data_defined_to_end_at_a_stated_y
         if refused:
             with pytest.raises(CardWithheld) as withheld:
                 await _admit(cards, write, platform=platform, **args)
-            assert withheld.value.refusal["code"] == RELATIVE_PERIOD_ON_CLOSED_WINDOW
+            assert withheld.value.refusal["code"] == HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW
         else:
             assert await _admit(cards, write, platform=platform, **args) == write
     # Named years are drawn on any definition.
@@ -457,9 +455,13 @@ async def _withheld_with_no_replayer(scene: Scene) -> Replays | None:
 @pytest.mark.parametrize(
     ("arrange", "code"),
     [
-        pytest.param(_withheld_by_a_queued_mint, ROLLING_REPLAY_PENDING, id="pending"),
-        pytest.param(_withheld_by_an_unresolved_anchor, ROLLING_REPLAY_REFUSED, id="refused"),
-        pytest.param(_withheld_with_no_replayer, ROLLING_REPLAY_NOT_CONFIGURED, id="no-replayer"),
+        pytest.param(_withheld_by_a_queued_mint, HarnessCode.ROLLING_REPLAY_PENDING, id="pending"),
+        pytest.param(
+            _withheld_by_an_unresolved_anchor, HarnessCode.ROLLING_REPLAY_REFUSED, id="refused"
+        ),
+        pytest.param(
+            _withheld_with_no_replayer, HarnessCode.ROLLING_REPLAY_NOT_CONFIGURED, id="no-replayer"
+        ),
     ],
 )
 async def test_a_replay_that_gives_no_frame_withholds_every_card_of_its_series(
@@ -488,7 +490,7 @@ async def test_a_replay_that_gives_no_frame_withholds_every_card_of_its_series(
         return
     # The dataset answers and the tool works again; the wait has to pass first.
     scene.tools.answers.clear()
-    wait = 1.5 if code == ROLLING_REPLAY_PENDING else WITHHELD_FOR_S
+    wait = 1.5 if code == HarnessCode.ROLLING_REPLAY_PENDING else WITHHELD_FOR_S
     clock.now = wait - 0.1
     with pytest.raises(CardWithheld):
         await _admit(cards, card)
@@ -527,7 +529,7 @@ async def test_a_replay_cut_at_its_deadline_is_tried_again_from_the_steps_in_the
     for _ in range(2):
         with pytest.raises(CardWithheld) as withheld:
             await _admit(cards, card)
-        assert withheld.value.refusal["code"] == ROLLING_REPLAY_PENDING
+        assert withheld.value.refusal["code"] == HarnessCode.ROLLING_REPLAY_PENDING
     assert len(replays.populations) == 1
 
     ran_out.now = 0.0
@@ -574,7 +576,7 @@ async def test_a_revise_is_judged_as_the_stored_card_with_the_patch_merged_in(
 
     # A title naming a period the stored card's `change.basis` resolved is refused.
     assert await revise({"title": "Aid in 2022 against 2021"}, "cmp_2") == (
-        TITLE_QUOTES_ROLLING_PERIOD
+        HarnessCode.TITLE_QUOTES_ROLLING_PERIOD
     )
     assert await revise({"title": "Aid in 2015 against 2010"}, "cmp_2") is None
     # A patch stating new relative periods is judged on what the new revision resolves.
@@ -611,12 +613,15 @@ async def test_a_revise_is_judged_as_the_stored_card_with_the_patch_merged_in(
     # A patch that can break no rule is sent without reading the stored card.
     assert await revise({"title": "Growth of each reporter"}) is None
     assert platform.stored_reads == []
-    assert await revise({"title": "Growth, 2019-2022"}) == TITLE_QUOTES_ROLLING_PERIOD
+    assert await revise({"title": "Growth, 2019-2022"}) == HarnessCode.TITLE_QUOTES_ROLLING_PERIOD
     assert await revise({"title": "Growth of 2030 targets"}) is None
     assert await revise({"select": {"reporter": sorted(REPORTERS)}}) is None
     assert replays.populations == []
     # Other series need another frame, which a revise cannot name.
-    assert await revise({"select": {"reporter": [FRANCE]}}) == ROLLING_SELECT_NEEDS_NEW_FRAME
+    assert (
+        await revise({"select": {"reporter": [FRANCE]}})
+        == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME
+    )
     # The same card written as a create is moved to that frame, with no second replay.
     created = await _admit(cards, {**stored, "select": {"reporter": [FRANCE]}})
     assert created["frame_ref"] != ref.model_dump()

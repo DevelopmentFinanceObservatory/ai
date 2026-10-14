@@ -17,10 +17,7 @@ a model or an upstream would answer:
 - search answers from the case's canned envelopes, run through the digest the
   served resolver builds (`harness.tool_contracts.resolver_digest`);
 - the tool surface and executor are `harness.scripted`'s, wrapped to log
-  every call and to refuse a retrieval the case names. A case marked
-  `direct` has the surface declare the real servers' schemas, which the
-  orchestrator's direct recipes (`harness.direct_recipes`) compile against,
-  and answer their `growth` step.
+  every call and to refuse a retrieval the case names.
 
 Every model call is recorded as a plain dict (`log`), next to the calls the
 plan's steps make, so `checks.py`'s request checks read what each model was
@@ -49,7 +46,6 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
-from harness.direct_recipes import DirectRecipes
 from harness.graph.workflow import create_root_workflow
 from harness.orchestrator_tools import build_orchestrator_tools
 from harness.planner_seam import PlannerSeam
@@ -60,11 +56,7 @@ from harness.scripted import (
     scripted_publish_result,
     use_compiled_proposals,
 )
-from harness.scripted_plan import (
-    scripted_aggregate_result,
-    scripted_fetch_series_stats,
-    scripted_plan,
-)
+from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
 from harness.tool_contracts import ResolverError, resolver_digest
@@ -348,16 +340,9 @@ class LoggingExecutor(ScriptedExecutor):
         return result
 
 
-def scripted_growth_result() -> dict[str, Any]:
-    """The `growth` result `LoggingSurface` answers a direct recipe's step with:
-    the scripted aggregate's frame, keyed by place as a growth of one series is."""
-    return {**scripted_aggregate_result(), "role_keys": ["observationAbout"]}
-
-
 class LoggingSurface(ScriptedSurface):
-    """`ScriptedSurface` that logs each plan-step call, answers `growth`
-    (`scripted_growth_result`), and refuses `get_data` for the spec ids a case
-    names with that refusal's `code` and `retry_mode`.
+    """`ScriptedSurface` that logs each plan-step call and refuses `get_data`
+    for the spec ids a case names with that refusal's `code` and `retry_mode`.
 
     With `real_schemas`, it declares the real servers' tool schemas, the ones
     a plan the translator compiled is pinned to."""
@@ -382,12 +367,6 @@ class LoggingSurface(ScriptedSurface):
         if refusal is not None:
             body = {"fix": {}, "message": "the case's scripted refusal", **refusal}
             result = ToolCallResult(is_error=True, structured_content=body, text=body["message"])
-        elif tool.name == "growth":
-            result = ToolCallResult(
-                is_error=False,
-                structured_content=scripted_growth_result(),
-                text="scripted growth result",
-            )
         else:
             result = await super().call_tool(
                 tool=tool, arguments=arguments, on_progress=on_progress
@@ -480,7 +459,7 @@ def build_studio(
     surface = LoggingSurface(
         log=log,
         refusals=scenario.get("get_data_refusals") or {},
-        real_schemas=planner_script is not None or bool(scenario.get("direct")),
+        real_schemas=planner_script is not None,
     )
     if planner_script is None:
         planner_llm = PlannerLlm(log=log)
@@ -509,22 +488,10 @@ def build_studio(
         planner = handing_back_planner_failures(seam)
 
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
-        run_ledger = InMemoryRunLedger()
         agent = create_orchestrator_agent(
             model_name="unused",
             tools=build_orchestrator_tools(
-                resolver=resolver,
-                executor=recorder,
-                surface=surface_recorder,
-                direct=DirectRecipes(
-                    recipes=tuple(settings.orchestrator_direct_recipes),
-                    run_ledger=run_ledger,
-                    publisher=scripted_publish_result,
-                    tool_surface=surface_recorder,
-                    translation_surface=surface,
-                    max_concurrent_steps=settings.executor_max_concurrent_steps,
-                    fetch_series_stats=scripted_fetch_series_stats,
-                ),
+                resolver=resolver, executor=recorder, surface=surface_recorder
             ),
         ).model_copy(update={"model": orchestrator_llm})
         return create_root_workflow(
@@ -534,7 +501,7 @@ def build_studio(
             tool_surface=surface_recorder,
             definition_surface=surface,
             publisher=scripted_publish_result,
-            run_ledger=run_ledger,
+            run_ledger=InMemoryRunLedger(),
             max_concurrent_steps=settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
         )

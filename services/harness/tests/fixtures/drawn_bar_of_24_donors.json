@@ -1,0 +1,404 @@
+{
+  "type": "bar_chart",
+  "title": "Official development assistance gross disbursements to Malawi by donor (2020-2024) (24 largest of 70 in 2024)",
+  "series": [
+    {
+      "id": "s_5d9ba23cf0c904b6",
+      "label": "International Development Association",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 542859710
+        }
+      ]
+    },
+    {
+      "id": "s_57893d668f099e04",
+      "label": "United States of America",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 398956060
+        }
+      ]
+    },
+    {
+      "id": "s_3d665e0afc6e0dc1",
+      "label": "Global Fund",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 231243928
+        }
+      ]
+    },
+    {
+      "id": "s_e50ed7fc7bef6355",
+      "label": "European Union institutions",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 109796311
+        }
+      ]
+    },
+    {
+      "id": "s_620325a2372315ee",
+      "label": "United Kingdom",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 61582867
+        }
+      ]
+    },
+    {
+      "id": "s_d1645effe75b4256",
+      "label": "Germany",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 55113779
+        }
+      ]
+    },
+    {
+      "id": "s_ac639747ad9512e4",
+      "label": "Norway",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 45723884
+        }
+      ]
+    },
+    {
+      "id": "s_ced6dd0401aec682",
+      "label": "Gavi, the Vaccine Alliance",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 34089492
+        }
+      ]
+    },
+    {
+      "id": "s_448182168cff7adc",
+      "label": "International Fund for Agricultural Development",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 33411000
+        }
+      ]
+    },
+    {
+      "id": "s_5be378cb77c74e51",
+      "label": "Ireland",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 26994383
+        }
+      ]
+    },
+    {
+      "id": "s_805dff75569fbe5f",
+      "label": "Gates Foundation",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 23400960
+        }
+      ]
+    },
+    {
+      "id": "s_21dd357efe2048b7",
+      "label": "African Development Fund",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 23359258
+        }
+      ]
+    },
+    {
+      "id": "s_bf3c425999ef026b",
+      "label": "Japan",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 21626621
+        }
+      ]
+    },
+    {
+      "id": "s_29754d8395ee791e",
+      "label": "United Nations Development Programme",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 13362271
+        }
+      ]
+    },
+    {
+      "id": "s_cd3e15bd67d9b845",
+      "label": "Iceland",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 11858360
+        }
+      ]
+    },
+    {
+      "id": "s_183a142e78b55a94",
+      "label": "Canada",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 11412730
+        }
+      ]
+    },
+    {
+      "id": "s_150e15fd9b3d41e6",
+      "label": "United Nations Children's Fund",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 10915000
+        }
+      ]
+    },
+    {
+      "id": "s_01394862fb2aa448",
+      "label": "Belgium",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 10124632
+        }
+      ]
+    },
+    {
+      "id": "s_609383c68da2c6fe",
+      "label": "Wellcome Trust",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 8237420
+        }
+      ]
+    },
+    {
+      "id": "s_e115a6deeb94d348",
+      "label": "The OPEC Fund for International Development",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 7047160
+        }
+      ]
+    },
+    {
+      "id": "s_dfc1ad46652b3e1e",
+      "label": "Central Emergency Response Fund",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 6598000
+        }
+      ]
+    },
+    {
+      "id": "s_1ed6e9d1e133a4a2",
+      "label": "Green Climate Fund",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 5279324
+        }
+      ]
+    },
+    {
+      "id": "s_962158deac72304f",
+      "label": "Sweden",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 5025183
+        }
+      ]
+    },
+    {
+      "id": "s_926ec7e9e2723e94",
+      "label": "Global Environment Facility",
+      "unit": "US Dollar",
+      "points": [
+        {
+          "period": "2024",
+          "value": 4874964
+        }
+      ]
+    }
+  ],
+  "summary_series": [
+    {
+      "id": "s_5d9ba23cf0c904b6",
+      "label": "International Development Association",
+      "coordinates": {
+        "financingProvider": "InternationalDevelopmentAssociation",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_57893d668f099e04",
+      "label": "United States of America",
+      "coordinates": {
+        "financingProvider": "country/USA",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_3d665e0afc6e0dc1",
+      "label": "Global Fund",
+      "coordinates": {
+        "financingProvider": "GlobalFund",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_e50ed7fc7bef6355",
+      "label": "European Union institutions",
+      "coordinates": {
+        "financingProvider": "EuropeanUnionInstitutions",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_620325a2372315ee",
+      "label": "United Kingdom",
+      "coordinates": {
+        "financingProvider": "country/GBR",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_d1645effe75b4256",
+      "label": "Germany",
+      "coordinates": {
+        "financingProvider": "country/DEU",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_ac639747ad9512e4",
+      "label": "Norway",
+      "coordinates": {
+        "financingProvider": "country/NOR",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_ced6dd0401aec682",
+      "label": "Gavi, the Vaccine Alliance",
+      "coordinates": {
+        "financingProvider": "Gavi",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_448182168cff7adc",
+      "label": "International Fund for Agricultural Development",
+      "coordinates": {
+        "financingProvider": "InternationalFundForAgriculturalDevelopment",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_5be378cb77c74e51",
+      "label": "Ireland",
+      "coordinates": {
+        "financingProvider": "country/IRL",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_805dff75569fbe5f",
+      "label": "Gates Foundation",
+      "coordinates": {
+        "financingProvider": "GatesFoundation",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    },
+    {
+      "id": "s_21dd357efe2048b7",
+      "label": "African Development Fund",
+      "coordinates": {
+        "financingProvider": "AfricanDevelopmentFund",
+        "financingRecipient": "country/MWI",
+        "provenance": "provenance/OECDDAC2A",
+        "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "unit": "CurrencyUSD"
+      }
+    }
+  ]
+}

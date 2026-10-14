@@ -2,143 +2,143 @@
   "cases": [
     {
       "id": "capped_25_groups",
-      "digest_chars": 1191
+      "digest_chars": 1085
     },
     {
       "id": "capped_30_groups",
-      "digest_chars": 1191
+      "digest_chars": 1085
     },
     {
       "id": "compare_2000_stat_vars_per_side",
-      "digest_chars": 716
+      "digest_chars": 610
     },
     {
       "id": "compare_capped_25_periods",
-      "digest_chars": 1313
+      "digest_chars": 1207
     },
     {
       "id": "compare_single_period",
-      "digest_chars": 675
+      "digest_chars": 569
     },
     {
       "id": "empty_group_by",
-      "digest_chars": 522
+      "digest_chars": 416
     },
     {
       "id": "filter_capped_25_rows",
-      "digest_chars": 1977
+      "digest_chars": 1871
     },
     {
       "id": "filter_empty_result",
-      "digest_chars": 372
+      "digest_chars": 266
     },
     {
       "id": "filter_single_row",
-      "digest_chars": 444
+      "digest_chars": 338
     },
     {
       "id": "five_groups",
-      "digest_chars": 604
+      "digest_chars": 498
     },
     {
       "id": "frame_pair_fat",
-      "digest_chars": 488
+      "digest_chars": 382
     },
     {
       "id": "frame_pair_lean",
-      "digest_chars": 488
+      "digest_chars": 382
     },
     {
       "id": "growth_capped_25_entities",
-      "digest_chars": 1451
+      "digest_chars": 1345
     },
     {
       "id": "growth_single_entity",
-      "digest_chars": 446
+      "digest_chars": 340
     },
     {
       "id": "join_capped_25_keys",
-      "digest_chars": 1494
+      "digest_chars": 1388
     },
     {
       "id": "join_single_key",
-      "digest_chars": 497
+      "digest_chars": 391
     },
     {
       "id": "join_with_dropped_keys",
-      "digest_chars": 580
+      "digest_chars": 474
     },
     {
       "id": "max_min_groups",
-      "digest_chars": 468
+      "digest_chars": 362
     },
     {
       "id": "quotient_of_capped_25_keys",
-      "digest_chars": 1765
+      "digest_chars": 1659
     },
     {
       "id": "quotient_of_keyed_dropped_key_and_zero_denominator",
-      "digest_chars": 1132
+      "digest_chars": 1026
     },
     {
       "id": "quotient_of_unkeyed_periods_left_out",
-      "digest_chars": 917
+      "digest_chars": 811
     },
     {
       "id": "rank_capped_25_entities",
-      "digest_chars": 1494
+      "digest_chars": 1388
     },
     {
       "id": "rank_limit_10_of_25_entities",
-      "digest_chars": 1697
+      "digest_chars": 1591
     },
     {
       "id": "rank_single_entity",
-      "digest_chars": 453
+      "digest_chars": 347
     },
     {
       "id": "share_of_capped_25_periods",
-      "digest_chars": 1376
+      "digest_chars": 1270
     },
     {
       "id": "share_of_single_period",
-      "digest_chars": 722
+      "digest_chars": 616
     },
     {
       "id": "single_group",
-      "digest_chars": 488
+      "digest_chars": 382
     },
     {
       "id": "sparse_coverage",
-      "digest_chars": 720
+      "digest_chars": 614
     },
     {
       "id": "sum_of_2000_stat_vars_per_side",
-      "digest_chars": 740
+      "digest_chars": 634
     },
     {
       "id": "sum_of_capped_25_periods_25_left_only",
-      "digest_chars": 1245
+      "digest_chars": 1139
     },
     {
       "id": "sum_of_single_period",
-      "digest_chars": 712
+      "digest_chars": 606
     },
     {
       "id": "wide_band_100000_groups",
-      "digest_chars": 1283
+      "digest_chars": 1177
     },
     {
       "id": "wide_band_1000_groups",
-      "digest_chars": 1197
+      "digest_chars": 1091
     },
     {
       "id": "wide_band_25_groups",
-      "digest_chars": 1166
+      "digest_chars": 1060
     },
     {
       "id": "with_warnings",
-      "digest_chars": 546
+      "digest_chars": 440
     }
   ]
 }

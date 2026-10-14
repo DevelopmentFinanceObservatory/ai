@@ -74,9 +74,8 @@ def create_planner_with_translator(
     Args:
         settings: The harness service's settings, read for the MCP URLs the
             default surface covers.
-        agent_settings: The model the planner runs on and how it is handed the
-            requirement schemas (`planner_schema_delivery`). Defaults to
-            reading the environment, the same way the deployed service does.
+        agent_settings: The model the planner runs on. Defaults to reading
+            the environment, the same way the deployed service does.
         surface: The tool surface translation discovers on and compiles
             against, and the planner's `get_skill` and `get_skill_file` call
             data-mcp through. Tests pin one here so the planner builds without
@@ -105,5 +104,4 @@ def create_planner_with_translator(
         surface=resolved_surface,
         question_fixed=question_fixed,
         prefix_cache=prefix_cache,
-        schema_delivery=resolved_agent_settings.planner_schema_delivery,
     )

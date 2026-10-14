@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from common.period_note import period_note
 from common.refusal import refusal_code
 from compiler.surface import (
     ProgressCallback,
@@ -53,6 +54,8 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
+from executor.artifacts import declared_ranked_before_limit
+from executor.outcomes import RefusalKind
 from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.workflow.utils._workflow_hitl_utils import (
@@ -60,15 +63,13 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
-from planner.agent import proposing_tool
+from planner.agent import PROPOSE_PLAN
 from planner.phrasing import entities_phrase
 from planner.plan import PLAN_STATE_KEY, DatasetRequirement
 from planner.plan import Plan as PlannerPlan
-from planner.settings import SchemaDelivery
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
-from submission.tool import SubmissionOutcome, SubmissionStage
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -77,19 +78,20 @@ from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_STATUS_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
 )
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
-from harness.planner_seam import PlannerSeamError
 from harness.provenance import (
     ProvenanceStore,
     manifest_with_stat_vars,
     retrieval_frame_ref,
 )
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
+from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
@@ -99,6 +101,7 @@ from harness.studio_state import (
 from harness.studio_state import (
     land_component as state_land_component,
 )
+from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_records import loose_match_notes
 from harness.wire import (
     ActivityStep,
@@ -129,10 +132,9 @@ from harness.wire import (
 
 logger = logging.getLogger(__name__)
 
-# A failed step's one-line reason in the Activity feed, bounded. Large
-# enough to hold a real over_ceiling/member_cardinality refusal whole,
-# including the advice sentence at the end that tells the user scope
-# cannot narrow it and to go back to search.
+# The bound on a recorded refusal's `message` and on a running line's detail.
+# Large enough to hold a real over_ceiling/member_cardinality refusal whole,
+# including the advice sentence at the end that says scope cannot narrow it.
 _STEP_DETAIL_CAP = 400
 
 
@@ -148,15 +150,6 @@ _RESOLVED_BY_TO_WIRE = {"planner_default": "default", "user": "user"}
 # closing frame's `detail` names the recorded plan's data (`_data_phrase`),
 # which Studio shows as the line's summary.
 _CHECKING = "Checking the plan against the data"
-
-# The tools a planner proposes through, one per `SchemaDelivery`.
-_PROPOSING_TOOLS = frozenset(proposing_tool(delivery) for delivery in SchemaDelivery)
-
-# The outcomes of a proposal that recorded a plan: `propose_plan`'s `ok`, and
-# `submit_analysis`'s two labels for it.
-_RECORDED_OUTCOMES = frozenset(
-    {Outcome.OK, SubmissionOutcome.RECORDED, SubmissionOutcome.READY_FOR_REVIEW}
-)
 
 # The line a refused `propose_plan` opens while the planner redrafts, and the
 # Activity detail for the refusal's code. The refusal's own message names
@@ -201,14 +194,25 @@ _TOOL_LABELS = {
 # A tool with no label above is never shown by its machine name.
 _UNNAMED_TOOL_LABEL = "Working on your request"
 
-# What a failed seed step says. A failed tool call's step carries no detail,
-# since its refusal is written for the agent, but a seed is taken before the
-# agent runs, and a turn that keeps none starts from the question with no
-# word of the datasets the user brought: this line is where the user learns it.
+# What a failed seed step says in place of its code's sentence. A seed is
+# taken before the agent runs, and a turn that keeps none starts from the
+# question with no word of the datasets the user brought: this line is where
+# the user learns it.
 _SEEDS_UNUSED = (
     "The datasets from Search could not be used, so the answer starts from your question"
 )
 _SEED_UNUSED = "This Search result was left out"
+
+
+def failure_detail(failure: Mapping[str, Any]) -> str:
+    """The sentence a user reads for `failure`, a refusal or a tool's failed
+    answer: the one `harness.sentences.failure_sentence` gives its `code`,
+    `retry_mode` and `fix`. Its `message`, which is written for the model,
+    stays out of the sentence."""
+    fix = failure.get("fix")
+    return failure_sentence(
+        failure.get("code"), failure.get("retry_mode"), fix if isinstance(fix, Mapping) else None
+    )
 
 
 def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) -> dict[str, Any]:
@@ -229,42 +233,18 @@ def _timeout_refusal(conversation: ConversationState, *, tool: str, key: str) ->
     repeat = key in conversation.timed_out_calls
     conversation.timed_out_calls.add(key)
     if tool == "write_component":
-        return {
-            "code": "transient_unavailable",
-            "retry_mode": "do_not_retry",
-            "fix": {
-                "detail": (
-                    "write_component timed out after it was sent, so the component may "
-                    "already exist; check the canvas before asking for it again -- the "
-                    f"team can trace it as {conversation.trace_id}"
-                )
-            },
-        }
-    if repeat:
-        return {
-            "code": "transient_unavailable",
-            "retry_mode": "do_not_retry",
-            "fix": {
-                "detail": (
-                    f"{tool} timed out again in this conversation; the earlier "
-                    "wait did not help, so retrying now is unlikely to either -- "
-                    f"the team can trace it as {conversation.trace_id}"
-                )
-            },
-        }
+        return harness_refusal(
+            code=HarnessCode.WRITE_UNCONFIRMED,
+            message="write_component timed out after it was sent, so the component may exist",
+        )
     return {
-        "code": "transient_unavailable",
-        "retry_mode": "retry_after_delay",
-        "fix": {"detail": f"{tool} timed out; the team can trace it as {conversation.trace_id}"},
+        "code": ErrorCode.TRANSIENT_UNAVAILABLE.value,
+        "retry_mode": (RetryMode.DO_NOT_RETRY if repeat else RetryMode.RETRY_AFTER_DELAY).value,
+        "fix": None,
+        "message": f"{tool} timed out again; the earlier wait did not help"
+        if repeat
+        else f"{tool} timed out",
     }
-
-
-# What the user reads when the planner pair stops without a plan ready for
-# them.
-_PLANNER_FAILED_DETAIL = (
-    "The assistant could not finish preparing a plan for this question. "
-    "The team can investigate using reference {trace_id}."
-)
 
 
 def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame:
@@ -272,7 +252,8 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     when the wire grammar knows it (e.g. `capability_unavailable` on an
     identity-reproduction failure); a timed-out MCP call (`timeout_tool`/
     `timeout_key`, set by `mcp_client._call_tool`) becomes its own synthetic
-    refusal so a repeat of the exact same call stops being told to wait.
+    refusal so a repeat of the exact same call stops being told to wait, and
+    reaches the wire as `transient_unavailable` whatever its own code.
 
     A code the wire grammar has no member for, e.g.
     `executor.outcomes.RefusalKind.SURFACE_CHANGED`, which fires when a
@@ -284,28 +265,24 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
     true member, so a do-not-retry refusal is never told to the user as a
     reason to retry.
 
-    A `PlannerSeamError` keeps its code and retry mode but not its detail:
-    that text is the seam's message to the planner model ("Propose it again
-    ... to have it translated"), logged by the caller, and the user reads
-    `_PLANNER_FAILED_DETAIL` with the trace id instead.
+    The frame's `detail`, which Studio shows as the reply, is the sentence
+    for the refusal's own code, or `raised` for an exception that states
+    none, under the retry mode the frame states (`failure_detail`). The
+    refusal's `fix.detail` and `message` are written for a model or an
+    operator and stay in the log the caller writes, as the turn's trace id
+    does.
     """
     timeout_tool = getattr(exc, "timeout_tool", None)
     if timeout_tool is not None:
         timeout_key = getattr(exc, "timeout_key", None) or timeout_tool
         refusal = _timeout_refusal(conversation, tool=timeout_tool, key=timeout_key)
+        wire_code = ErrorCode.TRANSIENT_UNAVAILABLE.value
     else:
         refusal = getattr(exc, "refusal", None) or {}
-    code = refusal.get("code")
+        wire_code = refusal.get("code")
     try:
-        error_code = ErrorCode(code)
+        error_code = ErrorCode(wire_code)
         retry = RetryMode(refusal.get("retry_mode", RetryMode.DO_NOT_RETRY))
-        if isinstance(exc, PlannerSeamError):
-            detail = _PLANNER_FAILED_DETAIL.format(trace_id=conversation.trace_id)
-        else:
-            detail = str(
-                (refusal.get("fix") or {}).get("detail")
-                or f"the turn failed server-side; the team can trace it as {conversation.trace_id}"
-            )
     except ValueError:
         try:
             retry = RetryMode(refusal.get("retry_mode", RetryMode.RETRY_AFTER_DELAY))
@@ -316,7 +293,8 @@ def _stream_fatal(conversation: ConversationState, exc: Exception) -> ErrorFrame
             if retry is RetryMode.RETRY_AFTER_DELAY
             else ErrorCode.CAPABILITY_UNAVAILABLE
         )
-        detail = f"the turn failed server-side; the team can trace it as {conversation.trace_id}"
+    stated = refusal if refusal.get("code") else {**refusal, "code": HarnessCode.RAISED.value}
+    detail = failure_detail({**stated, "retry_mode": retry.value})
     conversation.close_turn(
         final_text=conversation.turn_final_text or detail, error=error_code.value
     )
@@ -361,20 +339,21 @@ class _ExecutorRecord:
 
 
 def _raised_refusal(exc: BaseException) -> dict[str, Any]:
-    """The refusal a failed step shows for a call that raised: the exception's
-    class as its code, or `cancelled` for one stopped mid-flight."""
+    """The refusal a failed step shows for a call that raised, with the
+    exception's class and text as its message, or `cancelled` for one stopped
+    mid-flight."""
     if isinstance(exc, asyncio.CancelledError):
         return {
-            "code": "cancelled",
+            "code": ErrorCode.CANCELLED.value,
             "retry_mode": "do_not_retry",
             "fix": None,
             "message": "the call was stopped before it returned",
         }
     return {
-        "code": type(exc).__name__,
+        "code": HarnessCode.RAISED.value,
         "retry_mode": "retry_after_delay",
         "fix": None,
-        "message": (str(exc) or type(exc).__name__)[:_STEP_DETAIL_CAP],
+        "message": f"{type(exc).__name__}: {exc}"[:_STEP_DETAIL_CAP],
     }
 
 
@@ -527,9 +506,13 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
     """A `ToolCallResult` in the outcome grammar `_Translator._drain_recorder` reads.
 
     A successful `get_data` call's summary is its manifest's one line, the
-    one a direct fetch shows (`harness.mcp_client._manifest_summary`); any
-    other successful call has none, since its plan step's label already
-    says what it did. The digest text is written for the model and names
+    one a direct fetch shows (`harness.mcp_client._manifest_summary`), beside
+    the `period_note` of its coverage (`common.period_note.period_note`)
+    when there is one, as a direct fetch states it. Any other successful
+    call has no summary, since its plan step's label already says what it
+    did, and states the `rows` its result holds when its structured content
+    counts them, as an analysis verb's does, with the `ranked_before_limit`
+    of a limited ranking. The digest text is written for the model and names
     dcids and dimension keys, so it never becomes the summary.
 
     A refusal carries `code`, `retry_mode`, `fix` and `message`, read off
@@ -540,14 +523,26 @@ def _surface_call_outcome(tool: str, result: ToolCallResult) -> dict[str, Any]:
     text). The refusal omits `origin` and `advice`, so it reads as
     unattributed; `McpExecutor._refusal_outcome` states both.
     """
+    body: dict[str, Any] = result.structured_content or {}
+    if not result.is_error and tool == "get_data":
+        note = period_note(body.get("coverage") or {})
+        return {
+            "outcome": "ok",
+            "frame_refs": [],
+            "summary": _manifest_summary(body),
+            **({"period_note": note} if note else {}),
+        }
     if not result.is_error:
-        summary = _manifest_summary(result.structured_content or {}) if tool == "get_data" else None
-        return {"outcome": "ok", "frame_refs": [], "summary": summary}
-    body = result.structured_content or {}
+        counted: dict[str, int] = {}
+        if isinstance(body.get("rows"), int):
+            counted["rows"] = body["rows"]
+        if (ranked := declared_ranked_before_limit(body)) is not None:
+            counted["ranked_before_limit"] = ranked
+        return {"outcome": "ok", "frame_refs": [], "summary": None, **counted}
     return {
         "outcome": "refusal",
         "refusal": {
-            "code": refusal_code(body) or "unspecified",
+            "code": refusal_code(body) or HarnessCode.UNSPECIFIED.value,
             "retry_mode": str(body.get("retry_mode") or body.get("retry") or "do_not_retry"),
             "fix": body.get("fix") if isinstance(body.get("fix"), dict) else None,
             "message": str(body.get("message") or body.get("detail") or result.text),
@@ -631,7 +626,7 @@ class _RecordingSurface:
                 {
                     "outcome": "refusal",
                     "refusal": {
-                        "code": "transport_failed",
+                        "code": RefusalKind.TRANSPORT_FAILED.value,
                         "retry_mode": "retry_after_delay",
                         "fix": None,
                         "message": str(exc)[:_STEP_DETAIL_CAP],
@@ -897,19 +892,56 @@ def _request_input_call(event: Event) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
+def _facts(*facts: Any) -> str | None:
+    """A completed step's detail: each of `facts` its result states, in
+    order, or `None` when it states none. The Studio eval's grounding check
+    reads a reply's numbers against it."""
+    return " \u00b7 ".join(str(fact) for fact in facts if fact)[:_STEP_DETAIL_CAP] or None
+
+
+def _rows_held(record: _ExecutorRecord) -> str | None:
+    """How many rows the result of a recorded call other than a retrieval
+    holds, when it counts them. A ranking's rows are the ones it keeps, of
+    the entries it ranked when a limit cut them. A retrieval's summary
+    states its own observations."""
+    rows = record.result.get("rows")
+    if record.tool == "get_data" or not isinstance(rows, int):
+        return None
+    ranked = declared_ranked_before_limit(record.result)
+    total = rows if ranked is None else ranked
+    counted = f"{rows:,}" if ranked is None else f"{rows:,} of {ranked:,}"
+    counted += " row" if total == 1 else " rows"
+    return (
+        f"The ranking keeps {counted}." if record.tool == "rank" else f"The result holds {counted}."
+    )
+
+
 def _record_detail(record: _ExecutorRecord) -> str | None:
-    """A successful recorded call's one-line result. A card's line names
-    its kind and title already (`_record_label`), so it carries none."""
+    """A successful recorded call's result: its one-line summary, the period
+    note of a retrieval that carries one, and the rows an analysis result
+    holds. A card's line names its kind and title already (`_record_label`),
+    so it carries none."""
     if record.tool == "write_component":
         return None
-    return record.result.get("summary")
+    result = record.result
+    return _facts(result.get("summary"), result.get("period_note"), _rows_held(record))
 
 
-def _refused_detail(record: _ExecutorRecord) -> str | None:
-    """A failed recorded call's line: a seed step's plain sentence, else none."""
-    if record.tool != SEED_STEP_TOOL:
-        return None
-    return _SEEDS_UNUSED if record.step_id == SEEDS_STEP_ID else _SEED_UNUSED
+def _refused_detail(record: _ExecutorRecord) -> str:
+    """A failed recorded call's line: a seed step's plain sentence, else the
+    sentence for its refusal's code."""
+    if record.tool == SEED_STEP_TOOL:
+        return _SEEDS_UNUSED if record.step_id == SEEDS_STEP_ID else _SEED_UNUSED
+    refusal = record.result.get("refusal")
+    return failure_detail(refusal if isinstance(refusal, Mapping) else {})
+
+
+def _answer_failure(answer: Mapping[str, Any]) -> str:
+    """The line of an agent tool's failed answer. A tool states its `code`
+    and `retry_mode` beside its `error` or `refusal` prose, or inside a
+    `refusal` that is a refusal body."""
+    refusal = answer.get("refusal")
+    return failure_detail(refusal if isinstance(refusal, Mapping) else answer)
 
 
 def _step_label(tool: str, plan_label: str | None = None) -> str:
@@ -1029,6 +1061,8 @@ class _Translator:
         self._quiet_calls: dict[str, str] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
         self._handed_off: str | None = None
+        # The highest composition revision this stream has sent.
+        self._sent_revision = 0
 
     def _plan_path_frames(self, event: Event) -> list[Any]:
         """Frames for an event of the plan path: the planner's status lines,
@@ -1053,9 +1087,9 @@ class _Translator:
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
             for call in event.get_function_calls():
-                frames.extend(self._planner_call_status(call.name or "", call.args or {}))
+                frames.extend(self._planner_call_status(call.name or ""))
             for response in event.get_function_responses():
-                if response.name in _PROPOSING_TOOLS:
+                if response.name == PROPOSE_PLAN:
                     recorded = event.actions.state_delta.get(PLAN_STATE_KEY)
                     frames.extend(self._proposal_answered(response.response or {}, recorded))
             return frames
@@ -1075,38 +1109,31 @@ class _Translator:
             frames.extend(self._close_status())
         return frames
 
-    def _planner_call_status(self, name: str, args: dict[str, Any]) -> list[ActivityStep]:
-        """The status line for one of the planner's own calls. A proposing
-        call (`_PROPOSING_TOOLS`) opens the checking line, since the tool
-        translates the plan it records before it answers; a `submit_analysis`
-        `intent` call checks nothing and opens none. Any other call leaves
-        the current line running."""
-        if name in _PROPOSING_TOOLS:
-            if args.get("submission_stage") == SubmissionStage.INTENT:
-                return []
+    def _planner_call_status(self, name: str) -> list[ActivityStep]:
+        """The status line for one of the planner's own calls. A
+        `propose_plan` call opens the checking line, since the tool translates
+        the plan it records before it answers. Any other call leaves the
+        current line running."""
+        if name == PROPOSE_PLAN:
             return self._open_status(_CHECKING)
         return []
 
     def _proposal_answered(self, answer: dict[str, Any], recorded: object) -> list[ActivityStep]:
-        """The line change a proposing response makes: an accepted
-        proposal (`_RECORDED_OUTCOMES`) completes the checking line with the
+        """The line change a `propose_plan` response makes: an accepted
+        proposal (`ok`) completes the checking line with the
         data of the plan it recorded as `detail` (`recorded` is the plan's
         JSON from the response's state delta), and a refused one (it recorded
         nothing, so ran no translation) makes the planner's redraft a separate
         "Reworking the draft" line. The refusal's code shows in plain words;
-        its message, which names plan fields, never reaches the wire. A
-        `submit_analysis` intent, which records nothing and refuses nothing,
-        completes the line with no `detail`."""
+        its message, which names plan fields, never reaches the wire."""
         outcome = answer.get("outcome")
-        if outcome in _RECORDED_OUTCOMES:
+        if outcome == Outcome.OK:
             detail = (
                 _data_phrase(PlannerPlan.model_validate_json(recorded))
                 if isinstance(recorded, str)
                 else None
             )
             return self._close_status(detail=detail)
-        if outcome == SubmissionOutcome.REQUIREMENTS:
-            return self._close_status()
         return self._open_status(_REWORKING, detail=_REWORK_REASONS.get(answer.get("code") or ""))
 
     def _open_status(self, label: str, *, detail: str | None = None) -> list[ActivityStep]:
@@ -1225,14 +1252,24 @@ class _Translator:
         return records
 
     def _record_frames(self, records: list[_ExecutorRecord]) -> list[Any]:
-        """Frames for `records`. Every record of one step, retries included,
-        shares that step's wire id."""
+        """Frames for `records`, after one `composition.updated` for each
+        removal since the last drain. Every record of one step, retries
+        included, shares that step's wire id."""
         plan_labels = (
             self._surface_recorder.step_labels(current_conversation_id.get())
             if self._surface_recorder is not None
             else {}
         )
         frames: list[Any] = self._close_starting() if records else []
+        # A removal changed the canvas as its tool ran, before any landing
+        # below, so its frame goes first. It carries the manifest stored now
+        # rather than the one the removal wrote: `/composition` may have
+        # committed a newer revision since (`StudioStore.mutate_composition`
+        # rebuilds on the removal), and the client renders every update, so
+        # an older one would undo that edit on screen. One frame stands for
+        # every removal since the last drain.
+        if self._conversation.take_unreported_removal():
+            frames.extend(self._composition_update())
         for record in records:
             if self._unshown(record):
                 continue
@@ -1307,13 +1344,35 @@ class _Translator:
             return [created]
         if state_land_component(self._conversation, component) != "created":
             return [created]
+        # Read with no await since the landing, so this is the manifest it wrote.
+        return [created, *self._composition_update()]
+
+    def _composition_update(self) -> list[CompositionUpdated]:
+        """The `composition.updated` frame for the conversation's stored
+        manifest, or none when it stores none.
+
+        The manifest is read from the conversation the store holds
+        (`StudioStore.current`), which every writer assigns to, so its
+        revision never falls along a stream. A manifest below a revision this
+        stream already sent shows a read that did not come from the store: it
+        is logged and not sent, since a client renders every update.
+        """
+        manifest = self._conversation.composition
+        if manifest is None:
+            return []
+        if manifest.revision < self._sent_revision:
+            logger.error(
+                "composition.updated withheld: revision %d is below revision %d, which "
+                "this stream already sent",
+                manifest.revision,
+                self._sent_revision,
+            )
+            return []
+        self._sent_revision = manifest.revision
         return [
-            created,
             CompositionUpdated(
-                event="composition.updated",
-                seq=self._conversation.next_seq(),
-                manifest=self._conversation.composition,
-            ),
+                event="composition.updated", seq=self._conversation.next_seq(), manifest=manifest
+            )
         ]
 
     def _interrupt_frames(self, adk_id: str, args: dict[str, Any]) -> list[Any]:
@@ -1578,7 +1637,10 @@ class _Translator:
             frames = list(self._drain_recorder())
             if status == ORCHESTRATOR_PLAN_FAILED_STATUS:
                 frames.extend(self._close_status())
-                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED))
+                failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
+                code = failure.get("code") if isinstance(failure, Mapping) else None
+                detail = failure_detail({"code": code})
+                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail))
                 # The agent reads the planner's answer under its own line.
                 frames.extend(self._open_status(status))
             else:
@@ -1656,7 +1718,7 @@ class _Translator:
             if answer.get(HANDED_OFF):
                 self._handed_off = str(answer[HANDED_OFF])
             # A failure's reason is written for the model, so its line
-            # shows the failure alone.
+            # shows the sentence for its code.
             failed = "error" in answer or "refusal" in answer
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
@@ -1667,6 +1729,7 @@ class _Translator:
                             _tool_call_label(quiet, {}),
                             StepStatus.FAILED,
                             tool=quiet,
+                            detail=_answer_failure(answer),
                         )
                     )
                 continue
@@ -1675,7 +1738,7 @@ class _Translator:
                 continue
             step_id, label, args, started = opened
             if failed:
-                status, detail = StepStatus.FAILED, None
+                status, detail = StepStatus.FAILED, _answer_failure(answer)
             else:
                 status, detail = self._outcome(response.name or "", args, answer)
             # Studio closes a `pending` line only on a frame with a duration;
@@ -1688,16 +1751,6 @@ class _Translator:
             frames.append(
                 self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
             )
-            if response.name == "remove_cards" and answer.get("removed"):
-                # The tool already took the blocks off; the client re-renders
-                # from the manifest (`harness.studio_state.remove_cards`).
-                frames.append(
-                    CompositionUpdated(
-                        event="composition.updated",
-                        seq=self._conversation.next_seq(),
-                        manifest=self._conversation.composition,
-                    )
-                )
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -1801,12 +1854,9 @@ class _Translator:
         if name == "search":
             return StepStatus.COMPLETE, _search_detail(args.get("query"), answer)
         if name == "fetch":
-            summary = answer.get("summary")
-            return StepStatus.COMPLETE, str(summary) if summary else None
+            return StepStatus.COMPLETE, _facts(answer.get("summary"), answer.get("period_note"))
         if name == "make_charts":
             return _charts_outcome(args, answer)
-        if name == "submit_analysis":
-            return _direct_outcome(answer)
         if name == "explain_dfo":
             return StepStatus.COMPLETE, _explain_detail(answer)
         return StepStatus.COMPLETE, None
@@ -1872,9 +1922,12 @@ class _Translator:
         return frames
 
 
-# The step a plan hand-back with no plan shows: the closing message says
-# what could not be calculated.
+# The step a plan hand-back with no plan shows, detailed by the sentence the
+# failure table has for the refusal's code. The closing message says what
+# could not be calculated.
 _PLAN_FAILED = "No plan could be made"
+
+
 # Agent tools whose calls show only when they fail.
 _QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
 _SKILL_READS = frozenset({"get_skill", "get_skill_file"})
@@ -1900,7 +1953,6 @@ _ORCHESTRATOR_TOOL_LABELS = {
     "fetch": "Fetching data",
     "ask_user": "Asking you a question",
     "plan": _WORKING_ON_PLAN,
-    "submit_analysis": "Calculating",
     "explain_dfo": "Reading about DFO",
     "recall": "Looking back at an earlier turn",
     "remove_cards": "Removing cards from the canvas",
@@ -1994,36 +2046,63 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
     return None if counts in (None, COUNTS_UNAVAILABLE) else str(counts)
 
 
-def _direct_outcome(answer: dict[str, Any]) -> tuple[StepStatus, str | None]:
-    """A submit_analysis result's status by its `outcome`
-    (`submission.recipes.DirectOutcome`): complete once its run completed,
-    pending or failed with the run's standing, and skipped when the harness
-    refused to run it. The run's id and code and the refusal's message are
-    written for the agent, so the line states the standing alone."""
-    outcome = answer.get("outcome")
-    if outcome == "completed":
-        return StepStatus.COMPLETE, None
-    if outcome == "not_chartable":
-        return StepStatus.COMPLETE, "The result cannot be drawn"
-    if outcome == "pending":
-        return StepStatus.PENDING, "Storing the result is unfinished"
-    if outcome == "failed":
-        return StepStatus.FAILED, "The calculation failed"
-    return StepStatus.SKIPPED, None
+def _cut_sentence(cut: Mapping[str, Any]) -> str:
+    """What a cut card draws and leaves out, from the counts its result
+    states in `holds.cut` (`harness.reply_figures.card_holds`): how many
+    members it draws of how many with a value at its period, then how many
+    were left out as group totals or members of another level and how many
+    for having no value there, each named only when it is more than none."""
+    left_out = [
+        f"{count:,} {what}"
+        for count, what in (
+            (cut.get("other_kinds"), "group totals or members of another level"),
+            (cut.get("unvalued"), "with no value"),
+        )
+        if count
+    ]
+    drawn = (
+        f"The chart shows the {cut['drawn']:,} largest of {cut['with_a_value']:,} "
+        f"with a value in {cut['period']}"
+    )
+    return f"{drawn} and leaves out {' and '.join(left_out)}." if left_out else f"{drawn}."
 
 
 def _charts_outcome(args: dict[str, Any], answer: dict[str, Any]) -> tuple[StepStatus, str | None]:
     """A make_charts result's status: failed when any chart asked for was not
-    drawn, either refused or past the per-call limit, with how many and the
-    titles of the refused ones. A refusal's reason is written for the model,
-    so it stays out."""
-    asked = len(args.get("charts") or [])
+    drawn, either refused or past the per-call limit.
+
+    A call that drew every chart states what each cut card leaves out
+    (`_cut_sentence`), one sentence a card in the order drawn, and nothing
+    when no card was cut.
+
+    A failed call's detail gives each reason once, as the sentence for the
+    chart's code, then the titles it holds for, reasons in the order their
+    first chart was asked: "The card could not be drawn as asked: Aid by
+    donor; Aid by sector". A refusal's own message is written for the model,
+    so it stays out. The first reason leads because the Activity log shows a
+    detail's first `MAX_SENTENCE_CHARS` characters, and the detail is cut to
+    that many here so the cut falls in a title."""
+    asked = args.get("charts") or []
     charts = answer.get("charts") or []
-    refused = [str(chart.get("title")) for chart in charts if "error" in chart]
+    refused = [chart for chart in charts if "error" in chart]
     if not refused and not answer.get("not_drawn"):
-        return StepStatus.COMPLETE, None
-    drawn = sum(1 for chart in charts if "error" not in chart)
-    detail = f"{asked - drawn} of {asked} could not be drawn"
-    if refused:
-        detail += ": " + "; ".join(refused)
-    return StepStatus.FAILED, detail[:_STEP_DETAIL_CAP]
+        cuts = ((chart.get("holds") or {}).get("cut") for chart in charts)
+        return StepStatus.COMPLETE, _facts(" ".join(_cut_sentence(cut) for cut in cuts if cut))
+    reasons: dict[str, list[Any]] = {}
+    for chart in refused:
+        reasons.setdefault(failure_detail(chart), []).append(chart)
+    if answer.get("not_drawn"):
+        past = harness_refusal(code=HarnessCode.CHART_NOT_DRAWN, message=str(answer["not_drawn"]))
+        reasons.setdefault(failure_detail(past), []).extend(asked[len(charts) :])
+    titles = {
+        sentence: [str(c["title"]) for c in held if isinstance(c, Mapping) and c.get("title")]
+        for sentence, held in reasons.items()
+    }
+    detail = "; ".join(
+        f"{sentence.removesuffix('.')}: {'; '.join(named)}" if named else sentence.removesuffix(".")
+        for sentence, named in titles.items()
+    )
+    detail = " ".join(detail.split())
+    if len(detail) > MAX_SENTENCE_CHARS:
+        detail = detail[: MAX_SENTENCE_CHARS - 1] + "\u2026"
+    return StepStatus.FAILED, detail

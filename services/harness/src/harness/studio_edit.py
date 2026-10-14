@@ -34,7 +34,6 @@ from typing import Any
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 
 from harness.conversation import current_conversation_id
-from harness.rolling_cards import ROLLING_SELECT_NEEDS_NEW_FRAME
 from harness.studio_state import (
     ConversationState,
     _block_title,
@@ -42,8 +41,10 @@ from harness.studio_state import (
     _next_manifest,
     _replace_block,
     _turn_component_entry,
+    drawn_series_ids,
 )
-from harness.studio_translate import _RecordingExecutor, _stream_fatal
+from harness.studio_translate import _RecordingExecutor, _stream_fatal, failure_detail
+from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import (
     ActivityStep,
     ComponentCreated,
@@ -62,6 +63,9 @@ logger = logging.getLogger(__name__)
 # Intent fields a revise patch may not name, as dfo-apis
 # `assembler.merge.merge_intent` refuses them.
 _CREATE_ONLY_FIELDS = ("type", "frame_ref")
+
+# What a closing message says before the sentence for a refused edit's code.
+_EDIT_REFUSED = "The edit was refused."
 
 _REBUILT_TEXT = (
     "This conversation holds no edit access to this card, so I could not update it in "
@@ -117,17 +121,17 @@ async def _edit_flow(
         step_id: str,
         label: str,
         *,
-        failed: bool = False,
+        failed: str | None = None,
         produced: StepProduced | None = None,
     ) -> ActivityStep:
-        # A refusal's text is written for the agent: the step shows the
-        # failure alone, and the closing message says why.
+        """A finished step, failed when `failed` gives the sentence it shows."""
         return ActivityStep(
             event="activity.step",
             seq=c.next_seq(),
             step_id=step_id,
             label=label,
             status=StepStatus.FAILED if failed else StepStatus.COMPLETE,
+            detail=failed,
             produced=produced,
         )
 
@@ -140,15 +144,20 @@ async def _edit_flow(
             Done(event="done", seq=c.next_seq(), trace_id=c.trace_id, composition=c.composition),
         ]
 
-    def _refusal_text(result: dict[str, Any]) -> str:
-        refusal = result.get("refusal") or {}
-        return str(refusal.get("message") or refusal.get("fix") or refusal.get("code") or "refused")
+    def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[Any]:
+        """The failed step and the closing message of a call that was refused.
+        Both give the sentence for the refusal's code. Its message, which is
+        written for a model, goes to the log."""
+        refusal = result.get("refusal")
+        refusal = refusal if isinstance(refusal, dict) else {}
+        logger.info("card edit refused (%s): %s", refusal.get("code"), refusal.get("message"))
+        sentence = failure_detail(refusal)
+        return [_step(step_id, label, failed=sentence), *_close(f"{lead} {sentence}")]
 
     described = await recorder(tool="describe_component", args={"component_id": component_id})
     recorder.drain(current_conversation_id.get())
     if described.get("outcome") != "ok":
-        yield _step("e1", "Read the card", failed=True)
-        for frame in _close(f"I couldn't open that card: {_refusal_text(described)}."):
+        for frame in _refused("e1", "Read the card", "I couldn't open that card.", described):
             yield frame
         return
     body = described.get("component_body") or {}
@@ -185,11 +194,12 @@ async def _edit_flow(
             args={"intent": patch, "component_id": component_id, WRITE_TOKEN_KEY: write_token},
         )
         recorder.drain(current_conversation_id.get())
-        moved = (written.get("refusal") or {}).get("code") == ROLLING_SELECT_NEEDS_NEW_FRAME
+        moved = (written.get("refusal") or {}).get(
+            "code"
+        ) == HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME
     if patch and write_token and not moved:
         if written.get("outcome") != "ok" or not written.get("component"):
-            yield _step("e2", "Apply the edit", failed=True)
-            frames = _close(f"The edit was refused: {_refusal_text(written)}.")
+            frames = _refused("e2", "Apply the edit", _EDIT_REFUSED, written)
         elif int(written["component"]["revision"]) <= current_revision:
             # The platform treats an effectively-equal patch as a no-op.
             yield _step("e2", "Apply the edit")
@@ -215,9 +225,11 @@ async def _edit_flow(
     if patch:
         named = next((field for field in _CREATE_ONLY_FIELDS if field in patch), None)
         if named is not None:
-            refusal = f"{named!r} is create-only and cannot be revised"
-            yield _step("e2", "Apply the edit", failed=True)
-            for frame in _close(f"The edit was refused: {refusal}."):
+            create_only = harness_refusal(
+                code=HarnessCode.FIELD_CREATE_ONLY,
+                message=f"{named!r} is create-only and cannot be revised",
+            )
+            for frame in _refused("e2", "Apply the edit", _EDIT_REFUSED, {"refusal": create_only}):
                 yield frame
             return
         intent = _merge_patch(stored, patch)
@@ -235,8 +247,7 @@ async def _edit_flow(
     written = await recorder(tool="write_component", args={"intent": intent})
     recorder.drain(current_conversation_id.get())
     if written.get("outcome") != "ok" or not written.get("component"):
-        yield _step("e2", step_label, failed=True)
-        for frame in _close(f"The edit was refused: {_refusal_text(written)}."):
+        for frame in _refused("e2", step_label, _EDIT_REFUSED, written):
             yield frame
         return
     component = written["component"]
@@ -314,6 +325,7 @@ def _revised_frames(
     entry = conversation.components.setdefault(component_id, _digest_entry(component))
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
+    entry.update(drawn_series_ids(component))
     if patch.get("title"):
         entry["title"] = patch["title"]
     conversation.turn_components.append(

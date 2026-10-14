@@ -1,0 +1,330 @@
+{
+  "schema_version": 1,
+  "definition": {
+    "schema_version": 1,
+    "spec_id": "spec_21f32ad768f41d5fc6b3b9a0009b9364",
+    "identity": {
+      "entities": {
+        "financingRecipient": [
+          "country/MWI"
+        ]
+      },
+      "facets": {
+        "measurementMethod": {
+          "ref": "GrantEquivalent",
+          "state": "value"
+        },
+        "provenance": {
+          "ref": "OECD_DAC2A",
+          "state": "value"
+        },
+        "unit": {
+          "ref": "USD",
+          "state": "value"
+        }
+      },
+      "identity_version": "spec1",
+      "requested_window": {
+        "kind": "latest"
+      },
+      "shape": {
+        "id": "GrossOdaDisbursements",
+        "kind": "stat_var"
+      },
+      "slots": []
+    }
+  },
+  "content_version": "cv_6581df53760d1649eab0c735308a107b",
+  "prepared_at": "2026-10-13T14:37:10Z",
+  "coverage": {
+    "rows": 8,
+    "dimensions": [
+      {
+        "label": "financingProvider",
+        "count": 8,
+        "axis": "origin"
+      },
+      {
+        "label": "financingRecipient",
+        "count": 1,
+        "axis": "destination"
+      },
+      {
+        "label": "years",
+        "count": 1
+      }
+    ],
+    "window": {
+      "kind": "latest",
+      "start_year": 2024,
+      "end_year": 2024,
+      "origin": "query"
+    },
+    "recent_years": [
+      {
+        "year": 2025,
+        "series": 2,
+        "role_counts": {
+          "financingProvider": 2,
+          "financingRecipient": 1
+        }
+      },
+      {
+        "year": 2024,
+        "series": 8,
+        "role_counts": {
+          "financingProvider": 8,
+          "financingRecipient": 1
+        }
+      },
+      {
+        "year": 2023,
+        "series": 9,
+        "role_counts": {
+          "financingProvider": 9,
+          "financingRecipient": 1
+        }
+      }
+    ],
+    "elected_year": 2024
+  },
+  "citation": {
+    "text": "OECD_DAC2A (2026), via the Development Finance Observatory",
+    "sources": [
+      {
+        "ref": "OECD_DAC2A",
+        "label": "OECD_DAC2A"
+      }
+    ]
+  },
+  "trace": {
+    "applied_window": {
+      "kind": "latest",
+      "start_year": 2024,
+      "end_year": 2024,
+      "origin": "query"
+    },
+    "graph_revision": "fake-mint-graph-0",
+    "code_index_stamp": {
+      "content_hash": "78509eb94e806e797f2cd5f13bf6e891a6adea0a62fa441d415ee2dfb24ce8e4",
+      "exported_at": "2026-10-12T17:01:02Z",
+      "graph_endpoint": "https://dfo-dev-dc-datacommons-service-zms5lj4zhq-nn.a.run.app"
+    },
+    "origin_catalogue_build_id": "fake-catalogue",
+    "source_revisions": [
+      {
+        "source": "OECD_DAC2A",
+        "revision": "2026-10-07"
+      }
+    ],
+    "resolved_stat_vars": [
+      {
+        "ref": "dcid:GrossOdaDisbursements",
+        "roles": [
+          "financingProvider",
+          "financingRecipient"
+        ],
+        "observation_count": 8
+      }
+    ],
+    "family_member_digest": "020267b201dddc70960320ca77a07e47d5bb6744be62a9e02517786d715ef9f8",
+    "family_member_count": 1,
+    "facets": [
+      {
+        "axis": "provenance",
+        "ref": "OECD_DAC2A",
+        "basis": "bound",
+        "default_policy": null,
+        "default_policy_version": null,
+        "selection_reason": null,
+        "dispatch_facet_id": "usd"
+      },
+      {
+        "axis": "measurementMethod",
+        "ref": "GrantEquivalent",
+        "basis": "bound",
+        "default_policy": null,
+        "default_policy_version": null,
+        "selection_reason": null,
+        "dispatch_facet_id": "usd"
+      },
+      {
+        "axis": "unit",
+        "ref": "USD",
+        "basis": "bound",
+        "default_policy": null,
+        "default_policy_version": null,
+        "selection_reason": null,
+        "dispatch_facet_id": "usd"
+      }
+    ],
+    "normalisations": [],
+    "frame_grammar_version": "1.1.0",
+    "materialiser_build": "test-build",
+    "capability_version": "dset_test",
+    "served_from": "materialise",
+    "confirmed_at": "2026-10-11T09:00:00+00:00"
+  },
+  "warnings": [
+    {
+      "code": "enrichment_unavailable",
+      "severity": "info",
+      "message": "A name, code, or requested enrichment column has no value for some rows: the graph names nothing for the value, the name read failed, or two codes of the column's code system share its label. Those cells are left empty rather than fabricated. measurementMethod_label holds only a name that differs from the method's dcid, and its empty cells never raise this warning. Column 'stat_var_label' left 8 cells empty."
+    },
+    {
+      "code": "enrichment_unavailable",
+      "severity": "info",
+      "message": "A name, code, or requested enrichment column has no value for some rows: the graph names nothing for the value, the name read failed, or two codes of the column's code system share its label. Those cells are left empty rather than fabricated. measurementMethod_label holds only a name that differs from the method's dcid, and its empty cells never raise this warning. Column 'financingProvider_label' left 8 cells empty."
+    },
+    {
+      "code": "enrichment_unavailable",
+      "severity": "info",
+      "message": "A name, code, or requested enrichment column has no value for some rows: the graph names nothing for the value, the name read failed, or two codes of the column's code system share its label. Those cells are left empty rather than fabricated. measurementMethod_label holds only a name that differs from the method's dcid, and its empty cells never raise this warning. Column 'financingProvider_party_kind' left 8 cells empty."
+    },
+    {
+      "code": "enrichment_unavailable",
+      "severity": "info",
+      "message": "A name, code, or requested enrichment column has no value for some rows: the graph names nothing for the value, the name read failed, or two codes of the column's code system share its label. Those cells are left empty rather than fabricated. measurementMethod_label holds only a name that differs from the method's dcid, and its empty cells never raise this warning. Column 'financingRecipient_label' left 8 cells empty."
+    },
+    {
+      "code": "enrichment_unavailable",
+      "severity": "info",
+      "message": "A name, code, or requested enrichment column has no value for some rows: the graph names nothing for the value, the name read failed, or two codes of the column's code system share its label. Those cells are left empty rather than fabricated. measurementMethod_label holds only a name that differs from the method's dcid, and its empty cells never raise this warning. Column 'financingRecipient_party_kind' left 8 cells empty."
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "processing_level_undeclared",
+      "severity": "info",
+      "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier."
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_digest": "sha256:347bffcda83713b8bf947ba9c9e583de1da34570b825f647db6bd3d255036e56",
+      "rendering": {
+        "format": "csv",
+        "bundle": false,
+        "layout": 3
+      },
+      "bytes": 1313,
+      "media_type": "text/csv",
+      "created_at": "2026-10-13T14:37:10",
+      "tier": "working",
+      "url": "/api/datasets/spec_21f32ad768f41d5fc6b3b9a0009b9364/cv_6581df53760d1649eab0c735308a107b/files/sha256:347bffcda83713b8bf947ba9c9e583de1da34570b825f647db6bd3d255036e56"
+    },
+    {
+      "artifact_digest": "sha256:5717a9aa5c907f38f9d3c93ba9fb148b2d4be074ad377c2edb95f6882c828c29",
+      "rendering": {
+        "statistics": "series"
+      },
+      "bytes": 5083,
+      "media_type": "application/vnd.apache.parquet",
+      "created_at": "2026-10-13T14:37:10",
+      "tier": "working",
+      "url": "/api/datasets/spec_21f32ad768f41d5fc6b3b9a0009b9364/cv_6581df53760d1649eab0c735308a107b/files/sha256:5717a9aa5c907f38f9d3c93ba9fb148b2d4be074ad377c2edb95f6882c828c29"
+    }
+  ],
+  "series_count": 8,
+  "output_options": {
+    "capability_version": "dset_test",
+    "columns": [
+      {
+        "name": "stat_var",
+        "kind": "grain",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "financingProvider",
+        "kind": "role",
+        "droppable": false,
+        "distinct": 8
+      },
+      {
+        "name": "financingRecipient",
+        "kind": "role",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "time_period",
+        "kind": "grain",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "value",
+        "kind": "value",
+        "droppable": true
+      },
+      {
+        "name": "unit",
+        "kind": "unit",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "measurementMethod",
+        "kind": "facet",
+        "droppable": true,
+        "distinct": 1
+      },
+      {
+        "name": "provenance",
+        "kind": "facet",
+        "droppable": false,
+        "distinct": 1
+      },
+      {
+        "name": "status",
+        "kind": "status",
+        "droppable": true
+      }
+    ],
+    "formats": [
+      {
+        "name": "csv",
+        "state": "available"
+      },
+      {
+        "name": "xlsx",
+        "state": "available"
+      },
+      {
+        "name": "parquet",
+        "state": "available"
+      }
+    ],
+    "bundle": {
+      "state": "available"
+    },
+    "enrichments": [],
+    "long_layout_defaults": [
+      "financingProvider_label",
+      "financingProvider_party_kind",
+      "financingRecipient_label",
+      "financingRecipient_party_kind"
+    ],
+    "long_layout_totals": [],
+    "pivots": [],
+    "groupby": {
+      "state": "available",
+      "axes": [
+        {
+          "name": "crsCooperationModality"
+        },
+        {
+          "name": "crsPurpose"
+        },
+        {
+          "name": "crsTypeOfFinance"
+        },
+        {
+          "name": "crsTypeOfFlow"
+        }
+      ]
+    }
+  },
+  "series_coverage_stamp": "test-coverage-stamp"
+}

@@ -275,34 +275,47 @@ def _ceiling_kind(fix: Mapping[str, JsonValue]) -> object:
     return fix.get("ceiling_kind")
 
 
-# The code a payload that does not fit `ToolFailure` is parsed into. Not a
-# server code -- it never appears in the five sets above, so it always falls
-# through `classify_refusal` to `Disposition.STOP` regardless of the mode a
-# broken payload happened to name.
-MALFORMED_REFUSAL = "malformed_refusal"
+class ExecutorCode(StrEnum):
+    """The `code` of a refusal the executor mints itself."""
 
-# The code of the executor's own stop when a retrieval asked to sum its family
-# of StatVars returns them unsummed (`executor.run._Run._check_summed_retrieval`).
-# Not a server code either: it travels with `do_not_retry`, which
-# `classify_refusal` reads as `Disposition.STOP`, because the same plan draws
-# the same unsummed frame from the same deployment.
-FAMILY_NOT_SUMMED = "family_not_summed"
+    # A payload that does not fit `ToolFailure` is parsed into this. It is the
+    # executor's own code and appears in none of the five sets above, so it
+    # always falls through `classify_refusal` to `Disposition.STOP`, whatever
+    # mode the broken payload named.
+    MALFORMED_REFUSAL = "malformed_refusal"
+    # A retrieval asked to sum its family of StatVars returned them unsummed
+    # (`executor.run._Run._check_summed_retrieval`). It travels with
+    # `do_not_retry`, which `classify_refusal` reads as `Disposition.STOP`,
+    # because the same plan draws the same unsummed frame from the same
+    # deployment.
+    FAMILY_NOT_SUMMED = "family_not_summed"
+    # A rolling step's resolved start falls before the first year its dataset
+    # holds (`executor.run._Run._check_rolled_start`). It travels with
+    # `do_not_retry`, since the same plan resolves the same start over the
+    # same data.
+    ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    # A fault of the run itself, as both servers report their own.
+    INTERNAL_ERROR = "internal_error"
+    # The run was stopped before it finished.
+    CANCELLED = "cancelled"
+    # A run still unfinished after its last resumption or past its age bound
+    # (`executor.ledger`), by the stage it stood at.
+    PUBLICATION_ABANDONED = "publication_abandoned"
+    COMPUTATION_ABANDONED = "computation_abandoned"
+    # A publication held for a later try that names no fault of its own.
+    PUBLICATION_UNFINISHED = "publication_unfinished"
+    # The publisher raised (`executor.completion`).
+    PUBLICATION_ERROR = "publication_error"
+    # The ledger's store could not admit the run, or could not record its
+    # progress (`executor.completion.unrecorded_hand_back`).
+    RUN_NOT_STARTED = "run_not_started"
+    LEDGER_UNAVAILABLE = "ledger_unavailable"
 
-
-# The code of the executor's own stop when a rolling step's resolved start
-# falls before the first year its dataset holds (`executor.run._Run.
-# _check_rolled_start`). It travels with `do_not_retry`, since the same plan
-# resolves the same start over the same data.
-ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
 
 # analysis-mcp's code for a newest period that is not established, and the one
 # `fix.detail` of it that states a fact of the data.
 ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
 _NO_QUALIFYING_PERIOD = "no_qualifying_period"
-
-# The code a fault of the run itself is reported under, as both servers report
-# their own.
-INTERNAL_ERROR = "internal_error"
 
 
 class ToolFailure(StrictModel):
@@ -327,7 +340,7 @@ def parse_tool_failure(payload: Mapping[str, object]) -> ToolFailure:
     A payload that does not fit -- most often a missing `code`, since that
     is the one field `classify_refusal`'s correction lookup cannot proceed
     without -- parses into a `ToolFailure` naming the defect through
-    `MALFORMED_REFUSAL` rather than raising. A server that answers its own
+    `ExecutorCode.MALFORMED_REFUSAL` rather than raising. A server that answers its own
     refusal badly is exactly when the executor still has to report
     something back to the plan, not crash the run.
     """
@@ -341,7 +354,7 @@ def parse_tool_failure(payload: Mapping[str, object]) -> ToolFailure:
         )
     except ValidationError as exc:
         return ToolFailure(
-            code=MALFORMED_REFUSAL,
+            code=ExecutorCode.MALFORMED_REFUSAL,
             message=f"the refusal payload does not fit ToolFailure: {exc}",
             retry_mode="do_not_retry",
             fix={"payload": cast(JsonValue, dict(payload))},

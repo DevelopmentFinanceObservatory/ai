@@ -494,8 +494,8 @@ async def sources(
     its description. Use it
     for a question about the data itself rather than about a measure -- what
     datasets exist, who publishes them, how far back they go -- which `search`
-    cannot answer because it names no indicator to resolve. Never invent a
-    dataset the catalogue does not list.
+    cannot answer because it names no indicator to resolve. The catalogue is
+    the complete list of datasets DFO serves.
 
     Call it with a `ref` from the catalogue for that dataset's documentation:
     what it is, who publishes it, its licence and cadence, when DFO downloaded

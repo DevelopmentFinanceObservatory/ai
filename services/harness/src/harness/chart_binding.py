@@ -1,5 +1,6 @@
 """The select checks `make_charts` (`harness.orchestrator_tools`) runs before
-a write: the binding shapes the platform certainly refuses.
+a write: the binding shapes the platform certainly refuses, and the ranking
+of one dimension's members that cuts a select over the series cap.
 """
 
 from __future__ import annotations
@@ -13,10 +14,10 @@ from typing import Any
 from analysis_mcp.rolling_tool import coordinate_text
 from common.place_type import PARTY_ROLES, PLACE_LEVELS, levels_of
 from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
+from dfo_frame_grammar.rolling import latest_anchor
 
-from harness.tool_contracts import (
-    harness_refusal,
-)
+from harness.tool_contracts import HarnessCode, harness_refusal
+from harness.wire import RetryMode
 
 # dfo-apis's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
 # whose selection's estimated series count (`_series_estimate`) exceeds this.
@@ -34,10 +35,6 @@ MAX_CHARTS_PER_CALL = 8
 # the facet columns a select may leave unbound. The platform refuses one only
 # when it splits a series, and its estimate counts an unbound facet as 1.
 _FACET_DIMENSIONS = frozenset({UNIT_COLUMN, *FACET_IDENTITY_COLUMNS})
-
-# The codes of the harness refusals `select_binding_ok` returns.
-SERIES_LIMIT_EXCEEDED = "series_limit_exceeded"
-_SELECT_INVALID = "select_invalid"
 
 
 def _plural_dimension_names(view: dict[str, Any]) -> set[str]:
@@ -59,8 +56,17 @@ def _plural_dimension_names(view: dict[str, Any]) -> set[str]:
     }
 
 
+# What draws in place of a chart over the series cap whose period moves with
+# the latest data: `make_charts` cuts no such chart to its largest members.
+_MOVING_PERIOD_REPAIR = (
+    "This chart's period moves with the latest data, so its largest members are not "
+    f"chosen for it: list at most {MAX_SERIES_PER_COMPONENT} members in the select, or "
+    "get the largest from a ranking with a limit through plan."
+)
+
+
 def select_binding_ok(
-    *, type_: str, select: dict[str, Any], view: dict[str, Any]
+    *, type_: str, select: dict[str, Any], view: dict[str, Any], latest_periods: bool = False
 ) -> dict[str, Any] | None:
     """The binding shapes the platform certainly refuses (measured live
     against a 7-series frame, and against the catalogue grammar's stated
@@ -79,15 +85,22 @@ def select_binding_ok(
     `.items()`. Returns `None` when the binding is fine, else
     the harness refusal that says why it is not: `series_limit_exceeded`
     for a select over the series cap and `select_invalid` for every other
-    shape, each with the reason as its `message`. It is caught here, before
-    a `write_component` round trip."""
+    shape, each with the reason as its `message`. A chart whose period moves
+    with the latest data, one on a view marked `rolling` or one counting
+    `latest_periods` back, is told what draws in place of a cut
+    (`_series_refusal`). The rejection is caught here,
+    before a `write_component` round trip. The refusal of a select binding an
+    undeclared dimension lists every dimension name the view declares, in the
+    view's order, as `fix.dimensions`."""
     if not isinstance(select, dict):
         return _select_invalid(f"{type_} select is not a JSON object: {select!r}")
     declared = _declared_dimensions(view)
     undeclared = sorted(select.keys() - declared.keys()) if declared else []
     if undeclared:
         return _select_invalid(
-            f"{type_} select binds {undeclared}, which the frame does not declare"
+            f"{type_} select binds {undeclared}, which the frame does not declare. "
+            f"The frame's dimensions are {list(declared)}",
+            fix={"dimensions": list(declared)},
         )
     array_dims = sorted(name for name, value in select.items() if isinstance(value, list))
     if type_ == "stat_card":
@@ -96,16 +109,25 @@ def select_binding_ok(
     array_issue = _chart_array_refusal(type_=type_, select=select, array_dims=array_dims)
     if array_issue is not None:
         return array_issue
-    return _series_refusal(type_=type_, select=select, declared=declared)
+    return _series_refusal(
+        type_=type_,
+        select=select,
+        declared=declared,
+        moving=latest_periods or bool(view.get("rolling")),
+    )
 
 
 def _series_refusal(
-    *, type_: str, select: dict[str, Any], declared: dict[str, int]
+    *, type_: str, select: dict[str, Any], declared: dict[str, int], moving: bool
 ) -> dict[str, Any] | None:
     """The refusal of a select whose `_series_estimate` exceeds
     `MAX_SERIES_PER_COMPONENT`; None for a select within it. Where two or
     more dimensions multiply, the message goes on to name the selects that
-    draw (`_one_dimension_per_chart`) and the refusal is `correct_and_retry`."""
+    draw (`_one_dimension_per_chart`) and the refusal is `correct_and_retry`.
+    `moving` says the chart's period moves with the latest data, so no
+    dimension over the cap is cut to its largest members: the message says
+    what draws instead (`_MOVING_PERIOD_REPAIR`), which makes the refusal of
+    one dimension over the cap `correct_and_retry` too."""
     series = _series_estimate(select=select, declared=declared)
     if series <= MAX_SERIES_PER_COMPONENT:
         return None
@@ -114,12 +136,81 @@ def _series_refusal(
         f"over the platform's maximum of {MAX_SERIES_PER_COMPONENT}"
     )
     multiplying = _multiplying_dimensions(select=select, declared=declared)
+    if len(multiplying) < 2 and not moving:
+        return harness_refusal(code=HarnessCode.SERIES_LIMIT_EXCEEDED, message=over)
     if len(multiplying) < 2:
-        return harness_refusal(code=SERIES_LIMIT_EXCEEDED, message=over)
+        return harness_refusal(
+            code=HarnessCode.SERIES_LIMIT_EXCEEDED,
+            message=f"{over}. {_MOVING_PERIOD_REPAIR}",
+            retry_mode=RetryMode.CORRECT_AND_RETRY,
+        )
     return harness_refusal(
-        code=SERIES_LIMIT_EXCEEDED,
-        message=f"{over}: {_one_dimension_per_chart(multiplying)}",
-        retry_mode="correct_and_retry",
+        code=HarnessCode.SERIES_LIMIT_EXCEEDED,
+        message=f"{over}: {_one_dimension_per_chart(multiplying, moving=moving)}",
+        retry_mode=RetryMode.CORRECT_AND_RETRY,
+    )
+
+
+def every_series_selects(*, type_: str, view: dict[str, Any]) -> list[dict[str, Any]]:
+    """The selects that may name every series of a frame with `view`, for a
+    chart whose select is empty, in the order to try them: each binds one
+    non-facet dimension to every value it holds, a dimension of one value
+    before one of several. The view lists a dimension's values up to a cap,
+    so only a dimension whose listed values number its `total_count` (1 where
+    the view states none) is bound, and only a select `select_binding_ok`
+    passes is kept.
+
+    The view counts a dimension's values without its empty cells, and a row
+    with no value on the bound dimension is not named, so a select here names
+    every series only when `covers_every_row` says so of the frame's rows.
+    """
+    listed = [
+        (str(dim["name"]), list(dim["values"]))
+        for dim in view.get("dimensions") or []
+        if isinstance(dim, dict)
+        and dim.get("name")
+        and dim["name"] not in _FACET_DIMENSIONS
+        and isinstance(dim.get("values"), list)
+        and dim["values"]
+        and len(dim["values"]) == dim.get("total_count", 1)
+    ]
+    selects = [
+        {name: values[0] if len(values) == 1 else values}
+        for name, values in sorted(listed, key=lambda entry: len(entry[1]) > 1)
+    ]
+    return [
+        select
+        for select in selects
+        if select_binding_ok(type_=type_, select=select, view=view) is None
+    ]
+
+
+def covers_every_row(select: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every one of `rows` holds a value on each dimension `select`
+    binds, so that a select listing every value of those dimensions names
+    every row."""
+    return all(row.get(name) is not None for row in rows for name in select)
+
+
+def empty_select_refusal(
+    *, type_: str, view: dict[str, Any], unread: bool = False
+) -> dict[str, Any]:
+    """The refusal of an empty select on a frame no select of
+    `every_series_selects` names every series of, or when `unread`, on a
+    frame whose rows could not be read to check one, with every dimension
+    name the view declares as `fix.dimensions`. Either way a select that
+    binds a dimension draws, so the code is the same."""
+    declared = list(_declared_dimensions(view))
+    reason = (
+        "the frame's rows could not be read just now to check that it would show every series"
+        if unread
+        else "no dimension of the frame lists every series: the view lists only some of its "
+        "values, or some series hold no value on it"
+    )
+    return _select_invalid(
+        f"{type_} select is empty, and {reason}. Bind a dimension to a value the view lists "
+        f"for it, from {declared}",
+        fix={"dimensions": declared},
     )
 
 
@@ -149,20 +240,24 @@ def _multiplying_dimensions(*, select: dict[str, Any], declared: dict[str, int])
     )
 
 
-def _one_dimension_per_chart(multiplying: dict[str, int]) -> str:
+def _one_dimension_per_chart(multiplying: dict[str, int], *, moving: bool) -> str:
     """What `make_charts` accepts in place of a select on which the two or
     more `multiplying` dimensions (fewest values first) pass the series cap:
     each chart binds all but one of them to a single value. The dimension
     with the most values is the one left to list, so the charts that cover
     the whole select number the product of the others' counts, and the
-    sentence says whether that many fit one call."""
+    sentence says whether that many fit one call. A listed dimension over the
+    cap is cut to its largest members, except on a chart whose period is
+    `moving`, which is told `_MOVING_PERIOD_REPAIR`."""
     *bound, (_, most) = multiplying.items()
     named = _and_list([f"{name} ({count} values)" for name, count in multiplying.items()])
     repair = (
         f"{named} multiply. Bind all but one of them to a single value in each chart, "
         "so each chart lists one dimension's members."
     )
-    if most > MAX_SERIES_PER_COMPONENT:
+    if most > MAX_SERIES_PER_COMPONENT and moving:
+        repair += f" {_MOVING_PERIOD_REPAIR}"
+    elif most > MAX_SERIES_PER_COMPONENT:
         repair += (
             " A chart whose one listed dimension is over the maximum draws its largest "
             "members and says so."
@@ -191,13 +286,16 @@ def _and_list(items: list[str]) -> str:
 
 @dataclass(frozen=True)
 class TopMembers:
-    """The largest `members` of one dimension, highest first, out of `total`
-    members the selection holds, each by its value at `period`, or at its
-    own latest period when `period` is None."""
+    """The `members` of one dimension with the largest values at `period`,
+    highest first, out of the `holding` compared members that hold a value
+    there. `unvalued` are the compared members with no value at `period`, and
+    `other_kinds` counts the members left uncompared for their kind or level."""
 
     members: list[str]
-    total: int
-    period: str | None
+    period: str
+    holding: int
+    unvalued: list[str]
+    other_kinds: int
 
 
 # The frame columns that are not coordinates of a series.
@@ -209,19 +307,34 @@ def top_members(
     rows: Sequence[Mapping[str, Any]],
     select: dict[str, Any],
     dimension: str,
-    limit: int,
-    own_latest: bool,
+    limit: int | None,
+    cells: Mapping[str, str] | None = None,
 ) -> TopMembers | None:
-    """The `limit` largest members of `dimension` among `rows` matching
-    `select`, ranked by each member's value at the latest period those rows
-    hold, or at its own latest period when `own_latest`. Cells are
-    compared as dfo-apis spells them in a view and a select
-    (`coordinate_text`). None when there is nothing to rank honestly: no
-    matching rows, rows that differ on any other coordinate (a unit, a
-    source, a measure), or a member with two rows for one period. A member
-    with no value at the period it is ranked by is left out of the ranking
-    and counted in `total`; a row with no member names nothing a select can
-    list."""
+    """The members of `dimension` among `rows` matching `select` with the
+    largest values at one period, at most `limit` of them, or all when `limit`
+    is None.
+
+    The period is the one period the members compared hold a value at, a
+    year, a span or any other label, when they hold only one between them.
+    When they hold several it is the frame grammar's anchor (`latest_anchor`)
+    of those members: the newest period at least `ANCHOR_SHARE` of them hold
+    a value at. The members compared are those `select` names, or with `cells`, each
+    member's kind or type cell, only the ones one ranking compares
+    (`comparable_members`). A member outside them does not move the period.
+    Only a member holding a value at the period is ranked. Cells are compared
+    as dfo-apis spells them in a view and a select (`coordinate_text`).
+
+    Returns:
+        None when there is nothing to rank honestly: no matching rows, rows
+        that differ on any other coordinate (a unit, a source, a measure), a
+        member with two rows for one period, or no member to compare. A row
+        with no member names nothing a select can list.
+
+    Raises:
+        RollingError: The compared members hold several periods and have no
+            anchor: no period is held by enough of them, or their periods are
+            spans or mix grains.
+    """
     listed = select.get(dimension)
     keyed: list[dict[str, Any]] = [
         {name: coordinate_text(cell) for name, cell in row.items()} for row in rows
@@ -242,25 +355,35 @@ def top_members(
     coordinates = set().union(*matching) - _NOT_COORDINATES - {dimension}
     if any(len({row.get(name) for row in matching}) > 1 for name in coordinates):
         return None
-    by_member: dict[str, dict[str, float]] = {}
+    by_member: dict[str, dict[str, Any]] = {}
     for row in matching:
         periods = by_member.setdefault(str(row[dimension]), {})
         if row["time_period"] in periods:
             return None
-        periods[row["time_period"]] = float(row["value"])
-    common = max(period for periods in by_member.values() for period in periods)
-    ranked_at = {
-        member: max(periods) if own_latest else common for member, periods in by_member.items()
-    }
-    values = {
-        member: periods[ranked_at[member]]
+        periods[row["time_period"]] = row.get("value")
+    compared = set(by_member)
+    if cells is not None:
+        compared &= comparable_members(
+            {member: cells[member] for member in by_member if member in cells},
+            dimension=dimension,
+        )
+    if not compared:
+        return None
+    observed = {
+        member: {period: float(value) for period, value in periods.items() if value is not None}
         for member, periods in by_member.items()
-        if ranked_at[member] in periods
+        if member in compared
     }
-    ranked = sorted(values, key=lambda member: (-values[member], member))[:limit]
-    shared = {ranked_at[member] for member in ranked}
+    held = set().union(*observed.values())
+    period = held.pop() if len(held) == 1 else latest_anchor([observed]).period
+    values = {member: periods[period] for member, periods in observed.items() if period in periods}
+    ranked = sorted(values, key=lambda member: (-values[member], member))
     return TopMembers(
-        members=ranked, total=len(by_member), period=shared.pop() if len(shared) == 1 else None
+        members=ranked if limit is None else ranked[:limit],
+        period=period,
+        holding=len(values),
+        unvalued=[member for member in observed if member not in values],
+        other_kinds=len(by_member) - len(compared),
     )
 
 
@@ -295,7 +418,7 @@ def _chart_array_refusal(
     listed = [len(select[name]) for name in array_dims]
     if type_ == "line_chart" and listed and listed[0] > LINE_CHART_MAX_VALUES:
         return harness_refusal(
-            code=SERIES_LIMIT_EXCEEDED,
+            code=HarnessCode.SERIES_LIMIT_EXCEEDED,
             message=(
                 f"line_chart select lists {listed[0]} values on {array_dims[0]!r}, more than "
                 f"the {LINE_CHART_MAX_VALUES} one line_chart draws: list at most "
@@ -305,9 +428,11 @@ def _chart_array_refusal(
     return None
 
 
-def _select_invalid(message: str) -> dict[str, Any]:
-    """The harness refusal for a select the platform would refuse for its shape."""
-    return harness_refusal(code=_SELECT_INVALID, message=message)
+def _select_invalid(message: str, *, fix: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The harness refusal for a select the platform would refuse for its
+    shape. A select written another way draws, so its retry mode is
+    `correct_and_retry`."""
+    return harness_refusal(code=HarnessCode.SELECT_INVALID, message=message, fix=fix)
 
 
 def _stat_card_binding_reason(

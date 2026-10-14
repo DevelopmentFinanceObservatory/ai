@@ -490,13 +490,19 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
         "requested_window_kind": "range",
         "entity_roles": ["origin", "destination"],
         "open_entity_axes": [{"column": "origin", "members": 75}],
-        "recent_years": [
-            {"year": 2024, "observations": 0, "series": 0},
-            {"year": 2023, "observations": 15, "series": 15},
-        ],
     }
-    reading = SearchReading.from_part(part, origin="translator").with_fetch(
+    fetched = SearchReading.from_part(part, origin="translator").with_fetch(
         {"spec_id": part["spec_id"], "refusal": "too large", "code": "frame_too_large"}
+    )
+    # A stored conversation's reading holds the year counts a search once gave it.
+    reading = SearchReading.model_validate(
+        {
+            **fetched.model_dump(mode="json"),
+            "recent_years": [
+                {"year": 2024, "observations": 0, "series": 0},
+                {"year": 2023, "observations": 15, "series": 15},
+            ],
+        }
     )
 
     assert reading.coverage_kind == "exact"
@@ -508,9 +514,9 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     lines = render_readings([reading], budget=10_000).text.splitlines()
     assert lines[1].endswith("(from translator)")
     assert lines[3] == (
-        "   window 2010-2023 (requested); coverage exact; asked range; recent years 2024: 0 obs "
-        "in 0 series, 2023: 15 obs in 15 series; wide; roles donor/creditor/exporter, "
-        "recipient/debtor/importer; open donor/creditor/exporter (75 members)"
+        "   window 2010-2023 (requested); coverage exact; asked range; wide; "
+        "roles donor/creditor/exporter, recipient/debtor/importer; "
+        "open donor/creditor/exporter (75 members)"
     )
     assert lines[-1] == "   fetch refused: frame_too_large"
 
@@ -836,6 +842,19 @@ def test_a_loose_match_with_no_block_is_described_by_its_resolved_sentence() -> 
         'The closest series to "aid for health" is a loose match: Health aid, 2015 to 2020. '
         "US dollars · OECD CRS."
     ]
+
+
+def test_a_stored_decision_carrying_an_undeclared_key_still_loads() -> None:
+    """A ledger row written when a decision also recorded `source_spec_id` loads."""
+    stored = PlanRecord.from_plan(_plan("france_guatemala_join")).model_dump(mode="json")
+    assert stored["decisions"]
+    for decision in stored["decisions"]:
+        decision["source_spec_id"] = _BILATERAL_SPEC
+
+    record = PlanRecord.model_validate(stored)
+
+    assert [d.slot for d in record.decisions] == [d["slot"] for d in stored["decisions"]]
+    assert "source_spec_id" not in record.model_dump(mode="json")["decisions"][0]
 
 
 def test_plan_record_keeps_translator_source_account_across_turns():

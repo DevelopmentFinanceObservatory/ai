@@ -602,17 +602,14 @@ def test_a_range_window_with_both_endpoints_wins_over_coverage() -> None:
     with the years at `start_year`/`end_year`, not `start`/`end`. Both
     endpoints present is a complete answer the question named outright, so
     it is stated as `source: "requested"` even though the served members'
-    (different) coverage would otherwise be available."""
+    (different) coverage and the headline's year are also stated."""
     identity = {
         **_STANDARD_IDENTITY,
         "requested_window": {"kind": "range", "start_year": "1990", "end_year": "2023"},
     }
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
-        }
-    )
+    part = _definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)
+    part["spec"]["resolved"]["headline"] = {"year": 2024, "series": 85}
+    digest = graph_envelope({"status": "definite", "parts": [part]})
     assert digest["window"] == {"start": 1990, "end": 2023, "source": "requested"}
 
 
@@ -659,17 +656,30 @@ def test_the_kind_is_all_and_nothing_served_covers_leaves_window_out() -> None:
     assert "window" not in digest
 
 
-def test_window_is_left_out_when_the_kind_is_latest_even_with_coverage() -> None:
-    """`latest` names a single most-recent observation. The served members'
-    multi-year coverage must not be read as one."""
+@pytest.mark.parametrize(
+    ("headline", "window"),
+    [
+        pytest.param(
+            {"year": 2024, "series": 85},
+            {"start": 2024, "end": 2024, "source": "elected"},
+            id="elected-year",
+        ),
+        pytest.param({"year": None, "series": 85}, None, id="headline-without-a-year"),
+        pytest.param(None, None, id="no-headline"),
+    ],
+)
+def test_a_latest_window_is_the_year_the_headline_states(
+    headline: dict | None, window: dict | None
+) -> None:
+    """`latest` names one year: the one the answer's headline states, never
+    the served members' multi-year coverage. With no year stated the window
+    is left out."""
     identity = {**_STANDARD_IDENTITY, "requested_window": {"kind": "latest"}}
-    digest = graph_envelope(
-        {
-            "status": "definite",
-            "parts": [_definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)],
-        }
-    )
-    assert "window" not in digest
+    part = _definite("spec_1", identity=identity, data_date_range=_SERVED_1960_2023)
+    if headline is not None:
+        part["spec"]["resolved"]["headline"] = headline
+    digest = graph_envelope({"status": "definite", "parts": [part]})
+    assert digest.get("window") == window
 
 
 def test_an_open_ended_range_is_completed_from_the_served_coverage() -> None:

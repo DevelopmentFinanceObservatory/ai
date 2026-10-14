@@ -180,9 +180,9 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.FRAME_REF_FROM_MANIFEST, artifact=ArtifactKind.FRAME_REF),
         ),
         implementation_version="1",
-        # Pins the `place_types` and `breakdown` parameters, and `scope.entities` taking a
-        # dcid only behind the `dcid:` marker.
-        input_schema_hash="674c81b2cebae63837eb6c62424198fc85cafe46b890ddd50bcdabfa52e24ede",
+        # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
+        # `scope.entities` taking a dcid only behind the `dcid:` marker.
+        input_schema_hash="e7609438beb3ceaed7072c71ef7d69488b6dc45635a820814a9c74740fa0f8f6",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -197,7 +197,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("growth"),
@@ -208,7 +208,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `change`, `rolling` and `anchor_key` parameters.
         input_schema_hash="7be1cf6034ecf528d931b4f568700bebb821c69ead44cfaaad8e0e1a1715d1dd",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("compare"),
@@ -218,7 +218,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="da9ed37fe1dad12d15928195c44f7b06d1cdbb45d2fd859b9c03f86b94a30ba1",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("rank"),
@@ -229,7 +229,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
         input_schema_hash="f66afdbb23f66fe5e5c225d99b87f4fc8fab0f0b7aa24c3bcc767392f929d591",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("share_of"),
@@ -243,7 +243,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
         input_schema_hash="d769333e10961aa2b414a0034fbbc13444ab699c3b8f6767b600b8c7c81ed4c5",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("quotient_of"),
@@ -256,7 +256,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="47d9a33d100c3666504e3eaafd6c95d214772a8b420b598bf6c90a0343819734",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("join"),
@@ -266,7 +266,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="3a089d99fce6ec543ad5a20da4679dc3cc888ccfa293df4dd3af45df36e4ae48",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(
         tool=_analysis("filter"),
@@ -277,8 +277,8 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_level` predicate, the 21-character period operand, a
         # threshold's `rolling`, and the `rolling` and `anchor_key` parameters.
-        input_schema_hash="35fe8eaf19340f445160825cb0612f5043df0efa95bb724082e3dcd892cab1e7",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        input_schema_hash="b647cd47142035a50d5e42427a27354779a2546769ccbc474b90b398832b6ffc",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
         empty_is_an_answer=True,
     ),
     ToolCapability(
@@ -289,7 +289,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="34835d1f9f2caea89d276d3532fcf293c6fded1559addcad7bd37c292ac3e8c1",
-        output_schema_hash="72882940d4c3f2f3e2dc5c4d9093be25a51cd6d7bb97b05f2b720eb5e5499d79",
+        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     # Finds the latest period a workflow's rolling steps follow. It implements no
     # operation and returns no frame. It takes every root frame at once, in `roots`,
@@ -298,7 +298,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         tool=_analysis("resolve_anchor"),
         phase=Phase.WORKFLOW,
         implementation_version="1",
-        input_schema_hash="83198c5c0e00025187a5afc3d51cc4cfd5d1ffab001cccf8eef51bd5f41ae57c",
+        input_schema_hash="afb07a93ca6902725c8887a86be11f1ad27a74ee4434d74b3676ffd9f325fcf2",
         output_schema_hash="8869a613e4373434d7b1024eede77d1dc6dc57968b2a71690e618ca59794358c",
     ),
 )

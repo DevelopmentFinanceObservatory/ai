@@ -357,8 +357,7 @@ def _identity_block(
     return "\n".join(
         [
             f"{FRAME_REFERENCE_PREFIX}{op_spec_hash}, content_version={content_version} "
-            "-- pass both to downstream tools. presentation-mcp's write_component accepts "
-            "only spec_/cv_ frame references and refuses an ops_/ocv_ pair.",
+            "-- pass both to downstream tools.",
             f"{EXECUTION_IDENTITY_PREFIX}{execution_identity.canonical_string()}",
         ]
     )

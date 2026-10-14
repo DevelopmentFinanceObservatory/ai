@@ -2,27 +2,48 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
+from analysis_mcp.result import VerbResult
+from common.period_note import period_note
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
+from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.chart_binding import TopMembers
 from harness.conversation import current_conversation_id
 from harness.graph.state import (
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
+    ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_STATUS_KEY,
     STEP_PROGRESS_KEY,
 )
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import ProvenanceStore
-from harness.studio import _OpenSteps
-from harness.studio_state import ConversationState, StudioStore, land_component, remove_cards
+from harness.reply_figures import DrawnSeries, card_holds
+from harness.sentences import (
+    TERMINAL_PROPOSE_CODES,
+    SeamCode,
+    failure_sentence,
+    refusal_sentence,
+)
+from harness.studio_state import (
+    ConversationState,
+    StudioStore,
+    _next_manifest,
+    land_component,
+    remove_cards,
+)
 from harness.studio_translate import (
     _ExecutorRecord,
     _record_detail,
@@ -32,8 +53,11 @@ from harness.studio_translate import (
     _tool_call_label,
     _Translator,
 )
-from harness.wire import StepStatus
+from harness.wire import ActivityStep, CompositionActor, CompositionManifest, StepStatus
 from planner.workflow import ToolId
+
+from .failure_text import classed_sentence, is_user_sentence
+from .test_studio_orchestrator_eval import checks
 
 
 async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -218,16 +242,42 @@ def test_text_after_a_hand_off_is_not_shown_until_the_next_run_starts():
 
 
 @pytest.mark.parametrize(
-    "answer",
+    ("answer", "code", "retry_mode"),
     [
-        {"error": "search is down"},
-        {"refusal": "request_invalid: /input/scope/window", "code": "request_invalid"},
-        # A refusal that states no reason still fails its step.
-        {"refusal": None, "code": "over_ceiling"},
+        # An answer that states no code still fails its step with a sentence.
+        ({"error": "search is down"}, None, None),
+        (
+            {"refusal": "request_invalid: /input/scope/window", "code": "request_invalid"},
+            "request_invalid",
+            None,
+        ),
+        ({"refusal": None, "code": "over_ceiling"}, "over_ceiling", None),
+        (
+            {
+                "error": "fetch has been called 6 time(s) this turn, its limit.",
+                "code": "tool_budget_spent",
+                "retry_mode": "do_not_retry",
+            },
+            "tool_budget_spent",
+            "do_not_retry",
+        ),
+        # A refusal body states its own code.
+        (
+            {
+                "outcome": "refusal",
+                "refusal": {"code": "empty_result", "message": "no observations for country/KEN"},
+            },
+            "empty_result",
+            None,
+        ),
     ],
+    ids=["no-code", "refusal-prose", "no-reason", "budget", "refusal-body"],
 )
-def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_without_its_reason(answer):
-    """The reason is written for the model, so the failed line carries none."""
+def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_with_its_codes_sentence(
+    answer, code, retry_mode
+):
+    """The reason is written for the model, so the failed line states the
+    sentence of the answer's code and none of its prose."""
     translator = _translator()
     call = types.FunctionCall(id="call_1", name="fetch", args={"spec_id": "spec_x"})
     failed = types.FunctionResponse(id="call_1", name="fetch", response=answer)
@@ -238,10 +288,10 @@ def test_a_tool_that_returned_an_error_or_a_refusal_is_a_failed_step_without_its
         _event(types.Part(function_response=failed)),
     )
 
-    assert [(f.status, f.detail) for f in frames if f.event == "activity.step"][:2] == [
-        (StepStatus.RUNNING, None),
-        (StepStatus.FAILED, None),
-    ]
+    running, failed = [f for f in frames if f.event == "activity.step"][:2]
+    assert (running.status, running.detail) == (StepStatus.RUNNING, None)
+    assert (failed.status, failed.detail) == (StepStatus.FAILED, failure_sentence(code, retry_mode))
+    assert is_user_sentence(failed.detail)
 
 
 def test_step_ids_stay_unique_across_the_segments_of_one_turn():
@@ -350,23 +400,70 @@ def test_explain_dfos_step_shows_the_counts_it_read(counts, detail):
     ]
 
 
-def test_a_plan_the_planner_could_not_make_shows_as_a_failed_step():
-    translator = _translator()
+# A refusal detail with every slot a `SEAM_SENTENCES` template reads filled.
+_FILLED_DETAIL = {
+    "tool": "propose_plan",
+    "reference": "4f2a9c0d1e7b4a55",
+    "requirement_id": "aid_by_donor",
+    "kind": "no_data",
+    "rounds": 7,
+    "declined": [{"ask": "forecast U.S. aid to 2030"}],
+}
+_FILLED_VALUES = ("propose", "4f2a9c0d", "aid_by_donor", "forecast", "U.S.", "7")
 
+
+def _plan_failed_step(failure: object) -> ActivityStep:
+    """The failed step a plan hand-back with no plan shows for `failure`."""
+    failed_status = {ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_FAILED_STATUS}
+    if failure is not None:
+        failed_status[ORCHESTRATOR_STATUS_FAILURE_KEY] = failure
     frames = _frames(
-        translator,
+        _translator(),
         Event(author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"}),
-        Event(
-            author="t", custom_metadata={ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_FAILED_STATUS}
-        ),
+        Event(author="t", custom_metadata=failed_status),
     )
-
     assert _steps(frames) == [
         ("Reading your question", StepStatus.RUNNING),
         ("Reading your question", StepStatus.COMPLETE),
         ("No plan could be made", StepStatus.FAILED),
         (ORCHESTRATOR_PLAN_FAILED_STATUS, StepStatus.RUNNING),
     ]
+    return next(f for f in frames if f.event == "activity.step" and f.status is StepStatus.FAILED)
+
+
+@pytest.mark.parametrize("code", [*SeamCode, *TERMINAL_PROPOSE_CODES])
+def test_a_plan_the_planner_refused_shows_its_code_s_sentence_and_none_of_its_detail(code):
+    """The refusal's own sentence is filled for the agent with a tool name, a
+    reference, a requirement id or the declined ask. The step reads the
+    failure table by the code alone."""
+    refused = {"code": code, "detail": _FILLED_DETAIL}
+    reason = refusal_sentence(refused)
+
+    failed = _plan_failed_step({"code": code, "reason": reason})
+
+    assert failed.detail == classed_sentence(code)
+    assert not [value for value in _FILLED_VALUES if value in failed.detail]
+    assert is_user_sentence(failed.detail)
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        # A reason written for the agent stays out, and the code's sentence shows.
+        (
+            {"code": "internal_error", "reason": "the planner seam ran past 400 events"},
+            "internal_error",
+        ),
+        ({"code": None, "reason": "the pair did not converge"}, None),
+        (None, None),
+    ],
+    ids=["failure-code", "no-code", "no-failure"],
+)
+def test_a_plan_the_planner_could_not_make_shows_as_a_failed_step_with_its_reason(failure, code):
+    failed = _plan_failed_step(failure)
+
+    assert failed.detail == failure_sentence(code)
+    assert is_user_sentence(failed.detail)
 
 
 def test_a_plan_that_ran_is_read_from_the_execute_nodes_result_through_the_hand_back():
@@ -445,9 +542,10 @@ def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
         ),
     )
 
-    assert [(f.label, f.status, f.detail) for f in frames if f.event == "activity.step"] == [
-        ("Reading background notes", StepStatus.FAILED, None),
-    ]
+    (failed,) = [f for f in frames if f.event == "activity.step"]
+    assert (failed.label, failed.status) == ("Reading background notes", StepStatus.FAILED)
+    assert is_user_sentence(failed.detail)
+    assert "nope" not in failed.detail
 
 
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
@@ -473,6 +571,8 @@ def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
         types.FunctionCall(id="call_3", name="fetch", args={"spec_id": "spec_im"}),
     ]
     summary = "24 observations, 2000-2023 · World Development Indicators"
+    note = "The data is for 2023, which covers 8 donors, while 2024 covers 2 donors so far."
+    answers = {"call_2": {"summary": summary}, "call_3": {"summary": summary, "period_note": note}}
     # The search tool's state write, which `studio._keep_turn_records` keeps
     # on the conversation before the translator sees the event.
     translator._conversation.turn_readings = [
@@ -493,7 +593,7 @@ def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
             *(
                 types.Part(
                     function_response=types.FunctionResponse(
-                        id=call.id, name="fetch", response={"summary": summary}
+                        id=call.id, name="fetch", response=answers[call.id or ""]
                     )
                 )
                 for call in fetches
@@ -525,7 +625,8 @@ def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
         ("Fetching life expectancy", StepStatus.RUNNING, None),
         ("Fetching infant mortality", StepStatus.RUNNING, None),
         ("Fetching life expectancy", StepStatus.COMPLETE, summary),
-        ("Fetching infant mortality", StepStatus.COMPLETE, summary),
+        # A fetch's line states the period note its result carries.
+        ("Fetching infant mortality", StepStatus.COMPLETE, f"{summary} \u00b7 {note}"),
     ]
 
 
@@ -569,25 +670,53 @@ def test_a_fetch_names_its_measure_from_the_conversations_readings_after_a_resum
     ]
 
 
+def _refused_chart(title: str, code: str) -> dict[str, Any]:
+    return {"title": title, "error": "no such column", "code": code, "retry_mode": "do_not_retry"}
+
+
 @pytest.mark.parametrize(
-    ("answer", "detail"),
+    ("asked", "answer", "reasons"),
     [
         (
-            {"charts": [{"title": "A", "facts": {}}, {"title": "B", "error": "no such column"}]},
-            "1 of 2 could not be drawn: B",
-        ),
-        (
+            ["A", "B"],
             {
-                "charts": [{"title": "A", "facts": {}}],
+                "charts": [
+                    {"title": "A", "holds": {}, "reply_figures": []},
+                    _refused_chart("B", "binding_invalid"),
+                ]
+            },
+            [("binding_invalid", ["B"])],
+        ),
+        # The charts past the limit of one call are named too.
+        (
+            ["A", "B"],
+            {
+                "charts": [{"title": "A", "holds": {}, "reply_figures": []}],
                 "not_drawn": "1 charts past the 1 one call may draw",
             },
-            "1 of 2 could not be drawn",
+            [("chart_not_drawn", ["B"])],
+        ),
+        # Charts refused for one reason share it, in the order they were asked.
+        (
+            ["A", "B", "C"],
+            {
+                "charts": [
+                    _refused_chart("A", "series_limit_exceeded"),
+                    _refused_chart("B", "transient_unavailable"),
+                    _refused_chart("C", "series_limit_exceeded"),
+                ]
+            },
+            [("series_limit_exceeded", ["A", "C"]), ("transient_unavailable", ["B"])],
         ),
     ],
+    ids=["refused", "past-the-limit", "two-reasons"],
 )
-def test_a_chart_call_that_drew_only_some_of_its_charts_fails(answer, detail):
+def test_a_chart_call_that_drew_only_some_of_its_charts_fails(asked, answer, reasons):
+    """The failed line gives each reason as the sentence of its code, then the
+    cards it holds for, and nothing of the refusal's own message."""
     translator = _translator()
-    call = types.FunctionCall(id="call_1", name="make_charts", args={"charts": [{}, {}]})
+    charts = [{"title": title} for title in asked]
+    call = types.FunctionCall(id="call_1", name="make_charts", args={"charts": charts})
 
     frames = _frames(
         translator,
@@ -601,56 +730,31 @@ def test_a_chart_call_that_drew_only_some_of_its_charts_fails(answer, detail):
         ),
     )
 
-    assert [(f.label, f.status, f.detail) for f in frames if f.event == "activity.step"][:2] == [
-        ("Making 2 charts", StepStatus.RUNNING, None),
-        ("Making 2 charts", StepStatus.FAILED, detail),
+    running, failed = [f for f in frames if f.event == "activity.step"][:2]
+    label = f"Making {len(asked)} charts"
+    assert (running.label, running.status, running.detail) == (label, StepStatus.RUNNING, None)
+    assert (failed.label, failed.status) == (label, StepStatus.FAILED)
+    said = [
+        f"{classed_sentence(code, 'do_not_retry').removesuffix('.')}: {'; '.join(titles)}"
+        for code, titles in reasons
     ]
+    # The first reason and its cards are whole, and the rest follow as far as
+    # the Activity log shows.
+    assert failed.detail.startswith(said[0])
+    assert "; ".join(said).startswith(failed.detail.removesuffix("\u2026"))
+    assert is_user_sentence(failed.detail)
+    assert "no such column" not in failed.detail
 
 
-@pytest.mark.parametrize(
-    ("answer", "status", "detail"),
-    [
-        ({"outcome": "completed", "run": {"run_id": "run_1"}}, StepStatus.COMPLETE, None),
-        ({"outcome": "not_chartable"}, StepStatus.COMPLETE, "The result cannot be drawn"),
-        (
-            {"outcome": "pending", "run": {"run_id": "run_1", "status": "pending"}},
-            StepStatus.PENDING,
-            "Storing the result is unfinished",
-        ),
-        (
-            {"outcome": "failed", "run": {"run_id": "run_1", "code": "publication_abandoned"}},
-            StepStatus.FAILED,
-            "The calculation failed",
-        ),
-        (
-            {"outcome": "failed", "run": {"run_id": "run_1", "status": "failed"}},
-            StepStatus.FAILED,
-            "The calculation failed",
-        ),
-        (
-            {"outcome": "requires_planning", "code": "plan_pending", "message": "End your turn."},
-            StepStatus.SKIPPED,
-            None,
-        ),
-        (
-            {"outcome": "needs_decision", "message": "Ask the user."},
-            StepStatus.SKIPPED,
-            None,
-        ),
-    ],
-    ids=[
-        "completed",
-        "not_chartable",
-        "pending",
-        "failed",
-        "failed-with-no-code",
-        "requires_planning",
-        "needs_decision",
-    ],
-)
-def test_a_direct_calculation_line_states_its_outcome(answer, status, detail):
+def test_a_failed_chart_lines_reason_survives_titles_too_long_for_the_activity_log():
+    """The Activity log shows the first 139 characters of a detail. The
+    reason leads, so the cut falls in a title."""
     translator = _translator()
-    call = types.FunctionCall(id="call_1", name="submit_analysis", args={"recipe": "growth"})
+    titles = ["Official development assistance to " + "sub-Saharan Africa " * 4] * 3
+    call = types.FunctionCall(
+        id="call_1", name="make_charts", args={"charts": [{"title": title} for title in titles]}
+    )
+    answer = {"charts": [_refused_chart(title, "binding_invalid") for title in titles]}
 
     frames = _frames(
         translator,
@@ -658,22 +762,203 @@ def test_a_direct_calculation_line_states_its_outcome(answer, status, detail):
         _event(
             types.Part(
                 function_response=types.FunctionResponse(
-                    id="call_1", name="submit_analysis", response=answer
+                    id="call_1", name="make_charts", response=answer
                 )
             )
         ),
     )
 
-    steps = [f for f in frames if f.event == "activity.step"][:2]
-    assert [(f.label, f.status, f.detail) for f in steps] == [
-        ("Calculating", StepStatus.RUNNING, None),
-        ("Calculating", status, detail),
+    failed = next(f for f in frames if f.event == "activity.step" and f.status is StepStatus.FAILED)
+    reason = classed_sentence("binding_invalid", "do_not_retry").removesuffix(".")
+    assert failed.detail.startswith(f"{reason}: Official development assistance")
+    assert is_user_sentence(failed.detail)
+
+
+def _cut_chart(title: str, *, drawn: int, holding: int, other_kinds: int, unvalued: int) -> dict:
+    """The `make_charts` entry of a card cut to its `drawn` largest members,
+    with what it holds as `harness.reply_figures.card_holds` states it."""
+    cut = TopMembers(
+        members=[f"m{n}" for n in range(drawn)],
+        period="2024",
+        holding=holding,
+        unvalued=[f"u{n}" for n in range(unvalued)],
+        other_kinds=other_kinds,
+    )
+    series = [
+        DrawnSeries(id=member, label=member, unit="USD", points=(("2024", 1.0),))
+        for member in cut.members
     ]
-    # Every line closes, a pending one included.
-    open_steps = _OpenSteps()
-    for step in steps:
-        open_steps.observe(step)
-    assert open_steps.close(ConversationState(conversation_id="c1"), detail="ended") == []
+    return {"title": title, "holds": card_holds(series, cut=cut), "reply_figures": []}
+
+
+def _charts_step(*charts: dict[str, Any]) -> ActivityStep:
+    """The closing line of a `make_charts` call that answered `charts`."""
+    call = types.FunctionCall(
+        id="call_1", name="make_charts", args={"charts": [{"title": c["title"]} for c in charts]}
+    )
+    answered = types.FunctionResponse(
+        id="call_1", name="make_charts", response={"charts": list(charts)}
+    )
+    frames = _frames(
+        _translator(),
+        _event(types.Part(function_call=call)),
+        _event(types.Part(function_response=answered)),
+    )
+    return next(f for f in frames if f.event == "activity.step" and f.status is StepStatus.COMPLETE)
+
+
+def test_a_chart_line_states_the_counts_of_each_card_it_cut():
+    """A cut card's counts reach the stream in its step's detail: how many it
+    draws, of how many with a value, and how many it left out of each kind.
+    A zero count is omitted, and a card drawn whole states nothing."""
+    whole = {"title": "Aid over time", "holds": {"series_count": 2}, "reply_figures": []}
+    cut = _cut_chart("Aid by donor", drawn=24, holding=70, other_kinds=15, unvalued=3)
+    plain = _cut_chart("Aid by sector", drawn=20, holding=31, other_kinds=0, unvalued=0)
+
+    assert _charts_step(whole).detail is None
+    detail = _charts_step(whole, cut).detail
+    assert checks._numbers_in_prose(detail) == {24, 70, 2024, 15, 3}
+    assert is_user_sentence(detail)
+    assert checks._numbers_in_prose(_charts_step(plain).detail) == {20, 31, 2024}
+    # One sentence a cut card, in the order drawn.
+    both = _charts_step(cut, plain).detail
+    assert both == f"{detail} {_charts_step(plain).detail}"
+
+
+_YEAR_COUNTS_MANIFEST = json.loads(
+    (Path(__file__).parent / "fixtures" / "mint_manifest_recent_years.json").read_text()
+)
+
+
+class _PlanSurface:
+    """A `ToolSurface` answering each plan step's call with the structured
+    content scripted for its tool."""
+
+    def __init__(self, results: Mapping[str, Mapping[str, Any]]) -> None:
+        self._results = results
+
+    async def list_tools(self) -> list[ToolSchema]:
+        raise AssertionError("not called")
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, Any],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        return ToolCallResult(
+            text="digest", structured_content=dict(self._results[tool.name]), is_error=False
+        )
+
+
+async def _plan_steps(results: Mapping[str, Mapping[str, Any]]) -> dict[str, ActivityStep]:
+    """The closing line of each plan step, by tool, after a plan whose steps
+    call each tool of `results` once through the recording surface."""
+    current_conversation_id.set("c1")
+    surface = _RecordingSurface(_PlanSurface(results), provenance=ProvenanceStore())
+    translator = _Translator(
+        conversation=ConversationState(conversation_id="c1"),
+        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+        surface_recorder=surface,
+    )
+    for name in results:
+        server = "data-mcp" if name == "get_data" else "analysis-mcp"
+        token = current_step_id.set(f"step_{name}")
+        try:
+            await surface.call_tool(tool=ToolId(server=server, name=name), arguments={})
+        finally:
+            current_step_id.reset(token)
+    return {f.tool: f for f in translator._drain_recorder() if f.event == "activity.step"}
+
+
+def _verb_result(rows: int, *, ranked_before_limit: int | None = None) -> dict[str, Any]:
+    """An analysis verb's structured content, as analysis-mcp builds it."""
+    return VerbResult(
+        spec_id="ops_1",
+        content_version="v1",
+        frame_content_version="cv_1",
+        rows=rows,
+        stat_var_count=1,
+        ranked_before_limit=ranked_before_limit,
+    ).model_dump(mode="json")
+
+
+async def test_a_plan_steps_line_states_the_period_note_and_the_rows_its_result_holds():
+    """A plan's retrieval states the period note of its manifest's coverage
+    after its summary, and the summary alone when the coverage gives none. A
+    ranking and any other analysis step state the rows their result holds."""
+    coverage = _YEAR_COUNTS_MANIFEST["coverage"]
+    note = period_note(coverage)
+    assert note is not None
+    unnoted = copy.deepcopy(_YEAR_COUNTS_MANIFEST)
+    del unnoted["coverage"]["recent_years"]
+
+    steps = await _plan_steps(
+        {
+            "get_data": _YEAR_COUNTS_MANIFEST,
+            "rank": _verb_result(10, ranked_before_limit=70),
+            "growth": _verb_result(1),
+        }
+    )
+    plain = (await _plan_steps({"get_data": unnoted}))["get_data"].detail
+
+    assert plain and "\u00b7 The data is for" not in plain
+    assert steps["get_data"].detail == f"{plain} \u00b7 {note}"
+    assert checks._numbers_in_prose(steps["rank"].detail) == {10, 70}
+    unlimited = (await _plan_steps({"rank": _verb_result(10)}))["rank"].detail
+    assert checks._numbers_in_prose(unlimited) == {10}
+    assert checks._numbers_in_prose(steps["growth"].detail) == {1}
+    assert all(is_user_sentence(steps[tool].detail) for tool in ("rank", "growth"))
+
+
+async def test_a_reply_stating_the_facts_of_its_steps_is_grounded_by_their_frames():
+    """The Studio eval grounds a reply's numbers in the stream alone
+    (`evals/studio/checks.py`'s `check_grounding`). The period note's year and
+    count, a cut card's counts and a ranking's row count are grounded by the
+    step frames that state them, and by nothing else in the turn."""
+    manifest = copy.deepcopy(_YEAR_COUNTS_MANIFEST)
+    counts = {2025: 9, 2024: 85, 2023: 84}
+    for dimension in manifest["coverage"]["dimensions"]:
+        if dimension["label"] == "financingProvider":
+            dimension["count"] = 85
+    for year in manifest["coverage"]["recent_years"]:
+        year["role_counts"]["financingProvider"] = counts[year["year"]]
+    note = period_note(manifest["coverage"])
+    assert note is not None
+
+    fetch = types.FunctionCall(id="call_f", name="fetch", args={"spec_id": "spec_oda"})
+    fetched = types.FunctionResponse(
+        id="call_f", name="fetch", response={"summary": "170 observations", "period_note": note}
+    )
+    steps = [
+        *_frames(
+            _translator(),
+            _event(types.Part(function_call=fetch)),
+            _event(types.Part(function_response=fetched)),
+        ),
+        _charts_step(_cut_chart("Aid", drawn=24, holding=70, other_kinds=15, unvalued=31)),
+        *(
+            await _plan_steps(
+                {"get_data": manifest, "rank": _verb_result(25, ranked_before_limit=64)}
+            )
+        ).values(),
+    ]
+    reply = {
+        "event": "message.complete",
+        "text": (
+            "The data is for 2024, which covers 85 donors, while 2025 covers 9 donors so far. "
+            "The chart shows the 24 largest of 70 donors, excluding 15 group totals and 31 "
+            "with no value. The ranking keeps 25 of 64 ranked donors."
+        ),
+    }
+    turn = [frame.model_dump(mode="json") for frame in steps]
+
+    assert checks.check_grounding([[*turn, reply]]) == []
+    # The same turn with its step details withheld grounds none of them.
+    bare = [{**frame, "detail": None} for frame in turn]
+    (violation,) = checks.check_grounding([[*bare, reply]])
+    assert all(number in violation for number in ("2025", "85", "70", "15", "31", "25", "64"))
 
 
 def _record(tool: str, *, step_id: str | None = None, **result: object) -> _ExecutorRecord:
@@ -1034,6 +1319,81 @@ def test_cards_the_agent_removed_reach_the_client_as_a_composition_update():
     assert len(updates) == 1
     assert [b.component_id for b in updates[0].manifest.blocks] == ["cmp_02"]
     assert ("Removing cards from the canvas", StepStatus.FAILED) in _steps(frames)
+
+
+async def test_a_removal_reported_after_a_newer_canvas_edit_carries_that_edit():
+    """`/composition` can commit a newer revision between the agent's removal
+    and the drain that reports it, here a pin. The client renders every
+    update, so the removal's update carries the stored manifest: never a
+    revision below the one the pin committed, and the pin with it."""
+    store = StudioStore(InMemorySessionService(), app_name="app")
+    await store.create("principal", "c1")
+    conversation = store.current("principal", "c1")
+    assert conversation is not None
+    for cid in ("cmp_01", "cmp_02"):
+        land_component(
+            conversation,
+            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_no_executor, store=store),
+    )
+    remove_cards(conversation, ["cmp_01"], all_cards=False)
+
+    def pin(manifest: CompositionManifest | None) -> CompositionManifest:
+        assert manifest is not None
+        blocks = [block.model_copy(update={"pinned": True}) for block in manifest.blocks]
+        return _next_manifest(manifest, blocks, actor=CompositionActor.USER)
+
+    pinned = await store.mutate_composition("principal", "c1", pin)
+    assert isinstance(pinned, CompositionManifest)
+
+    frames = _frames(
+        translator,
+        *_batch(("remove_cards", {"component_ids": ["cmp_01"]}, {"removed": ["cmp_01"]})),
+    )
+
+    (update,) = [f for f in frames if f.event == "composition.updated"]
+    assert update.manifest.revision >= pinned.revision
+    assert [(b.component_id, b.pinned) for b in update.manifest.blocks] == [("cmp_02", True)]
+
+
+def test_a_manifest_older_than_one_the_stream_sent_is_logged_and_not_sent(caplog):
+    """No path gives the translator a manifest below a revision it sent. One
+    forced on it is withheld and logged with both revisions, and a manifest
+    at the revision last sent goes out."""
+    conversation = ConversationState(conversation_id="c1")
+    for cid in ("cmp_01", "cmp_02", "cmp_03"):
+        land_component(
+            conversation,
+            {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"},
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_no_executor, store=StudioStore(InMemorySessionService())),
+    )
+    removal = ("remove_cards", {"component_ids": ["cmp_01"]}, {"removed": ["cmp_01"]})
+    older = conversation.composition
+    remove_cards(conversation, ["cmp_01"], all_cards=False)
+    sent = conversation.composition
+    assert older is not None and sent is not None
+
+    def revisions(*events: Event) -> list[int]:
+        frames = _frames(translator, *events)
+        return [f.manifest.revision for f in frames if f.event == "composition.updated"]
+
+    assert revisions(*_batch(removal)) == [sent.revision]
+    # The same revision again, as after a `/composition` response the client holds.
+    conversation._removal_unreported = True
+    assert revisions(*_batch(removal)) == [sent.revision]
+
+    conversation.composition = older
+    conversation._removal_unreported = True
+    with caplog.at_level(logging.ERROR, logger="harness.studio_translate"):
+        assert revisions(*_batch(removal)) == []
+    (record,) = caplog.records
+    assert record.args == (older.revision, sent.revision)
 
 
 def test_a_canvas_listing_is_read_under_its_own_line():

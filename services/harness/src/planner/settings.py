@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
-
 from common.settings import BaseServiceSettings
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
@@ -17,37 +15,20 @@ from google.genai import types
 _PINNED_AGENT_MODEL = "gemini-3.8-flash"
 
 
-class SchemaDelivery(StrEnum):
-    """How the planner is handed the requirement kinds' schemas.
-
-    `eager` declares every kind's full schema on `propose_plan`. `compact`
-    declares `submission.tool`'s stable `submit_analysis` envelope, puts one
-    card per kind in the instruction, and returns a kind's contract when an
-    `intent` call names it. Both record plans through `submission.service`.
-    """
-
-    EAGER = "eager"
-    COMPACT = "compact"
-
-
 class AgentSettings(BaseServiceSettings):
-    """The model the planner agent runs on, and its schema delivery.
+    """The model the planner agent runs on.
 
     Separate from `harness.settings.Settings`, which configures the service
-    around them -- the MCP URLs, the session backend -- and whose inherited
+    around it -- the MCP URLs, the session backend -- and whose inherited
     `model_name` still drives the harness's own root agent. Reading a model
     string from here costs a caller none of that surface, which is what lets
     the eval agents under `evals/` read the same field the service does.
 
     `PLANNER_MODEL_NAME` overrides the pin. That override is how a
     different model gets scored (see `evals/README.md`).
-
-    `PLANNER_SCHEMA_DELIVERY` is the planner's `SchemaDelivery`, `eager`
-    unless set.
     """
 
     planner_model_name: str = _PINNED_AGENT_MODEL
-    planner_schema_delivery: SchemaDelivery = SchemaDelivery.EAGER
 
 
 # `gemini-3.8-flash` takes a `thinking_level` of `LOW`, `MEDIUM` or `HIGH`

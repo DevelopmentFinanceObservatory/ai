@@ -10,7 +10,6 @@ from common.mcp_telemetry import is_loopback_url
 from common.settings import BaseServiceSettings
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import NoDecode
-from submission.recipes import RECIPES
 
 # Mount prefixes for the data-mcp / analysis-mcp / presentation-mcp ASGI
 # apps that `harness.server.create_app` mounts in-process: the four
@@ -246,13 +245,6 @@ class Settings(BaseServiceSettings):
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL
-    # The direct recipes (`submission.recipes.RECIPES`) the orchestrator may
-    # run without a plan through `submit_analysis` (`harness.direct_recipes`),
-    # as a comma-separated env value (`ORCHESTRATOR_DIRECT_RECIPES`). Empty
-    # removes the tool; an id no recipe has is refused at startup.
-    orchestrator_direct_recipes: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["growth"]
-    )
     # Browser origins the server answers CORS preflights for, as a
     # comma-separated env value (a locally served page testing against the
     # real agent on another port). Empty sends no CORS headers: the deployed
@@ -334,20 +326,12 @@ class Settings(BaseServiceSettings):
             return None
         return value
 
-    @field_validator("studio_cors_origins", "orchestrator_direct_recipes", mode="before")
+    @field_validator("studio_cors_origins", mode="before")
     @classmethod
     def _split_list(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
-
-    @field_validator("orchestrator_direct_recipes")
-    @classmethod
-    def _known_recipes(cls, value: list[str]) -> list[str]:
-        unknown = sorted(set(value) - set(RECIPES))
-        if unknown:
-            raise ValueError(f"no direct recipe is named {unknown}; known: {sorted(RECIPES)}")
-        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def _refuse_one_value_for_both_studio_credentials(self) -> Settings:

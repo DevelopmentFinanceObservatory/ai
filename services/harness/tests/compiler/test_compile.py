@@ -214,8 +214,8 @@ def test_a_retrieval_then_an_aggregate_compiles_to_two_bound_steps(
     assert workflow is not None
     retrieve, totals = workflow.steps
     assert (retrieve.tool.server, retrieve.tool.name) == ("data-mcp", "get_data")
-    # A total across a flow source's parties asks for their types.
-    assert retrieve.args == {"spec_id": SPEC_KENYA, "place_types": True}
+    # A flow source's frame holds its open sides' parties without their group totals.
+    assert retrieve.args == {"spec_id": SPEC_KENYA, "without_party_totals": True}
     assert retrieve.bindings == {}
     assert (totals.tool.server, totals.tool.name) == ("analysis-mcp", "aggregate")
     # The compiler wrote the frame grammar's period column; the proposal said "period".
@@ -1895,15 +1895,15 @@ def test_a_translation_that_stops_at_the_retrieval_compiles(
     assert result.workflow.terminal_steps == ("debt",)
     (step,) = result.workflow.steps
     assert step.tool.name == "get_data"
-    assert step.args == {"spec_id": SPEC_KENYA}
+    assert step.args == {"spec_id": SPEC_KENYA, "without_party_totals": True}
 
 
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"served_count": 2}, {"spec_id": SPEC_KENYA, "stat_vars": "separate"}),
-        ({"served_count": None}, {"spec_id": SPEC_KENYA, "stat_vars": "separate"}),
-        ({"served_count": 1}, {"spec_id": SPEC_KENYA}),
+        ({"served_count": 2}, {"stat_vars": "separate"}),
+        ({"served_count": None}, {"stat_vars": "separate"}),
+        ({"served_count": 1}, {}),
     ],
     ids=["a-family", "unsettled", "one-served"],
 )
@@ -1917,7 +1917,7 @@ def test_a_retrieval_writes_the_spec_id_and_a_family_s_reading_alone(
 ) -> None:
     # The mint resolves the family's members itself, so a retrieval posts no
     # StatVar: a family states its reading, and a source serving one StatVar
-    # states nothing beside its spec_id.
+    # states nothing beside its spec_id and, for a flow source, its party totals.
     plan = _draft([decision()], [requirement()], answer_mode=AnswerMode.SERIES)
 
     result = build(
@@ -1929,7 +1929,14 @@ def test_a_retrieval_writes_the_spec_id_and_a_family_s_reading_alone(
     assert result.issues == ()
     assert result.workflow is not None
     (step,) = result.workflow.steps
-    assert step.args == expected
+    assert (
+        step.args
+        == {
+            "spec_id": SPEC_KENYA,
+            "without_party_totals": True,
+        }
+        | expected
+    )
 
 
 def test_an_operation_feeding_no_terminal_is_reported(
@@ -4487,13 +4494,14 @@ def test_a_total_over_ids_debtors_by_country_needs_no_level_filter(
     build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
 ) -> None:
     # "country" covers the debtors' flow axis, which keeps its role: it holds
-    # parties, whose kinds keep the World Bank group totals out of the sum.
+    # parties, and the retrieval serves them without the World Bank group totals.
     result = _ids_debt_total(build, decision, source, level_filter=False)
 
     assert result.ok, result.issues
     assert result.workflow is not None
     retrieve, total = result.workflow.steps
-    assert retrieve.args["place_types"] is True
+    assert retrieve.args["without_party_totals"] is True
+    assert "place_types" not in retrieve.args
     assert total.args["group_by"] == ["time_period"]
 
 
@@ -4509,13 +4517,13 @@ def test_a_level_filter_over_ids_debtors_is_refused_with_its_own_code(
     )
 
 
-def test_a_series_of_every_place_asks_for_no_place_types(
+def test_a_series_of_every_place_asks_for_no_place_types_and_no_party_totals(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     place_scope_block: dict[str, Any],
 ) -> None:
     # No place-level filter reads the retrieval, so its frame carries no type
-    # column.
+    # column, and a place source holds no flow party whose totals to leave out.
     open_place = source_from_spec_block(place_scope_block)
     plan = _draft([decision()], [_every_country()], answer_mode=AnswerMode.SERIES)
     fetch = RetrieveOperation(id="fetch", requirement_id="health", spec_id=open_place.spec_id)
@@ -4524,7 +4532,7 @@ def test_a_series_of_every_place_asks_for_no_place_types(
 
     assert result.ok, result.issues
     assert result.workflow is not None
-    assert "place_types" not in result.workflow.steps[0].args
+    assert result.workflow.steps[0].args == {"spec_id": open_place.spec_id}
 
 
 def _kenya_from_every_donor(party: str = "donor") -> DatasetRequirement:
@@ -4608,7 +4616,7 @@ def test_top_donors_to_kenya_ranks_by_the_open_origin_axis(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
-        "place_types": True,
+        "without_party_totals": True,
     }
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.RULE
     assert retrieve.expected_role_keys == _frame_role_columns(["destination", "origin"])
@@ -4821,52 +4829,97 @@ def test_a_rank_over_a_donor_family_the_plan_reads_summed_asks_for_the_sum(
     assert retrieve.args == {
         "spec_id": role_open_block["spec_id"],
         "stat_vars": "sum",
-        "place_types": True,
+        "without_party_totals": True,
     }
     assert result.workflow.sources[0].stat_var_reading_set_by is ReadingSetBy.PLAN
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}
     assert rank.expected_role_keys == _frame_role_columns(["origin"])
 
 
-@pytest.mark.parametrize("ranked", [True, False], ids=["growth-then-rank", "growth-alone"])
-def test_a_growth_across_donors_asks_for_party_types_when_a_rank_reads_it(
+@pytest.mark.parametrize("reader", ["nothing", "filter", "growth", "join", "aggregate-by-party"])
+def test_a_flow_retrieval_leaves_out_party_totals_whatever_reads_it(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
-    role_open_block: dict[str, Any],
-    ranked: bool,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    reader: str,
 ) -> None:
-    # "Whose education aid to Kenya grew the most?": the growth keeps each donor
-    # with its types, so the rank over it can leave out the donors that total
-    # others only when the retrieval asks for their types.
-    kenya_from_every_donor = source_from_spec_block(role_open_block)
-    reading = decision(slot="reading", fixes=DecisionFixes(stat_vars=StatVarReading.SUM))
-    aid = _kenya_from_every_donor().model_copy(
-        update={"stat_vars": StatVarReading.SUM, "decision_ids": ("measure", "reading")}
-    )
-    window = {"window_start": 2015, "window_end": 2023}
-    growth_req = GrowthRequirement(id="growth", decision_ids=["measure"], input_id="aid", **window)
-    growth = GrowthOperation(id="growth", requirement_id="growth", input="fetch", **window)
-    rank_req, rank = _rank_over("growth", axis="donor", reads="growth")
-    requirements: list[EvidenceRequirement] = [aid, growth_req]
-    decisions = [decision(), reading]
-    operations: list[Operation] = [
-        RetrieveOperation(id="fetch", requirement_id="aid", spec_id=kenya_from_every_donor.spec_id),
-        growth,
-    ]
-    if ranked:
-        requirements.append(rank_req)
-        decisions.append(_population_decision(decision))
-        operations.append(rank)
+    # The frame of a flow retrieval holds each open side's parties without their
+    # group totals for every verb that reads it, and for none at all.
+    debt = requirement()
+    discovered = {"annual_debt_service": source()}
+    operations: list[Operation] = [_retrieve()]
+    requirements: list[EvidenceRequirement] = [debt]
+    answer_mode = AnswerMode.COMPUTED
+    match reader:
+        case "nothing":
+            answer_mode, terminal = AnswerMode.SERIES, "debt"
+        case "filter":
+            predicates = (ValueThreshold(op="gt", value=0),)
+            requirements.append(
+                FilterRequirement(
+                    id="read",
+                    decision_ids=["measure"],
+                    input_id="annual_debt_service",
+                    predicates=predicates,
+                )
+            )
+            operations.append(
+                FilterOperation(
+                    id="read", requirement_id="read", input="debt", predicates=predicates
+                )
+            )
+            terminal = "read"
+        case "growth":
+            window = {"window_start": 2015, "window_end": 2023}
+            requirements.append(
+                GrowthRequirement(
+                    id="read", decision_ids=["measure"], input_id="annual_debt_service", **window
+                )
+            )
+            operations.append(
+                GrowthOperation(id="read", requirement_id="read", input="debt", **window)
+            )
+            terminal = "read"
+        case "join":
+            requirements += [
+                requirement(id="annual_gdp", measure="gross domestic product"),
+                JoinRequirement(
+                    id="read",
+                    decision_ids=["measure"],
+                    left_id="annual_debt_service",
+                    right_id="annual_gdp",
+                ),
+            ]
+            operations += [
+                _retrieve(id="gdp", requirement_id="annual_gdp", spec_id=SPEC_OTHER),
+                JoinOperation(id="read", requirement_id="read", left="debt", right="gdp"),
+            ]
+            discovered["annual_gdp"] = source(spec_id=SPEC_OTHER)
+            terminal = "read"
+        case _:
+            group_by = (GroupBy.ENTITY, GroupBy.PERIOD)
+            requirements.append(
+                AggregateRequirement(
+                    id="read",
+                    decision_ids=["measure"],
+                    input_id="annual_debt_service",
+                    reduction=Reduction.SUM,
+                    group_by=group_by,
+                )
+            )
+            operations.append(_aggregate(id="read", requirement_id="read", group_by=group_by))
+            terminal = "read"
 
     result = build(
-        _draft(decisions, requirements),
-        _translation(*operations, terminal=[operations[-1].id]),
-        discovered={"aid": kenya_from_every_donor},
+        _draft([decision()], requirements, answer_mode=answer_mode),
+        _translation(*operations, terminal=[terminal]),
+        discovered=discovered,
     )
 
     assert result.ok, result.issues
     assert result.workflow is not None
-    assert result.workflow.steps[0].args.get("place_types", False) is ranked
+    assert result.workflow.steps[0].args == {"spec_id": SPEC_KENYA, "without_party_totals": True}
 
 
 def test_grouping_by_entity_over_an_open_axis_naming_no_entity_is_refused(

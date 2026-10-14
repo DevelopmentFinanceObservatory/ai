@@ -3,9 +3,11 @@
 Two layers, one case file (`harness-studio-orchestrator-v1.cases.json`):
 
 - CONTRACT (mechanical, always on): every frame validates against
-  `harness.wire`, the stream invariants in `checks.py` hold, and each
+  `harness.wire`, the stream invariants in `checks.py` hold, each
   turn's `expect` block matches (terminal frame, component/block counts,
-  error codes, elicitation affordances, ...). No model involved.
+  error codes, elicitation affordances, ...), and each turn's closing
+  message states the figures of its cards as `checks.check_reply` holds it
+  to. No model involved.
 - AGENT (rubric-judged, live mode with --judge): a judge model scores each
   case's `rubrics` against a digest of the conversation. Needs
   `GOOGLE_API_KEY`; see `test_config.json` for the judge settings.
@@ -19,6 +21,12 @@ Modes:
     uv run --package harness python evals/studio/run.py --mode scripted
     uv run --env-file .env --package harness python evals/studio/run.py \
         --mode live --url http://localhost:8080 --judge
+
+The stream carries each card and no tool result, so a run reads the figures
+a card may be stated with from the card itself (`_reply_faults`).
+
+A closing message the reply check cannot decide is reported as undecided
+and fails nothing (`reply_verdict` in the results file).
 
 Exit 0 iff every non-xfail case passes its layer(s). An xfail case failing
 is reported XFAIL (expected, known gap); an xfail case PASSING is reported
@@ -34,7 +42,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -49,6 +57,8 @@ _CONFIG_PATH = _HERE / "test_config.json"
 _RESULTS_DIR = _HERE / ".results"
 
 _MAX_RESUMES = 6
+# The members of a case's record that hold the reply check's result.
+_REPLY_RECORD_KEYS = ("reply_verdict", "reply_rules", "reply_undecided")
 
 
 def _bearer(token: str | None) -> dict[str, str]:
@@ -223,6 +233,62 @@ async def _run_mutate_turn(
     return {"status": response.status_code, "manifest": manifest, "error_body": body}
 
 
+def _canvas_series(before: Sequence[dict[str, Any]]) -> set[str]:
+    """The ids of the series the cards on the canvas drew after the frames
+    `before`, as `make_charts` reads the canvas as a turn begins: every
+    series of each card the last `composition.updated` holds, read from that
+    card's newest frame with a payload."""
+    drawn: dict[str, dict[str, Any]] = {}
+    composed: list[str] = []
+    for frame in before:
+        if frame["event"] in ("component.created", "component.revised") and "payload" in frame:
+            drawn[frame["component_id"]] = frame
+        elif frame["event"] == "composition.updated":
+            composed = [block["component_id"] for block in frame["manifest"]["blocks"]]
+    return {
+        one.id
+        for component_id in composed
+        if component_id in drawn
+        for one in checks.reply_card(drawn[component_id]).series
+        if one.id
+    }
+
+
+def _reply_faults(
+    turn: dict[str, Any],
+    turns: list[list[dict[str, Any]]],
+    *,
+    before: Sequence[dict[str, Any]] = (),
+) -> tuple[list[checks.ReplyFault], list[checks.ReplyCard], set[float]]:
+    """The faults of the closing message of the last of `turns` against the
+    cards that turn drew (`checks.check_reply`), those cards, and the values
+    they gave the reply to state (`checks.stated_values`).
+
+    The stream carries no tool result, so a card's figures are read from
+    the card. Under a `reply` expectation they are what a card gives unasked,
+    to which the check adds the figures the expectation lists. With no
+    expectation they are any point the card draws, since nothing says which
+    the model was given, and such a point grounds where the message states
+    it beside its own series and year. A card whose every series was on the
+    canvas as the turn began (`_canvas_series` of `before`, the frames of
+    the turns before and the canvas each mutation left) is a redraw, which
+    states nothing.
+    """
+    expect = turn.get("expect", {}).get("reply")
+    if expect is not None and checks.reply_expect_problems(expect):
+        expect = None
+    on_canvas = _canvas_series(before)
+    cards = [
+        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None)
+        for frame in turns[-1]
+        if frame["event"] == "component.created"
+    ]
+    message = "\n".join(f["text"] for f in turns[-1] if f["event"] == "message.complete")
+    states = expect["states"] if expect else []
+    faults = checks.check_reply(message, cards, states=states, turns=turns)
+    return faults, cards, checks.stated_values(cards, states, message=message)
+
+
 async def run_case(
     client: httpx2.AsyncClient,
     case: dict[str, Any],
@@ -233,11 +299,19 @@ async def run_case(
     """Runs one case's turns. Violations come back in two buckets, because
     they mean different things to an xfail marker: `contract` (wire
     validity, stream invariants, segment discipline — never excusable) and
-    `expectation` (the case's expect blocks — what an xfail expects to
-    miss). `on_turn` is told each message turn's number as it starts."""
+    `expectation` (the case's expect blocks and the reply check, which an
+    xfail expects to miss). `reply_verdict` is the reply check's verdict
+    over every turn (`checks.reply_verdict`), `reply_rules` names each rule
+    of `checks.REPLY_RULES` a closing message broke, and `reply_undecided`
+    lists each statement the check could not decide, which fails nothing. `on_turn` is told each
+    message turn's number as it starts."""
     conversation_id = conversation_id or f"eval_{uuid.uuid4().hex[:12]}"
     all_frames: list[dict[str, Any]] = []
     turn_frames: list[list[dict[str, Any]]] = []
+    turn_stated: list[set[float]] = []
+    # Every frame of the turns so far, and the canvas each mutation left.
+    canvas_log: list[dict[str, Any]] = []
+    findings: list[tuple[int, checks.ReplyFault]] = []
     produced: list[dict[str, Any]] = []  # newest component per message turn
     contract: list[str] = []
     expectation: list[str] = []
@@ -248,6 +322,8 @@ async def run_case(
         if "operations" in turn:
             result = await _run_mutate_turn(client, conversation_id, turn, produced)
             expectation += _check_mutation(turn, result, label=f"turn {index}")
+            if result["manifest"] is not None:
+                canvas_log.append({"event": "composition.updated", "manifest": result["manifest"]})
             continue
         if on_turn is not None:
             on_turn(index)
@@ -264,13 +340,20 @@ async def run_case(
         components = [f for f in frames if f["event"] == "component.created"]
         produced.append(components[-1] if components else {})
         expectation += _check_turn_expectations(turn, frames, label=f"turn {index}")
+        faults, _, stated = _reply_faults(turn, turn_frames, before=canvas_log)
+        canvas_log += frames
+        turn_stated.append(stated)
+        findings += [(index, fault) for fault in faults]
+        expectation += _reply_misses(index, faults)
 
     # A turn the runner declined to resume ends on its pause by the runner's
     # choice; the transcript check's "incomplete turn" for it is not the
     # server's doing.
     contract += [
         violation
-        for violation in checks.check_transcript(all_frames, complete_conversation=True)
+        for violation in checks.check_transcript(
+            all_frames, complete_conversation=True, stated=turn_stated
+        )
         if not any(violation.startswith(f"turn {index}: ends on ") for index in declined)
     ]
     return {
@@ -279,6 +362,30 @@ async def run_case(
         "answers": answers,
         "contract": contract,
         "expectation": expectation,
+        **_reply_record(findings),
+    }
+
+
+def _reply_misses(index: int, findings: list[checks.ReplyFault]) -> list[str]:
+    """The findings of turn `index` that are missed expectations. An
+    undecided statement is no fault, and the transcript check reports an
+    ungrounded number as a contract violation, which no xfail marker excuses."""
+    return [
+        f"turn {index}: {finding}"
+        for finding in findings
+        if finding.rule != "number_in_no_frame" and not finding.undecided
+    ]
+
+
+def _reply_record(findings: list[tuple[int, checks.ReplyFault]]) -> dict[str, Any]:
+    """The reply check's part of a case's record, from each finding and the
+    turn it is of."""
+    return {
+        "reply_verdict": checks.reply_verdict(finding for _, finding in findings),
+        "reply_rules": sorted({finding.rule for _, finding in findings if not finding.undecided}),
+        "reply_undecided": [
+            f"turn {index}: {finding.detail}" for index, finding in findings if finding.undecided
+        ],
     }
 
 
@@ -305,12 +412,15 @@ TURN_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "elicitation": frozenset({"min_options", "allow_free_text", "skippable"}),
     "plan": frozenset({"min_steps", "min_version", "max_version", "operations_contain"}),
     "no_plan": None,
+    "card_title_contains": None,
+    "max_card_series": None,
+    "reply": None,
 }
 # The `expect` keys whose value is a list of strings the turn's closing text is
 # matched against, case-insensitively.
 _TEXT_LIST_EXPECT_KEYS = ("message_contains", "message_excludes")
 # Every `expect` key that takes a non-empty list of non-empty strings.
-_STRING_LIST_EXPECT_KEYS = (*_TEXT_LIST_EXPECT_KEYS, "step_tools")
+_STRING_LIST_EXPECT_KEYS = (*_TEXT_LIST_EXPECT_KEYS, "step_tools", "card_title_contains")
 MUTATION_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "status": None,
     "blocks": None,
@@ -339,6 +449,10 @@ def check_expect_keys(turn: dict[str, Any], *, label: str) -> list[str]:
                 if sub not in known[key]
             )
     expect = turn.get("expect", {})
+    if "reply" in expect:
+        violations += [
+            f"{label}: {problem}" for problem in checks.reply_expect_problems(expect["reply"])
+        ]
     lists = {key: expect[key] for key in _STRING_LIST_EXPECT_KEYS if key in expect}
     if isinstance(expect.get("plan"), dict) and "operations_contain" in expect["plan"]:
         lists["plan.operations_contain"] = expect["plan"]["operations_contain"]
@@ -396,6 +510,20 @@ def _check_turn_expectations(
                 for field in expect["revised"].get("changed_contains", [])
                 if field not in revised[-1]["changed"]
             )
+    if "card_title_contains" in expect:
+        titles = [checks.card_title(f) for f in created]
+        violations.extend(
+            f"{label}: no created card's title mentions {needle!r}; the titles are {titles}"
+            for needle in _text_needles(expect, "card_title_contains")
+            if not any(needle.lower() in title.lower() for title in titles)
+        )
+    if "max_card_series" in expect:
+        violations.extend(
+            f"{label}: {card.title!r} draws {len(card.series)} series, "
+            f"expected <= {expect['max_card_series']}"
+            for card in map(checks.reply_card, created)
+            if len(card.series) > expect["max_card_series"]
+        )
     if "fact_summary_contains" in expect:
         blob = json.dumps([f["fact_summary"] for f in created + revised]).lower()
         violations.extend(
@@ -856,6 +984,7 @@ async def run_suite(
                     outcome["expectation"] += _frame_checks(case, outcome)
                 record["contract_violations"] = outcome["contract"]
                 record["expectation_violations"] = outcome["expectation"]
+                record |= {key: outcome[key] for key in _REPLY_RECORD_KEYS}
                 if judge and case.get("rubrics"):
                     try:
                         record["rubric_scores"] = await judge_case(
@@ -925,6 +1054,12 @@ def _print_record(record: dict[str, Any]) -> None:
     if record["status"] == "XPASS":
         line += f"  (marked xfail '{record['xfail']}' but PASSED — gap closed? retire the marker)"
     print(line)
+    if "reply_verdict" in record:
+        print(f"       - reply check: {record['reply_verdict']}")
+    if record.get("reply_rules"):
+        print(f"       - reply rules failed: {', '.join(record['reply_rules'])}")
+    for statement in record.get("reply_undecided", []):
+        print(f"       - reply undecided: {statement}")
     if record["status"] == "JUDGE_ERROR":
         print(f"       - [judge] {record['judge_error']}")
     if record["status"] in ("FAIL", "JUDGE_ERROR"):
@@ -952,6 +1087,11 @@ def main() -> int:
     for record in results:
         counts[record["status"]] = counts.get(record["status"], 0) + 1
     print("\n" + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no cases matched")
+    verdicts = [record["reply_verdict"] for record in results if "reply_verdict" in record]
+    print(
+        "reply check: "
+        + ", ".join(f"{verdicts.count(verdict)} {verdict}" for verdict in checks.REPLY_VERDICTS)
+    )
 
     _RESULTS_DIR.mkdir(exist_ok=True)
     out = _RESULTS_DIR / f"{args.mode}-{time.strftime('%Y%m%d-%H%M%S')}.json"

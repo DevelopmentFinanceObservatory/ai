@@ -1376,18 +1376,18 @@ class ToolRefusal:
         )
 
     @classmethod
-    def internal_error(cls, *, tool: str, trace_id: str) -> Self:
+    def internal_error(cls, *, tool: str) -> Self:
         """The registration-site catch-all's own refusal (see `server.py`'s
         module docstring), for an exception no verb's own typed handling
-        anticipated. The exception's text stays in the log line `trace_id`
-        names (`common.refusal.log_unexpected_error`): it can hold a bucket
-        path or a service account, and it gives a retry nothing to act on,
-        which is why this code is `do_not_retry`.
+        anticipated. The exception's text stays in the log
+        (`common.refusal.log_unexpected_error`): it can hold a bucket path or
+        a service account, and it gives a retry nothing to act on, which is
+        why this code is `do_not_retry`.
         """
         return cls(
             code=ToolErrorCode.INTERNAL_ERROR,
-            message=internal_error_message(subject=tool, trace_id=trace_id),
-            fix={"tool": tool, "trace_id": trace_id},
+            message=internal_error_message(subject=tool),
+            fix={"tool": tool},
         )
 
 

@@ -90,9 +90,8 @@ async def get_skill(
 
     A skill carries the definitions, caveats and methods an answer in its
     domain needs. Call this with an id from the skills list beneath a
-    `search` result when its description bears on the question. Loading a
-    skill returns instructions and does not finish the task. Carry on with
-    the task once you have read them.
+    `search` result when its description bears on the question. A skill is
+    reference material for the question, so loading one does not answer it.
 
     Returns the skill's SKILL.md verbatim, front matter included, then the
     skill's other files with their sizes. Read one with `get_skill_file`,

@@ -70,10 +70,7 @@ answered with one full page, then proposes the drafted plan again unchanged
 mechanical loop against a canned `no_data` search and refers the plan back. The
 planner then answers in text, which ends the entry with no plan ready: the
 largest planner request on record is that last generation, which carries the
-brief, the skill page and the referral. The `COMPACT` scenario runs the same
-round with the planner built under `SchemaDelivery.COMPACT`, proposing through
-`submit_analysis`, and is held to its own instruction and declaration
-ceilings.
+brief, the skill page and the referral.
 """
 
 from __future__ import annotations
@@ -142,10 +139,8 @@ from planner.plan import (
     Unit,
 )
 from planner.records import GroupBy, Reduction
-from planner.settings import AgentSettings, SchemaDelivery
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
-from submission.catalogue import catalogue_revision
 
 from .context_probe import (
     BOUNDING_PATTERNS,
@@ -200,23 +195,6 @@ PROPOSE_PLAN_DECLARATION_CEILING = 34_050
 # `get_skill_file`, `get_skill` and `reject_plan`, measured 4,053 together.
 MINOR_DECLARATIONS_TOTAL_CEILING = 5_070
 
-# The compact planner (`SchemaDelivery.COMPACT`), measured on `COMPACT`, the
-# realistic round proposing through `submit_analysis`, with each margin the
-# eager segment's own. Its instruction is the eager one plus the protocol
-# paragraph and one card per requirement kind
-# (`submission.catalogue.render_cards`): measured 21,191, margin 4.1%. Its
-# declarations trade `propose_plan` for the `submit_analysis` envelope, which
-# states no kind's own fields: 12,699 together, margin 2.7%, and
-# `submit_analysis` 8,646 of them, margin 2%. Its `contents`, less the skill
-# page and the brief, measured 1,428: the `submit_analysis` answer is 1,201,
-# 149 more than `propose_plan`'s for its `attempt_id` and the stage and
-# catalogue revision its refusal's `action` states, and the call itself
-# states the stage and the catalogue revision. Margin 5%.
-COMPACT_PLANNER_SYSTEM_INSTRUCTION_CEILING = 22_060
-COMPACT_PLANNER_DECLARATIONS_TOTAL_CEILING = 13_050
-SUBMIT_ANALYSIS_DECLARATION_CEILING = 8_820
-COMPACT_PLANNER_CONTENTS_CEILING = 1_500
-
 # The planner's `contents` history on its largest captured generation, less
 # the skill text `SKILL_PAGE_CEILING` and the brief `RECORDED_BRIEF_CEILING`
 # bound on their own (1,158 chars, the third and last generation of the
@@ -267,12 +245,8 @@ RECORDED_BRIEF_CEILING = 9_460
 # at their maxima.
 BOUNDED_CONTEXT = "bounded-context"
 
-# The third: the realistic round, with the planner proposing through
-# `submit_analysis` (`SchemaDelivery.COMPACT`).
-COMPACT = "compact"
 
-
-def _seam(schema_delivery: SchemaDelivery = SchemaDelivery.EAGER) -> PlannerSeam:
+def _seam() -> PlannerSeam:
     """The seam the recorded round runs on, over a canned data-mcp surface.
 
     Built here, not reused from `test_planner_seam`, whose own
@@ -284,7 +258,6 @@ def _seam(schema_delivery: SchemaDelivery = SchemaDelivery.EAGER) -> PlannerSeam
             schemas=[],
             responses={"search": _NO_DATA_SEARCH_RESPONSE, "get_skill": _skill_page()},
         ),
-        agent_settings=AgentSettings(planner_schema_delivery=schema_delivery),
     )
 
 
@@ -308,29 +281,16 @@ def _skill_page() -> ToolCallResult:
     return ToolCallResult(is_error=False, text=with_closing_line(page.text, closing))
 
 
-def _script(schema_delivery: SchemaDelivery) -> list[Any]:
+def _script() -> list[Any]:
     """The planner's script for one round.
 
     The planner loads a skill, proposes the drafted plan again unchanged (which
     translates it and refers it back), and then produces text, which ends the
-    entry. Under `SchemaDelivery.COMPACT` the proposal is `submit_analysis`'s
-    complete stage.
+    entry.
     """
-    proposal = (
-        ("propose_plan", {"amends_version": 1})
-        if schema_delivery is SchemaDelivery.EAGER
-        else (
-            "submit_analysis",
-            {
-                "submission_stage": "complete",
-                "catalogue_revision": catalogue_revision(),
-                "amends_version": 1,
-            },
-        )
-    )
     return [
         [("get_skill", {"skill_id": "dfo-faq"})],
-        [proposal],
+        [("propose_plan", {"amends_version": 1})],
         "nothing to submit",
     ]
 
@@ -365,7 +325,6 @@ async def _recorded_round(
     derived_requirement: Callable[..., Any],
     context: dict[str, Any],
     state: dict[str, Any] | None = None,
-    schema_delivery: SchemaDelivery = SchemaDelivery.EAGER,
 ) -> dict[str, tuple[list[dict[str, Any]], list[Any]]]:
     """One plan-then-translate round, with every request the planner's model was handed.
 
@@ -379,10 +338,8 @@ async def _recorded_round(
     assertions compare byte for byte.
     """
     draft = _gdp_plan(decision, requirement, derived_requirement)
-    seam = _seam(schema_delivery)
-    planner_llm = RecordingLlm(
-        script=_script(schema_delivery), agent_name="planner", scenario=scenario
-    )
+    seam = _seam()
+    planner_llm = RecordingLlm(script=_script(), agent_name="planner", scenario=scenario)
     seam._agent.model = planner_llm
 
     arguments: dict[str, Any] = {"question": draft.question, **context}
@@ -429,8 +386,7 @@ async def measured(
     reads a raw request are looking at the same capture, so the stability
     assertions and the size assertions can never describe different rounds.
     The second scenario, `BOUNDED_CONTEXT`, hands the seam readings far past
-    their budget and both digests at their maxima. The third, `COMPACT`, is the
-    realistic round under `SchemaDelivery.COMPACT`.
+    their budget and both digests at their maxima.
 
     The baseline rewrite is env-gated the way `test_digest_budget.py`'s own is
     and wrapped by the `context-baseline` `just` recipe. It happens here, in the
@@ -439,12 +395,11 @@ async def measured(
     """
     measured: dict[tuple[str, str], tuple[list[dict[str, Any]], list[Any]]] = {}
     recorded = _recorded_brief()
-    scenarios: list[tuple[str, dict[str, Any], dict[str, Any] | None, SchemaDelivery]] = [
-        ("realistic", recorded["context"], recorded["state"], SchemaDelivery.EAGER),
-        (BOUNDED_CONTEXT, _bounded_context(), None, SchemaDelivery.EAGER),
-        (COMPACT, recorded["context"], recorded["state"], SchemaDelivery.COMPACT),
+    scenarios: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = [
+        ("realistic", recorded["context"], recorded["state"]),
+        (BOUNDED_CONTEXT, _bounded_context(), None),
     ]
-    for scenario, context, state, schema_delivery in scenarios:
+    for scenario, context, state in scenarios:
         round_measured = await _recorded_round(
             scenario=scenario,
             decision=decision,
@@ -452,7 +407,6 @@ async def measured(
             derived_requirement=derived_requirement,
             context=context,
             state=state,
-            schema_delivery=schema_delivery,
         )
         measured[(scenario, "planner")] = round_measured["planner"]
 
@@ -546,49 +500,23 @@ def _declaration(record: dict[str, Any], name: str) -> int:
 
 
 def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
-    """`(label, measured, ceiling)` for every boundary one request can be held to.
-
-    A `COMPACT` request is held to the compact planner's instruction,
-    declaration and contents ceilings, and to the same brief and skill ceilings.
-    """
-    if record["scenario"] == COMPACT:
-        declared = [
-            (
-                "compact planner system instruction",
-                record["system_instruction_chars"],
-                COMPACT_PLANNER_SYSTEM_INSTRUCTION_CEILING,
-            ),
-            (
-                "compact planner declarations",
-                record["declaration_total_chars"],
-                COMPACT_PLANNER_DECLARATIONS_TOTAL_CEILING,
-            ),
-            (
-                "submit_analysis declaration",
-                _declaration(record, "submit_analysis"),
-                SUBMIT_ANALYSIS_DECLARATION_CEILING,
-            ),
-        ]
-    else:
-        declared = [
-            (
-                "planner system instruction",
-                record["system_instruction_chars"],
-                PLANNER_SYSTEM_INSTRUCTION_CEILING,
-            ),
-            (
-                "planner declarations",
-                record["declaration_total_chars"],
-                PLANNER_DECLARATIONS_TOTAL_CEILING,
-            ),
-            (
-                "propose_plan declaration",
-                _declaration(record, "propose_plan"),
-                PROPOSE_PLAN_DECLARATION_CEILING,
-            ),
-        ]
+    """`(label, measured, ceiling)` for every boundary one request can be held to."""
     return [
-        *declared,
+        (
+            "planner system instruction",
+            record["system_instruction_chars"],
+            PLANNER_SYSTEM_INSTRUCTION_CEILING,
+        ),
+        (
+            "planner declarations",
+            record["declaration_total_chars"],
+            PLANNER_DECLARATIONS_TOTAL_CEILING,
+        ),
+        (
+            "propose_plan declaration",
+            _declaration(record, "propose_plan"),
+            PROPOSE_PLAN_DECLARATION_CEILING,
+        ),
         (
             "minor planner declarations",
             _minor_declarations(record),
@@ -599,9 +527,7 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
             record["contents"]["total_chars"]
             - bucket_chars(record, SKILL_BUCKET)
             - bucket_chars(record, SEAM_BUCKET),
-            COMPACT_PLANNER_CONTENTS_CEILING
-            if record["scenario"] == COMPACT
-            else PLANNER_CONTENTS_CEILING,
+            PLANNER_CONTENTS_CEILING,
         ),
         ("seam brief", bucket_chars(record, SEAM_BUCKET), RECORDED_BRIEF_CEILING),
         ("skill page", bucket_chars(record, SKILL_BUCKET), SKILL_PAGE_CEILING),
@@ -612,16 +538,10 @@ def _declare(record: dict[str, Any]) -> list[tuple[str, int, int]]:
 SKILL_BUCKET = "functionResponse:get_skill"
 
 
-# Everything a planner request declares other than the proposing tool,
-# `propose_plan` or `submit_analysis`, the one declaration bounded individually
-# above, not lumped into this total.
-_NAMED_DECLARATIONS = ("propose_plan", "submit_analysis")
-
-
+# Everything a planner request declares other than `propose_plan`, the one
+# declaration bounded individually above, not lumped into this total.
 def _minor_declarations(record: dict[str, Any]) -> int:
-    return sum(
-        item["chars"] for item in record["declarations"] if item["name"] not in _NAMED_DECLARATIONS
-    )
+    return sum(item["chars"] for item in record["declarations"] if item["name"] != "propose_plan")
 
 
 def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> None:
@@ -631,13 +551,11 @@ def test_no_segment_grows_past_its_ceiling(records: list[dict[str, Any]]) -> Non
     so a round that stopped calling `get_skill` cannot clear the skill ceiling
     by measuring nothing.
     """
-    checked: list[tuple[str, int, int]] = []
-    for scenario in ("realistic", COMPACT):
-        planner = _largest(records, scenario=scenario, agent="planner")
-        assert bucket_chars(planner, SKILL_BUCKET) > PAGE_CHARS, (
-            f"{_baseline_key(planner)} carries no full `get_skill` page: the round did not load one"
-        )
-        checked.extend(_declare(planner))
+    planner = _largest(records, scenario="realistic", agent="planner")
+    assert bucket_chars(planner, SKILL_BUCKET) > PAGE_CHARS, (
+        f"{_baseline_key(planner)} carries no full `get_skill` page: the round did not load one"
+    )
+    checked = _declare(planner)
 
     over = [
         f"{label}: {measured} chars > ceiling {ceiling}"
@@ -703,8 +621,7 @@ def test_the_relay_check_measures_a_relay_that_is_there() -> None:
 # grows without a cap, a grounding ref that restates its sentence).
 
 
-@pytest.mark.parametrize("scenario", ["realistic", COMPACT])
-def test_the_cached_prefix_is_stable_across_a_run(measured: Any, scenario: str) -> None:
+def test_the_cached_prefix_is_stable_across_a_run(measured: Any) -> None:
     """Each consecutive pair of requests carries a byte-identical cached prefix.
 
     Between two requests in one run, `config.system_instruction` is byte-identical
@@ -723,9 +640,9 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any, scenario: str) 
     only while every conversation builds the same prefix. A deploy that changes
     the prompt starts a new cache, as it should.
     """
-    _records, requests = measured[(scenario, "planner")]
+    _records, requests = measured[("realistic", "planner")]
     assert len(requests) >= 2, (
-        f"{scenario}/planner: only {len(requests)} request(s) captured, so there is no "
+        f"realistic/planner: only {len(requests)} request(s) captured, so there is no "
         "pair to compare. Two consecutive requests are what the cache prefix needs."
     )
     for index in range(len(requests) - 1):
@@ -735,22 +652,19 @@ def test_the_cached_prefix_is_stable_across_a_run(measured: Any, scenario: str) 
         instruction_before = system_instruction_text(before)
         instruction_after = system_instruction_text(after)
         assert instruction_before == instruction_after, (
-            f"{scenario}/planner: the system instruction differs between {first} and "
+            f"realistic/planner: the system instruction differs between {first} and "
             f"{second} ({len(instruction_before)} vs {len(instruction_after)} chars). "
             "The shared prefix cache is keyed on it, so each variant creates a cache."
         )
         key_before = prefix_key(before.model or "", before.config)
         assert key_before == prefix_key(after.model or "", after.config), (
-            f"{scenario}/planner: the tool declarations or tool config differ between "
+            f"realistic/planner: the tool declarations or tool config differ between "
             f"{first} and {second}. The shared prefix cache is keyed on them, so each "
             "variant creates a cache."
         )
 
 
-@pytest.mark.parametrize("scenario", ["realistic", COMPACT])
-def test_the_leading_contents_of_a_run_are_only_ever_appended_to(
-    measured: Any, scenario: str
-) -> None:
+def test_the_leading_contents_of_a_run_are_only_ever_appended_to(measured: Any) -> None:
     """Each planner request's `contents` begins with the previous one's, unchanged.
 
     Gemini's implicit caching matches a leading run of contents, so a run whose
@@ -768,13 +682,13 @@ def test_the_leading_contents_of_a_run_are_only_ever_appended_to(
     generation. Where it does not, the test reports that directly, so it
     never passes vacuously.
     """
-    _records, requests = measured[(scenario, "planner")]
-    assert len(requests) >= 2, f"{scenario}/planner: no pair of requests to compare"
+    _records, requests = measured[("realistic", "planner")]
+    assert len(requests) >= 2, "realistic/planner: no pair of requests to compare"
     signatures = [contents_leading(request) for request in requests]
     for index in range(len(signatures) - 1):
         before, after = signatures[index], signatures[index + 1]
         assert after[: len(before)] == before, (
-            f"{scenario}/planner: request {index + 1}'s contents do not begin with request "
+            f"realistic/planner: request {index + 1}'s contents do not begin with request "
             f"{index}'s. {len(before)} leading contents compared. The first difference is at "
             f"index {next(i for i, (a, b) in enumerate(zip(before, after, strict=False)) if a != b)}. "
             "Implicit caching matches the leading contents, and a rewrite here "
@@ -868,22 +782,21 @@ def test_every_ceiling_fails_when_its_segment_grows() -> None:
 
     One oversized declaration per name `_declare` looks up, so `_declaration`
     finds each of them, plus enough text to clear the contents ceiling and a
-    `get_skill` answer past its own. Once for each delivery's proposing tool.
+    `get_skill` answer past its own.
     """
-    for scenario, proposing in (("realistic", "propose_plan"), (COMPACT, "submit_analysis")):
-        request = _request(
-            tool_names=[proposing, "adk_request_input", "reject_plan"],
-            texts=["t" * _INFLATED] * 3,
-            seam=_INFLATED,
-            skill=SKILL_PAGE_CEILING + 1,
-        )
-        inflated = compose(request, agent="planner", scenario=scenario, call_index=0)
-        reported = {label for label, measured, ceiling in _declare(inflated) if measured > ceiling}
-        expected = {label for label, _, _ in _declare(inflated)}
-        assert reported == expected, (
-            f"{scenario}: a ceiling did not fail on a request built to exceed it, so that "
-            f"bound is not live. Missing from the reported set: {sorted(expected - reported)}"
-        )
+    request = _request(
+        tool_names=["propose_plan", "adk_request_input", "reject_plan"],
+        texts=["t" * _INFLATED] * 3,
+        seam=_INFLATED,
+        skill=SKILL_PAGE_CEILING + 1,
+    )
+    inflated = compose(request, agent="planner", scenario="realistic", call_index=0)
+    reported = {label for label, measured, ceiling in _declare(inflated) if measured > ceiling}
+    expected = {label for label, _, _ in _declare(inflated)}
+    assert reported == expected, (
+        "a ceiling did not fail on a request built to exceed it, so that bound is not "
+        f"live. Missing from the reported set: {sorted(expected - reported)}"
+    )
 
 
 # The seam brief at its realistic upper end --------------------------------------

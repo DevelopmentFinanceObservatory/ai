@@ -9,7 +9,8 @@ import io
 import json
 import logging
 from collections.abc import Callable, Coroutine, Iterator, Mapping
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import httpx2
 import pyarrow as pa
@@ -4246,6 +4247,47 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     assert registered == [minted]
 
 
+async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The option is dfo-apis': the replay sends it as recorded, and the record of the new
+    # pair keeps it.
+    stored = _stored_definition(**_FLOW_OPEN_PROVIDER)
+    registered: list[Mapping[str, Any]] = []
+
+    async def registered_as_asked(
+        *, manifest: Manifest, options: Mapping[str, Any], **_: Any
+    ) -> MaterialisationOutcome:
+        registered.append(options)
+        return MaterialisationOutcome(
+            status="registered",
+            attempts=1,
+            frame_ref=mint_pair(manifest),
+            stat_var_count=1,
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", registered_as_asked)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content)["options"])
+        return httpx2.Response(
+            200, json=_manifest_response(spec_id=stored.spec_id, content_version="cv_" + "2" * 32)
+        )
+
+    recorded = {"format": "parquet", "columns": ["party_kind"], "without_party_totals": True}
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+
+    minted = await _mint_recorded_root(
+        handler, stored, MintRecord(frame=root, dataset=root, options=recorded)
+    )
+
+    assert sent == [recorded]
+    assert registered == [recorded]
+    assert isinstance(minted, RootMint)
+    assert minted.options == recorded
+
+
 async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4345,6 +4387,445 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
         "Country",
         "AdministrativeArea1,State",
     ]
+
+
+_FLOW_OPEN_PROVIDER = {"entities": {"destination": ["country/KEN"]}, "open_roles": ["origin"]}
+_PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
+
+
+@pytest.mark.parametrize(
+    ("identity", "arguments", "columns", "cut"),
+    [
+        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, ["party_kind"], True),
+        (_FLOW_OPEN_PROVIDER, {"place_types": True}, ["party_kind"], False),
+        (_FLOW_OPEN_PROVIDER, {}, None, False),
+        (_PLACE_SPEC, {"without_party_totals": True}, None, False),
+        (
+            _PLACE_SPEC,
+            {"without_party_totals": True, "place_types": True},
+            ["observationAbout_type"],
+            False,
+        ),
+    ],
+    ids=["flow-totals-only", "flow-types-only", "flow-neither", "place-totals-only", "place-both"],
+)
+async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: dict[str, Any],
+    arguments: dict[str, Any],
+    columns: list[str] | None,
+    cut: bool,
+) -> None:
+    stored = _stored_definition(**identity)
+    registered: list[Mapping[str, Any]] = []
+
+    async def record(
+        *, manifest: Manifest, options: Mapping[str, Any], **_: Any
+    ) -> MaterialisationOutcome:
+        registered.append(options)
+        return MaterialisationOutcome(
+            status="registered", attempts=0, frame_ref=mint_pair(manifest)
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", record)
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content)["options"])
+        return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, **arguments}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [sent_options.get("columns") for sent_options in sent] == [columns]
+    # Sent only when true, as dfo-apis records it in a rendering only then.
+    assert [sent_options.get("without_party_totals") for sent_options in sent] == [
+        True if cut else None
+    ]
+    assert registered == sent
+
+
+class _FlowMint:
+    """dfo-apis for a flow spec with an open provider side and a named recipient. Its frame
+    holds single parties, group totals, a residual and a party of no kind. A mint with
+    `options.without_party_totals` answers as dfo-apis cuts it: the rows of the providers of
+    kind `total` left out, under a version of its own (`CUT_VERSION`) whose coverage counts
+    the rows kept and whose trace lists the totals left out. The artifact of each mint is the
+    rendering it asked for. Records every artifact fetch."""
+
+    # provider, provider kind
+    PROVIDERS: ClassVar[list[tuple[str, str | None]]] = [
+        ("country/FRA", "party"),
+        ("DACTotal", "total"),
+        ("G7", "total"),
+        ("DACUnspecified", "residual"),
+        ("country/XYZ", None),
+    ]
+    CUT_VERSION = "cv_" + "c" * 32
+
+    def __init__(self, *, spec_id: str) -> None:
+        self.spec_id = spec_id
+        self.content_version = _content_version_of(_parquet_bytes())
+        self.artifacts = {cut: self._artifact(cut=cut) for cut in (False, True)}
+        self.fetched: list[str] = []
+
+    def _providers(self, *, cut: bool) -> list[tuple[str, str | None]]:
+        return [(name, kind) for name, kind in self.PROVIDERS if not (cut and kind == "total")]
+
+    def _artifact(self, *, cut: bool) -> bytes:
+        providers = self._providers(cut=cut)
+        count = len(providers)
+        table = pa.table(
+            {
+                "stat_var": pa.array(["dcid:Test"] * count, type=pa.string()),
+                "financingProvider": pa.array([name for name, _ in providers]),
+                "financingRecipient": pa.array(["country/KEN"] * count),
+                "time_period": pa.array(["2021"] * count, type=pa.string()),
+                "value": pa.array([float(index + 1) for index in range(count)]),
+                "financingProvider_party_kind": pa.array(
+                    [kind for _, kind in providers], pa.string()
+                ),
+                "financingRecipient_party_kind": pa.array(["party"] * count),
+            }
+        )
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        return buf.getvalue()
+
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/api/datasets"
+        options = json.loads(request.content)["options"]
+        cut = options.get("without_party_totals") is True
+        providers = self._providers(cut=cut)
+        response = _manifest_response(
+            spec_id=self.spec_id, content_version=self.CUT_VERSION if cut else self.content_version
+        )
+        response["definition"]["identity"] = _identity_doc(**_FLOW_OPEN_PROVIDER)
+        response["coverage"]["rows"] = len(providers)
+        response["coverage"]["dimensions"] = [
+            {"count": len(providers), "label": "financingProvider", "axis": "origin"},
+            {"count": 1, "label": "financingRecipient", "axis": "destination"},
+        ]
+        if cut:
+            response["trace"] = {
+                "party_totals_left_out": [
+                    {"role": "financingProvider", "entities": ["DACTotal", "G7"]}
+                ]
+            }
+        response["artifacts"][0] |= {
+            "artifact_digest": _digest(self.artifacts[cut]),
+            "rendering": options,
+        }
+        return httpx2.Response(200, json=response)
+
+    async def fetch(self, *, artifact_digest: str, **_: Any) -> bytes:
+        self.fetched.append(artifact_digest)
+        return next(data for data in self.artifacts.values() if _digest(data) == artifact_digest)
+
+
+async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_served_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the real `materialise_and_register`
+    stored = _stored_definition(**_FLOW_OPEN_PROVIDER)
+    upstream = _FlowMint(spec_id=stored.spec_id)
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+
+    with_totals, left_out, left_out_again = await _call_get_data_in_one_process(
+        upstream.handler,
+        _StubStore(stored),
+        [
+            {"spec_id": stored.spec_id, "place_types": True},
+            {"spec_id": stored.spec_id, "without_party_totals": True},
+            {"spec_id": stored.spec_id, "without_party_totals": True},
+        ],
+    )
+
+    assert [r.is_error for r in (with_totals, left_out, left_out_again)] == [False] * 3
+    assert with_totals.structured_content is not None
+    assert left_out.structured_content is not None
+    assert left_out_again.structured_content is not None
+    kept_ref = FrameRef.model_validate(with_totals.structured_content["frame_ref"])
+    cut_ref = FrameRef.model_validate(left_out.structured_content["frame_ref"])
+    # The manifest names dfo-apis' cut version, and the frame is held under the pair its
+    # kinds derive from that version.
+    assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
+    assert cut_ref == frame_ref_for(
+        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=("party_kind",)
+    )
+    assert cut_ref != kept_ref
+    # The repeat is a store hit: it fetches nothing and names the same frame.
+    assert left_out_again.structured_content["frame_ref"] == cut_ref.model_dump()
+    assert upstream.fetched == [
+        _digest(upstream.artifacts[False]),
+        _digest(upstream.artifacts[True]),
+    ]
+    kept_held = await frame_store.get(kept_ref)
+    cut_held = await frame_store.get(cut_ref)
+    assert kept_held is not None
+    assert cut_held is not None
+    assert sorted(kept_held[0].table.column("financingProvider").to_pylist()) == sorted(
+        name for name, _ in upstream.PROVIDERS
+    )
+    assert sorted(cut_held[0].table.column("financingProvider").to_pylist()) == [
+        "DACUnspecified",
+        "country/FRA",
+        "country/XYZ",
+    ]
+    # The record keeps the option, so a replay asks dfo-apis for the cut again.
+    record = await frame_store.get_mint_record(cut_ref)
+    assert record is not None
+    assert record.dataset == FrameRef(spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION)
+    assert record.options == {
+        "format": "parquet",
+        "bundle": False,
+        "layout": "frame",
+        "columns": ["party_kind"],
+        "without_party_totals": True,
+    }
+    # The digest names the totals the manifest's trace lists, on the fresh mint and the hit.
+    for result in (left_out, left_out_again):
+        assert (
+            "Left out of the frame: 2 group totals on financingProvider (DACTotal, G7)"
+            in text_of(result)
+        )
+    assert "Left out of the frame" not in text_of(with_totals)
+
+
+# `GET /api/datasets/{id}/options` as dfo-apis answered it for the DAC2a spec "official
+# development assistance to Kenya from every provider, 2015-2022".
+_REGISTRY_OPTIONS = json.loads(
+    (Path(__file__).parent / "fixtures" / "options_dac2a_kenya_open_provider.json").read_text()
+)
+_REGISTRY_SPEC_ID = _REGISTRY_OPTIONS["definition"]["spec_id"]
+
+
+class _RegistryFlowMint:
+    """dfo-apis for the spec `_REGISTRY_OPTIONS` records, which the definition store does not
+    hold: its registry answers the options route, and a flow table refuses a place type
+    column and serves the artifact of the rendering that asks for party kinds, cut of the
+    providers of kind `total` under a version of its own (`CUT_VERSION`) when the mint asks
+    for `without_party_totals`. Every manifest carries the recorded definition, coverage and
+    trace. Records each request."""
+
+    CUT_VERSION = "cv_" + "d" * 32
+
+    PROVIDERS: ClassVar[list[tuple[str, str | None]]] = [
+        ("country/FRA", "party"),
+        ("DACWorldBank", "total"),
+        ("WorldBankGroup", "total"),
+        ("AfricanDevelopmentBankGroup", "total"),
+        ("country/XYZ", None),
+    ]
+
+    def __init__(self, *, options_response: dict[str, Any] | None = None) -> None:
+        self.options_response = _REGISTRY_OPTIONS if options_response is None else options_response
+        self.requests: list[tuple[str, dict[str, Any] | None]] = []
+        self.artifacts = {cut: self._artifact(cut=cut) for cut in (False, True)}
+        self.fetched: list[str] = []
+
+    def _artifact(self, *, cut: bool) -> bytes:
+        """The frame of the rendering that asks for party kinds, less the providers of kind
+        `total` when `cut`."""
+        providers = [(name, kind) for name, kind in self.PROVIDERS if not (cut and kind == "total")]
+        count = len(providers)
+        buf = io.BytesIO()
+        pq.write_table(
+            pa.table(
+                {
+                    "stat_var": pa.array(["dcid:Test"] * count),
+                    "financingProvider": pa.array([name for name, _ in providers]),
+                    "financingRecipient": pa.array(["country/KEN"] * count),
+                    "time_period": pa.array(["2021"] * count),
+                    "value": pa.array([float(index + 1) for index in range(count)]),
+                    "financingProvider_party_kind": pa.array(
+                        [kind for _, kind in providers], pa.string()
+                    ),
+                    "financingRecipient_party_kind": pa.array(["party"] * count),
+                }
+            ),
+            buf,
+        )
+        return buf.getvalue()
+
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            self.requests.append((request.url.path, None))
+            assert request.url.path.endswith("/options")
+            return httpx2.Response(200, json=self.options_response)
+        body = json.loads(request.content)
+        self.requests.append((request.url.path, body))
+        columns = body["options"].get("columns")
+        if columns == ["observationAbout_type"]:
+            return _column_unknown(served=["financingProvider_type", "financingRecipient_type"])
+        cut = body["options"].get("without_party_totals") is True
+        response = _manifest_response(
+            spec_id=body["input"]["spec_id"],
+            content_version=self.CUT_VERSION if cut else _REGISTRY_OPTIONS["content_version"],
+        )
+        response["definition"] = _REGISTRY_OPTIONS["definition"]
+        response["coverage"] = _REGISTRY_OPTIONS["coverage"]
+        response["trace"] = _REGISTRY_OPTIONS["trace"]
+        if cut:
+            response["trace"] = response["trace"] | {
+                "party_totals_left_out": [
+                    {
+                        "role": "financingProvider",
+                        "entities": sorted(
+                            name for name, kind in self.PROVIDERS if kind == "total"
+                        ),
+                    }
+                ]
+            }
+        response["artifacts"][0] |= {
+            "artifact_digest": _digest(self.artifacts[cut]),
+            "rendering": body["options"],
+        }
+        return httpx2.Response(200, json=response)
+
+    async def fetch(self, *, artifact_digest: str, **_: Any) -> bytes:
+        self.fetched.append(artifact_digest)
+        return next(data for data in self.artifacts.values() if _digest(data) == artifact_digest)
+
+
+@pytest.mark.parametrize(
+    ("argument", "totals_served"),
+    [("place_types", True), ("without_party_totals", False)],
+)
+async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
+    monkeypatch: pytest.MonkeyPatch, argument: str, totals_served: bool
+) -> None:
+    monkeypatch.undo()  # the real `materialise_and_register`
+    upstream = _RegistryFlowMint()
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    frame_store = InMemoryMaterialisationStore()
+    set_frame_store(frame_store)
+    definitions = _RecordingStore()
+
+    result = await _call_get_data(
+        upstream.handler, definitions, {"spec_id": _REGISTRY_SPEC_ID, argument: True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert result.structured_content is not None
+    # The registry is read first, the mint asks for kinds with the definition beside it, and
+    # the definition is kept for the next call.
+    assert [
+        (path, body and body["options"].get("columns")) for path, body in upstream.requests
+    ] == [
+        (f"/api/datasets/{_REGISTRY_SPEC_ID}/options", None),
+        ("/api/datasets", ["party_kind"]),
+    ]
+    mint = upstream.requests[1][1]
+    assert mint is not None
+    assert ("without_party_totals" in mint["options"]) is not totals_served
+    assert mint["input"]["definition"]["identity"] == _REGISTRY_OPTIONS["definition"]["identity"]
+    assert [put.spec_id for put in definitions.put_calls] == [_REGISTRY_SPEC_ID]
+    held = await frame_store.get(FrameRef.model_validate(result.structured_content["frame_ref"]))
+    assert held is not None
+    table = held[0].table
+    assert set(table.column("financingProvider_party_kind").to_pylist()) >= {"party"}
+    providers = set(table.column("financingProvider").to_pylist())
+    assert ("DACWorldBank" in providers) is totals_served
+    assert ("country/XYZ" in providers) and ("country/FRA" in providers)
+
+
+@pytest.mark.parametrize("argument", ["place_types", "without_party_totals"])
+async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_and_no_sidecar(
+    monkeypatch: pytest.MonkeyPatch, argument: str
+) -> None:
+    # The registry answers the definition under its own id, which the requested id is not,
+    # so the mint cannot carry it. Its flow sides still choose the columns.
+    monkeypatch.undo()  # the real `materialise_and_register`
+    upstream = _RegistryFlowMint()
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+    definitions = _RecordingStore()
+
+    result = await _call_get_data(
+        upstream.handler, definitions, {"spec_id": "spec_" + "e" * 32, argument: True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    mint = upstream.requests[1][1]
+    assert mint is not None
+    assert mint["options"]["columns"] == ["party_kind"]
+    assert "definition" not in mint["input"]
+    # Only the manifest's own definition is kept, as for any re-mint under another id.
+    assert [put.spec_id for put in definitions.put_calls] == [_REGISTRY_SPEC_ID]
+
+
+@pytest.mark.parametrize("argument", ["place_types", "without_party_totals"])
+async def test_a_flow_frame_that_cannot_carry_the_asked_kinds_is_refused(
+    monkeypatch: pytest.MonkeyPatch, argument: str
+) -> None:
+    # The registry reads the spec as a place spec, and dfo-apis then serves a flow manifest
+    # for the mint without kinds: that frame would carry every group total.
+    monkeypatch.undo()  # the real `materialise_and_register`
+    place = _stored_definition(entities={"recipient": ["country/KEN"]})
+    upstream = _RegistryFlowMint(
+        options_response={
+            "definition": {
+                "schema_version": 1,
+                "spec_id": place.spec_id,
+                "identity": json.loads(place.canonical_bytes),
+            }
+        }
+    )
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+
+    result = await _call_get_data(
+        upstream.handler, _RecordingStore(), {"spec_id": place.spec_id, argument: True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "upstream_error"
+    assert upstream.fetched == []
+
+
+async def test_a_registry_definition_the_store_cannot_keep_is_logged_and_the_call_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="data_mcp.get_data_tool")
+    monkeypatch.undo()  # the real `materialise_and_register`
+    upstream = _RegistryFlowMint()
+    monkeypatch.setattr("data_mcp.frame_materialisation._fetch_artifact_bytes", upstream.fetch)
+    set_frame_store(InMemoryMaterialisationStore())
+
+    result = await _call_get_data(
+        upstream.handler,
+        _PutFailsStore(None),  # holds nothing and refuses writes
+        {"spec_id": _REGISTRY_SPEC_ID, "without_party_totals": True},
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [
+        record.getMessage() for record in caplog.records if _REGISTRY_SPEC_ID in record.getMessage()
+    ]
+
+
+async def test_a_spec_the_registry_does_not_hold_either_refuses_before_minting() -> None:
+    spec_id = "spec_" + "d" * 32
+    paths: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        paths.append(request.url.path)
+        return httpx2.Response(404, content=_problem_body(code="spec_not_found", retryable=False))
+
+    result = await _call_get_data(
+        handler, _StubStore(None), {"spec_id": spec_id, "without_party_totals": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "definition_not_held"
+    assert paths == [f"/api/datasets/{spec_id}/options"]
 
 
 def test_a_refusal_names_a_place_by_its_label_and_only_counts_one_without() -> None:

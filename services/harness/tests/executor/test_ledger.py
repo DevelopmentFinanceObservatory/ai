@@ -268,23 +268,44 @@ def test_a_field_a_later_release_adds_at_its_default_leaves_the_submission_diges
     )
 
 
-def test_both_authorisations_round_trip_through_a_run_record() -> None:
-    request = RequestAuthorisation(
-        source_policy=_policy(GDP),
-        expires_at=NOW + timedelta(minutes=5),
-        task="turn:3",
-        recipe_id="growth",
-        recipe_revision="1",
-        graph_digest="g" * 64,
-        limits={"steps": 8},
-        parameter_origins={"spec_id": ParameterOrigin.RECORDED},
-        at=NOW,
-    )
-    for authorisation in (_approval(), request):
-        run = new_run(
-            idempotency_key="rk_1", submission_digest="d", authorisation=authorisation, now=NOW
-        )
-        assert RunRecord.model_validate(run.model_dump(mode="json")) == run
+def test_a_plan_approval_round_trips_through_a_run_record() -> None:
+    run = new_run(idempotency_key="rk_1", submission_digest="d", authorisation=_approval(), now=NOW)
+    assert RunRecord.model_validate(run.model_dump(mode="json")) == run
+
+
+# A run record as the ledger stores one admitted under a request authorisation.
+_STORED_REQUEST_RUN = {
+    "run_id": "run_15e10ab66c594efb9b4decc70c05b4ec",
+    "idempotency_key": "rk_1",
+    "submission_digest": "d" * 64,
+    "authorisation": {
+        "kind": "request",
+        "source_policy": {"sources": [GDP], "version_policy": "latest"},
+        "expires_at": "2026-10-12T13:00:00Z",
+        "task": "relative growth of GDP in Kenya from 2015 to 2022",
+        "recipe_id": "growth",
+        "recipe_revision": "0123456789abcdef",
+        "graph_digest": "g" * 64,
+        "limits": {"steps": 2, "concurrent_steps": 4},
+        "parameter_origins": {"spec_id": "recorded", "change": "model_stated"},
+        "at": "2026-10-12T12:00:00Z",
+    },
+    "status": "completed",
+    "admitted_at": "2026-10-12T12:00:00Z",
+    "resumes": 0,
+    "delivered": True,
+}
+
+
+def test_a_stored_run_admitted_under_a_request_authorisation_loads() -> None:
+    run = stored_run(_STORED_REQUEST_RUN)
+
+    assert isinstance(run.authorisation, RequestAuthorisation)
+    assert run.authorisation.parameter_origins == {
+        "spec_id": ParameterOrigin.RECORDED,
+        "change": ParameterOrigin.MODEL_STATED,
+    }
+    assert run.model_dump(mode="json")["authorisation"] == _STORED_REQUEST_RUN["authorisation"]
 
 
 # --- the status machine -----------------------------------------------------------

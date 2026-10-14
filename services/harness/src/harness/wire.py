@@ -1115,10 +1115,11 @@ class StepProgress(_WireModel):
 class ActivityStep(_WireModel):
     """One execution step -- the only progress channel (Activity tab and the
     "2/3 complete" line). A step-scoped failure surfaces here as
-    `status: "failed"`, a failed tool call's step with no `detail` (a
-    refusal's text is written for the agent and stays in the trace), and the run
-    continues where the graph allows (delta 4); a stream-fatal problem is an
-    `error` frame instead."""
+    `status: "failed"`, with a `detail` of one sentence for the user: the
+    one `harness.sentences` has for the failure's code. The refusal's own
+    text is written for the agent and stays in the trace. The run continues
+    where the graph allows (delta 4); a stream-fatal problem is an `error`
+    frame instead, whose `detail` is such a sentence too."""
 
     event: Literal["activity.step"]
     seq: int = Field(ge=0)

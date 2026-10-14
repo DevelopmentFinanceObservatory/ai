@@ -17,8 +17,7 @@ builds, the pins it windows
 `Admission` carrying the plan to record. `submit` records an admission and
 answers `ok`, which is all `planner.agent.propose_plan` does with its call.
 A `Proposer` names the tool the proposal came through, so every `action` a
-refusal carries calls a tool the model was given, with the arguments every
-call to it states.
+refusal carries calls a tool the model was given.
 
 The chain reads the session through a `SessionView`: the state slots
 `planner.plan` and the translator keep, what the user answered and was asked
@@ -34,7 +33,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, NamedTuple, Protocol
 
@@ -205,29 +204,22 @@ _MAX_REPORTED_ERRORS = 10
 class Proposer:
     """The tool a proposal came through, as the chain's answers address it.
 
-    `call` is the tool a refusal's `action` names to propose again, and
-    `arguments` what every call to it states beside the proposal, which each
-    such `action` carries. `max_reported_errors` is how many failing fields
-    one `INVALID_PLAN` refusal names, `None` for every one.
+    `call` is the tool a refusal's `action` names to propose again.
     """
 
     call: str
-    arguments: Mapping[str, JsonValue] = field(default_factory=dict)
-    max_reported_errors: int | None = _MAX_REPORTED_ERRORS
 
     def action(
         self, arguments: Mapping[str, JsonValue] | None = None, needs: tuple[str, ...] = ()
     ) -> Action:
         """The call to this tool that states `arguments` and leaves `needs` to the model.
 
-        An action stating nothing, here or in `self.arguments`, leaves
-        `arguments` unset.
+        An action stating no arguments leaves `arguments` unset.
         """
-        stated = {**self.arguments, **(arguments or {})}
-        return Action(call=self.call, arguments=stated or None, needs=needs)
+        return Action(call=self.call, arguments=arguments or None, needs=needs)
 
 
-# `planner.agent.propose_plan`, which states nothing beside the proposal.
+# `planner.agent.propose_plan`'s proposer.
 PROPOSE_PLAN = Proposer(call="propose_plan")
 
 
@@ -545,7 +537,7 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     """Return the `INVALID_PLAN` problem for data a plan's own rules refused.
 
     A `ValidationError` is reported as each failing field's path, the rule it
-    broke and the rule's limit, for the first `proposer.max_reported_errors`
+    broke and the rule's limit, for the first `_MAX_REPORTED_ERRORS`
     fields and a count of the rest. The refused value is left out: the response lands in
     the model's next request, so echoing it would spend the space the refusal
     exists to protect and repeat it in the history on every retry. A location
@@ -580,7 +572,7 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
             return refused
     reported = [
         {**error, "loc": tuple(_cut_loc_element(element) for element in error["loc"])}
-        for error in errors[: proposer.max_reported_errors]
+        for error in errors[:_MAX_REPORTED_ERRORS]
     ]
     lines = [
         f"{'.'.join(map(str, error['loc'])) or 'the plan'}: {error['msg']}" for error in reported

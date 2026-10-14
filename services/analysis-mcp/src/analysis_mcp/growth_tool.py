@@ -306,6 +306,8 @@ async def growth(
 ) -> ToolResult:
     """Compute each entity's growth across `[window_start, window_end]`.
 
+    Use it for the change between two periods, as a percentage or an amount.
+
     `change="relative"` (the default) computes
     `growth_rate = (value_end - value_start) / value_start`, the total
     percentage change across the window; a zero or sign-crossing base makes

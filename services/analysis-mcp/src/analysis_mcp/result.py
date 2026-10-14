@@ -56,6 +56,10 @@ class VerbResult(BaseModel):
       `quotient_of` holds no row for: those with no denominator group, those
       sharing no period with it, and those whose every matched cell has a
       zero denominator. 0 for an un-keyed call and for every other verb.
+    - `ranked_before_limit`: how many entries a `rank` call with a `limit`
+      ranked before the limit cut them to `rows`: entities, or entity
+      periods with `per_period`. `None` for a call with no `limit` and for
+      every other verb.
     - `exclusions`/`time`: as `Trace` carries them.
     """
 
@@ -68,6 +72,7 @@ class VerbResult(BaseModel):
     role_keys: tuple[str, ...] = ()
     stat_var_count: int = Field(ge=0)
     dropped_key_count: int = Field(default=0, ge=0)
+    ranked_before_limit: int | None = Field(default=None, ge=0)
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)
 

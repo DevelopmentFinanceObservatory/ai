@@ -747,7 +747,7 @@ async def test_a_rank_ranks_by_the_frames_provider_column(
     retrieved: Retrieved,
     surface_for: Callable[..., FrameSurface],
 ) -> None:
-    # A rank across donors needs their kinds, which the harness asks `get_data` for.
+    # A rank across donors reads their kinds, which `get_data(without_party_totals=True)` serves.
     surface = surface_for(
         get_data=[ok(await retrieved(_source(), frame=_family_frame(kinds=True)))]
     )
@@ -1408,11 +1408,11 @@ async def test_a_join_of_one_stat_var_under_two_units_declares_one(
     assert outcome.steps[-1].row_count == 2 * 48
 
 
-# --- Party totals: a sum across a flow side leaves out the parties totalling others -----
+# --- Party totals: a flow retrieval is served without the parties totalling others -----
 
 # DAC2A's donors to Kenya with the kind dfo-apis serves for each: countries, an
 # organisation and a residual add up; the DAC total and the G7 hold the countries' figures
-# again.
+# again, and `get_data(without_party_totals=True)` leaves them out.
 _DONORS_TO_KENYA: dict[str, tuple[str, float]] = {
     "country/DEU": ("party", 10.0),
     "country/USA": ("party", 20.0),
@@ -1421,32 +1421,34 @@ _DONORS_TO_KENYA: dict[str, tuple[str, float]] = {
     "DACCountriesTotal": ("total", 30.0),
     "GroupOfSeven": ("total", 30.0),
 }
-_TYPED_CONTENT_VERSION = "cv_" + "7" * 32
+_WITHOUT_TOTALS_CONTENT_VERSION = "cv_" + "7" * 32
 
 
-def _donors_frame(*, typed: bool) -> Frame:
-    """Every donor's yearly aid to Kenya since 2000, with each donor's kind when `typed`."""
+def _donors_frame(*, without_totals: bool) -> Frame:
+    """Every donor's yearly aid to Kenya since 2000, each with its kind, less the donors
+    that total others when `without_totals`."""
     provider_kind = f"{PROVIDER}_party_kind"
     return Frame.build(
-        role_keys=[PROVIDER, RECIPIENT, *([provider_kind] if typed else [])],
+        role_keys=[PROVIDER, RECIPIENT, provider_kind],
         rows=[
             {
                 "stat_var": "dcid:Oda",
                 PROVIDER: donor,
                 RECIPIENT: KENYA.ref,
-                **({provider_kind: kind} if typed else {}),
+                provider_kind: kind,
                 "time_period": str(year),
                 "value": value,
                 "unit": "usd",
             }
             for donor, (kind, value) in _DONORS_TO_KENYA.items()
+            if not (without_totals and kind == "total")
             for year in range(2000, 2024)
         ],
     )
 
 
-class _TypedOnRequest(FrameSurface):
-    """Answers `get_data` with the typed frame when the call asks for place types."""
+class _WithoutTotalsOnRequest(FrameSurface):
+    """Answers `get_data` with the frame without donor totals when the call asks for it."""
 
     def __init__(self, *, answers: Mapping[bool, dict[str, Any]], **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -1462,10 +1464,10 @@ class _TypedOnRequest(FrameSurface):
         if tool.name != "get_data":
             return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
         self.calls.append((tool.name, dict(arguments)))
-        return ok(self._answers[bool(arguments.get("place_types"))])
+        return ok(self._answers[bool(arguments.get("without_party_totals"))])
 
 
-async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
+async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_donor_totals(
     plan_for: PlanFactory,
     retrieved: Retrieved,
     frame_store: InMemoryMaterialisationStore,
@@ -1473,8 +1475,9 @@ async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
     real_schemas: list[ToolSchema],
 ) -> None:
     # "Total aid to Kenya each year": the source binds Kenya and leaves the donors open.
-    # The compiled retrieval asks for their types, and each year's total sums the
-    # countries, the organisation and the residual, 38, where every donor sums to 98.
+    # The compiled retrieval asks for the frame without donor totals, and each year's
+    # total sums the countries, the organisation and the residual, 38, where every donor
+    # sums to 98.
     source = _source(
         entities=(KENYA,), open_entity_axes=(OpenEntityAxis(column="origin", member_count=6),)
     )
@@ -1510,23 +1513,30 @@ async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
         discovered={"oda": source},
     )
     donors = tuple(ResolvedEntity(role="origin", ref=ref, label=ref) for ref in _DONORS_TO_KENYA)
-    plain = await retrieved(source, frame=_donors_frame(typed=False), providers=donors)
-    typed_frame = _donors_frame(typed=True)
-    typed_ref = FrameRef(spec_id=source.spec_id, content_version=_TYPED_CONTENT_VERSION)
+    plain = await retrieved(source, frame=_donors_frame(without_totals=False), providers=donors)
+    without_totals_frame = _donors_frame(without_totals=True)
+    without_totals_ref = FrameRef(
+        spec_id=source.spec_id, content_version=_WITHOUT_TOTALS_CONTENT_VERSION
+    )
     plain_ref = FrameRef(spec_id=source.spec_id, content_version=CONTENT_VERSION)
     _held, trace = await frame_store.get(plain_ref)
-    await frame_store.put(typed_ref, frame=typed_frame, trace=trace, writer="tests")
-    _stats_by_manifest[(source.spec_id, _TYPED_CONTENT_VERSION)] = _stats_by_manifest[
+    await frame_store.put(
+        without_totals_ref, frame=without_totals_frame, trace=trace, writer="tests"
+    )
+    _stats_by_manifest[(source.spec_id, _WITHOUT_TOTALS_CONTENT_VERSION)] = _stats_by_manifest[
         (source.spec_id, CONTENT_VERSION)
     ]
-    typed = plain | {
-        "content_version": _TYPED_CONTENT_VERSION,
-        "frame_ref": typed_ref.model_dump(),
-        "role_keys": list(observed_shape(typed_frame)[0]),
+    without_totals = plain | {
+        "content_version": _WITHOUT_TOTALS_CONTENT_VERSION,
+        "frame_ref": without_totals_ref.model_dump(),
+        "role_keys": list(observed_shape(without_totals_frame)[0]),
     }
     engines = McpSurface(sources={"analysis-mcp": analysis_server.mcp})
-    surface = _TypedOnRequest(
-        answers={False: plain, True: typed}, schemas=real_schemas, responses={}, engines=engines
+    surface = _WithoutTotalsOnRequest(
+        answers={False: plain, True: without_totals},
+        schemas=real_schemas,
+        responses={},
+        engines=engines,
     )
 
     try:
@@ -1538,4 +1548,4 @@ async def test_a_yearly_total_over_every_donor_leaves_out_the_donor_totals(
     total, _trace = await frame_store.get(outcome.results["totals_op"])
     assert set(total.table.column("value").to_pylist()) == {38.0}
     ((_, aggregated),) = [call for call in surface.calls if call[0] == "aggregate"]
-    assert aggregated["frame_ref"]["content_version"] == _TYPED_CONTENT_VERSION
+    assert aggregated["frame_ref"]["content_version"] == _WITHOUT_TOTALS_CONTENT_VERSION

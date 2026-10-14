@@ -71,8 +71,9 @@ from harness.graph.answer import (
     stored_run_plan,
 )
 from harness.graph.delivery import Delivery, deliver
-from harness.graph.plan_done import HandBack
+from harness.graph.plan_done import HandBack, StepSummary
 from harness.graph.seams import Executor
+from harness.tool_contracts import HarnessCode
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ def run_resumer(
         except UnreadableRunError as exc:
             logger.error("resume: %s", exc)
             failed = await record_change(
-                run_ledger, run.run_id, Fail("run_record_unreadable", str(exc))
+                run_ledger, run.run_id, Fail(HarnessCode.RUN_RECORD_UNREADABLE.value, str(exc))
             )
             return run_hand_back(failed), None
         outcome = await resume_run(
@@ -191,7 +192,9 @@ def run_resumer(
         plan = await stored_run_plan(run_ledger, run_id=run.run_id, revision=submission.revision)
         hand_back = HandBack(
             executor,
-            summaries=[step.digest for step in presentable_steps(outcome) if step.digest],
+            summaries=[
+                StepSummary.of_record(step) for step in presentable_steps(outcome) if step.digest
+            ],
             totals=answer_notes(surface, outcome, plan=plan) if plan is not None else [],
         )
         tools = {record.step_id: record.tool.name for record in outcome.steps}
@@ -222,7 +225,9 @@ async def _failed(ledger: RunLedger, run_id: str, exc: Exception) -> dict[str, A
     try:
         run = await ledger.get(run_id)
         if run is not None and run.status not in TERMINAL_STATUSES:
-            run = await ledger.record(run_id, Fail("resume_failed", f"{type(exc).__name__}: {exc}"))
+            run = await ledger.record(
+                run_id, Fail(HarnessCode.RESUME_FAILED.value, f"{type(exc).__name__}: {exc}")
+            )
     except Exception:
         logger.exception("resume: run %s could not be recorded failed", run_id)
         return None

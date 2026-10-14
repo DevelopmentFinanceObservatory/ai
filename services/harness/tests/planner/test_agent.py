@@ -282,18 +282,12 @@ def _response_event(name: str, response: dict[str, Any]) -> Any:
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
 
-def _referred_event(
-    kind: ReferralKind, requirement_id: str | None, *, recorded_by: str = "propose_plan"
-) -> Any:
-    """The event carrying the answer whose translation hands the plan back.
-
-    `recorded_by` is the tool that recorded the plan: `propose_plan` answers
-    `ok`, `submit_analysis` answers `recorded`.
-    """
+def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
+    """The `propose_plan` event carrying the answer whose translation hands the plan back."""
     return _response_event(
-        recorded_by,
+        "propose_plan",
         {
-            "outcome": Outcome.OK.value if recorded_by == "propose_plan" else "recorded",
+            "outcome": Outcome.OK.value,
             "status": "draft",
             "version": 1,
             "translation": {
@@ -1779,24 +1773,20 @@ def _combination_asked(
     options: list[dict[str, str]] | None = None,
     call_id: str = "ask-1",
     about: tuple[str, list[str]] | None = ("net_flows", _AID_AND_DEBT),
-    refused_by: str = "propose_plan",
 ) -> list[Any]:
     """A `combination_unasked` refusal naming the sum `about` (its requirement id and
     datasets; `None` for no refusal), then an `adk_request_input` call offering
     `options`, `COMBINATION_OPTIONS` by default, and one response to it per answer in
-    `answers`. `refused_by` is the tool that refused, `submit_analysis` answering
-    `needs_decision` where `propose_plan` answers `refused`."""
+    `answers`."""
     offered = [dict(option) for option in COMBINATION_OPTIONS] if options is None else options
     refusals = (
         []
         if about is None
         else [
             _response_event(
-                refused_by,
+                "propose_plan",
                 {
-                    "outcome": Outcome.REFUSED.value
-                    if refused_by == "propose_plan"
-                    else "needs_decision",
+                    "outcome": Outcome.REFUSED.value,
                     "code": ProblemCode.COMBINATION_UNASKED.value,
                     "message": "m",
                     "detail": {"requirement_id": about[0], "datasets": about[1]},
@@ -1827,7 +1817,6 @@ def _combination_asked(
         (_combination_asked({"text": "separately, please"}), False),
         (_combination_asked({"text": "add them"}), False),
         (_combination_asked({"spec_id": "add them"}), True),
-        (_combination_asked({"spec_id": "add them"}, refused_by="submit_analysis"), True),
         (_combination_asked({"spec_id": "show them separately"}), False),
         (_combination_asked({"spec_id": "add them"}, {"spec_id": "show them separately"}), False),
         (
@@ -1854,7 +1843,6 @@ def _combination_asked(
         "paraphrase-picking-the-other-option",
         "typed-in-place-of-a-pick",
         "picked-its-choice",
-        "picked-its-choice-after-submit-analysis-refused",
         "picked-the-other-option",
         "picked-then-changed-their-mind",
         "asked-with-other-options",
@@ -2791,15 +2779,10 @@ def test_a_real_answer_to_an_ask_raised_after_the_referral_settles_it(
     assert amended["outcome"] == Outcome.OK.value, amended
 
 
-@pytest.mark.parametrize("recorded_by", ["propose_plan", "submit_analysis"])
-def test_an_answer_after_a_referral_counts_whichever_tool_recorded_the_plan(
-    recorded_by: str,
-) -> None:
-    """The referral is read off the answer's shape, its `translation`, not the tool's name."""
+def test_an_answer_after_a_referral_counts() -> None:
+    """The referral is read off the recording answer's `translation`."""
     ctx = _FakeToolContext()
-    ctx.session.events.append(
-        _referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp", recorded_by=recorded_by)
-    )
+    ctx.session.events.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
     ctx.session.events.extend(_ask_answered_events())
 
     answered, _picked = ToolContextSession(ctx).answers_since_referral()
@@ -6189,6 +6172,66 @@ def test_a_translate_unsupported_answer_has_to_be_declined_too(
     else:
         assert result["code"] == ProblemCode.DECLINE_MISSING.value
         assert result["detail"] == {"operations": [operation.value]}
+
+
+def _drafted_arguments(decision: DecisionFactory, requirements: RequirementPair) -> dict[str, Any]:
+    """A first draft's `propose_plan` arguments, as JSON a model sends."""
+    return {
+        "question": "q",
+        "answer_mode": AnswerMode.COMPUTED.value,
+        "decisions": [draft.model_dump(mode="json") for draft in drafts([decision()])],
+        "evidence_requirements": [r.model_dump(mode="json") for r in requirements],
+    }
+
+
+async def _compiled_then_rejected(tool_context: Any) -> dict[str, object]:
+    """An `ok` translation after which the plan on record is rejected, so
+    `planner.agent.declare_ready`'s gate refuses it."""
+    _translate(tool_context)
+    plan = load_plan(tool_context.state)
+    assert plan is not None
+    save_plan(tool_context.state, plan.reject())
+    return {"outcome": "ok"}
+
+
+async def _never_translated(tool_context: Any) -> dict[str, object]:
+    raise AssertionError("a refused proposal records nothing to translate")
+
+
+async def test_a_refusal_action_states_the_decline_it_needs(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    operation = next(iter(UnsupportedOperation))
+    ctx = _FakeToolContext()
+    record_unsupported(ctx.state, operation)
+    tools = _tools_by_name(translate=_never_translated)
+
+    answer = await tools["propose_plan"].run_async(
+        args=_drafted_arguments(decision, requirements),
+        tool_context=ctx,  # type: ignore[arg-type]
+    )
+
+    assert answer["code"] == ProblemCode.DECLINE_MISSING.value
+    assert answer["action"] == {
+        "call": "propose_plan",
+        "arguments": {"declined": [{"code": operation.value}]},
+        "needs": ["declined.ask"],
+    }
+
+
+async def test_a_gate_refusal_action_calls_propose_plan_with_nothing_stated(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    tools = _tools_by_name(translate=_compiled_then_rejected)
+
+    answer = await tools["propose_plan"].run_async(
+        args=_drafted_arguments(decision, requirements),
+        tool_context=_FakeToolContext(),  # type: ignore[arg-type]
+    )
+
+    assert "summary" not in answer
+    assert answer["submission"]["code"] == ProblemCode.PLAN_REJECTED.value
+    assert answer["submission"]["action"] == {"call": "propose_plan"}
 
 
 @pytest.mark.parametrize(

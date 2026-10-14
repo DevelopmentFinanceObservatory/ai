@@ -44,6 +44,7 @@ GET_DATA_PARAMETERS: dict[str, Any] = {
         "scope": {"type": "object"},
         "stat_vars": {"type": "string", "enum": ["sum", "separate"], "default": "separate"},
         "place_types": {"type": "boolean", "default": False},
+        "without_party_totals": {"type": "boolean", "default": False},
         "breakdown": {
             "anyOf": [
                 {

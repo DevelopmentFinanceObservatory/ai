@@ -378,6 +378,7 @@ async def test_limit_moves_the_op_spec_hash_and_the_content_version(seeded) -> N
     limited = await rank(**arguments, limit=2)
 
     assert limited.structured_content["spec_id"] != unlimited.structured_content["spec_id"]
+    assert unlimited.structured_content["ranked_before_limit"] is None
     assert (
         limited.structured_content["content_version"]
         != unlimited.structured_content["content_version"]
@@ -399,6 +400,7 @@ async def test_limit_keeps_the_top_entities_and_reports_the_rest(seeded) -> None
 
     assert result.is_error is False
     assert result.structured_content["rows"] == 2
+    assert result.structured_content["ranked_before_limit"] == 5
     digest = result.content[0].text
     assert "limit 2 (kept 2 of 5 ranked entities)" in digest
     assert "beyond_limit (ranked beyond the limit): 9 row(s)" in digest
@@ -450,6 +452,7 @@ async def test_per_period_limit_keeps_the_top_of_each_period(seeded) -> None:
 
     assert result.is_error is False
     assert result.structured_content["rows"] == 3
+    assert result.structured_content["ranked_before_limit"] == 15
     assert "limit 1 per period (kept 3 of 15 ranked rows)" in result.content[0].text
 
 

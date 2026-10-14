@@ -232,7 +232,7 @@ def test_a_rolling_growth_keeps_its_planned_years_and_adds_the_overlay(
         "rolling": {"window_start": FIVE_BACK, "window_end": LATEST, "population": KENYA_ALONE},
     }
     # The retrieval is of the open copy as approved: no scope is written.
-    assert _step(result, "debt").args == {"spec_id": SPEC_DEBT}
+    assert _step(result, "debt").args == {"spec_id": SPEC_DEBT, "without_party_totals": True}
     # The key names a resolution that exists only once the retrievals have run.
     assert ANCHOR_KEY_PARAMETER not in step.args
     assert is_rolling(step)

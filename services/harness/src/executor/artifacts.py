@@ -138,6 +138,17 @@ def declared_dropped_key_count(structured_content: Mapping[str, object] | None) 
     return max(count, 0)
 
 
+def declared_ranked_before_limit(structured_content: Mapping[str, object] | None) -> int | None:
+    """How many entries a `rank` call ranked before its `limit` cut them
+    (`analysis_mcp.result.VerbResult.ranked_before_limit`), which the result
+    declares only when a limit was set. `None` for a call with no limit, for
+    any other tool, and when the member is not a count."""
+    count = (structured_content or {}).get("ranked_before_limit")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    return count
+
+
 def retrieved_frame_columns(
     structured_content: Mapping[str, object], *, compiled: Iterable[str]
 ) -> FrameColumns | None:

@@ -57,12 +57,13 @@ from google.adk.errors import StaleSessionError
 from google.adk.events import Event, EventActions
 from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig
-from planner.plan import PlanStatus, ResolvedBy, cut_user_text
+from planner.plan import PlanStatus, cut_user_text
 from pydantic import BaseModel, ValidationError
 
 from harness.approval import ApprovalRecord
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY
+from harness.reply_figures import drawn_series
 from harness.turn_records import (
     PlanRecord,
     PlanSource,
@@ -509,6 +510,17 @@ class ConversationState:
     _composition_ops: list[Callable[[CompositionManifest | None], CompositionManifest | None]] = (
         field(default_factory=list, repr=False, compare=False)
     )
+    # Whether a `remove_cards` of this turn changed the canvas since the
+    # stream last reported one (`take_unreported_removal`). Not durable.
+    # Reset by `begin_turn`.
+    _removal_unreported: bool = field(default=False, repr=False, compare=False)
+
+    def take_unreported_removal(self) -> bool:
+        """Whether `remove_cards` changed the canvas since the last call: the
+        stream then owes one `composition.updated`, which carries the
+        manifest stored when it is sent."""
+        unreported, self._removal_unreported = self._removal_unreported, False
+        return unreported
 
     def _canvas_view(self, focus: str | None = None) -> _CanvasView:
         """The cards a canvas view names: the composed blocks the cap keeps,
@@ -669,6 +681,26 @@ class ConversationState:
             window[-1] = _history_turn(newest[-1], shrink=shrink)
         return digest(window)
 
+    def canvas_series_ids(self) -> list[str]:
+        """The id of every series the cards on the canvas draw, in canvas
+        order: each card's stored `_SERIES_IDS`, or for an entry stored
+        without them, the ids its fact summary lists, which the platform
+        caps at twelve a card."""
+        ids: list[str] = []
+        for block in self.composition.blocks if self.composition is not None else []:
+            entry = self.components.get(block.component_id) or {}
+            held = entry.get(_SERIES_IDS)
+            if not isinstance(held, list):
+                summary = entry.get("fact_summary")
+                listed = summary.get("series") if isinstance(summary, dict) else None
+                held = [
+                    series["id"]
+                    for series in listed or []
+                    if isinstance(series, dict) and series.get("id")
+                ]
+            ids += [str(series_id) for series_id in held]
+        return ids
+
     def recall_part(
         self,
         *,
@@ -699,7 +731,12 @@ class ConversationState:
             composed = self.composition is not None and any(
                 block.component_id == component_id for block in self.composition.blocks
             )
-            return {"part": part, "component_id": component_id, "on_canvas": composed, **entry}
+            return {
+                "part": part,
+                "component_id": component_id,
+                "on_canvas": composed,
+                **_without_series_ids(entry),
+            }
         key = "plans" if part == "plan" else "readings"
         holding = [number for number, t in enumerate(self.turns, start=1) if t.get(key)]
         if turn is None and holding:
@@ -763,18 +800,16 @@ class ConversationState:
         readings = [*self.turn_readings, *(reading.model_dump(mode="json") for reading in sourced)]
         if readings:
             record["readings"] = readings
-        # Only the blocks of the sources the turn's plans used, and of the
-        # source each windowed copy among them copies, since a block can run
-        # to about 120 KB and the record is kept for the whole conversation.
+        # Keep the blocks of the sources the turn's plans used and of the source
+        # each windowed copy among them copies: a later turn can pin or fetch
+        # that source through `earlier_block`. A block can run to about 120 KB
+        # and the record is kept for the whole conversation, so no other is kept.
         identities = _turn_identities(self.turn_specs, plans)
-        windowed_from = _windowed_from(
+        copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
         )
-        if windowed_from:
-            record["windowed_from"] = windowed_from
-        used = {source.spec_id for plan in plans for source in plan.sources}
-        used |= set(windowed_from.values())
+        used = {source.spec_id for plan in plans for source in plan.sources} | copied
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
             record["specs"] = specs
@@ -825,41 +860,15 @@ class ConversationState:
         reading that names a spec_id decides. `spec_ids` lists the spec_ids
         `earlier_block` resolves. No block is included. A pin or a fetch
         reads one through `earlier_block`.
-
-        `windowed_from` maps each windowed copy a plan retrieved to the
-        source it copies (`close_turn`), and `elected` lists the spec_ids
-        the user chose, read off each plan decision resolved by the user
-        that fixes a source, with the source each such copy copies. Each is
-        left out when empty.
         """
         readings, blocks, warnings = self._earlier_ledger()
         if not readings:
             return None
-        ledger: dict[str, Any] = {
+        return {
             "readings": [r.model_dump(mode="json") for r in newest_per_spec_id(readings)],
             "warnings": warnings,
             "spec_ids": list(blocks),
         }
-        windowed_from: dict[str, str] = {}
-        for turn in self.turns:
-            windowed_from.update(turn.get("windowed_from") or {})
-        if windowed_from:
-            ledger["windowed_from"] = windowed_from
-        chosen = {
-            decision.source_spec_id
-            for turn in self.turns
-            for plan in _validated(
-                PlanRecord, turn.get("plans") or (), reader="ledger", what="plan record"
-            )
-            for decision in plan.decisions
-            if decision.resolved_by is ResolvedBy.USER and decision.source_spec_id is not None
-        }
-        elected = chosen | {
-            windowed_from[spec_id] for spec_id in chosen if spec_id in windowed_from
-        }
-        if elected:
-            ledger["elected"] = sorted(elected)
-        return ledger
 
     def earlier_block(self, spec_id: str) -> dict[str, Any] | None:
         """The spec block an earlier turn stored for `spec_id`, decided by the
@@ -937,6 +946,7 @@ class ConversationState:
         self.plan_version_ids.clear()
         self.latest_plan_version = None
         self._composition_ops = []
+        self._removal_unreported = False
         if self.turn_index > 1 and not self.turn_recorded:
             # The previous turn never reached a terminal frame (an abandoned
             # pause, or a death no code path recorded). Its record keeps
@@ -1089,6 +1099,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "cancel_reason",
         "_telemetry_span",
         "_composition_ops",
+        "_removal_unreported",
         "turn_specs",
     }
 )
@@ -1972,6 +1983,20 @@ def make_recall_part(store: StudioStore) -> Any:
     return recall_part
 
 
+def make_canvas_series(store: StudioStore) -> Any:
+    """The seam `make_charts` and `remove_cards` read the canvas's series ids
+    through (`ConversationState.canvas_series_ids`), bound to a store and
+    resolved to the conversation at CALL time, as `make_recall_part` is.
+    Empty when there is no conversation."""
+
+    def canvas_series() -> list[str]:
+        key = current_conversation_key.get()
+        conversation = store.current(*key) if key is not None else None
+        return conversation.canvas_series_ids() if conversation is not None else []
+
+    return canvas_series
+
+
 def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` seam, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is."""
@@ -2051,15 +2076,23 @@ def _bounded_fact_summary(summary: Any) -> Any:
     """`summary`, factored where it can be (`_factored_fact_summary`), when
     that fits `_FACT_SUMMARY_BYTE_CAP`. Over it, a factored summary keeps the
     most leading series that fit, and `series_truncated` labels them a subset
-    of the card's series chosen by `_SUBSET_RULE`. Anything else over the cap
-    becomes a `{"cut": ...}` stub stating the summary's size and the limit."""
+    of the card's series chosen by `_SUBSET_RULE`. A summary the platform
+    already cut (its own `series_truncated`) states the platform's total in
+    that label. Anything else over the cap becomes a `{"cut": ...}` stub
+    stating the summary's size and the limit."""
     factored = _factored_fact_summary(summary)
+    platform_total = 0
+    if factored is not None and isinstance(cut := factored.get("series_truncated"), dict):
+        platform_total = cut.get("total", 0)
+        factored["series_truncated"] = _subset_label(
+            showing=len(factored["series"]), total=max(platform_total, len(factored["series"]))
+        )
     shown = summary if factored is None else factored
     if len(json.dumps(shown)) <= _FACT_SUMMARY_BYTE_CAP:
         return shown
     if factored is not None:
         series = factored["series"]
-        total = len(series)
+        total = max(platform_total, len(series))
 
         def leading(count: int) -> dict[str, Any]:
             return {
@@ -2087,8 +2120,11 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     title, fact summary and what it shows bounded. An `entities` list
     shorter than the names the card draws carries an `entities_truncated`
     label. The stored entry stays whole for `recall_part`
-    and the composition "add" op."""
-    block: dict[str, Any] = {"component_id": _cut_text(component_id, _BLOCK_ID_BYTES), **entry}
+    and the composition "add" op. Its `_SERIES_IDS` are left out."""
+    block: dict[str, Any] = {
+        "component_id": _cut_text(component_id, _BLOCK_ID_BYTES),
+        **_without_series_ids(entry),
+    }
     if isinstance(block.get("type"), str):
         block["type"] = _cut_text(block["type"], _BLOCK_TYPE_BYTES)
     if block.get("title") is not None:
@@ -2239,18 +2275,17 @@ def _turn_identities(
     return identities
 
 
-def _windowed_from(
+def _copied_sources(
     sources: Iterable[PlanSource], candidates: dict[str, RecordedIdentity]
-) -> dict[str, str]:
-    """Each of `sources` that is one of `candidates` over another window,
-    mapped to the spec_id of the one it copies.
+) -> set[str]:
+    """The spec_ids of `candidates` that one of `sources` copies over another window.
 
     A copy's identity is its source's with `requested_window` replaced
     (`data_mcp.definition_writes.windowed_identity`), so a candidate whose
     identity over the copy's window hashes to the copy's spec_id is the one
     it copies.
     """
-    relation: dict[str, str] = {}
+    copied: set[str] = set()
     for source in sources:
         window = (source.identity or {}).get("requested_window")
         if not isinstance(window, dict):
@@ -2260,9 +2295,9 @@ def _windowed_from(
                 spec_id != source.spec_id
                 and windowed_identity(recorded.identity, window)[0] == source.spec_id
             ):
-                relation[source.spec_id] = spec_id
+                copied.add(spec_id)
                 break
-    return relation
+    return copied
 
 
 def _validated[M: BaseModel](
@@ -2290,19 +2325,44 @@ def _leading_sentences(text: str, cap: int) -> str:
     return text[:end] + _CUT_MARKER if end else cut_user_text(text, cap)
 
 
+# The key of a stored component entry holding the id of every series the card
+# draws. No digest, listing or recall states it, and `canvas_series_ids` reads it.
+_SERIES_IDS = "series_ids"
+
+
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
-    """The per-component slice of the models' canvas digest. It states what
-    the card is and what it shows, as names only, no rows: the entities it
-    draws and the span it covers. The resolved
-    revision in `payload` contributes only its title (`_block_title`). The
-    model never sees the rest of it."""
+    """The stored entry of a component: the per-component slice of the
+    models' canvas digest, and the ids of the series it draws
+    (`drawn_series_ids`). The digest slice states what the card is and what
+    it shows, as names only, no rows: the entities it draws and the span it
+    covers. The resolved revision in `payload` contributes only its title
+    (`_block_title`) and its series ids. The model never sees the rest of
+    it."""
     return {
         "type": str(component.get("type", "")),
         "title": _block_title(component),
         "revision": int(component.get("revision") or 1),
         "fact_summary": component.get("fact_summary"),
         **_digest_shows(component),
+        **drawn_series_ids(component),
     }
+
+
+def drawn_series_ids(component: dict[str, Any]) -> dict[str, list[str]]:
+    """The `_SERIES_IDS` member of a stored entry: the id of every series
+    the resolved revision in `component`'s `payload` draws
+    (`harness.reply_figures.drawn_series`). Empty for a component that
+    carries no resolved revision, so its entry states no ids."""
+    drawn = (component.get("payload") or {}).get("component")
+    if not isinstance(drawn, dict):
+        return {}
+    series = drawn_series(drawn, component.get("fact_summary") or {})
+    return {_SERIES_IDS: [one.id for one in series if one.id]}
+
+
+def _without_series_ids(entry: dict[str, Any]) -> dict[str, Any]:
+    """A stored entry as a model may read it, without its `_SERIES_IDS`."""
+    return {key: value for key, value in entry.items() if key != _SERIES_IDS}
 
 
 def _turn_component_entry(
@@ -2488,7 +2548,8 @@ def remove_cards(
     block when `all_cards`. Returns the ids removed, in canvas order, and the
     named ids the conversation never held; a named card already off the
     canvas is neither. Recorded as a replayable op, like `_append_block`, so
-    a concurrent `/composition` reconciles with it."""
+    a concurrent `/composition` reconciles with it. The stream is told a
+    removal is unreported (`ConversationState.take_unreported_removal`)."""
     previous = conversation.composition
     present = [block.component_id for block in previous.blocks] if previous else []
     named = set(component_ids)
@@ -2500,6 +2561,7 @@ def remove_cards(
         op = functools.partial(_remove_blocks, component_ids=frozenset(removed))
         conversation.composition = op(previous)
         conversation._composition_ops.append(op)
+        conversation._removal_unreported = True
     return removed, missing
 
 

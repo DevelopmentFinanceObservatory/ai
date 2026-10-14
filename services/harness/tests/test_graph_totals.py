@@ -26,6 +26,7 @@ from typing import Any, cast
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from common.period_note import period_note
 from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface, ToolSchema, ToolSurface
@@ -878,6 +879,32 @@ async def test_a_rank_over_a_quotient_that_left_keys_out_still_says_so(
     assert len(notes) == 2
     assert notes[:-1] == _stat_var_totals(surface, outcome, plan=plan)
     assert "2 recipient entries" in notes[-1]
+    assert answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
+    assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+
+
+async def test_a_rank_states_the_period_note_of_the_retrieval_under_it(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """The rank's frame is an analysis output with no manifest of its own.
+    The note comes from the manifest of each retrieval that feeds it, once
+    per distinct sentence, and is confined to the terminals it sits under.
+    The captured manifest states no noun for its dimensions, so the note
+    counts members."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    coverage = json.loads(
+        (Path(__file__).parent / "fixtures" / "mint_manifest_recent_years.json").read_text()
+    )["coverage"]
+    assert answer_notes(surface, outcome, plan=plan) == []
+    for manifest in surface.manifests.values():
+        manifest["coverage"] = coverage
+
+    notes = answer_notes(surface, outcome, plan=plan)
+
+    assert len(surface.manifests) == 2
+    assert notes == [period_note(coverage)]
+    assert all(stated in notes[0] for stated in ("2024", "8 members", "2025", "2 members"))
     assert answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
     assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
 

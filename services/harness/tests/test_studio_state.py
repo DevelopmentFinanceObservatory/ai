@@ -68,6 +68,7 @@ from harness.wire import ComponentType, CompositionActor, CompositionBlock, Comp
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 
+from . import drawn_cards
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
 from .test_turn_records import _top_donors
@@ -369,6 +370,56 @@ def _entry(
     }
 
 
+def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
+    """A stored entry holds the id of every series its card draws, past the
+    twelve the platform's fact summary lists. No canvas view, recall or
+    manifest states them, and a revised card's ids follow its new payload."""
+    codes = [f"country/P{number:02d}" for number in range(24)]
+    series = {code: {"2024": 1.0} for code in codes}
+    card = drawn_cards.write_reply(
+        drawn_cards.chart("bar_chart", series), drawn_cards.stored(codes)
+    )
+    state = ConversationState(conversation_id=CONVERSATION)
+    land_component(state, card)
+    card_id = card["component_id"]
+
+    ids = [drawn_cards.series_id(code) for code in codes]
+    assert state.canvas_series_ids() == ids
+    assert len(state.components[card_id]["fact_summary"]["series"]) == 12
+    model_facing = json.dumps(
+        [
+            state.canvas_digest_state(),
+            state.canvas_digest_state(focus=card_id),
+            state.canvas_summary_state(focus=card_id),
+            state.canvas_listing_state(),
+            state.recall_part(part="canvas"),
+            state.recall_part(part="canvas", component_id=card_id),
+            state.composition.model_dump(mode="json"),
+        ]
+    )
+    assert "series_ids" not in model_facing
+    assert ids[11] in model_facing
+    assert ids[12] not in model_facing
+
+    assert studio_state.drawn_series_ids({"component_id": card_id, "revision": 2}) == {}
+    fewer = drawn_cards.write_reply(
+        drawn_cards.chart("bar_chart", {codes[0]: {"2024": 1.0}}), drawn_cards.stored(codes[:1])
+    )
+    state.components[card_id].update(studio_state.drawn_series_ids(fewer))
+    assert state.canvas_series_ids() == ids[:1]
+
+
+def test_an_entry_stored_without_series_ids_gives_those_its_fact_summary_lists() -> None:
+    """An entry a conversation stored before entries held series ids loads
+    as it is, and the canvas's series are then the ones its summary lists."""
+    entry = _digest_entry(_two_entity_component())
+    stored = {key: value for key, value in entry.items() if key != "series_ids"}
+    assert stored != entry
+
+    assert _canvas({"cmp_two": stored}).canvas_series_ids() == ["gtm", "nga"]
+    assert _canvas({"cmp_two": {"type": "line_chart", "revision": 1}}).canvas_series_ids() == []
+
+
 def _shows(name: str, time: str, *, count: int = studio_state._DIGEST_SHOW_CAP) -> dict[str, Any]:
     """The `entities` / `time` keys `_digest_shows` adds to an entry."""
     return {"entities": [name] * count, "time": time}
@@ -516,6 +567,27 @@ def test_an_oversized_fact_summary_keeps_its_leading_series_and_labels_the_subse
         _serialised({**summary, "series": series[: showing + 1]})
         > studio_state._FACT_SUMMARY_BYTE_CAP
     )
+
+
+@pytest.mark.parametrize("oversized", [False, True], ids=["fits", "oversized"])
+def test_a_summary_the_platform_cut_states_the_platforms_total(oversized: bool):
+    """The platform's `series_truncated` (its series cap) reaches the digest
+    with the platform's total, whether or not the harness cuts further."""
+    count = BIG // 500 if oversized else 2
+    summary = {
+        **_fact_summary(count),
+        "series_truncated": {"showing": count, "total": count + 40},
+    }
+    state = _canvas({"cmp_01": _entry("Aid", summary)})
+
+    digest = state.canvas_digest_state()
+
+    assert digest is not None
+    block = digest["blocks"][0]["fact_summary"]
+    assert block["series_truncated"]["total"] == count + 40
+    assert block["series_truncated"]["showing"] == len(block["series"])
+    assert block["series_truncated"]["rule"] == "display order"
+    assert (len(block["series"]) < count) is oversized
 
 
 def test_an_oversized_fact_summary_becomes_a_stub_that_says_it_was_cut():
@@ -836,6 +908,9 @@ def test_removing_cards_takes_the_named_blocks_off_and_reports_the_rest():
     assert state.composition.actor == CompositionActor.MODEL
     # Recorded as a replayable op, so a concurrent `/composition` reconciles.
     assert state._composition_ops[-1](before) == state.composition
+    # The stream owes one update for it, once.
+    assert state.take_unreported_removal() is True
+    assert state.take_unreported_removal() is False
 
 
 def test_a_card_already_off_the_canvas_is_not_reported_missing():
@@ -843,6 +918,7 @@ def test_a_card_already_off_the_canvas_is_not_reported_missing():
     state.components["cmp_hidden"] = _entry("Hidden", None)
 
     assert remove_cards(state, ["cmp_hidden"], all_cards=False) == ([], [])
+    assert state.take_unreported_removal() is False
 
 
 def test_removing_every_card_leaves_an_empty_canvas_the_digest_states():
@@ -1108,6 +1184,32 @@ def test_a_source_only_the_translator_found_keeps_its_identity_into_the_next_tur
         identity=source["identity"]
     )
     assert state.earlier_block(source["spec_id"]) is None
+
+
+def test_a_closed_turn_keeps_the_block_of_the_source_a_windowed_copy_copies():
+    """A plan retrieving a copy of a searched source over another window keeps
+    the searched source's block, so the next turn can pin or fetch it."""
+    origin, copy_spec = _GDP_ALL_YEARS["spec_id"], _GDP_1960_2024["spec_id"]
+    origin_block = {"spec_id": origin, "definition": {"identity": _GDP_ALL_YEARS["identity"]}}
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_plans = [_gdp_plan_json()]
+    state.turn_readings = [
+        SearchReading.from_part(
+            {"variable": "Guatemala's GDP", "status": "definite", "spec_id": origin}
+        ).model_dump(mode="json")
+    ]
+    state.turn_specs = {
+        origin: origin_block,
+        copy_spec: {"spec_id": copy_spec, "definition": {"identity": _GDP_1960_2024["identity"]}},
+    }
+
+    state.close_turn(final_text="Done.")
+    state.begin_turn()
+
+    (record,) = state.turns
+    assert set(record["specs"]) == {origin, copy_spec}
+    assert origin in state.prior_ledger_state()["spec_ids"]
+    assert state.earlier_block(origin) == origin_block
 
 
 @pytest.mark.parametrize(

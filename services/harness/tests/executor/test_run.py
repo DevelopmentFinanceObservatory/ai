@@ -121,7 +121,7 @@ async def test_a_run_binds_the_retrieved_frame_into_the_verb_and_is_accepted(
     (get_data_call, aggregate_call) = surface.calls
     assert get_data_call == (
         "get_data",
-        {"spec_id": SPEC_KENYA, "place_types": True},
+        {"spec_id": SPEC_KENYA, "without_party_totals": True},
     )
     # The binding resolved to the frame get_data's manifest named.
     assert aggregate_call[1]["frame_ref"] == {
@@ -763,7 +763,7 @@ async def test_a_refused_steps_detail_carries_the_message_without_the_envelope_l
 ) -> None:
     """The detail reaches the planner's replan prompt, cut at 2,000
     characters, so the JSON envelope a refusal's text ends in stays out."""
-    served = to_tool_result(ToolRefusal.internal_error(tool="aggregate", trace_id="0" * 32))
+    served = to_tool_result(ToolRefusal.internal_error(tool="aggregate"))
     text = served.content[0].text
     assert isinstance(text, str) and '"retry_mode"' in text
     surface = _surface(
@@ -778,7 +778,7 @@ async def test_a_refused_steps_detail_carries_the_message_without_the_envelope_l
 
     assert isinstance(outcome, Refused), outcome
     assert outcome.refusal is RefusalKind.STEP_REFUSED
-    message = ToolRefusal.internal_error(tool="aggregate", trace_id="0" * 32).message
+    message = ToolRefusal.internal_error(tool="aggregate").message
     assert outcome.detail == f"'aggregate' refused: {message}"
     assert "{" not in outcome.detail
 
@@ -1312,18 +1312,22 @@ async def test_a_non_terminal_zero_row_step_does_not_refuse_on_its_own(
 
 
 @pytest.mark.parametrize(
-    ("declared", "recorded"),
+    ("declared", "recorded", "ranked"),
     [
-        pytest.param({"dropped_key_count": 2}, 2, id="two-keys"),
-        pytest.param({}, 0, id="no-member"),
-        pytest.param({"dropped_key_count": "2"}, 0, id="not-a-number"),
-        pytest.param({"dropped_key_count": True}, 0, id="a-boolean"),
-        pytest.param({"dropped_key_count": -1}, 0, id="negative"),
+        pytest.param({"dropped_key_count": 2}, 2, None, id="two-keys"),
+        pytest.param({}, 0, None, id="no-member"),
+        pytest.param({"dropped_key_count": "2"}, 0, None, id="not-a-number"),
+        pytest.param({"dropped_key_count": True}, 0, None, id="a-boolean"),
+        pytest.param({"dropped_key_count": -1}, 0, None, id="negative"),
+        pytest.param({"ranked_before_limit": 70}, 0, 70, id="ranked-before-a-limit"),
+        pytest.param({"ranked_before_limit": "70"}, 0, None, id="ranked-not-a-number"),
+        pytest.param({"ranked_before_limit": True}, 0, None, id="ranked-a-boolean"),
     ],
 )
-async def test_a_step_records_the_keys_its_result_declares_it_left_out(
+async def test_a_step_records_the_counts_its_result_declares(
     declared: dict[str, Any],
     recorded: int,
+    ranked: int | None,
     two_input_plan: PlanFactory,
     manifest_for: Callable[..., dict[str, Any]],
     source: Callable[..., SelectedSource],
@@ -1348,6 +1352,11 @@ async def test_a_step_records_the_keys_its_result_declares_it_left_out(
         "debt": 0,
         "gdp": 0,
         "combined": recorded,
+    }
+    assert {step.step_id: step.ranked_before_limit for step in outcome.steps} == {
+        "debt": None,
+        "gdp": None,
+        "combined": ranked,
     }
 
 

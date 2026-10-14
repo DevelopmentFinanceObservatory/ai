@@ -60,6 +60,7 @@ from harness.studio_state import (
     SegmentLost,
     StudioStore,
 )
+from harness.tool_contracts import HarnessCode
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def _unreadable(raw: Any, reason: str) -> dict[str, Any]:
     return {
         **raw,
         "status": RunStatus.FAILED.value,
-        "failure": {"code": "run_record_unreadable", "reason": reason},
+        "failure": {"code": HarnessCode.RUN_RECORD_UNREADABLE.value, "reason": reason},
     }
 
 

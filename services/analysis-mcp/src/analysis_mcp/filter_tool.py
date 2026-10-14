@@ -176,8 +176,8 @@ async def filter_verb(
                 "(column/level), which keeps a row whose place-type column, such as "
                 "observationAbout_type, names a place at that level, such as Country, to keep "
                 "one level of place. A role, a window, or a facet binding is out of this "
-                "grammar -- filter narrows by value only, never by scope; scope narrowing "
-                "belongs at the Datasets door. An ordered_threshold on time_period may carry "
+                "grammar: filter narrows by value, and scope is narrowed in get_data's "
+                "scope argument. An ordered_threshold on time_period may carry "
                 "rolling, {anchor: 'latest', offset: 0, rule: 'half1'}, marking its value as "
                 "following the latest period of the data, with offset counting whole periods "
                 "back; the value stays the literal period compared against."
@@ -210,6 +210,8 @@ async def filter_verb(
     ] = None,
 ) -> ToolResult:
     """Keep only the rows of `frame_ref` satisfying every predicate in `predicates`.
+
+    Use it to keep the rows of a frame that pass a condition.
 
     Row-value predicates only. An `ordered_threshold` compares a column's
     own ordered cell against a threshold, numerically against `value`, or

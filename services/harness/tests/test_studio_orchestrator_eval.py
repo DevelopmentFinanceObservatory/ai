@@ -15,6 +15,8 @@ import copy
 import importlib.util
 import json
 import sys
+from collections import Counter
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
@@ -24,6 +26,7 @@ import pytest
 from google.adk.events import Event
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from harness.reply_figures import card_result
 from harness.studio_state import ConversationState, StudioStore
 from harness.studio_translate import _RecordingExecutor, _Translator
 
@@ -42,6 +45,7 @@ from .orchestrator_fakes import (
 )
 
 STUDIO_EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "studio"
+FIXTURES = Path(__file__).parent / "fixtures"
 CASES_PATH = STUDIO_EVAL_DIR / "harness-studio-orchestrator-v1.cases.json"
 
 
@@ -109,27 +113,6 @@ def _search_answer(**reading: Any) -> dict[str, Any]:
     }
 
 
-def _direct_answer(**answer: Any) -> dict[str, Any]:
-    response = {"name": "submit_analysis", "response": answer}
-    return {
-        "kind": "request",
-        "agent": "orchestrator",
-        "system": "",
-        "contents": [{"role": "user", "parts": [{"function_response": response}]}],
-    }
-
-
-COMPLETED = {
-    "outcome": "completed",
-    "run": {"run_id": "run_1", "status": "completed"},
-    "frames": [{"frame": "f1", "view": {}}],
-}
-UNVERIFIED = {
-    "outcome": "needs_fields",
-    "errors": [{"field": "spec_id", "code": "unverified_source", "message": "m"}],
-}
-
-
 def _closing(text: str) -> list[dict[str, Any]]:
     return [{"event": "message.complete", "seq": 0, "text": text}, {"event": "done", "seq": 1}]
 
@@ -144,12 +127,12 @@ def _plan_call(*asks: str) -> dict[str, Any]:
     }
 
 
-def _proposal(tool: str, **translation: Any) -> dict[str, Any]:
-    """A planner call whose accepted proposal carries `translation`."""
+def _proposal(**translation: Any) -> dict[str, Any]:
+    """A `propose_plan` call whose accepted proposal carries `translation`."""
     return {
         "kind": "call",
         "layer": "planner",
-        "tool": tool,
+        "tool": "propose_plan",
         "response": {"outcome": "ok", "translation": {"outcome": "invalid_input", **translation}},
     }
 
@@ -303,32 +286,15 @@ TURN_ONE = [{"kind": "turn", "index": 1}, _request("orchestrator", "first")]
             True,
         ),
         ("every_ask_accounted_for", _card(), [_plan_call(), _hand_back()], True),
-        # Either proposing tool's translation counts.
         *(
             (
                 "translation_stops_on_a_repeated_failure",
                 [],
-                [_proposal(tool), _proposal(tool, repeated=True), *after],
+                [_proposal(), _proposal(repeated=True), *after],
                 bool(after),
             )
-            for tool in ("propose_plan", "submit_analysis")
-            for after in ([], [_proposal(tool)])
+            for after in ([], [_proposal()])
         ),
-        ("direct_run_completed", [], [_direct_answer(**COMPLETED)], False),
-        # A run still publishing, a run with no frame, a plan card, or no call at all.
-        (
-            "direct_run_completed",
-            [],
-            [_direct_answer(**{**COMPLETED, "run": {"run_id": "run_1", "status": "pending"}})],
-            True,
-        ),
-        ("direct_run_completed", [], [_direct_answer(**{**COMPLETED, "frames": []})], True),
-        ("direct_run_completed", _card(ANSWERED), [_direct_answer(**COMPLETED)], True),
-        ("direct_run_completed", [], [_request("orchestrator", "x")], True),
-        ("unverified_source_refused", [], [_direct_answer(**UNVERIFIED)], False),
-        ("unverified_source_refused", [], [_direct_answer(**UNVERIFIED), _step(SPEC)], True),
-        ("unverified_source_refused", [], [_direct_answer(**COMPLETED)], True),
-        ("unverified_source_refused", [], [_request("orchestrator", "x")], True),
     ],
 )
 def test_a_request_check_fails_exactly_when_its_property_is_broken(
@@ -412,7 +378,7 @@ async def test_a_judge_that_stays_unavailable_marks_the_case_and_the_run_goes_on
     first, second = _judged_cases(2)
 
     async def outcome(client: Any, case: dict[str, Any]) -> dict[str, Any]:
-        return {"contract": [], "expectation": [], "turn_frames": []}
+        return {"contract": [], "expectation": [], "turn_frames": [], **run._reply_record([])}
 
     async def judge(
         case: dict[str, Any], turn_frames: Any, config: Any, *, answers: Any = None
@@ -798,7 +764,8 @@ def test_drawn_dates_do_not_ground_invented_month_or_day_magnitudes(period: str)
 def test_chart_points_ground_only_citations_of_four_or_more_figures() -> None:
     """Each point cited to four figures grounds, and moved one unit in its last
     digit does not. Cited to three figures it sits within half a unit of some
-    point, which would let a chart ground any number near it."""
+    point, which would let a chart ground any number near it, so only the
+    series' first and last value ground at three, the two a reply is given."""
     billions = (1.0134, 1.0521, 1.0873, 1.1246, 1.1618, 1.2337, 1.2726, 1.3091, 1.3468, 1.3832)
     frames = _drawn_component(
         [(str(2000 + i), round(value * 1e9)) for i, value in enumerate(billions)],
@@ -810,7 +777,9 @@ def test_chart_points_ground_only_citations_of_four_or_more_figures() -> None:
         assert _ungrounded(frames, f"It reached {cited:.3f} billion.") == []
         for moved in (cited - 0.001, cited + 0.001):
             assert _ungrounded(frames, f"It reached {moved:.3f} billion.") != []
-        assert _ungrounded(frames, f"It reached {value:.2f} billion.") != []
+        given = value in (billions[0], billions[-1])
+        assert (_ungrounded(frames, f"It reached {value:.2f} billion.") == []) is given
+        assert _ungrounded(frames, f"It reached {value:.1f} billion.") != []
 
 
 async def _no_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -952,6 +921,694 @@ def test_a_mutate_that_returns_no_manifest_fails_a_block_expectation() -> None:
     violations = run._check_mutation(turn, refused, label="t")
 
     assert any("no manifest" in v for v in violations)
+
+
+def _card_frame(
+    series: dict[str, dict[str, float]], *, title: str = "A card", unit: Any = "Years"
+) -> dict[str, Any]:
+    """A `component.created` frame of a chart drawing `series`, each label's
+    values by period, its fact summary naming each series' place."""
+    drawn = [
+        {
+            "id": f"s_{label.lower().replace(' ', '_')}",
+            "label": label,
+            "unit": unit,
+            "points": [{"period": period, "value": value} for period, value in points.items()],
+        }
+        for label, points in series.items()
+    ]
+    listed = [
+        {"id": one["id"], "coordinates": {"observationAbout": f"country/{one['label']}"}}
+        for one in drawn
+    ]
+    return {
+        "event": "component.created",
+        "component_id": "cmp_" + "_".join(one["id"].removeprefix("s_") for one in drawn),
+        "payload": {"component": {"type": "bar_chart", "title": {"text": title}, "series": drawn}},
+        "fact_summary": {"series": listed},
+    }
+
+
+def _returned(frame: dict[str, Any], **named: Any) -> dict[str, Any]:
+    """The frame's card as `make_charts` returns it for the arguments `named`."""
+    return card_result(checks.reply_card(frame).series, **named)
+
+
+def _rules(text: str, cards: list[Any], **given: Any) -> set[str]:
+    return {fault.rule for fault in checks.check_reply(text, cards, **given)}
+
+
+def test_the_recorded_ranking_replies_fail_where_they_list_the_ranking() -> None:
+    """Twenty-three replies live runs gave to a ranking of twelve countries,
+    each held to the figures its card returned: the two marks, and the four
+    values where the user asked for four. The sixteen that name a country
+    they state no figure of break the label rule. Twenty-one, the seven
+    brief ones among them, write the largest and the smallest in one
+    sentence ("Senegal highest at 68.7 years, while Nigeria lowest at 54.5
+    years"), which leaves a value beside both names."""
+    recorded = json.loads((FIXTURES / "recorded_ranking_replies.json").read_text())
+    frame = _card_frame(
+        {label: {recorded["period"]: value} for label, value in recorded["series"].items()},
+        title=recorded["title"],
+    )
+
+    verdicts = {
+        reply["id"]: sorted(
+            _rules(
+                reply["text"],
+                [
+                    checks.reply_card(
+                        frame, returned=_returned(frame, state_values_for=reply["asked"])
+                    )
+                ],
+            )
+        )
+        for reply in recorded["replies"]
+    }
+
+    assert verdicts == {reply["id"]: reply["rules"] for reply in recorded["replies"]}
+    assert Counter(reply["verdict"] for reply in recorded["replies"]) == {
+        "fail": 16,
+        "undecided": 7,
+    }
+    assert all(
+        reply["verdict"]
+        == checks.reply_verdict(checks.ReplyFault(rule, "") for rule in verdicts[reply["id"]])
+        for reply in recorded["replies"]
+    )
+    listing = [rules for rules in verdicts.values() if "series_outside_reply_figures" in rules]
+    undecided = [rules for rules in verdicts.values() if "pairing_undecided" in rules]
+    assert (len(listing), len(undecided)) == (16, 21)
+    assert [rules for rules in verdicts.values() if rules not in listing] == [
+        ["pairing_undecided"]
+    ] * 7
+
+
+PAIR = _card_frame({"Uganda": {"2024": 68.52}, "Kenya": {"2024": 63.81}})
+BOTH = [{"series": "Kenya", "which": "last"}, {"series": "country/Uganda", "which": "last"}]
+SPAN = _card_frame(
+    {
+        "Kenya": {"2000": 56.1, "2012": 60.9, "2023": 63.6},
+        "South Sudan": {"2000": 47.6, "2012": 55.2, "2023": 57.6},
+    }
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "rules"),
+    [
+        ("In 2024, life expectancy in Uganda and Kenya was 68.5 and 63.8 years.", set()),
+        ("The values in 2024:\n- **Uganda**: 68.5 years\n- **Kenya**: 63.8 years", set()),
+        # The year of a sentence carries to the next ones that name none.
+        ("In 2024 Uganda led. Uganda stood at 68.5 years. Kenya stood at 63.8 years.", set()),
+        # A value with a name on each side of it is beside both, and
+        # nothing says which it is of: 63.8 here, 68.5 in the next.
+        (
+            "In 2024, life expectancy was 68.5 years in Uganda and 63.8 years in Kenya.",
+            {"pairing_undecided"},
+        ),
+        (
+            "Uganda (68.5 years) is ahead of Kenya (63.8 years) in 2024.",
+            {"pairing_undecided"},
+        ),
+        (
+            "In 2024, life expectancy was 63.8 years in Uganda and 68.5 years in Kenya.",
+            {"value_outside_reply_figures", "pairing_undecided"},
+        ),
+        (
+            "The values in 2024:\n- **Uganda**: 63.8 years\n- **Kenya**: 68.5 years",
+            {"value_outside_reply_figures", "figure_missing"},
+        ),
+        (
+            "In 2023, life expectancy in Uganda and Kenya was 68.5 and 63.8 years.",
+            {"figure_without_period"},
+        ),
+        ("Life expectancy in Uganda and Kenya was 68.5 and 63.8 years.", {"figure_without_period"}),
+        ("In 2024, life expectancy was 68.5 years in Uganda.", {"figure_missing"}),
+        # Two figures state no value a reply rounds to three.
+        ("In 2024 Uganda stood at about 69 years. Kenya stood at 63.8 years.", {"figure_missing"}),
+    ],
+)
+def test_a_reply_states_each_required_figure_beside_its_series_and_its_year(
+    text: str, rules: set[str]
+) -> None:
+    assert _rules(text, [checks.reply_card(PAIR)], states=BOTH) == rules
+
+
+@pytest.mark.parametrize(
+    ("text", "rules"),
+    [
+        ("In 2000 Kenya stood at 56.1 years. In 2023 Kenya stood at 63.6 years.", set()),
+        ("Between 2000 and 2023 Kenya rose from 56.1 to 63.6 years.", set()),
+        (
+            "In 2023 Kenya stood at 56.1 years. In 2000 Kenya stood at 63.6 years.",
+            {"figure_without_period"},
+        ),
+        # A value with a year on each side of it is beside both.
+        ("Kenya: 56.1 years in 2000, rising to 63.6 years in 2023.", {"pairing_undecided"}),
+        (
+            "Kenya: 56.1 years in 2023, up from 63.6 years in 2000.",
+            {"figure_without_period", "pairing_undecided"},
+        ),
+        ("South Sudan: 56.1 years in 2000.", {"value_outside_reply_figures"}),
+        # Two names and then two values that are both the second name's.
+        ("In 2000 and 2023, compared with South Sudan, Kenya stood at 56.1 and 63.6.", set()),
+        # Two years and then four values, and the years repeat for each series.
+        (
+            "In 2000 and 2023, Kenya and South Sudan stood at 56.1 and 47.6 and at 63.6 and 57.6.",
+            set(),
+        ),
+        ("Life expectancy, 2000 to 2023:\n- Kenya: 56.1 and 63.6 years", set()),
+        # The card draws no point at 2024, so the list is read in 2023.
+        (
+            "The data is for 2023, while 2024 covers fewer countries so far. The values:\n"
+            "- Kenya: 63.6 years\n- South Sudan: 57.6 years",
+            set(),
+        ),
+        ("Kenya and South Sudan stood at 56.1, 63.6 and 47.6 years.", {"pairing_undecided"}),
+        # South Sudan's 57.6 has only Kenya named near it, past another value.
+        ("In 2023 the two ranged from 57.6 years to 63.6 years in Kenya.", {"pairing_undecided"}),
+        # A value in a sentence that names neither series of the card.
+        ("In 2023 the higher of the two stood at 63.6 years.", {"pairing_undecided"}),
+        # Two carried years the card draws, and one value that is at neither's turn.
+        ("Life expectancy, 2000 to 2023:\n- Kenya: 56.1 years", {"pairing_undecided"}),
+        # 2100 is no year or value the card draws, and no word places it.
+        ("In 2023 Kenya stood at 63.6 years, short of the 2100 target.", {"pairing_undecided"}),
+        # 58 rounds South Sudan's 57.6, and the sentence names only Kenya.
+        ("In 2023 Kenya stood at 63.6 years, among 58 countries.", {"pairing_undecided"}),
+        # Two names and then each name's two values in turn.
+        (
+            "Kenya and South Sudan both rose between 2000 and 2023: from 56.1 to 63.6 and "
+            "from 47.6 to 57.6.",
+            set(),
+        ),
+        (
+            "Kenya and South Sudan both rose between 2000 and 2023: from 47.6 to 57.6 and "
+            "from 56.1 to 63.6.",
+            {"value_outside_reply_figures"},
+        ),
+        # A bound that rounds Kenya's 56.1 is no third value.
+        ("In 2023 Kenya and South Sudan were both above 56: 63.6 and 57.6 years.", set()),
+        (
+            "In 2023 Kenya and South Sudan were both above 56: 57.6 and 63.6 years.",
+            {"value_outside_reply_figures"},
+        ),
+        # A value of the card the result did not list.
+        ("Kenya stood at 60.9 years in 2012.", {"value_outside_reply_figures"}),
+    ],
+)
+def test_a_reply_states_only_the_figures_its_card_returned(text: str, rules: set[str]) -> None:
+    returned = _returned(SPAN, state_values_for=["Kenya", "South Sudan"], state_span=True)
+
+    assert _rules(text, [checks.reply_card(SPAN, returned=returned)]) == rules
+
+
+NAMED = {
+    "PAIR": ["Kenya", "Uganda"],
+    "SPAN": ["Kenya", "South Sudan"],
+    "NEWEST_FIRST": ["Kenya"],
+    "AMOUNTS": ["Exports"],
+}
+# Annual values that are written as four bare digits, as a year is.
+AMOUNTS = _card_frame({"Exports": {"2020": 1500, "2023": 2500}}, unit="US Dollar")
+NEWEST_FIRST = _card_frame({"Kenya": {"2023": 63.6, "2012": 60.9, "2000": 56.1}})
+UNDATED_CARRY = pytest.mark.xfail(
+    strict=True,
+    reason="a value under a year an earlier paragraph names reads as that year's, which "
+    "is how a correct reply dates a closing sentence; nothing but 'today' says otherwise",
+)
+
+
+@pytest.mark.parametrize(
+    ("card", "states", "wrong", "rules", "right", "right_rules"),
+    [
+        (
+            "PAIR",
+            BOTH,
+            "In 2024, life expectancy in Uganda and Kenya was 63.8 and 68.5 years respectively.",
+            {"value_outside_reply_figures", "figure_missing"},
+            "In 2024, life expectancy in Uganda and Kenya was 68.5 and 63.8 years respectively.",
+            set(),
+        ),
+        (
+            "PAIR",
+            BOTH,
+            "In 2024 Uganda trailed Kenya, at 63.8 years against 68.5 years.",
+            {"value_outside_reply_figures", "figure_missing"},
+            "In 2024 Uganda trailed Kenya, at 68.5 years against 63.8 years.",
+            set(),
+        ),
+        (
+            "PAIR",
+            BOTH,
+            "Uganda leads in 2024. It stood at 63.8 years. The other country stood at 68.5 years.",
+            {"value_outside_reply_figures", "pairing_undecided", "figure_missing"},
+            "Uganda leads in 2024. It stood at 68.5 years. The other country stood at 63.8 years.",
+            {"pairing_undecided"},
+        ),
+        (
+            "PAIR",
+            [],
+            "In 2024 life expectancy was 64 years in Uganda and 69 years in Kenya.",
+            {"value_outside_reply_figures", "pairing_undecided"},
+            "In 2024 life expectancy was 69 years in Uganda and 64 years in Kenya.",
+            {"pairing_undecided"},
+        ),
+        (
+            "SPAN",
+            [],
+            "Between 2000 and 2023 Kenya fell from 63.6 to 56.1 years.",
+            {"figure_without_period"},
+            "Between 2000 and 2023 Kenya rose from 56.1 to 63.6 years.",
+            set(),
+        ),
+        # A series drawn newest first ends at its latest period.
+        (
+            "NEWEST_FIRST",
+            [{"series": "Kenya", "which": "last"}],
+            "In 2000 Kenya stood at 56.1 years.",
+            {"value_outside_reply_figures", "figure_missing"},
+            "In 2023 Kenya stood at 63.6 years.",
+            set(),
+        ),
+        (
+            "AMOUNTS",
+            [],
+            "In 2023 Exports were 1500. In 2020 Exports were 2500.",
+            {"figure_without_period"},
+            "In 2020 Exports were 1500. In 2023 Exports were 2500.",
+            set(),
+        ),
+        (
+            "AMOUNTS",
+            [],
+            "In 2020 Exports were $2500. In 2023 Exports were $1500.",
+            {"figure_without_period"},
+            "In 2020 Exports were $1500. In 2023 Exports were $2500.",
+            set(),
+        ),
+        pytest.param(
+            "SPAN",
+            [],
+            "In 2000 both were lower.\n\nToday Kenya stands at 56.1 years.",
+            {"figure_without_period"},
+            "In 2000 both were lower.\n\nIn 2023 Kenya stands at 63.6 years.",
+            set(),
+            marks=UNDATED_CARRY,
+        ),
+        (
+            "SPAN",
+            [],
+            "Life expectancy, 2000 to 2023. Latest values:\n- Kenya: 56.1 years\n"
+            "- South Sudan: 47.6 years",
+            {"pairing_undecided"},
+            "Life expectancy, 2000 to 2023. Latest values:\n- Kenya: 63.6 years\n"
+            "- South Sudan: 57.6 years",
+            set(),
+        ),
+    ],
+)
+def test_values_exchanged_between_series_or_years_fail_and_pass_the_right_way_round(
+    card: str,
+    states: list[dict[str, str]],
+    wrong: str,
+    rules: set[str],
+    right: str,
+    right_rules: set[str],
+) -> None:
+    """Each card returned both ends of the series it draws, as a
+    `make_charts` call naming them gets. The right reply passes unless it
+    too leaves a value's series open."""
+    frame = {"PAIR": PAIR, "SPAN": SPAN, "NEWEST_FIRST": NEWEST_FIRST, "AMOUNTS": AMOUNTS}[card]
+    returned = _returned(
+        frame, state_values_for=NAMED[card], state_span=card in ("SPAN", "AMOUNTS")
+    )
+    cards = [checks.reply_card(frame, returned=returned)]
+
+    assert _rules(right, cards, states=states) == right_rules
+    assert _rules(wrong, cards, states=states) == rules
+
+
+@pytest.mark.parametrize(
+    ("text", "verdict"),
+    [
+        ("In 2024, life expectancy in Uganda and Kenya was 68.5 and 63.8 years.", "pass"),
+        # 63.8 sits beside both names.
+        ("In 2024, life expectancy was 68.5 years in Uganda and 63.8 years in Kenya.", "undecided"),
+        ("In 2024, life expectancy in Uganda and Kenya was 63.8 and 68.5 years.", "fail"),
+        ("In 2024, life expectancy was 68.5 years in Uganda.", "fail"),
+        # 63.8 is held to Uganda and is Kenya's, and 68.5 sits beside both names.
+        ("In 2024, life expectancy was 63.8 years in Uganda and 68.5 years in Kenya.", "fail"),
+    ],
+)
+def test_a_reply_passes_fails_or_is_undecided(text: str, verdict: str) -> None:
+    """A fault fails the reply whatever else it holds. With no fault, a
+    statement the check cannot decide makes it undecided, and a required
+    figure that statement writes is not reported missing."""
+    findings = checks.check_reply(text, [checks.reply_card(PAIR)], states=BOTH)
+
+    assert checks.reply_verdict(findings) == verdict
+
+
+def test_an_undecided_reply_fails_no_case_and_the_run_exits_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = _load("run")
+    case = next(
+        case["id"]
+        for case in _suite()["cases"]
+        if "live" in case["modes"] and not case.get("xfail")
+    )
+    undecided = "In 2024, life expectancy was 68.5 years in Uganda and 63.8 years in Kenya."
+    found = checks.check_reply(undecided, [checks.reply_card(PAIR)], states=BOTH)
+
+    async def outcome(client: Any, case: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "contract": [],
+            "expectation": run._reply_misses(1, found),
+            "turn_frames": [],
+            **run._reply_record([(1, finding) for finding in found]),
+        }
+
+    @asynccontextmanager
+    async def no_client(url: str) -> AsyncIterator[object]:
+        yield object()
+
+    monkeypatch.setattr(run, "run_case", outcome)
+    monkeypatch.setattr(run, "_frame_checks", lambda case, outcome: [])
+    monkeypatch.setattr(run, "_live_client", no_client)
+    monkeypatch.setattr(run, "_RESULTS_DIR", tmp_path)
+    monkeypatch.setattr("sys.argv", ["run.py", "--mode", "live", "--case", case])
+
+    assert run.main() == 0
+    (written,) = [json.loads(path.read_text()) for path in tmp_path.iterdir()]
+    assert [(record["status"], record["reply_verdict"]) for record in written] == [
+        ("PASS", "undecided")
+    ]
+    assert [undecided in statement for statement in written[0]["reply_undecided"]] == [True]
+    assert written[0]["reply_rules"] == []
+    assert "reply check: 0 pass, 0 fail, 1 undecided" in capsys.readouterr().out
+
+
+def test_a_figure_a_card_lists_and_a_case_requires_draws_one_fault() -> None:
+    """The card marks Uganda its largest and Kenya its smallest, and the
+    case requires both."""
+    undated = "Uganda stood at 68.5 years. Kenya stood at 63.8 years."
+
+    faults = checks.check_reply(undated, [checks.reply_card(PAIR)], states=BOTH)
+
+    assert [fault.rule for fault in faults] == ["figure_without_period"] * 2
+
+
+def test_a_redraw_gives_its_reply_no_value_to_state() -> None:
+    kenya = _card_frame({"Kenya": {"1960": 48.5, "2024": 63.8}})
+    recap = "The table replaces the line chart. In 2024, life expectancy stood at 63.8 years."
+
+    redrawn = [checks.reply_card(kenya, on_canvas={"s_kenya"})]
+
+    assert _rules("The table replaces the line chart.", redrawn) == set()
+    assert _rules(recap, redrawn) == {"value_outside_reply_figures"}
+    assert _rules(recap, [checks.reply_card(kenya)]) == set()
+
+
+def test_a_number_no_frame_holds_is_a_fault_and_a_figure_the_card_gave_is_not() -> None:
+    """The fact summary lists no value here, as for a series past its twelfth,
+    so the card's own figure is all that grounds 63.8."""
+    card = checks.reply_card(PAIR)
+
+    def rules(text: str) -> set[str]:
+        turns = [[PAIR, {"event": "message.complete", "text": text}]]
+        return _rules(text, [card], turns=turns)
+
+    assert rules("In 2024 Kenya stood at 63.8 years.") == set()
+    assert rules("In 2024 Kenya stood at 63.8 years, 4.7 below the leader.") == {
+        "number_in_no_frame"
+    }
+
+
+def test_a_figure_at_a_named_past_year_grounds_once_the_case_lists_it() -> None:
+    """A value between a series' first and last is in no fact summary, and a
+    drawn point grounds only at four figures."""
+    text = "Kenya stood at 60.9 years in 2012."
+    turns = [[SPAN, {"event": "message.complete", "text": text}]]
+    listed = [{"series": "Kenya", "which": "at", "period": "2012"}]
+
+    assert _rules(text, [checks.reply_card(SPAN)], states=listed, turns=turns) == set()
+    assert _rules(text, [checks.reply_card(SPAN)], turns=turns) == {
+        "value_outside_reply_figures",
+        "number_in_no_frame",
+    }
+
+
+def test_a_card_of_24_series_gives_its_smallest_and_a_series_past_its_twelfth() -> None:
+    """A recorded bar chart of the 24 largest donors to Malawi, whose fact
+    summary lists twelve. Iceland is fifteenth."""
+    drawn = json.loads((FIXTURES / "drawn_bar_of_24_donors.json").read_text())
+    frame = {
+        "event": "component.created",
+        "payload": {"component": {key: drawn[key] for key in ("type", "title", "series")}},
+        "fact_summary": {"series": drawn["summary_series"]},
+    }
+    states = [{"which": "smallest"}, {"series": "Iceland", "which": "last"}]
+    asked = (
+        "In 2024 the smallest donor drawn was the Global Environment Facility at "
+        "$4.87 million. Iceland gave $11.9 million."
+    )
+
+    def faults(text: str) -> set[str]:
+        turns = [[frame, {"event": "message.complete", "text": text}]]
+        return _rules(text, [checks.reply_card(frame)], states=states, turns=turns)
+
+    assert len(checks.reply_card(frame).series) == 24
+    assert faults(asked) == set()
+    assert faults(asked.replace("11.9", "11.4")) == {
+        "figure_missing",
+        "value_outside_reply_figures",
+    }
+    assert faults(asked + " Japan gave $21.6 million.") == {
+        "value_outside_reply_figures",
+        "series_outside_reply_figures",
+    }
+    assert faults("In 2024 Iceland gave $11.9 million.") == {"figure_missing"}
+
+
+def test_a_cards_counts_ground_the_reply_that_cites_them() -> None:
+    """The card draws 24 series and its title says they are the largest of
+    70. No step frame is here to repeat the title."""
+    drawn = json.loads((FIXTURES / "drawn_bar_of_24_donors.json").read_text())
+    title = {"text": drawn["title"], "authorship": "model"}
+    frame = {
+        "event": "component.created",
+        "payload": {
+            "component": {"type": drawn["type"], "title": title, "series": drawn["series"]}
+        },
+        "fact_summary": {"series": drawn["summary_series"]},
+    }
+
+    assert "(24 largest of 70 in 2024)" in drawn["title"]
+    assert _ungrounded([frame], "The chart shows the 24 largest of 70 donors.") == []
+    assert _ungrounded([frame], "The chart shows the 24 largest of 71 donors.") != []
+    assert _ungrounded([frame], "The chart shows 25 donors.") != []
+
+
+@pytest.mark.parametrize(
+    ("listed", "rules"),
+    [
+        (
+            "- United States of America: $399 million\n- Global Fund: $231 million\n"
+            "- Iceland: $11.9 million",
+            set(),
+        ),
+        (
+            "- United States of America: $231 million\n- Global Fund: $399 million\n"
+            "- Iceland: $11.9 million",
+            {"value_outside_reply_figures"},
+        ),
+        (
+            "- United States of America: $420 million\n- Global Fund: $231 million\n"
+            "- Iceland: $11.9 million",
+            {"number_in_no_frame"},
+        ),
+    ],
+)
+def test_a_reply_listing_a_ranking_under_the_period_note_is_held_value_by_value(
+    listed: str, rules: set[str]
+) -> None:
+    """The case lists no figure and the card's own figures are its largest
+    and smallest, so each listed value is held to the point drawn for its
+    series in 2024. Iceland is past the twelve series the summary lists."""
+    run = _load("run")
+    drawn = json.loads((FIXTURES / "drawn_bar_of_24_donors.json").read_text())
+    frame = {
+        "event": "component.created",
+        "payload": {"component": {key: drawn[key] for key in ("type", "title", "series")}},
+        "fact_summary": {"series": drawn["summary_series"]},
+    }
+    note = "The data is for 2024, which covers 85 donors, while 2025 covers 9 donors so far:\n"
+    steps = {"event": "activity.step", "label": "85 series in 2024, 9 in 2025", "detail": None}
+    turns = [[steps, frame, {"event": "message.complete", "text": note + listed}]]
+
+    faults, _, stated = run._reply_faults({"message": "q", "expect": {}}, turns)
+
+    assert {fault.rule for fault in faults} == rules
+    assert (checks.check_grounding(turns, stated=[stated]) == []) == (
+        "number_in_no_frame" not in rules
+    )
+
+
+def test_a_value_of_a_series_called_by_another_name_is_undecided() -> None:
+    """The reply shortens "United States of America", which no label matches,
+    so its value sits beside a label that is not its own. Once the message
+    spells the label out elsewhere, the value is held to the label beside it."""
+    drawn = json.loads((FIXTURES / "drawn_bar_of_24_donors.json").read_text())
+    frame = {
+        "event": "component.created",
+        "payload": {"component": {key: drawn[key] for key in ("type", "title", "series")}},
+        "fact_summary": {"series": drawn["summary_series"]},
+    }
+    card = checks.reply_card(frame, any_point=True)
+    trailed = "In 2024 Germany trailed the United States ($399 million)."
+
+    assert _rules(trailed, [card]) == {"pairing_undecided"}
+    assert _rules(f"{trailed} The United States of America led.", [card]) == {
+        "value_outside_reply_figures"
+    }
+
+
+def test_a_case_that_lists_no_figure_allows_any_point_beside_its_own_series_and_year() -> None:
+    card = checks.reply_card(SPAN, any_point=True)
+
+    assert _rules("Kenya stood at 60.9 years in 2012.", [card]) == set()
+    assert _rules("Kenya rose. South Sudan stood at 60.9 years in 2012.", [card]) == {
+        "value_outside_reply_figures"
+    }
+    assert _rules("Kenya stood at 60.9 years in 2023.", [card]) == {"figure_without_period"}
+    assert checks.stated_values([card]) == set()
+
+
+@pytest.mark.parametrize(
+    ("text", "rules"),
+    [
+        ("Kenya stood at 60.9 years in 2012.", set()),
+        (
+            "Kenya rose. South Sudan stood at 60.9 years in 2012.",
+            {"value_outside_reply_figures", "number_in_no_frame"},
+        ),
+        ("Kenya stood at 60.9 years in 2023.", {"figure_without_period", "number_in_no_frame"}),
+        ("Kenya stood at 60.9 years.", {"figure_without_period", "number_in_no_frame"}),
+        ("Kenya stood at 61.4 years in 2012.", {"number_in_no_frame"}),
+        (
+            "In 2023 Kenya and South Sudan were both above 56: 63.6 and 61.0 years.",
+            {"number_in_no_frame", "pairing_undecided"},
+        ),
+    ],
+)
+def test_a_point_between_a_series_ends_grounds_beside_its_own_series_and_year(
+    text: str, rules: set[str]
+) -> None:
+    """A value between a series' first and last is in no fact summary, and
+    the case lists no figure, so the card's figures are every point."""
+    run = _load("run")
+    turns = [[SPAN, {"event": "message.complete", "text": text}]]
+
+    faults, _, stated = run._reply_faults({"message": "q", "expect": {}}, turns)
+
+    assert {fault.rule for fault in faults} == rules
+    assert (checks.check_grounding(turns, stated=[stated]) == []) == (
+        "number_in_no_frame" not in rules
+    )
+
+
+@pytest.mark.parametrize(
+    "expect",
+    [
+        None,
+        [],
+        {},
+        {"states": None},
+        {"states": [{"series": "Kenya"}]},
+        {"states": [{"series": "Kenya", "which": "middle"}]},
+        {"states": [{"series": "Kenya", "which": "last", "period": "2023"}]},
+        {"states": [{"series": "Kenya", "which": "at"}]},
+        {"states": [{"series": "", "which": "last"}]},
+        {"states": [{"series": "Kenya", "which": "largest"}]},
+        {"states": [{"series": "Kenya", "which": "last", "year": "2023"}]},
+        {"states": [], "no_other_values": True},
+    ],
+)
+def test_a_malformed_reply_expectation_is_reported(expect: object) -> None:
+    run = _load("run")
+
+    assert run.check_expect_keys({"message": "q", "expect": {"reply": expect}}, label="t") != []
+
+
+def _composed(*frames: dict[str, Any]) -> dict[str, Any]:
+    """A `composition.updated` frame whose canvas holds the cards `frames` drew."""
+    blocks = [{"component_id": frame["component_id"]} for frame in frames]
+    return {"event": "composition.updated", "manifest": {"blocks": blocks}}
+
+
+def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> None:
+    """With no `reply` expectation any drawn point may be stated. With one,
+    a card gives what it gives unasked, and a card whose every series was on
+    the canvas as its turn began gives nothing. A card removed in between
+    is off the canvas, so drawing its series again is a new card."""
+    run = _load("run")
+    kenya = _card_frame({"Kenya": {"1960": 48.5, "2024": 63.8}})
+    again = kenya | {"component_id": "cmp_kenya_again"}
+    said = {"event": "message.complete", "text": "Kenya rose from 48.5 years in 1960."}
+    recap = {"event": "message.complete", "text": "In 2024 Kenya stood at 63.8 years."}
+    removed = [_composed(), {"event": "message.complete", "text": "The card is removed."}]
+
+    def rules(expect: dict[str, Any], *turns: list[dict[str, Any]]) -> list[str]:
+        turn = {"message": "q", "expect": expect}
+        before = [frame for earlier in turns[:-1] for frame in earlier]
+        return [fault.rule for fault in run._reply_faults(turn, list(turns), before=before)[0]]
+
+    listed = {"reply": {"states": []}}
+    drawn = [kenya, _composed(kenya), recap]
+    assert rules({}, [kenya, said]) == []
+    assert rules(listed, [kenya, said]) == ["value_outside_reply_figures"]
+    assert rules(listed, drawn) == []
+    assert rules(listed, drawn, [again, _composed(kenya, again), recap]) == [
+        "value_outside_reply_figures"
+    ]
+    assert rules(listed, drawn, removed, [again, _composed(again), recap]) == []
+
+
+def test_a_cut_card_is_held_to_its_title_and_its_series_count() -> None:
+    run = _load("run")
+    cut = _card_frame(
+        {name: {"2024": 9.0 - place} for place, name in enumerate("ABC")},
+        title="Aid to Malawi by donor (3 largest of 70 in 2024)",
+    )
+    expect = {"card_title_contains": ["largest of"], "max_card_series": 3}
+
+    def violations(**changed: Any) -> list[str]:
+        turn = {"message": "q", "expect": expect | changed}
+        return run._check_turn_expectations(turn, [cut], label="t")
+
+    assert violations() == []
+    assert any("draws 3 series" in v for v in violations(max_card_series=2))
+    assert any("'smallest of'" in v for v in violations(card_title_contains=["smallest of"]))
+
+
+def test_the_donor_routing_case_fails_a_card_drawn_without_a_cut() -> None:
+    run = _load("run")
+    case = next(
+        case
+        for case in json.loads(CASES_PATH.read_text())["cases"]
+        if case["id"] == "orchestrator-live-aid-by-donor-draws-one-cut-card-without-a-plan"
+    )
+    donors = {f"Donor {place}": {"2025": 99.0 - place} for place in range(9)}
+
+    def title_faults(title: str) -> list[str]:
+        frames = [_card_frame(donors, title=title)]
+        found = run._check_turn_expectations(case["turns"][0], frames, label="t")
+        return [v for v in found if "title" in v]
+
+    assert title_faults("Aid to Malawi by donor (8 largest of 70 in 2024)") == []
+    assert len(title_faults("Aid to Malawi by donor (2025)")) == 1
 
 
 # The source sentence of each plan recorded for "general government debt

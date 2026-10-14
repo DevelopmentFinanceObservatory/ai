@@ -234,7 +234,14 @@ def planner_node(*, planner: PlannerModel) -> Callable[[Context, Any], AsyncIter
                 return
             if unreadable:
                 text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
-            yield Event(output={"text": text, "final": bool(refused.get("final"))}, route="refused")
+            yield Event(
+                output={
+                    "text": text,
+                    "final": bool(refused.get("final")),
+                    "code": refused.get("code"),
+                },
+                route="refused",
+            )
             return
         planner_plan = PlannerPlan.model_validate(drafted["plan"])
         ctx.state["plan"] = planner_plan.model_dump_json()

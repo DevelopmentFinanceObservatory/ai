@@ -69,6 +69,8 @@ from common.hashed_fields import revision_content
 from planner.records import SpecId, StrictModel
 from pydantic import AfterValidator, BaseModel, Field, JsonValue
 
+from executor.classify import ExecutorCode
+
 
 class RunStatus(StrEnum):
     ADMITTED = "admitted"
@@ -108,7 +110,8 @@ class SourcePolicy(StrictModel):
 
 
 class PlanApproval(StrictModel):
-    """A user's approval of one Plan revision, the planned route's authorisation."""
+    """A user's approval of one Plan revision, the authorisation every new run is
+    admitted under."""
 
     kind: Literal["plan_approval"] = "plan_approval"
     source_policy: SourcePolicy
@@ -120,19 +123,20 @@ class PlanApproval(StrictModel):
 
 
 class ParameterOrigin(StrEnum):
-    """Where a direct request's parameter came from: `recorded` when the
-    harness checked it against what the conversation recorded (a source a
-    search settled on, years inside its reported coverage), `model_stated`
-    when it is the model's reading of the user's words, which nothing
-    checks."""
+    """Where a `RequestAuthorisation`'s recipe parameter came from: `recorded`
+    when the harness checked it against what the conversation recorded,
+    `model_stated` when it was the model's reading of the user's words."""
 
     RECORDED = "recorded"
     MODEL_STATED = "model_stated"
 
 
 class RequestAuthorisation(StrictModel):
-    """The harness's authorisation of a direct request to run one reviewed
-    recipe. `parameter_origins` names where each recipe parameter came from."""
+    """The harness's authorisation of a request to run one reviewed recipe
+    without a plan. Stored runs carry it, so `RunRecord` reads it and a run
+    admitted under it is carried on like any other (`executor.run.resume_run`);
+    `new_run` takes a `PlanApproval`, so no new run is admitted under it.
+    `parameter_origins` names where each recipe parameter came from."""
 
     kind: Literal["request"] = "request"
     source_policy: SourcePolicy
@@ -201,7 +205,7 @@ class PendingHold(StrictModel):
     """Why a run's publication is unfinished, and when a retry may succeed.
     `code` is the fault's code; `reason` its text, which stays in the ledger."""
 
-    code: str = "publication_unfinished"
+    code: str = ExecutorCode.PUBLICATION_UNFINISHED.value
     reason: str
     retry_after_s: float | None = None
 
@@ -454,7 +458,7 @@ def _digest(content: JsonValue) -> str:
 
 def idempotency_key(*, caller: str, conversation_id: str, task: str, generation: int = 0) -> str:
     """The key naming one piece of work for one caller in one conversation.
-    `task` names the work (a plan version, a direct request); an intentional
+    `task` names the work, such as a plan's approved revision; an intentional
     refresh passes the next `generation`."""
     content = {
         "caller": caller,
@@ -488,10 +492,10 @@ def submission_digest(*, submission: BaseModel, source_policy: SourcePolicy) -> 
 
 
 def new_run(
-    *, idempotency_key: str, submission_digest: str, authorisation: Authorisation, now: datetime
+    *, idempotency_key: str, submission_digest: str, authorisation: PlanApproval, now: datetime
 ) -> RunRecord:
-    """A freshly minted `admitted` run, the candidate `RunLedger.admit` stores
-    unless its key already names a run."""
+    """A freshly minted `admitted` run under a plan's approval, the candidate
+    `RunLedger.admit` stores unless its key already names a run."""
     return RunRecord(
         run_id=f"run_{uuid.uuid4().hex}",
         idempotency_key=idempotency_key,
@@ -620,8 +624,12 @@ def _resumed(run: RunRecord, now: datetime) -> RunRecord:
         return run.model_copy(
             update={"status": status, "pending": None, "resumes": run.resumes + 1}
         )
-    stage = "publication" if run.status in _UNFINISHED_PUBLICATION else "computation"
-    failure = RunFailure(code=f"{stage}_abandoned", reason=f"the run was still unfinished {why}")
+    code = (
+        ExecutorCode.PUBLICATION_ABANDONED
+        if run.status in _UNFINISHED_PUBLICATION
+        else ExecutorCode.COMPUTATION_ABANDONED
+    )
+    failure = RunFailure(code=code.value, reason=f"the run was still unfinished {why}")
     return run.model_copy(update={"status": RunStatus.FAILED, "failure": failure, "pending": None})
 
 

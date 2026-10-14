@@ -992,6 +992,114 @@ async def test_get_frame_view_does_not_publish_for_a_spec_ref(
     ]
 
 
+_DERIVED_REF = FrameRef(spec_id=_ROOT_REF.spec_id, content_version="cv_" + "d" * 32)
+
+
+async def _frame_ref_on_the_wire(call: str, frame_ref: FrameRef) -> dict[str, str]:
+    """The pair the platform receives when `call` is made with `frame_ref`."""
+    ref = frame_ref.model_dump()
+    requests, handler = _counting_handler(
+        httpx2.Response(200, json=WRITE_BODY | {"dimensions": {}})
+    )
+    async with _assembler(handler) as assembler:
+        match call:
+            case "get_frame_view":
+                reply = await assembler.get_frame_view(frame_ref=ref)
+                assert not isinstance(reply, Refusal)
+                _, _, spec_id, content_version = requests[0].url.path.rsplit("/", 3)
+                return {"spec_id": spec_id, "content_version": content_version}
+            case "create_component":
+                reply = await assembler.create_component(
+                    intent={"frame_ref": ref}, caller=Caller.EXTERNAL
+                )
+            case _:
+                reply = await assembler.revise_component(
+                    component_id="cmp_1",
+                    patch={"frame_ref": ref},
+                    write_token=WRITE_TOKEN,
+                    caller=Caller.EXTERNAL,
+                )
+    assert not isinstance(reply, Refusal)
+    return json.loads(requests[0].content)["intent"]["frame_ref"]
+
+
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component", "revise_component"])
+@pytest.mark.parametrize(
+    ("record", "called", "sent"),
+    [
+        pytest.param(
+            MintRecord(frame=_DERIVED_REF, dataset=_ROOT_REF, options={"columns": ["x"]}),
+            _DERIVED_REF,
+            _ROOT_REF,
+            id="derived pair goes as its dataset pair",
+        ),
+        pytest.param(
+            MintRecord(frame=_ROOT_REF, dataset=_ROOT_REF, options={"layout": "frame"}),
+            _ROOT_REF,
+            _ROOT_REF,
+            id="pair equal to its dataset pair goes unchanged",
+        ),
+        pytest.param(
+            None, _DERIVED_REF, _DERIVED_REF, id="pair with no mint record goes unchanged"
+        ),
+    ],
+)
+async def test_a_spec_pair_goes_to_the_platform_as_the_dataset_pair_its_mint_record_names(
+    materialisation_store: InMemoryMaterialisationStore,
+    call: str,
+    record: MintRecord | None,
+    called: FrameRef,
+    sent: FrameRef,
+) -> None:
+    if record is not None:
+        await materialisation_store.put_mint_record(record)
+
+    assert await _frame_ref_on_the_wire(call, called) == sent.model_dump()
+
+
+@pytest.mark.parametrize("call", ["get_frame_view", "create_component", "revise_component"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(FrameIntegrityError(_DERIVED_REF, reason="sha256_mismatch"), id="integrity"),
+        pytest.param(OSError("storage unreachable"), id="storage"),
+    ],
+)
+async def test_a_spec_pair_whose_mint_record_lookup_fails_goes_to_the_platform_unchanged(
+    materialisation_store: InMemoryMaterialisationStore,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    call: str,
+    failure: Exception,
+) -> None:
+    async def failing_get_mint_record(ref: FrameRef) -> MintRecord | None:
+        raise failure
+
+    monkeypatch.setattr(materialisation_store, "get_mint_record", failing_get_mint_record)
+    caplog.set_level(logging.WARNING, logger=client_module.__name__)
+
+    assert await _frame_ref_on_the_wire(call, _DERIVED_REF) == _DERIVED_REF.model_dump()
+
+    [record] = [r for r in caplog.records if r.name == "presentation_mcp.client"]
+    assert record.levelno == logging.WARNING
+    assert _DERIVED_REF.spec_id in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[1] is failure
+
+
+async def test_a_cancelled_mint_record_lookup_propagates(
+    materialisation_store: InMemoryMaterialisationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def cancelled_get_mint_record(ref: FrameRef) -> MintRecord | None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(materialisation_store, "get_mint_record", cancelled_get_mint_record)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _frame_ref_on_the_wire("get_frame_view", _DERIVED_REF)
+
+
 async def test_create_component_publishes_an_ops_frame_ref_before_creating(
     materialisation_store: InMemoryMaterialisationStore,
 ) -> None:
@@ -1124,7 +1232,7 @@ async def test_publish_wraps_the_platforms_real_publish_not_permitted_refusal(
     assert isinstance(reply, Refusal)
     assert reply.error == "publish_not_permitted"
     assert reply.retry == RetryMode.DO_NOT_RETRY
-    assert getattr(reply, "platform_trace_id", None) == "trace-1"
+    assert "trace-1" not in json.dumps(dataclasses.asdict(reply), default=str)
     assert "Publishing this frame to the platform failed" in reply.detail
     assert "publish permission is not granted" in reply.detail
 
@@ -1899,10 +2007,12 @@ async def test_retryable_problem_composes_a_retry_mode_from_the_cached_release_t
     assert reply.detail == "because"
 
 
-async def test_a_platform_500_refusal_carries_the_platforms_trace_id_onto_the_wire() -> None:
-    """The platform's `trace_id` rides on the refusal as `platform_trace_id`,
-    so an operator can match a refused write to the platform's own log line.
-    `asdict` with `None` dropped is the shape `server._reply` puts on the wire."""
+async def test_a_platform_refusal_leaves_the_platforms_trace_id_out_of_the_reply_and_logs_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The platform's `trace_id` stays out of the refusal on the wire and lands
+    in a warning with the error code. `asdict` with `None` dropped is the shape
+    `server._reply` puts on the wire."""
     body = json.dumps(
         {
             "code": "internal_error",
@@ -1912,6 +2022,7 @@ async def test_a_platform_500_refusal_carries_the_platforms_trace_id_onto_the_wi
         }
     ).encode()
     _requests, handler = _counting_handler(httpx2.Response(500, content=body))
+    caplog.set_level(logging.WARNING, logger=client_module.__name__)
 
     async with _assembler(handler) as assembler:
         reply = await assembler.create_component(intent=INTENT, caller=Caller.EXTERNAL)
@@ -1924,8 +2035,11 @@ async def test_a_platform_500_refusal_carries_the_platforms_trace_id_onto_the_wi
         "error": "internal_error",
         "retry": RetryMode.DO_NOT_RETRY,
         "detail": "Internal error",
-        "platform_trace_id": "41d94ed2",
     }
+    assert "41d94ed2" not in json.dumps(wire)
+    [record] = [r for r in caplog.records if r.name == "presentation_mcp.client"]
+    assert "41d94ed2" in record.getMessage()
+    assert "internal_error" in record.getMessage()
 
 
 @pytest.mark.parametrize(
@@ -1936,19 +2050,18 @@ async def test_a_platform_500_refusal_carries_the_platforms_trace_id_onto_the_wi
         pytest.param(None, id="null"),
     ],
 )
-async def test_a_platform_refusal_without_a_usable_trace_id_carries_none(
-    trace_id: object,
+async def test_a_platform_refusal_without_a_usable_trace_id_logs_nothing(
+    trace_id: object, caplog: pytest.LogCaptureFixture
 ) -> None:
     body = _problem_body(code="binding_invalid", retryable=False, trace_id=trace_id)
     _requests, handler = _counting_handler(httpx2.Response(400, content=body))
+    caplog.set_level(logging.WARNING, logger=client_module.__name__)
 
     async with _assembler(handler) as assembler:
         reply = await assembler.get_component(component_id="cmp_1")
 
     assert isinstance(reply, Refusal)
-    assert "platform_trace_id" not in {
-        key for key, value in dataclasses.asdict(reply).items() if value is not None
-    }
+    assert [r for r in caplog.records if r.name == "presentation_mcp.client"] == []
 
 
 async def test_retryable_false_forces_do_not_retry_even_when_the_table_says_otherwise() -> None:
