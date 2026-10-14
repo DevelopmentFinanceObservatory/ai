@@ -350,6 +350,9 @@ async def rank(
     """Rank entities identified by `rank_by`, optionally reducing each
     entity's own rows with `aggregation` first.
 
+    Use it to order entities by a value, such as the largest donors in a
+    year, and to keep the top or bottom few.
+
     Ranks what's present. An entity absent from the window simply isn't
     ranked. Competition ranking ("1224"). Entities sharing a value share a
     rank number, and the rank number never breaks a tie. The *order* two
@@ -573,4 +576,5 @@ async def rank(
             exclusions=output_trace.exclusions,
             time=output_trace.time,
         ),
+        ranked_before_limit=len(result.entity_ranks) if result.limit is not None else None,
     )

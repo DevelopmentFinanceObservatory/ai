@@ -8,8 +8,10 @@ again on the data dfo-apis holds now:
    (`data_mcp.get_data_tool.mint_recorded_root`), which registers the current
    frame of that rendering in the materialisation store. The mint may send other
    options than the recorded ones: a flow root recorded with its parties' types
-   or with no columns is minted with their kinds. Every root is minted,
-   moved or not, because a frame older than the store's retention has left it.
+   or with no columns is minted with their kinds. A root recorded with
+   `without_party_totals` sends it to dfo-apis as recorded, and comes back as the
+   current frame without the group totals of its open party roles. Every root is
+   minted, moved or not, because a frame older than the store's retention has left it.
    A mint dfo-apis queues does not wait: the replay answers `Pending`, and the
    next call sends the same mint, which dfo-apis answers from the operation it
    already holds.

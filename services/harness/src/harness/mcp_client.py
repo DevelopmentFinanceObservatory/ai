@@ -92,6 +92,7 @@ from functools import partial
 from http import HTTPStatus
 from typing import Any
 
+from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from common.auth import bearer_token
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
@@ -102,6 +103,7 @@ from common.materialisation import (
     get_store,
 )
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from common.period_note import period_note
 from common.recipe import RecipeAnchorError, RecipeError, build_recipe
 from common.refusal import refusal_code
 from compiler.caller_clients import CallerClients, session_call_meta
@@ -160,10 +162,10 @@ from harness.tool_contracts import (
     _PRESENTATION_TOOLS,
     _SEVERITY_TO_WIRE,
     REFUSAL_ORIGIN_SERVICE,
+    HarnessCode,
     ResolverError,
     _float_or_none,
     harness_refusal,
-    platform_trace_id_of,
     resolver_digest,
 )
 
@@ -335,7 +337,7 @@ class McpResolver:
             raise ResolverError(
                 "search needs at least one decomposed part; none were supplied",
                 refusal={
-                    "code": "no_search_parts",
+                    "code": HarnessCode.NO_SEARCH_PARTS.value,
                     "retry_mode": "do_not_retry",
                     "fix": {"detail": "the question could not be decomposed into search parts"},
                 },
@@ -425,12 +427,18 @@ def _store_fault(frame: FrameRef, exc: Exception) -> PublishFault:
     if isinstance(exc, FrameExpired):
         return _replay_unavailable(frame, str(exc))
     if isinstance(exc, FrameIntegrityError):
-        return PublishFault(code="frame_integrity_failed", reason=str(exc), retryable=False)
+        return PublishFault(
+            code=AnalysisCode.FRAME_INTEGRITY_FAILED.value, reason=str(exc), retryable=False
+        )
     if isinstance(exc, FrameTooLarge):
-        return PublishFault(code="frame_too_large", reason=str(exc), retryable=False)
+        return PublishFault(
+            code=AnalysisCode.FRAME_TOO_LARGE.value, reason=str(exc), retryable=False
+        )
     if _transient_store_fault(exc):
-        return PublishFault(code="store_unavailable", reason=str(exc), retryable=True)
-    return PublishFault(code="store_refused", reason=str(exc), retryable=False)
+        return PublishFault(
+            code=HarnessCode.STORE_UNAVAILABLE.value, reason=str(exc), retryable=True
+        )
+    return PublishFault(code=HarnessCode.STORE_REFUSED.value, reason=str(exc), retryable=False)
 
 
 async def _replay_recipe(
@@ -462,19 +470,23 @@ async def _replay_recipe(
     except (LiveApisError, LiveApisNotConfigured) as exc:
         retryable = isinstance(exc, LiveApisError) and exc.retryable
         return PublishFault(
-            code="dataset_versions_unavailable", reason=str(exc), retryable=retryable
+            code=HarnessCode.DATASET_VERSIONS_UNAVAILABLE.value,
+            reason=str(exc),
+            retryable=retryable,
         )
     except RecipeError as exc:
         if isinstance(exc, RecipeAnchorError) and exc.recipe is not None:
             return exc.recipe
-        return PublishFault(code="recipe_unbuildable", reason=str(exc), retryable=False)
+        return PublishFault(
+            code=HarnessCode.RECIPE_UNBUILDABLE.value, reason=str(exc), retryable=False
+        )
     except _STORE_FAULTS as exc:
         return _store_fault(frame, exc)
 
 
 def _replay_unavailable(frame: FrameRef, why: str) -> PublishFault:
     return PublishFault(
-        code="replay_unavailable",
+        code=HarnessCode.REPLAY_UNAVAILABLE.value,
         reason=f"frame {frame.spec_id}/{frame.content_version} cannot be replayed: {why}",
         retryable=False,
     )
@@ -591,7 +603,7 @@ class McpExecutor:
         publisher = self._publisher()
         if publisher is None:
             return PublishFault(
-                code="publish_unavailable",
+                code=HarnessCode.PUBLISH_UNAVAILABLE.value,
                 reason="presentation-mcp has wired no assembler in this process",
                 retryable=True,
             )
@@ -610,7 +622,9 @@ class McpExecutor:
             )
         if isinstance(published, NormalFormConflict):
             return PublishFault(
-                code="recipe_normal_form_conflict", reason=published.detail, retryable=False
+                code=HarnessCode.RECIPE_NORMAL_FORM_CONFLICT.value,
+                reason=published.detail,
+                retryable=False,
             )
         return FramePublished(replay_key=recipe["replay_key"])
 
@@ -792,7 +806,7 @@ class McpExecutor:
         return {
             "outcome": "refusal",
             "refusal": harness_refusal(
-                code="unknown_tool",
+                code=HarnessCode.UNKNOWN_TOOL,
                 message=f"the plan named a tool this executor does not route: {tool!r}",
             ),
         }
@@ -817,6 +831,7 @@ class McpExecutor:
             conversation=current_conversation_id.get(), manifest=manifest
         )
         store_ref = retrieval_frame_ref(manifest)
+        coverage = manifest.get("coverage") or {}
         if None in store_ref.values():
             logger.warning(
                 "get_data for spec_id=%r states no complete frame_ref; the frame will be "
@@ -828,8 +843,9 @@ class McpExecutor:
             "frame_refs": [ref],
             "store_refs": [store_ref],
             "summary": _manifest_summary(manifest),
-            "rows": (manifest.get("coverage") or {}).get("rows"),
+            "rows": coverage.get("rows"),
             "warnings": manifest.get("warnings") or [],
+            **({"period_note": note} if (note := period_note(coverage)) else {}),
         }
 
     async def _presentation(
@@ -883,7 +899,7 @@ class McpExecutor:
             return {
                 "outcome": "refusal",
                 "refusal": harness_refusal(
-                    code="resolved_revision_unavailable",
+                    code=HarnessCode.RESOLVED_REVISION_UNAVAILABLE,
                     message=(
                         "the platform stored the card but returned no resolved revision; "
                         "withholding the card rather than sending one with nothing to draw"
@@ -895,7 +911,7 @@ class McpExecutor:
             return {
                 "outcome": "refusal",
                 "refusal": harness_refusal(
-                    code="provenance_unavailable",
+                    code=HarnessCode.PROVENANCE_UNAVAILABLE,
                     message=(
                         "no source manifest is linked to this frame; withholding the card "
                         "rather than stating a source it cannot support"
@@ -1034,15 +1050,12 @@ def _refusal_outcome(
     `provenance_unavailable` after the platform accepted a write) carry
     `"harness"`, so a consumer can tell who declined. `advice` is a
     presentation service's display-text `fix` and the only key that holds
-    the violated constraint id. `platform_trace_id` is the platform's own
-    trace id for the refused call, present only when the body carries a
-    non-empty string. It serves trace and log correlation; no user or model
-    sees it.
+    the violated constraint id.
     """
     body = structured or {}
     fix = body.get("fix")
     refusal: dict[str, Any] = {
-        "code": refusal_code(body) or "unspecified",
+        "code": refusal_code(body) or HarnessCode.UNSPECIFIED.value,
         "retry_mode": str(body.get("retry_mode") or body.get("retry") or "do_not_retry"),
         "origin": REFUSAL_ORIGIN_SERVICE,
         # data/analysis refusals carry a machine-mergeable fix mapping;
@@ -1054,9 +1067,6 @@ def _refusal_outcome(
         # without the raw text the replanner redrafts blind.
         "message": str(body.get("message") or body.get("detail") or fallback_text),
     }
-    platform_trace_id = platform_trace_id_of(body)
-    if platform_trace_id:
-        refusal["platform_trace_id"] = platform_trace_id
     # Read by `McpExecutor.__call__`'s retry wait, which ignores an unusable value.
     if body.get("retry_after_s") is not None:
         refusal["retry_after_s"] = body["retry_after_s"]
@@ -1113,8 +1123,11 @@ def _wire_fact_summary(
     """The wire fact summary. `indicator_count` is the frame's StatVar count,
     which the label states. Each series carries
     the periods of its first and last values, read from the drawn points:
-    a series with gaps starts or ends inside the window. `unit` is the
-    platform's, forwarded as it is: the unit slot of the card's payload."""
+    a series with gaps starts or ends inside the window. `series_truncated`
+    states how many of the card's series the platform's list holds when it
+    stopped at its series cap (`series_cut` counts the series left out).
+    `unit` is the platform's, forwarded as it is: the unit slot of the card's
+    payload."""
     platform_ids = Counter(entry.get("id") for entry in platform_facts.get("series") or [])
     periods = {
         series_id: dated
@@ -1150,6 +1163,8 @@ def _wire_fact_summary(
             "indicator_count": total,
         },
     }
+    if cut := int(platform_facts.get("series_cut") or 0):
+        summary["series_truncated"] = {"showing": len(series), "total": len(series) + cut}
     window = platform_facts.get("window") or _drawn_window(component)
     if window.get("start") and window.get("end"):
         summary["window"] = {"start": str(window["start"]), "end": str(window["end"])}

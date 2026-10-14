@@ -39,6 +39,7 @@ from executor.ledger import (
     Seal,
     SourcePolicy,
     idempotency_key,
+    submission_content,
     submission_digest,
 )
 from executor.outcomes import Accepted, RefusalKind, Refused
@@ -1102,31 +1103,14 @@ async def test_two_concurrent_submissions_of_one_key_run_the_work_once(
     assert run is not None and run.status is RunStatus.COMPLETED
 
 
-@pytest.mark.parametrize("kind", ["plan_approval", "request"])
 async def test_an_authorisation_of_other_work_admits_no_run(
-    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema], kind: str
+    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
     plan = approved_plan()
     submission = _submission(plan)
-    expires_at = datetime.now(UTC) + HOUR
-    other = "f" * 64
-    authorisation = (
-        _approval(plan, submission.source_policy(), expires_at=expires_at).model_copy(
-            update={"approved_revision": other}
-        )
-        if kind == "plan_approval"
-        else RequestAuthorisation(
-            source_policy=submission.source_policy(),
-            expires_at=expires_at,
-            task="t",
-            recipe_id="recipe",
-            recipe_revision="1",
-            graph_digest=other,
-            limits={},
-            parameter_origins={},
-            at=datetime.now(UTC),
-        )
-    )
+    authorisation = _approval(
+        plan, submission.source_policy(), expires_at=datetime.now(UTC) + HOUR
+    ).model_copy(update={"approved_revision": "f" * 64})
     ledger = InMemoryRunLedger()
     surface = _surface(real_schemas, manifest())
 
@@ -1144,6 +1128,90 @@ async def test_an_authorisation_of_other_work_admits_no_run(
     assert outcome.run_id is None
     assert await ledger.unfinished() == ()
     assert _tools(surface) == []
+
+
+def _stored_request_authorisation(
+    sources: SourcePolicy, *, at: datetime, digest: str
+) -> RequestAuthorisation:
+    """A request authorisation as the ledger stores one, from its JSON."""
+    return RequestAuthorisation.model_validate(
+        {
+            "kind": "request",
+            "source_policy": sources.model_dump(mode="json"),
+            "expires_at": (at + HOUR).isoformat(),
+            "task": "relative growth of life expectancy at birth in Kenya from 2015 to 2022",
+            "recipe_id": "growth",
+            "recipe_revision": "0123456789abcdef",
+            "graph_digest": digest,
+            "limits": {"steps": 2, "concurrent_steps": 4},
+            "parameter_origins": {
+                "spec_id": "recorded",
+                "start_year": "recorded",
+                "end_year": "recorded",
+                "change": "model_stated",
+            },
+            "at": at.isoformat(),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("later", "status", "code"),
+    [
+        (timedelta(0), RunStatus.COMPLETED, None),
+        (2 * HOUR, RunStatus.FAILED, "authorisation_expired"),
+    ],
+    ids=["in_force", "expired"],
+)
+async def test_the_next_turn_carries_on_a_stored_run_a_request_authorised(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    later: timedelta,
+    status: RunStatus,
+    code: str | None,
+) -> None:
+    """A run stored under a `RequestAuthorisation` and left unfinished is
+    carried on by the next turn's resume like a plan's: run to completion
+    while its authorisation is in force, recorded failed once it is not."""
+    now = [datetime.now(UTC)]
+    ledger = InMemoryRunLedger(clock=lambda: now[0])
+    plan = approved_plan()
+    assert plan.workflow is not None
+    digest = "a" * 64
+    submission = _submission(plan).model_copy(update={"revision": digest})
+    authorisation = _stored_request_authorisation(
+        submission.source_policy(), at=now[0], digest=digest
+    )
+    stored = RunRecord(
+        run_id="run_" + "b" * 32,
+        idempotency_key=idempotency_key(caller="u", conversation_id="c", task="t"),
+        submission_digest=submission_digest(
+            submission=submission, source_policy=authorisation.source_policy
+        ),
+        authorisation=authorisation,
+        status=RunStatus.ADMITTED,
+        admitted_at=now[0],
+    )
+    admitted = await ledger.admit(stored, submission=submission_content(submission))
+    now[0] += later
+    resume = run_resumer(
+        run_ledger=ledger,
+        publisher=_Publisher(FramePublished(replay_key=REPLAY_KEY)),
+        executor=_describes,
+        tool_surface=_surface(real_schemas, manifest()),
+        max_concurrent_steps=4,
+        fetch_series_stats=default_fetch_series_stats,
+    )
+
+    handed_back = await resume(_Context())  # type: ignore[arg-type] -- reads only `state`
+
+    assert handed_back is not None
+    run = await ledger.get(admitted.run.run_id)
+    assert run is not None and run.status is status
+    assert (run.failure.code if run.failure is not None else None) == code
+    await handed_back.acknowledge()
+    assert await ledger.unfinished() == ()
 
 
 async def test_carrying_on_a_run_failed_before_its_outcome_answers_that_it_was_abandoned(

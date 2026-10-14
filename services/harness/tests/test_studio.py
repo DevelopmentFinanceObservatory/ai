@@ -73,7 +73,7 @@ from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.provenance import ProvenanceStore
 from harness.scripted import ScriptedSurface
-from harness.sentences import SeamCode, refusal_sentence
+from harness.sentences import FAILURE_CLASS, SeamCode, refusal_sentence
 from harness.settings import Settings
 from harness.studio import (
     _acquire_or_conflict,
@@ -89,7 +89,7 @@ from harness.studio_state import (
     land_component,
 )
 from harness.studio_translate import _RecordingExecutor, _stream_fatal
-from harness.tool_contracts import ResolverError
+from harness.tool_contracts import HarnessCode, ResolverError
 from harness.turn_budget import bounded
 from harness.turn_records import SearchReading
 from harness.wire import (
@@ -127,6 +127,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 
+from .failure_text import classed_sentence, is_user_sentence
 from .orchestrator_fakes import (
     AUTH,
     CONVERSATION,
@@ -199,7 +200,11 @@ COMPONENT = {
     },
 }
 
-_VIEW = {"outcome": "ok", "frame_refs": [], "view": {"dimensions": {"stat_var": ["dcid:Aid"]}}}
+_VIEW = {
+    "outcome": "ok",
+    "frame_refs": [],
+    "view": {"dimensions": [{"name": "stat_var", "values": ["dcid:Aid"], "plural": False}]},
+}
 
 
 def _get_data_manifest(*, spec_id: str = SPEC_A) -> dict[str, Any]:
@@ -619,7 +624,19 @@ async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line
     ]
     assert [line["status"] for line in lines] == ["complete", "failed"]
     assert lines[0]["produced"] == {"component_id": "cmp_01test0001", "revision": 1}
-    assert "detail" not in lines[1]
+    assert lines[1]["detail"] == classed_sentence("schema_invalid")
+    assert is_user_sentence(lines[1]["detail"])
+    # The call's own line names the card it could not draw, after the reason.
+    (call,) = [
+        f
+        for f in frames
+        if f["event"] == "activity.step"
+        and f.get("tool") == "make_charts"
+        and f["status"] == "failed"
+    ]
+    assert call["detail"].startswith(classed_sentence("schema_invalid").removesuffix("."))
+    assert call["detail"].endswith("Aid to Kenya (2)")
+    assert is_user_sentence(call["detail"])
     (created,) = [f for f in frames if f["event"] == "component.created"]
     assert created["component_id"] == "cmp_01test0001"
     assert created["created_from"]["step_id"] == lines[0]["step_id"]
@@ -1256,7 +1273,7 @@ async def test_a_step_its_budget_cuts_off_closes_its_activity_line_as_failed(
     assert len({frame["step_id"] for frame in get_data}) == 1
     assert {frame["status"] for frame in get_data[:-1]} == {"running"}
     assert get_data[-1]["status"] == "failed"
-    assert "detail" not in get_data[-1]
+    assert is_user_sentence(get_data[-1]["detail"])
     assert get_data[-1]["duration_ms"] is not None
     assert second.index(get_data[-1]) < _events(second).index("plan.proposed")
 
@@ -1338,7 +1355,9 @@ async def test_a_stop_closes_the_activity_lines_its_stream_left_running() -> Non
         ("activity.step", "s0", "failed"),
         ("error", None, None),
     ]
-    assert frames[2]["detail"] == "Stopped before this step finished"
+    assert frames[2]["detail"] == frames[3]["error"]["detail"]
+    assert frames[2]["detail"] == classed_sentence("cancelled", "do_not_retry")
+    assert is_user_sentence(frames[2]["detail"])
     assert frames[2]["duration_ms"] >= 0
     assert frames[3]["error"]["error"] == "cancelled"
     assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
@@ -1357,7 +1376,7 @@ async def test_a_stream_fatal_error_closes_the_activity_lines_left_running_first
             error=ToolError(
                 error=ErrorCode.TRANSIENT_UNAVAILABLE,
                 retry=RetryMode.RETRY_AFTER_DELAY,
-                detail="get_data timed out",
+                detail="The fetch did not finish.",
                 retry_after_seconds=30,
             ),
         )
@@ -1374,7 +1393,8 @@ async def test_a_stream_fatal_error_closes_the_activity_lines_left_running_first
         ("activity.step", "s0", "failed"),
         ("error", None, None),
     ]
-    assert frames[1]["detail"] == "The turn failed before this step finished"
+    # The line closes on the reason the turn ended for.
+    assert frames[1]["detail"] == frames[2]["error"]["detail"]
     assert [f["seq"] for f in frames] == [0, 2, 3]
 
 
@@ -1405,9 +1425,9 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
         ("activity.step", "s0", "failed"),
         ("error", None, None),
     ]
-    assert (
-        frames[1]["detail"] == "the connection to the turn was lost; the step may not have finished"
-    )
+    assert frames[1]["detail"] == frames[2]["error"]["detail"]
+    assert frames[1]["detail"] == classed_sentence("transient_unavailable", "retry_after_delay")
+    assert is_user_sentence(frames[1]["detail"])
     assert frames[1]["duration_ms"] >= 0
     assert frames[2]["error"]["error"] == "transient_unavailable"
     assert [f["seq"] for f in frames] == sorted({f["seq"] for f in frames})
@@ -2744,12 +2764,16 @@ def test_a_timeout_is_advised_the_wait_unless_the_same_call_timed_out_before(
     assert first["error"] == "transient_unavailable"
     assert first["retry"] == "retry_after_delay"
     assert first["retry_after_seconds"] == 30
-    assert "search timed out" in first["detail"]
     assert again["error"] == "transient_unavailable"
     assert again["retry"] == retry
     assert again.get("retry_after_seconds") == (30 if retry == "retry_after_delay" else None)
-    assert tool in again["detail"]
-    assert ("did not help" in again["detail"]) is (retry == "do_not_retry")
+    # The reply is the transient sentence for the frame's retry mode. It names
+    # no tool and no trace id.
+    for error in (first, again):
+        assert error["detail"] == classed_sentence("transient_unavailable", error["retry"])
+        assert is_user_sentence(error["detail"])
+        assert conversation.trace_id not in error["detail"]
+    assert (again["detail"] == first["detail"]) is (retry == "retry_after_delay")
 
 
 def test_a_surface_changed_refusal_reaches_the_wire_as_do_not_retry() -> None:
@@ -2805,7 +2829,9 @@ async def test_a_write_component_timeout_is_never_advised_a_retry() -> None:
     assert error["error"] == "transient_unavailable"
     assert error["retry"] == "do_not_retry"
     assert error.get("retry_after_seconds") is None
-    assert "may already exist" in error["detail"]
+    assert error["detail"] == classed_sentence(HarnessCode.WRITE_UNCONFIRMED, "do_not_retry")
+    assert error["detail"] != classed_sentence("transient_unavailable", "do_not_retry")
+    assert is_user_sentence(error["detail"])
 
 
 # --- heartbeats (delta 3) -------------------------------------------------------
@@ -3364,13 +3390,12 @@ async def test_a_patch_naming_a_create_only_field_is_refused_before_any_write() 
         await _conversation_with_component(client)
         frames = await _stream(client, "/api/studio/turn", _edit_body("make it a line"))
 
-    assert _frame(frames, "message.complete")["text"] == (
-        "The edit was refused: 'type' is create-only and cannot be revised."
-    )
-    # The closing message says why; the step shows the failure alone.
+    # The closing message and the failed step give the sentence of the code.
+    sentence = classed_sentence(HarnessCode.FIELD_CREATE_ONLY, "correct_and_retry")
+    assert _frame(frames, "message.complete")["text"] == f"The edit was refused. {sentence}"
     step = next(f for f in frames if f["event"] == "activity.step" and f["step_id"] == "e2")
-    assert step["status"] == "failed"
-    assert "detail" not in step
+    assert (step["status"], step["detail"]) == ("failed", sentence)
+    assert is_user_sentence(sentence)
     assert "component.created" not in _events(frames)
     assert [c["tool"] for c in executor.calls].count("write_component") == 1
 
@@ -3664,10 +3689,15 @@ async def test_component_ref_edit_refusal_is_an_honest_message() -> None:
 
     assert "component.revised" not in _events(frames)
     assert _events(frames)[-1] == "done"
+    # The platform's message names a dimension and a dcid for the model. The
+    # closing message and the failed step give the sentence of its code.
+    sentence = classed_sentence("schema_invalid", "do_not_retry")
     message = _frame(frames, "message.complete")["text"]
-    assert "does not hold value" in message
-    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
-    assert failed, "the refused write should surface as a failed step"
+    assert message == f"The edit was refused. {sentence}"
+    assert "observationAbout" not in message
+    (failed,) = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert failed["detail"] == sentence
+    assert is_user_sentence(sentence)
     assert executor.calls[-1]["tool"] == "write_component"  # the write was what refused
 
 
@@ -4351,9 +4381,13 @@ async def test_the_recorder_closes_a_call_that_raises_or_is_cancelled_as_a_faile
 
     records = recorder.drain("u_a/conv_a")
     assert [(record.result["outcome"], record.result["refusal"]["code"]) for record in records] == [
-        ("refusal", "RuntimeError"),
+        ("refusal", HarnessCode.RAISED),
         ("refusal", "cancelled"),
     ]
+    # Both are codes the failure table classes, and the exception stays in
+    # the message.
+    assert all(record.result["refusal"]["code"] in FAILURE_CLASS for record in records)
+    assert "RuntimeError" in records[0].result["refusal"]["message"]
 
 
 async def test_a_rejected_plan_turn_is_recorded() -> None:
@@ -5226,7 +5260,10 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
 
     assert _events(frames)[-1] == "error"
     assert "plan.proposed" not in _events(frames)
-    assert _frame(frames, "error")["error"]["error"] == "transient_unavailable"
+    error = _frame(frames, "error")["error"]
+    assert error["error"] == "transient_unavailable"
+    assert error["detail"] == classed_sentence(HarnessCode.STATE_NOT_SAVED, "retry_after_delay")
+    assert is_user_sentence(error["detail"])
 
 
 async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame_and_the_ledger(

@@ -58,11 +58,13 @@ from harness.graph.answer import (
     presentable_steps,
     store_run_plan,
 )
+from harness.graph.plan_done import StepSummary
 from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     STEP_PROGRESS_KEY,
     readable_plan,
 )
+from harness.tool_contracts import HarnessCode
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +298,8 @@ def _kept_asks(
                     "frame_ref": answers[step].presented.model_dump(),
                     "store_ref": answers[step].store.model_dump(),
                     "digest": records[step].digest,
+                    "rows": records[step].row_count,
+                    "ranked_before_limit": records[step].ranked_before_limit,
                 }
                 for step in steps
             ],
@@ -348,7 +352,7 @@ def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> d
         return {
             "step_id": outcome.step_id,
             "tool": outcome.tool.name,
-            "code": "rediscovery_needed",
+            "code": HarnessCode.REDISCOVERY_NEEDED,
             "message": outcome.refusal.message
             or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
         }
@@ -598,7 +602,7 @@ def execute_node(
                     ],
                     "plan_version": finished.version,
                     "step_summaries": [
-                        step.digest
+                        StepSummary.of_record(step)._asdict()
                         for step in presentable_steps(outcome, published=published)
                         if step.digest
                     ],
@@ -659,7 +663,9 @@ def execute_node(
                     for step in presentable
                 ],
                 "plan_version": finished.version,
-                "step_summaries": [step.digest for step in presentable if step.digest],
+                "step_summaries": [
+                    StepSummary.of_record(step)._asdict() for step in presentable if step.digest
+                ],
                 "stat_var_totals": answer_notes(tool_surface, outcome, plan=finished),
                 "failed_step": _failed_step(outcome),
             },

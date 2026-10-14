@@ -24,6 +24,7 @@ import httpx2
 import pytest
 from common.auth import apply_gate
 from common.caller import conversation_caller
+from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
 from data_mcp import stat_var_list
@@ -277,38 +278,6 @@ def test_a_platform_refusal_is_stamped_as_a_service_refusal_and_keeps_its_advice
             "message": "the chart breaks a display rule",
         },
     }
-
-
-def test_a_platform_trace_id_rides_on_the_refusal_when_the_body_carries_one() -> None:
-    """presentation-mcp's wire body for a platform 500 keeps the platform's own
-    trace id as `platform_trace_id`, and the executor's refusal carries it on."""
-    refusal = _refusal_outcome(
-        {
-            "error": "internal_error",
-            "retry": "do_not_retry",
-            "detail": "Internal error",
-            "platform_trace_id": "41d94ed2",
-        }
-    )["refusal"]
-
-    assert refusal == {
-        "code": "internal_error",
-        "retry_mode": "do_not_retry",
-        "origin": "service",
-        "fix": None,
-        "advice": None,
-        "message": "Internal error",
-        "platform_trace_id": "41d94ed2",
-    }
-
-
-@pytest.mark.parametrize("platform_trace_id", ["", None, 41, ["41d94ed2"]])
-def test_an_unusable_platform_trace_id_is_left_off_the_refusal(platform_trace_id: object) -> None:
-    refusal = _refusal_outcome(
-        {"error": "internal_error", "retry": "do_not_retry", "platform_trace_id": platform_trace_id}
-    )["refusal"]
-
-    assert "platform_trace_id" not in refusal
 
 
 def test_a_mapping_fix_stays_a_fix_and_carries_no_advice() -> None:
@@ -1336,6 +1305,21 @@ async def test_a_cut_series_list_leaves_the_attribution_counting_every_stat_var(
     assert summary["attribution"]["indicator_count"] == 3000
 
 
+async def test_a_cut_series_list_states_how_many_of_the_series_it_shows() -> None:
+    store, envelope, facts = _assembled_summary(drawn=20, resolved=3000, series_cut=40)
+    executor = McpExecutor(settings=Settings(), provenance=store)
+    reply = {"component_id": "cmp_1", "revision": 1, "fact_summary": facts}
+
+    cut = await executor._assemble_component(reply=reply, envelope=envelope)
+    facts["series_cut"] = 0
+    whole = await executor._assemble_component(reply=reply, envelope=envelope)
+
+    assert cut is not None and whole is not None
+    assert cut["fact_summary"]["series_truncated"] == {"showing": 20, "total": 60}
+    FactSummary.model_validate(cut["fact_summary"])
+    assert "series_truncated" not in whole["fact_summary"]
+
+
 async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> None:
     """A family frame of 461 StatVars filtered to one: the card over the
     derived frame counts the one StatVar its producing step declared, and a
@@ -1561,6 +1545,51 @@ async def test_the_executor_hands_a_get_data_steps_progress_to_on_progress(
         ProgressReport(progress=0, total=None, message="submitted"),
         ProgressReport(progress=4.0, total=None, message="running"),
     ]
+
+
+# --- the period note a get_data result carries ------------------------------
+
+_YEAR_COUNTS_MANIFEST = Path(__file__).parent / "fixtures" / "mint_manifest_recent_years.json"
+
+
+@pytest.mark.parametrize("stated", [True, False], ids=["year_counts", "no_year_counts"])
+async def test_get_data_carries_the_period_note_of_a_mint_that_states_its_year_counts(
+    monkeypatch: pytest.MonkeyPatch, stated: bool
+) -> None:
+    """The mint's `coverage.recent_years` and the noun of its counted
+    dimension pass data-mcp's manifest model, and the executor's result
+    states the note built from them. A mint without the year counts gives a
+    result with no `period_note` key."""
+    minted = json.loads(_YEAR_COUNTS_MANIFEST.read_text())
+    minted["coverage"]["dimensions"][0]["noun"] = {"singular": "provider", "plural": "providers"}
+    if not stated:
+        del minted["coverage"]["recent_years"]
+    server = FastMCP(name="data-mcp")
+
+    @server.tool(name="get_data")
+    async def get_data(spec_id: str) -> ToolResult:
+        return ToolResult(
+            content="fetched",
+            structured_content=Manifest.model_validate(minted).model_dump(mode="json"),
+        )
+
+    monkeypatch.setattr(McpTimeoutPolicy, "client", lambda *args, **kwargs: Client(server))
+    executor = McpExecutor(settings=Settings())
+    try:
+        outcome = await executor(tool="get_data", args={"spec_id": minted["definition"]["spec_id"]})
+    finally:
+        await executor.aclose()
+
+    assert outcome["outcome"] == "ok"
+    assert outcome["summary"].startswith("8 observations, 2024")
+    if stated:
+        assert outcome["period_note"] == period_note(minted["coverage"])
+        assert all(
+            stated in outcome["period_note"]
+            for stated in ("2024", "8 providers", "2025", "2 providers")
+        )
+    else:
+        assert "period_note" not in outcome
 
 
 # --- the Activity feed's one-line get_data summary --------------------------

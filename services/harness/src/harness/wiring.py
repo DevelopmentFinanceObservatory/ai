@@ -42,7 +42,8 @@ def handing_back_planner_failures(seam: PlannerModel) -> PlannerModel:
     """`seam`, answering a draft it cannot finish (`PlannerSeamError`) with a
     refusal instead of raising. The planner node then takes its "refused"
     route and `plan_done` hands the reason back to the agent, which answers
-    with what it can. The failure is logged in full."""
+    with what it can. The refusal states the failure's code, which words the
+    failed step the user sees. The failure is logged in full."""
 
     async def planner(**kwargs: Any) -> dict[str, Any]:
         try:
@@ -51,7 +52,7 @@ def handing_back_planner_failures(seam: PlannerModel) -> PlannerModel:
             logger.error(
                 "planner seam failed; handing the reason back to the orchestrator: %s", exc
             )
-            return {"refused": {"text": str(exc)}}
+            return {"refused": {"text": str(exc), "code": exc.refusal.get("code")}}
 
     return planner
 

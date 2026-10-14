@@ -1,11 +1,10 @@
 """What a plan's run says about its answer: the retrievals each answer frame's
 evidence comes from (`link_evidence_to_terminal_frames`), the answer frames
 (`answer_frames`), and the notes on how the figures were computed
-(`answer_notes`). The `execute` node (`harness.graph.execute`) and the
-direct `submit_analysis` (`harness.direct_recipes`) call it, and
-`harness.graph.resume` links a completed run carried on from an earlier turn
-through `link_accepted_run` and reads its notes from the plan both routes
-store before the run (`store_run_plan`, `stored_run_plan`).
+(`answer_notes`). The `execute` node (`harness.graph.execute`) calls it,
+and `harness.graph.resume` links a completed run carried on from an earlier
+turn through `link_accepted_run` and reads its notes from the plan stored
+before the run (`store_run_plan`, `stored_run_plan`).
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from functools import partial
 from typing import Any, NamedTuple
 
 from common.materialisation import FrameRef
+from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
@@ -467,13 +467,58 @@ def answer_notes(
     """The notes on how an answer's figures were computed, over every
     answer frame (`answer_frames`) or only those of `terminals`: one per
     summed family (`_stat_var_totals`), one per named set a retrieval reads
-    (`_group_reading_sentences`), then one per step that left keys out
-    (`_dropped_key_sentences`)."""
+    (`_group_reading_sentences`), one per step that left keys out
+    (`_dropped_key_sentences`), then one per one-year retrieval when a newer
+    year holds data, the year served is not the elected year, or a fuller
+    earlier year is named (`_period_notes`)."""
     return [
         *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
         *_group_reading_sentences(outcome, plan=plan, terminals=terminals),
         *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
+        *_period_notes(tool_surface, outcome, plan=plan, terminals=terminals),
     ]
+
+
+def _period_notes(
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """The period note (`common.period_note.period_note`) of each retrieval
+    under an answer frame, over every answer frame (`answer_frames`) or only
+    those of `terminals`.
+
+    An answer frame an analysis step wrote has no manifest of its own, so
+    the note is read from the recorded `get_data` result
+    (`_RecordingSurface.retrieval_manifest`) of every retrieval that feeds
+    it (`_upstream_retrievals`). Retrievals are taken in the plan's step
+    order, and identical sentences are stated once.
+    """
+    manifest_of = getattr(tool_surface, "retrieval_manifest", None)
+    workflow = plan.workflow
+    if manifest_of is None or workflow is None:
+        return []
+    retrieval_step_ids = frozenset(binding.step_id for binding in workflow.evidence_bindings)
+    steps_by_id = {step.id: step for step in workflow.steps}
+    step_order = {step.id: index for index, step in enumerate(workflow.steps)}
+    evidence_by_step = {record.step_id: record for record in outcome.evidence}
+    memo: dict[str, frozenset[str]] = {}
+    sentences: list[str] = []
+    for terminal_id in answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
+        under = _upstream_retrievals(
+            terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
+        )
+        for retrieval_id in sorted(under, key=step_order.__getitem__):
+            record = evidence_by_step.get(retrieval_id)
+            manifest = manifest_of(frame_ref=record.frame_ref.model_dump()) if record else None
+            note = period_note((manifest or {}).get("coverage") or {})
+            if note and note not in sentences:
+                sentences.append(note)
+    return sentences
 
 
 def _group_reading_sentences(

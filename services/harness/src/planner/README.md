@@ -196,8 +196,8 @@ permits the filter, since it cannot know which axis the word covers, and the
 compiler demands it from the selected source
 (`compiler.evidence.opens_place_axis`); analysis-mcp refuses the same calls at
 run time as `place_levels_mixed`. Where the word covers a flow axis instead, as
-IDS holds its debtors on `destination`, the axis holds parties whose kinds keep
-totals out of a sum or a rank, and the compiler refuses a level filter there as
+IDS holds its debtors on `destination`, the axis holds parties served without
+their group totals, and the compiler refuses a level filter there as
 `level_filter_on_flow_axis`.
 The planner's instruction tells it to take the level the question names,
 choose `Country` as its own default when the question names none and reads

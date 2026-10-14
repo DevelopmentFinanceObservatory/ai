@@ -69,9 +69,6 @@ model or an upstream would answer. It is the same battery CI runs via
   translation's verdict comes back under `translation` in `propose_plan`'s answer.
 - `get_data_refusals`: spec id to the refusal (`code`, `retry_mode`) a plan step's
   `get_data` returns for it.
-- `direct`: set for a case whose orchestrator calls `submit_analysis`, the direct recipes
-  (`harness.direct_recipes`). The tool surface then declares the real servers' tool
-  schemas, which a recipe compiles against, and answers its `growth` step.
 
 Every model request (system instruction and contents, as the model received them) and
 every tool call, a scripted planner's own included, is recorded in order. A
@@ -98,10 +95,6 @@ case's `checks` list names properties from `checks.py`'s `CASE_CHECKS` that read
   called `plan` is on the plan card, answered by steps the card shows or declined with
   a reason, and comes back in the plan's hand-back with each answering step's status
   or its decline.
-- `direct_run_completed`: a `submit_analysis` call answered `completed` with a run that
-  completed and a frame to chart, and no plan card was proposed.
-- `unverified_source_refused`: a `submit_analysis` call naming a spec_id no search
-  settled on was answered `needs_fields` for that spec_id, and nothing was retrieved.
 - `no_repeated_failed_step` reads frames only, so it also runs live: a failed plan
   step does not fail again with the same tool, label and outcome text.
 
@@ -115,6 +108,107 @@ settles, with rubrics for the judge. Among them are that a period outside the
 data's coverage is a recorded decision, every requested output is planned, declined or put to the user, a
 later "yes" resolves the previous turn's offer, a blocking search warning is not
 reused as an answer, and an unchanged failed step is not repeated.
+
+### The reply check
+
+Every turn's closing message is held to the figures its cards supplied
+(`check_reply` in `checks.py`). The stream carries each card and no tool result,
+so the runner rebuilds a card from its `component.created` frame as `make_charts`
+reads it (`harness.reply_figures`). The check gives a case one of three verdicts:
+
+- `fail`: some closing message breaks a rule below. The case fails.
+- `undecided`: no rule is broken, and the check cannot pair some stated value
+  with one series and one year. This fails nothing: not the case, not the
+  contract, not the run's exit status.
+- `pass`: neither.
+
+Each case prints its verdict on a `reply check:` line, the rules it broke on a
+`reply rules failed` line and each undecided sentence on a `reply undecided:`
+line. The run ends with the count of each verdict. The results file holds the
+verdict under `reply_verdict`, the broken rules under `reply_rules` and the
+undecided sentences under `reply_undecided`. The rules:
+
+- `figure_missing`: a figure the turn's `reply.states` lists is not stated.
+- `value_outside_reply_figures`: the message states a value a card draws that is
+  not one of its figures, or states a figure beside another series' name.
+- `figure_without_period`: a figure sits beside a year that is not its period's,
+  or is stated nowhere with its period.
+- `series_outside_reply_figures`: the message names a series of a card of more
+  than four series that it may state no figure of.
+- `number_in_no_frame`: the grounding check of the contract layer, which reports
+  it as a contract violation.
+
+A number states a figure when it writes the value whole or rounded to three
+significant figures. A series is recognised by its label. The check pairs a value
+with a series and a year by sentence shape, and decides only these readings:
+
+- One name beside the value, with no other value between them, is its series; so
+  is the only label a card of one series has. One year beside it is its year.
+- Several names and then a multiple of as many values pair in order ("Uganda and
+  Kenya stood at 68.5 and 63.8"), or each name takes its values in turn ("Kenya and
+  Uganda rose from 60.1 to 63.8 and from 58.0 to 68.5"), or every value is a figure
+  of one of the names. A reading counts when every value fits it; when none fits
+  and the names divide the values, the values are held to their order and fail.
+  Several years and then values pair the same way, in order or all at the last.
+- A sentence that names one series and states no value gives that name to the
+  first value of the next sentence when that names none ("Uganda leads. It stood at
+  68.5 years.").
+- A sentence that names no year is read in the year of the last sentence before it
+  that names one, as a list item is under the line that introduces its list. A year
+  no card draws a point at dates no value.
+- A number of two figures that rounds a figure of a series its sentence names is
+  held to that series and year, and states no figure. One written after "above",
+  "below", "over", "under", "at least", "more than" or "less than" is a bound.
+- A four-digit number is an amount when a currency sign, a per cent sign or a
+  series' unit sits beside it, or when it is a value a card draws at no year a card
+  draws. It is a year when it is a year a card draws a point at and no drawn value,
+  or when it follows "in", "for", "since", "from", "to" or "between" or sits in a
+  range of years.
+
+Everything else is undecided, reported under `pairing_undecided` with the sentence
+quoted, the open number and why. Such a value never passes by default, and a
+figure `reply.states` requires that it writes is not reported missing:
+
+- a value with a name on each side ("68.5 years in Uganda and 63.8 years in Kenya"
+  leaves 63.8 open), or after several names it does not pair with;
+- a value with a year on each side ("56.1 years in 2000, rising to 63.6 years in
+  2023" leaves 63.6 open);
+- a value in a sentence that names no series, on a card of several;
+- a value beside a label that is not its own, where the message spells its own
+  label out nowhere ("the United States" for "United States of America"), or where
+  the label sits past another value ("from $543 million (IDA) down to $27.0 million
+  (Ireland)");
+- values under several carried years they do not pair with in order;
+- a two-figure number that rounds a figure of a series the sentence does not name,
+  which may be a count;
+- a four-digit number that no form, drawn value, drawn year or place decides.
+
+Ordinary prose is often undecided. With no `reply` expectation, 53 of 132
+recorded streams (40%) and 45 of 71 recorded case replies (63%) hold an undecided
+sentence; with the figures each card returned, 42 of the 71 (59%). The verdicts
+over the 132 streams are 75 pass, 13 fail and 44 undecided. A value with a name or
+a year on each side is the commonest shape: every open value sits in a strictly
+alternating sentence in 26 of the 53 streams and 35 of the 45 replies.
+
+Two shapes still pass wrongly:
+
+- A year carries across a paragraph break, so "In 2000 both were lower.", a blank
+  line, then "Today Kenya stands at 56.1 years." passes with the 2000 value.
+- A card's series count and the two counts of a cut card's title ground wherever a
+  reply writes them, so "70 donors cut their aid" grounds on a card cut from 70.
+
+Which figures a card may be stated with depends on the turn's `expect`:
+
+- With a `reply` expectation, a card gives what `make_charts` gives a card none of
+  whose series the model named: a lone series' latest value, the largest and
+  smallest of a card whose series share one period, and nothing for a card whose
+  every series a card on the canvas drew as the turn began, as the last
+  composition before it holds. The figures `reply.states` lists are added,
+  and any other value a card draws fails.
+- With none, any point a card draws may be stated, and the check holds only that
+  each value sits beside its own series and its own year. A point stated that way
+  grounds at three figures; a number that matches no point of the series beside it
+  fails the grounding check.
 
 ## Reading a run
 
@@ -157,8 +251,17 @@ keeps. A turn's `seed_spec` is sent
 as the request's seeds, the Search results a seeded turn starts from, and
 `step_tools` takes a non-empty list of tool names, each of which some activity
 step of the turn must have completed (`receive_seeds` is the seed intake); a
-failed step does not count. Scripted cases use
-them because their closing text is fixed. A live message varies, so live cases
+failed step does not count. `card_title_contains` takes a non-empty list of
+strings, each of which some card the turn created must hold in its title,
+case-insensitively, and `max_card_series` is the most series any card the turn
+created may draw. `reply` takes `{"states": [...]}`, the figures the closing
+message must state, each `{"series", "which", "period"}`: `which` is `first`,
+`last`, `at` (with `period`, the point at that period), `largest` or `smallest`
+(the marks of a card whose series share one period, which take no `series`).
+`series` names a drawn series by its label or by a coordinate such as
+`country/KEN`. Left out, any drawn series answers. An empty `states` list still
+holds the reply to what its cards give unasked. Scripted cases use the text keys
+because their closing text is fixed. A live message varies, so live cases
 judge wording with a rubric. Rubric text follows the lessons in
 `evals/README.md`: state when a property always applies, keep properties
 independent, and leave the judge no route to excuse a miss.

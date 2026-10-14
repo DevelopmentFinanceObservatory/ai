@@ -105,18 +105,12 @@ from data_mcp.deadline import CallDeadline
 from pydantic import ValidationError
 
 from harness.recipe_replay import Pending, Refused, Replayed
-from harness.tool_contracts import harness_refusal
+from harness.tool_contracts import HarnessCode, harness_refusal
 
 __all__ = [
     "CARD_REPLAY_DEADLINE_S",
     "MAX_FRAMES_KEPT",
     "MAX_REPLAYS_KEPT",
-    "RELATIVE_PERIOD_ON_CLOSED_WINDOW",
-    "ROLLING_REPLAY_NOT_CONFIGURED",
-    "ROLLING_REPLAY_PENDING",
-    "ROLLING_REPLAY_REFUSED",
-    "ROLLING_SELECT_NEEDS_NEW_FRAME",
-    "TITLE_QUOTES_ROLLING_PERIOD",
     "WITHHELD_FOR_S",
     "AdmittedWrite",
     "CardReplay",
@@ -133,16 +127,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# The refusals a card whose period moves can meet before it is written, as the
-# `code` of a harness refusal. Each refusal's `message` is written for the person
-# or model that asked for the card.
-TITLE_QUOTES_ROLLING_PERIOD: Final = "title_quotes_rolling_period"
-ROLLING_REPLAY_PENDING: Final = "rolling_replay_pending"
-ROLLING_REPLAY_REFUSED: Final = "rolling_replay_refused"
-ROLLING_REPLAY_NOT_CONFIGURED: Final = "rolling_replay_not_configured"
-ROLLING_SELECT_NEEDS_NEW_FRAME: Final = "rolling_select_needs_new_frame"
-RELATIVE_PERIOD_ON_CLOSED_WINDOW: Final = "relative_period_on_closed_window"
-
+# The `message` of each refusal a card whose period moves can meet before it is
+# written, for the person or model that asked for the card.
 _TITLE_MESSAGE = (
     "The title names {period}, which this card worked out from the latest data and will "
     "move past when newer data arrives. Give it a title that leaves that period out."
@@ -257,7 +243,8 @@ def title_refusal(title: object, periods: Iterable[object]) -> dict[str, Any] | 
     for year in years:
         if re.search(rf"(?<!\d){year}(?!\d)", text):
             refusal = harness_refusal(
-                code=TITLE_QUOTES_ROLLING_PERIOD, message=_TITLE_MESSAGE.format(period=year)
+                code=HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
+                message=_TITLE_MESSAGE.format(period=year),
             )
             return {**refusal, "fix": {"period": year}}
     return None
@@ -384,7 +371,7 @@ class CardWithheld(Exception):  # noqa: N818 -- a control-flow signal carrying a
 
 
 def _withheld(
-    code: str, message: str, cause: object, *, held_for_s: float = WITHHELD_FOR_S
+    code: HarnessCode, message: str, cause: object, *, held_for_s: float = WITHHELD_FOR_S
 ) -> CardWithheld:
     """The refusal `code` with `message`, the cause logged beside it."""
     logger.warning("a card on a rolling frame was withheld as %s: %s", code, cause)
@@ -452,7 +439,7 @@ def _refuse_closed_window(card: Mapping[str, Any], read_window: ReadWindow) -> N
         return
     raise CardWithheld(
         harness_refusal(
-            code=RELATIVE_PERIOD_ON_CLOSED_WINDOW,
+            code=HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
             message=_CLOSED_WINDOW_MESSAGE.format(end_year=window["end_year"]),
         )
     )
@@ -646,7 +633,9 @@ class RollingCards:
         )
         if target != frame.ref:
             raise CardWithheld(
-                harness_refusal(code=ROLLING_SELECT_NEEDS_NEW_FRAME, message=_NEW_FRAME_MESSAGE)
+                harness_refusal(
+                    code=HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME, message=_NEW_FRAME_MESSAGE
+                )
             )
         return merged
 
@@ -705,7 +694,7 @@ class RollingCards:
                 selection=card_selection(select, view=view, bound=bound),
             )
         except (PopulationEmptyError, PopulationLevelColumnMissingError) as exc:
-            raise _withheld(ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
+            raise _withheld(HarnessCode.ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
 
     async def _columns(self, frame: RollingFrame) -> list[frozenset[str]]:
         """The column names of each root frame of `frame`'s recipe, in its
@@ -723,16 +712,16 @@ class RollingCards:
             held = await get_store().open(root)
             if held is None or held.num_rows is None:
                 raise _withheld(
-                    ROLLING_REPLAY_REFUSED,
+                    HarnessCode.ROLLING_REPLAY_REFUSED,
                     _REFUSED_MESSAGE,
                     f"the store holds no countable root frame {root.spec_id}",
                 )
             with row_budget().claim(held.num_rows):
                 read, _ = await held.read(max_rows=held.num_rows)
         except RowBudgetExhausted as exc:
-            raise _withheld(ROLLING_REPLAY_PENDING, _PENDING_MESSAGE, exc) from exc
+            raise _withheld(HarnessCode.ROLLING_REPLAY_PENDING, _PENDING_MESSAGE, exc) from exc
         except (FrameExpired, FrameIntegrityError, FrameTooLarge) as exc:
-            raise _withheld(ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
+            raise _withheld(HarnessCode.ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
         return frozenset(read.table.column_names)
 
     async def _replay_once(
@@ -746,7 +735,9 @@ class RollingCards:
         """
         if self._replay is None:
             raise _withheld(
-                ROLLING_REPLAY_NOT_CONFIGURED, _NOT_CONFIGURED_MESSAGE, "no replayer was given"
+                HarnessCode.ROLLING_REPLAY_NOT_CONFIGURED,
+                _NOT_CONFIGURED_MESSAGE,
+                "no replayer was given",
             )
         try:
             async with asyncio.timeout(self._deadline_s + _HARD_STOP_GRACE_S):
@@ -757,19 +748,23 @@ class RollingCards:
                 )
         except TimeoutError as exc:
             raise _withheld(
-                ROLLING_REPLAY_PENDING, _PENDING_MESSAGE, "the replay ran past its hard stop"
+                HarnessCode.ROLLING_REPLAY_PENDING,
+                _PENDING_MESSAGE,
+                "the replay ran past its hard stop",
             ) from exc
         except LiveApisNotConfigured as exc:
-            raise _withheld(ROLLING_REPLAY_NOT_CONFIGURED, _NOT_CONFIGURED_MESSAGE, exc) from exc
+            raise _withheld(
+                HarnessCode.ROLLING_REPLAY_NOT_CONFIGURED, _NOT_CONFIGURED_MESSAGE, exc
+            ) from exc
         except (LiveApisError, ToolSurfaceUnavailableError) as exc:
-            raise _withheld(ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
+            raise _withheld(HarnessCode.ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
         if isinstance(outcome, Pending):
             raise _withheld(
-                ROLLING_REPLAY_PENDING,
+                HarnessCode.ROLLING_REPLAY_PENDING,
                 _PENDING_MESSAGE,
                 outcome,
                 held_for_s=outcome.retry_after_s,
             )
         if isinstance(outcome, Refused):
-            raise _withheld(ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, outcome)
+            raise _withheld(HarnessCode.ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, outcome)
         return outcome.frame

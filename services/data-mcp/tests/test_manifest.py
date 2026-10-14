@@ -172,21 +172,61 @@ def test_series_count_present_on_a_definition_manifest_survives() -> None:
     assert artifact.rendering == {"statistics": "series"}
 
 
-def test_a_coverage_dimension_carries_its_flow_axis_when_dfo_apis_states_one() -> None:
+def test_a_coverage_dimension_carries_its_flow_axis_and_noun_when_dfo_apis_states_them() -> None:
+    """A noun that is not a singular and a plural reads as absent, and the
+    manifest still parses."""
+    creditor = {"singular": "creditor", "plural": "creditors"}
     payload = copy.deepcopy(_DEFINITION_MANIFEST)
     payload["coverage"]["dimensions"] = [
-        {"label": "financingProvider", "count": 1, "axis": "origin"},
-        {"label": "financingRecipient", "count": 3, "axis": "destination"},
+        {"label": "financingProvider", "count": 1, "axis": "origin", "noun": creditor},
+        {"label": "financingRecipient", "count": 3, "axis": "destination", "noun": "debtors"},
+        {"label": "sector", "count": 4, "noun": {"singular": "", "plural": "sectors"}},
         {"label": "years", "count": 10},
     ]
 
     stripped = strip_manifest(payload)
 
-    assert [(d.label, d.axis) for d in stripped.coverage.dimensions] == [
-        ("financingProvider", "origin"),
-        ("financingRecipient", "destination"),
-        ("years", None),
+    dumped = stripped.model_dump(mode="json")["coverage"]["dimensions"]
+    assert [(d["label"], d["axis"], d["noun"]) for d in dumped] == [
+        ("financingProvider", "origin", creditor),
+        ("financingRecipient", "destination", None),
+        ("sector", None, None),
+        ("years", None, None),
     ]
+
+
+def test_the_year_counts_dfo_apis_states_survive_stripping() -> None:
+    fullest = {
+        "year": 2021,
+        "series": 3344,
+        "role_counts": {"financingProvider": 120, "financingRecipient": 1},
+    }
+    recent = [
+        {
+            "year": 2025,
+            "series": 9,
+            "role_counts": {"financingProvider": 9, "financingRecipient": 1},
+        },
+        {
+            "year": 2024,
+            "series": 85,
+            "role_counts": {"financingProvider": 85, "financingRecipient": 1},
+        },
+    ]
+    payload = copy.deepcopy(_DEFINITION_MANIFEST)
+    payload["coverage"] |= {"recent_years": recent, "elected_year": 2024, "fullest_year": fullest}
+
+    coverage = strip_manifest(payload).model_dump(mode="json")["coverage"]
+
+    assert coverage["recent_years"] == recent
+    assert coverage["elected_year"] == 2024
+    assert coverage["fullest_year"] == fullest
+
+
+def test_a_manifest_without_year_counts_dumps_neither_member() -> None:
+    coverage = strip_manifest(_DEFINITION_MANIFEST).model_dump(mode="json")["coverage"]
+
+    assert coverage.keys() == _DEFINITION_MANIFEST["coverage"].keys()
 
 
 def test_a_coverage_dimension_from_a_dfo_apis_without_axes_still_parses() -> None:

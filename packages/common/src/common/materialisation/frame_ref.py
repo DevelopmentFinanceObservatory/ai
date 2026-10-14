@@ -5,21 +5,19 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# The pairing of `spec_id` and `content_version` is not enforced: an
+# internally inconsistent pair never matches a stored key, so a caller
+# resolving it reaches the ordinary `frame_not_held` refusal, not a schema
+# error. `MaterialisationStore` keys its entries by the plain tuple
+# `(ref.spec_id, ref.content_version)`, not by this object, so hashability
+# is not needed and the model stays unfrozen, like
+# `analysis_mcp.op_spec.DatasetSnapshotRef`.
 class FrameRef(BaseModel):
-    """Names one materialised or computed frame: `{spec_id, content_version}`.
+    """Names one frame by the `{spec_id, content_version}` pair a tool reply gives.
 
-    `spec_id` is either a Datasets snapshot's `spec_` id or a toolkit
-    result's `ops_` op_spec_hash; `content_version` is either
-    frame-grammar's `cv_` family or the toolkit's own `ocv_` family. Both
-    members must come from the same family, but this model does not enforce
-    that pairing -- an internally inconsistent pair simply never matches a
-    stored key, so a caller resolving it reaches the ordinary
-    `frame_not_held` refusal, never a schema error.
-
-    Mutable: `MaterialisationStore` keys its entries by the plain tuple
-    `(ref.spec_id, ref.content_version)`, never by this object itself, so
-    hashability isn't load-bearing -- matching the same unfrozen shape
-    `analysis_mcp.op_spec.DatasetSnapshotRef` already uses.
+    A data or analysis tool's reply gives both values. `spec_id` is a dataset's
+    `spec_` id or an analysis result's `ops_` id, and `content_version` is the
+    matching `cv_` or `ocv_` value.
     """
 
     model_config = ConfigDict(extra="forbid")

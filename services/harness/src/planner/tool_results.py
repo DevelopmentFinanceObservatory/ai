@@ -91,7 +91,6 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
-    CATALOGUE_STALE = "catalogue_stale"
 
 
 class Action(StrictModel):

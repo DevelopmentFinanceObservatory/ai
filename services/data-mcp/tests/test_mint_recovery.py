@@ -23,9 +23,13 @@ _OLDER = "cv_" + "2" * 32
 _NEWER = "cv_" + "3" * 32
 _SUMMED = "cv_" + "4" * 32
 _UNRECORDED = "cv_" + "5" * 32
+_CUT = "cv_" + "6" * 32
+_CUT_SUMMED = "cv_" + "7" * 32
 _DEFAULT_OPTIONS = {"format": "parquet", "bundle": False, "layout": "frame"}
 _GROUPBY = {"by": ["recipient"], "op": "sum", "levels": {"crsPurpose": 0}}
 _VERSIONS = (
+    DatasetVersion(_CUT_SUMMED, _NEWER, "groupby", _GROUPBY, without_party_totals=True),
+    DatasetVersion(_CUT, _NEWER, "without_party_totals", None, without_party_totals=True),
     DatasetVersion(_UNRECORDED, _NEWER, "not_recorded", None),
     DatasetVersion(_SUMMED, _NEWER, "groupby", _GROUPBY),
     DatasetVersion(_NEWER, None, "plain", None),
@@ -137,6 +141,22 @@ async def _holding(
             _OLDER,
             _DEFAULT_OPTIONS | {"columns": ["kind"]},
         ),
+        (
+            frame_ref_for(spec_id=_SPEC_ID, content_version=_CUT, columns=("party_kind",)),
+            _CUT,
+            _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
+        ),
+        (
+            frame_ref_for(
+                spec_id=_SPEC_ID,
+                content_version=_CUT_SUMMED,
+                columns=("party_kind",),
+                groupby=_GROUPBY,
+            ),
+            _CUT_SUMMED,
+            _DEFAULT_OPTIONS
+            | {"columns": ["party_kind"], "groupby": _GROUPBY, "without_party_totals": True},
+        ),
     ],
     ids=[
         "default-columns",
@@ -150,6 +170,8 @@ async def _holding(
         "the-one-flow-party-type-a-table-serves",
         "flow-party-kinds",
         "flow-party-kinds-under-the-earlier-token",
+        "flow-party-kinds-of-a-cut-version",
+        "flow-party-kinds-of-a-sum-of-a-cut-version",
     ],
 )
 async def test_a_root_is_recovered_from_the_version_that_reproduces_its_pair(
@@ -233,18 +255,29 @@ async def test_a_root_nothing_reproduces_fails_with_its_pair_and_reason(
 _KEPT_SUM = _DEFAULT_OPTIONS | {"groupby": _GROUPBY}
 
 
-async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options() -> None:
+@pytest.mark.parametrize("without_party_totals", [False, True], ids=["kept", "totals-left-out"])
+async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
+    without_party_totals: bool,
+) -> None:
     """dfo-apis lists the version as unsummed, so only the options the held frame's
     trace keeps reproduce the pair that names the groupby."""
-    ref = frame_ref_for(spec_id=_SPEC_ID, content_version=_OLDER, groupby=_GROUPBY)
-    store = await _holding(ref, "dcid:A", options=_KEPT_SUM)
+    kept_sum = _KEPT_SUM | (
+        {"columns": ["party_kind"], "without_party_totals": True} if without_party_totals else {}
+    )
+    ref = frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=_OLDER,
+        columns=("party_kind",) if without_party_totals else (),
+        groupby=_GROUPBY,
+    )
+    store = await _holding(ref, "dcid:A", options=kept_sum)
 
     record = await recover_mint_record(ref, dataset_versions=_Versions(), store=store)
 
     assert record == MintRecord(
         frame=ref,
         dataset=FrameRef(spec_id=_SPEC_ID, content_version=_OLDER),
-        options=_KEPT_SUM,
+        options=kept_sum,
         scope={},
         stat_var_count=1,
     )

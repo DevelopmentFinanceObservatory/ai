@@ -621,9 +621,9 @@ class RankOpSpec(_OpSpecBase):
         if (
             self.window_start is not None
             and self.window_end is not None
-            and int(self.window_end) <= int(self.window_start)
+            and int(self.window_end) < int(self.window_start)
         ):
-            raise ValueError("window_end must be a later year than window_start")
+            raise ValueError("window_end must not be earlier than window_start")
         return self
 
     @model_validator(mode="after")

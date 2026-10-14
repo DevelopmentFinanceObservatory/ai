@@ -1,0 +1,311 @@
+{
+  "title": "Life expectancy at birth in 2023",
+  "unit": "Years",
+  "period": "2023",
+  "series": {
+    "Senegal": 68.683,
+    "Uganda": 68.252,
+    "Rwanda": 67.785,
+    "Malawi": 67.353,
+    "Ethiopia": 67.315,
+    "Tanzania": 66.995,
+    "Zambia": 66.349,
+    "Ghana": 65.498,
+    "Kenya": 63.646,
+    "Niger": 61.183,
+    "Mali": 60.439,
+    "Nigeria": 54.462
+  },
+  "replies": [
+    {
+      "id": "a-2",
+      "asked": [],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, is:\n\n1. **Senegal**: 68.7 years\n2. **Uganda**: 68.3 years\n3. **Rwanda**: 67.8 years\n4. **Malawi**: 67.4 years\n5. **Ethiopia**: 67.3 years\n6. **Tanzania**: 67.0 years\n7. **Zambia**: 66.3 years\n8. **Ghana**: 65.5 years\n9. **Kenya**: 63.6 years\n10. **Niger**: 61.2 years\n11. **Mali**: 60.4 years\n12. **Nigeria**: 54.5 years\n\n### Conclusion\nAmong the 12 countries, Senegal, Uganda, and Rwanda had the highest life expectancy at birth in 2023 (all near or above 68 years), whereas Mali and Nigeria had the lowest, with Nigeria recording the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "a-6",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "Across the 12 countries in 2023, life expectancy at birth ranges from 68.7 years in Senegal to 54.5 years in Nigeria, based on data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO).\n\n### Ranking (highest to lowest, 2023)\n1. Senegal: 68.7 years\n2. Uganda: 68.3 years\n3. Rwanda: 67.8 years\n4. Malawi: 67.4 years\n5. Ethiopia: 67.3 years\n6. Tanzania: 67.0 years\n7. Zambia: 66.3 years\n8. Ghana: 65.5 years\n9. Kenya: 63.6 years\n10. Niger: 61.2 years\n11. Mali: 60.4 years\n12. Nigeria: 54.5 years\n\n### Requested Country Values (2023)\n* **Uganda:** 68.3 years\n* **Ghana:** 65.5 years\n* **Kenya:** 63.6 years\n* **Nigeria:** 54.5 years\n\n### Conclusion\nAmong the compared group, Senegal and East African nations (Uganda and Rwanda) exhibit the highest life expectancies, clustered near 68 years, while West African nations display a broad spread, with Ghana at 65.5 years and Nigeria recording the lowest life expectancy at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "b2-2",
+      "asked": [],
+      "text": "According to the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, is:\n\n1. **Senegal**: 68.7 years\n2. **Uganda**: 68.3 years\n3. **Rwanda**: 67.8 years\n4. **Malawi**: 67.4 years\n5. **Ethiopia**: 67.3 years\n6. **Tanzania**: 67.0 years\n7. **Zambia**: 66.3 years\n8. **Ghana**: 65.5 years\n9. **Kenya**: 63.6 years\n10. **Niger**: 61.2 years\n11. **Mali**: 60.4 years\n12. **Nigeria**: 54.5 years\n\n### Conclusion\nAcross the 12 countries examined, Senegal had the highest life expectancy at birth in 2023 at 68.7 years, while Nigeria ranked lowest at 54.5 years. Most of the group clustered between 60 and 69 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "b2-6",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "Across the 12 countries, life expectancy at birth in 2023 was highest in Senegal and lowest in Nigeria. \n\nThe ranking from highest to lowest:\n1. Senegal: 68.7 years\n2. Uganda: 68.3 years\n3. Rwanda: 67.8 years\n4. Malawi: 67.4 years\n5. Ethiopia: 67.3 years\n6. Tanzania: 67.0 years\n7. Zambia: 66.3 years\n8. Ghana: 65.5 years\n9. Kenya: 63.6 years\n10. Niger: 61.2 years\n11. Mali: 60.4 years\n12. Nigeria: 54.5 years\n\nFor the four requested countries in 2023:\n- **Uganda**: 68.3 years\n- **Ghana**: 65.5 years\n- **Kenya**: 63.6 years\n- **Nigeria**: 54.5 years\n\n*Source: United Nations Development Programme Human Development Report Office (UNDP-HDRO).*",
+      "rules": [
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-2",
+      "asked": [],
+      "text": "### Ranking of Life Expectancy at Birth (2023)\n\nAccording to data from the **United Nations Development Programme Human Development Report Office (UNDP-HDRO)**, the 12 countries rank as follows for life expectancy at birth in 2023, from highest to lowest:\n\n1. **Senegal** \u2013 68.7 years\n2. **Uganda** \u2013 68.3 years\n3. **Rwanda** \u2013 67.8 years\n4. **Malawi** \u2013 67.4 years\n5. **Ethiopia** \u2013 67.3 years\n6. **Tanzania** \u2013 67.0 years\n7. **Zambia** \u2013 66.3 years\n8. **Ghana** \u2013 65.5 years\n9. **Kenya** \u2013 63.6 years\n10. **Niger** \u2013 61.2 years\n11. **Mali** \u2013 60.4 years\n12. **Nigeria** \u2013 54.5 years\n\n---\n\n### Conclusion\n\n* **Highest:** Senegal had the highest life expectancy at birth among the group in 2023 at **68.7 years**, closely followed by Uganda (**68.3 years**) and Rwanda (**67.8 years**).\n* **Lowest:** Nigeria recorded the lowest life expectancy at birth at **54.5 years**, trailing the next lowest countries, Mali (**60.4 years**) and Niger (**61.2 years**), by about six years, and trailing Senegal by **14.2 years**.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-6",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, is:\n\n1. **Senegal** \u2013 68.7 years\n2. **Uganda** \u2013 68.3 years\n3. **Rwanda** \u2013 67.8 years\n4. **Malawi** \u2013 67.4 years\n5. **Ethiopia** \u2013 67.3 years\n6. **Tanzania** \u2013 67.0 years\n7. **Zambia** \u2013 66.3 years\n8. **Ghana** \u2013 65.5 years\n9. **Kenya** \u2013 63.6 years\n10. **Niger** \u2013 61.2 years\n11. **Mali** \u2013 60.4 years\n12. **Nigeria** \u2013 54.5 years\n\n### Requested Values (2023)\n* **Uganda**: 68.3 years\n* **Ghana**: 65.5 years\n* **Kenya**: 63.6 years\n* **Nigeria**: 54.5 years\n\n### Conclusion\nAmong the 12 nations, life expectancy at birth in 2023 spans a range of roughly 14 years, led by Senegal (68.7 years) and Uganda (68.3 years), with Nigeria recording the lowest life expectancy at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-7",
+      "asked": [],
+      "text": "The ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, according to the United Nations Development Programme Human Development Report Office (UNDP-HDRO):\n\n1. **Senegal**: 68.7 years\n2. **Uganda**: 68.3 years\n3. **Rwanda**: 67.8 years\n4. **Malawi**: 67.4 years\n5. **Ethiopia**: 67.3 years\n6. **Tanzania**: 67.0 years\n7. **Zambia**: 66.3 years\n8. **Ghana**: 65.5 years\n9. **Kenya**: 63.6 years\n10. **Niger**: 61.2 years\n11. **Mali**: 60.4 years\n12. **Nigeria**: 54.5 years\n\n### Conclusion\nAmong the 12 countries, Senegal has the highest life expectancy at birth in 2023 at 68.7 years, while Nigeria has the lowest at 54.5 years\u2014a difference of over 14 years across the group. The majority of the countries fall within the 63- to 68-year range, with Niger, Mali, and Nigeria lagging behind at the lower end.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-9",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to the World Development Indicators, life expectancy at birth in 2023 across the 12 countries ranks from highest to lowest as follows:\n\n1. **Senegal** (68.7 years)\n2. **Uganda** (68.3 years)\n3. **Rwanda** (67.8 years)\n4. **Malawi** (67.4 years)\n5. **Ethiopia** (67.3 years)\n6. **Tanzania** (67.0 years)\n7. **Zambia** (66.3 years)\n8. **Ghana** (65.5 years)\n9. **Kenya** (63.6 years)\n10. **Niger** (61.2 years)\n11. **Mali** (60.4 years)\n12. **Nigeria** (54.5 years)\n\n### Requested country values (2023)\n* **Uganda**: 68.3 years\n* **Ghana**: 65.5 years\n* **Kenya**: 63.6 years\n* **Nigeria**: 54.5 years\n\n### Conclusion\nAmong the 12 nations, Senegal and Uganda had the highest life expectancy at birth in 2023 (at 68.7 and 68.3 years, respectively), while Nigeria recorded the lowest at 54.5 years, trailing the group leader by more than 14 years.",
+      "rules": [
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-10",
+      "asked": [],
+      "text": "The ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, based on data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO):\n\n1. **Senegal** (68.7 years)\n2. **Uganda** (68.3 years)\n3. **Rwanda** (67.8 years)\n4. **Malawi** (67.4 years)\n5. **Ethiopia** (67.3 years)\n6. **Tanzania** (67.0 years)\n7. **Zambia** (66.3 years)\n8. **Ghana** (65.5 years)\n9. **Kenya** (63.6 years)\n10. **Niger** (61.2 years)\n11. **Mali** (60.4 years)\n12. **Nigeria** (54.5 years)\n\n### Conclusion\nIn 2023, life expectancy across the 12 countries ranged from a high of 68.7 years in Senegal to a low of 54.5 years in Nigeria. Most countries in the group clustered between 63 and 69 years, while Nigeria lagged significantly behind the others.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures",
+        "value_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "c-12",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "In 2023, life expectancy at birth across the 12 countries ranged from 68.7 years in Senegal to 54.5 years in Nigeria. Overall, countries in East and Southern Africa, along with Senegal, ranked highest among this group, while West and Sahelian nations such as Mali and Nigeria ranked lowest.\n\nAccording to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO):\n\n* **Uganda**: 68.3 years (ranked 2nd)\n* **Ghana**: 65.5 years (ranked 8th)\n* **Kenya**: 63.6 years (ranked 9th)\n* **Nigeria**: 54.5 years (ranked 12th)",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "d-2",
+      "asked": [],
+      "text": "According to the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023, from highest to lowest, is:\n\n1. Senegal\n2. Uganda\n3. Rwanda\n4. Malawi\n5. Ethiopia\n6. Tanzania\n7. Zambia\n8. Ghana\n9. Kenya\n10. Niger\n11. Mali\n12. Nigeria\n\nSenegal had the highest life expectancy at birth among the group in 2023 at 68.7 years, while Nigeria had the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "d-6",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "In 2023, life expectancy at birth across the 12 countries ranged from 68.7 years in Senegal to 54.5 years in Nigeria, based on World Development Indicators data. \n\nThe values for the requested countries in 2023 are:\n- **Uganda**: 68.3 years\n- **Ghana**: 65.5 years\n- **Kenya**: 63.6 years\n- **Nigeria**: 54.5 years\n\nAmong the 12 countries ranked from highest to lowest\u2014Senegal, Uganda, Rwanda, Malawi, Ethiopia, Tanzania, Zambia, Ghana, Kenya, Niger, Mali, and Nigeria\u2014Senegal has the highest life expectancy at birth, while Nigeria has the lowest.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "d-9",
+      "asked": [],
+      "text": "Across the 12 countries in 2023, life expectancy at birth ranked from highest to lowest as follows: Senegal, Uganda, Rwanda, Malawi, Ethiopia, Tanzania, Zambia, Ghana, Kenya, Niger, Mali, and Nigeria, based on data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO).\n\nSenegal had the highest life expectancy at 68.7 years in 2023, while Nigeria had the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "d-13",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the life expectancy at birth in 2023 for the requested countries was:\n\n- **Uganda**: 68.3 years\n- **Ghana**: 65.5 years\n- **Kenya**: 63.6 years\n- **Nigeria**: 54.5 years\n\nAcross the 12 countries ranked, Senegal had the highest life expectancy at birth in 2023 at 68.7 years, while Nigeria had the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "d-16",
+      "asked": [],
+      "text": "According to the World Development Indicators, the 12 countries rank as follows by life expectancy at birth in 2023, from highest to lowest:\n\n1. Senegal\n2. Uganda\n3. Rwanda\n4. Malawi\n5. Ethiopia\n6. Tanzania\n7. Zambia\n8. Ghana\n9. Kenya\n10. Niger\n11. Mali\n12. Nigeria\n\nSenegal recorded the highest life expectancy at birth in 2023 at 68.7 years, while Nigeria recorded the lowest among the group at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "d-20",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), in 2023 life expectancy at birth among the 12 countries was highest in Senegal and lowest in Nigeria.\n\nThe life expectancy at birth figures for the requested countries in 2023 were:\n* **Uganda**: 68.3 years\n* **Ghana**: 65.5 years\n* **Kenya**: 63.6 years\n* **Nigeria**: 54.5 years\n\nAcross the group, Senegal had the highest life expectancy at 68.7 years, while Nigeria had the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-2",
+      "asked": [],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the 12 countries ranked by life expectancy at birth in 2023 from highest to lowest are:\n\n1. Senegal\n2. Rwanda\n3. Ghana\n4. Uganda\n5. Tanzania\n6. Ethiopia\n7. Kenya\n8. Zambia\n9. Malawi\n10. Niger\n11. Mali\n12. Nigeria\n\nSenegal recorded the highest life expectancy at birth among the group at 68.7 years in 2023, while Nigeria recorded the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    },
+    {
+      "id": "e-6",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023 is led by Senegal at 68.7 years, while Nigeria ranks lowest among them at 54.5 years.\n\nFor the requested countries in 2023:\n* **Uganda**: 68.3 years\n* **Ghana**: 65.5 years\n* **Kenya**: 63.6 years\n* **Nigeria**: 54.5 years\n\nAmong the 12 selected nations, life expectancy at birth in 2023 ranges from a high of 68.7 years in Senegal to a low of 54.5 years in Nigeria.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-7",
+      "asked": [],
+      "text": "According to World Development Indicators data for life expectancy at birth across the 12 countries in 2023:\n\n- **Senegal** ranks highest with a life expectancy of 68.7 years.\n- **Nigeria** ranks lowest with a life expectancy of 54.5 years.\n\nAcross the group, life expectancy spans from 54.5 to 68.7 years, with Senegal recording the highest life expectancy at birth and Nigeria the lowest in 2023.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-8",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "In 2023, life expectancy at birth across the 12 countries ranged from 54.5 years in Nigeria to 68.7 years in Senegal, according to the United Nations Development Programme Human Development Report Office (UNDP-HDRO).\n\nFor the requested countries in 2023:\n* **Uganda**: 68.3 years\n* **Ghana**: 65.5 years\n* **Kenya**: 63.6 years\n* **Nigeria**: 54.5 years\n\nAmong the 12 countries compared, Senegal ranked highest (68.7 years) and Nigeria ranked lowest (54.5 years).",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-9",
+      "asked": [],
+      "text": "According to the World Development Indicators, life expectancy at birth across the 12 countries in 2023 ranks Senegal highest at 68.7 years and Nigeria lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-10",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to data from the United Nations Development Programme Human Development Report Office (UNDP-HDRO), the ranking of the 12 countries by life expectancy at birth in 2023 is led by Senegal at 68.7 years, while Nigeria ranks lowest among them at 54.5 years.\n\nAmong the requested countries:\n- **Uganda**: 68.3 years (2023)\n- **Ghana**: 65.5 years (2023)\n- **Kenya**: 63.6 years (2023)\n- **Nigeria**: 54.5 years (2023)\n\nIn conclusion, Senegal has the highest life expectancy at birth among the group in 2023, while Nigeria has the lowest.",
+      "rules": [
+        "pairing_undecided"
+      ],
+      "verdict": "undecided"
+    },
+    {
+      "id": "e-12",
+      "asked": [
+        "Kenya",
+        "Uganda",
+        "Ghana",
+        "Nigeria"
+      ],
+      "text": "According to the United Nations Development Programme Human Development Report Office (UNDP-HDRO), life expectancy at birth in 2023 across the twelve countries ranks as follows from highest to lowest: Senegal (68.7 years), Uganda (68.3 years), followed by Rwanda, Tanzania, Ethiopia, Ghana (65.5 years), Malawi, Kenya (63.6 years), Niger, Zambia, Mali, and Nigeria (54.5 years). \n\nFor the requested countries in 2023:\n- **Uganda**: 68.3 years\n- **Ghana**: 65.5 years\n- **Kenya**: 63.6 years\n- **Nigeria**: 54.5 years\n\nAmong the twelve countries compared, Senegal had the highest life expectancy at birth in 2023 at 68.7 years, while Nigeria had the lowest at 54.5 years.",
+      "rules": [
+        "pairing_undecided",
+        "series_outside_reply_figures"
+      ],
+      "verdict": "fail"
+    }
+  ]
+}

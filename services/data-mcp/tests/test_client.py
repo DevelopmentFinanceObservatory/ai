@@ -119,14 +119,14 @@ async def test_per_call_timeout_override_reaches_the_request() -> None:
     # float into every deadline at once, so an override that only pinned
     # `read` would silently raise `connect` to match and leave an
     # unreachable dfo-apis hanging for a full read timeout per attempt.
-    # `read` is `pytest.approx`, not exact, since it's `min(attempt_timeout,
-    # remaining)` against the call's wall-clock deadline, and 42.5 exceeds
-    # the default retry budget, so `remaining` (not `attempt_timeout`) is
-    # what's chosen, trimmed by whatever real time already elapsed since the
-    # deadline was set.
+    # `read` is `min(attempt_timeout, remaining)` against the call's
+    # wall-clock deadline, and 42.5 exceeds the default retry budget, so
+    # `remaining` is chosen: 42.5 less the real time elapsed since the
+    # deadline was set, which a loaded machine can stretch past any relative
+    # tolerance, and which stays far under a second.
     timeout = requests[0].extensions["timeout"]
     assert timeout["connect"] == 1.0
-    assert timeout["read"] == pytest.approx(42.5)
+    assert 41.5 < timeout["read"] <= 42.5
     assert timeout["write"] == 1.0
     assert timeout["pool"] == 1.0
 

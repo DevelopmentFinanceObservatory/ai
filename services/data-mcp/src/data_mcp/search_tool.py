@@ -490,10 +490,10 @@ async def search(
 ) -> ToolResult:
     """Find what data and indicators exist for the user's ask.
 
-    Call this first when the user asks about data: it resolves their ask into
-    concrete dataset definitions, each identified by a spec_id that later data
-    retrieval uses as its handle. Split a compound ask into one part per
-    measured variable ("aid to Kenya, and malaria deaths there" is two parts):
+    Call this first for a question about development-finance data: it resolves
+    their ask into concrete dataset definitions, each identified by a spec_id
+    that later data retrieval uses as its handle. Split a compound ask into one
+    part per measured variable ("aid to Kenya, and malaria deaths there" is two parts):
 
     ```json
     {"parts": [

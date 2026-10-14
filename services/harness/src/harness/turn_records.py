@@ -174,10 +174,6 @@ class RecordedIdentity(StrictModel):
 class PlanDecision(StrictModel):
     """One decision: its slot, the option chosen, who settled it, and the first line of why.
 
-    `source_spec_id` is the source a decision fixes (`DecisionFixes.source_spec_id`),
-    such as the measure the user picked, so a later turn reads who chose it;
-    left out when it fixes none.
-
     A record ignores keys it does not declare, so a ledger record written by
     a release that adds a field still loads in one that does not.
     """
@@ -188,7 +184,6 @@ class PlanDecision(StrictModel):
     chosen: str
     resolved_by: ResolvedBy
     rationale: str
-    source_spec_id: str | None = Field(default=None, exclude_if=lambda spec_id: spec_id is None)
 
 
 class PlanWarning(StrictModel):
@@ -304,7 +299,6 @@ class PlanRecord(StrictModel):
                     chosen=plan_display.with_source_names(decision.chosen, plan),
                     resolved_by=decision.resolved_by,
                     rationale=plan_display.with_source_names(_first_line(decision.rationale), plan),
-                    source_spec_id=decision.fixes.source_spec_id if decision.fixes else None,
                 )
                 for decision in plan_display.shown_decisions(plan)
             ),
@@ -529,7 +523,9 @@ class WindowReading(StrictModel):
     """The window a search part states and which side settled it.
 
     `source` is `requested` when the window echoes the question's own range,
-    `coverage` when it is the span the resolved items hold data across.
+    `coverage` when it is the span the resolved items hold data across, and
+    `elected` when it is the one year Search chose for a question naming no
+    period (`harness.tool_contracts._window`).
     """
 
     start: int
@@ -594,9 +590,10 @@ class SearchReading(StrictModel):
     when search keeps it independent of other parts. `departures` are the ways search says the answer
     differs from what was asked. `skills` are the ids of the skills the search
     result named. `coverage_kind` (`exact`, `breadth`, `bare`),
-    `requested_window_kind` (`range`, `all`, `latest`), `roles`,
-    `open_axes` and `recent_years` (newest first) are empty when the part
-    did not state them. `roles` and `open_axes` are the series' own;
+    `requested_window_kind` (`range`, `all`, `latest`), `roles` and
+    `open_axes` are empty when the part did not state them. `recent_years`
+    is read from a stored conversation only: no reading gains it and it is
+    not rendered. `roles` and `open_axes` are the series' own;
     `asked_roles` are the flow parties the search part asked for, each a
     `planner.parties.PARTY_ROLES` word, empty when it named none, and
     `open_roles` those of them it asked to hold open, every member listed,
@@ -713,9 +710,6 @@ class SearchReading(StrictModel):
             ),
             asked_roles=tuple(str(role) for role in part.get("asked_roles") or ()),
             open_roles=tuple(str(role) for role in part.get("open_roles") or ()),
-            recent_years=tuple(
-                YearCount.model_validate(year) for year in part.get("recent_years") or ()
-            ),
             refusal_code=_str_or_none(part.get("reason")),
             unbound_qualifiers=tuple(
                 dict.fromkeys(
@@ -1071,13 +1065,6 @@ def _reading_facts(reading: SearchReading) -> str:
         facts.append(f"coverage {reading.coverage_kind}")
     if reading.requested_window_kind:
         facts.append(f"asked {reading.requested_window_kind}")
-    if reading.recent_years:
-        years = ", ".join(
-            f"{year.year}: {year.observations:,} obs"
-            + (f" in {year.series:,} series" if year.series is not None else "")
-            for year in reading.recent_years
-        )
-        facts.append(f"recent years {years}")
     if reading.wide:
         facts.append("wide")
     if reading.roles:

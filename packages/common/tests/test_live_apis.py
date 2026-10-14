@@ -224,6 +224,20 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
                 "spec_id": SPEC,
                 "versions": [
                     {
+                        "content_version": "cv_5",
+                        "base_content_version": "cv_1",
+                        "rendering": "groupby",
+                        "groupby": _GROUPBY,
+                        "without_party_totals": True,
+                    },
+                    {
+                        "content_version": "cv_4",
+                        "base_content_version": "cv_1",
+                        "rendering": "without_party_totals",
+                        "groupby": None,
+                        "without_party_totals": True,
+                    },
+                    {
                         "content_version": "cv_3",
                         "base_content_version": "cv_1",
                         "rendering": "not_recorded",
@@ -253,6 +267,8 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
     assert (request.method, request.url.path) == ("GET", f"/api/datasets/{SPEC}/versions")
     assert request.headers[PRINCIPAL_HEADER] == DATASETS_PRINCIPAL
     assert versions == (
+        DatasetVersion("cv_5", "cv_1", "groupby", _GROUPBY, without_party_totals=True),
+        DatasetVersion("cv_4", "cv_1", "without_party_totals", None, without_party_totals=True),
         DatasetVersion("cv_3", "cv_1", "not_recorded", None),
         DatasetVersion("cv_2", "cv_1", "groupby", _GROUPBY),
         DatasetVersion("cv_1", None, "plain", None),
@@ -271,8 +287,29 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
             "rendering": "plain",
             "groupby": {"by": ["recipient"], "op": "sum"},
         },
+        {
+            "content_version": "cv_2",
+            "base_content_version": "cv_1",
+            "rendering": "without_party_totals",
+            "groupby": {"by": ["recipient"], "op": "sum"},
+            "without_party_totals": True,
+        },
+        {
+            "content_version": "cv_2",
+            "base_content_version": "cv_1",
+            "rendering": "without_party_totals",
+            "groupby": None,
+            "without_party_totals": "true",
+        },
     ],
-    ids=["no_rendering", "unknown_rendering", "groupby_without_one", "plain_with_groupby"],
+    ids=[
+        "no_rendering",
+        "unknown_rendering",
+        "groupby_without_one",
+        "plain_with_groupby",
+        "cut_with_groupby",
+        "flag_not_a_boolean",
+    ],
 )
 async def test_list_versions_refuses_a_version_outside_the_contract(
     version: dict[str, Any],

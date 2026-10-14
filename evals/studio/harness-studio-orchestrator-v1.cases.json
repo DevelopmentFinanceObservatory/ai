@@ -50,6 +50,48 @@
         }
       ]
     },
+    "growth-between-two-years": {
+      "search": [
+        {
+          "parts": [
+            {
+              "variable": "life expectancy",
+              "status": "definite",
+              "spec_id": "spec_22222222222222222222222222222222",
+              "sentence": "life expectancy at birth in Kenya",
+              "coverage": [
+                2015,
+                2022
+              ]
+            }
+          ]
+        }
+      ],
+      "plan_spec_id": "spec_22222222222222222222222222222222",
+      "orchestrator": [
+        {
+          "call": "search",
+          "args": {
+            "query": "life expectancy in Kenya from 2015 to 2022",
+            "parts": [
+              {
+                "variable": "life expectancy"
+              }
+            ]
+          }
+        },
+        {
+          "call": "plan",
+          "args": {
+            "brief": "Growth of life expectancy in Kenya from 2015 to 2022",
+            "asks": []
+          }
+        },
+        {
+          "text": "Life expectancy in Kenya grew between 2015 and 2022."
+        }
+      ]
+    },
     "refused-step-then-second-plan": {
       "search": [
         {
@@ -789,154 +831,6 @@
           "text": "Average life expectancy in Kenya rose; the ranking could not be computed."
         }
       ]
-    },
-    "direct-growth": {
-      "direct": true,
-      "search": [
-        {
-          "parts": [
-            {
-              "variable": "life expectancy",
-              "status": "definite",
-              "spec_id": "spec_22222222222222222222222222222222",
-              "sentence": "life expectancy at birth in Kenya",
-              "coverage": [
-                2015,
-                2022
-              ]
-            }
-          ]
-        }
-      ],
-      "orchestrator": [
-        {
-          "call": "search",
-          "args": {
-            "query": "life expectancy in Kenya from 2015 to 2022",
-            "parts": [
-              {
-                "variable": "life expectancy"
-              }
-            ]
-          }
-        },
-        {
-          "call": "submit_analysis",
-          "args": {
-            "recipe": "growth",
-            "spec_id": "spec_22222222222222222222222222222222",
-            "start_year": 2015,
-            "end_year": 2022,
-            "change": "relative"
-          }
-        },
-        {
-          "text": "Life expectancy in Kenya grew between 2015 and 2022."
-        }
-      ]
-    },
-    "direct-growth-unverified-source": {
-      "direct": true,
-      "search": [
-        {
-          "parts": [
-            {
-              "variable": "life expectancy",
-              "status": "definite",
-              "spec_id": "spec_22222222222222222222222222222222",
-              "sentence": "life expectancy at birth in Kenya",
-              "coverage": [
-                2015,
-                2022
-              ]
-            }
-          ]
-        }
-      ],
-      "orchestrator": [
-        {
-          "call": "search",
-          "args": {
-            "query": "life expectancy in Kenya from 2015 to 2022",
-            "parts": [
-              {
-                "variable": "life expectancy"
-              }
-            ]
-          }
-        },
-        {
-          "call": "submit_analysis",
-          "args": {
-            "recipe": "growth",
-            "spec_id": "spec_33333333333333333333333333333333",
-            "start_year": 2015,
-            "end_year": 2022,
-            "change": "relative"
-          }
-        },
-        {
-          "text": "That series could not be verified, so nothing was calculated."
-        }
-      ]
-    },
-    "direct-growth-after-a-planning-request": {
-      "direct": true,
-      "search": [
-        {
-          "parts": [
-            {
-              "variable": "life expectancy",
-              "status": "definite",
-              "spec_id": "spec_22222222222222222222222222222222",
-              "sentence": "life expectancy at birth in Kenya",
-              "coverage": [
-                2015,
-                2022
-              ]
-            }
-          ]
-        }
-      ],
-      "plan_spec_id": "spec_22222222222222222222222222222222",
-      "orchestrator": [
-        {
-          "call": "search",
-          "args": {
-            "query": "life expectancy in Kenya from 2015 to 2022",
-            "parts": [
-              {
-                "variable": "life expectancy"
-              }
-            ]
-          }
-        },
-        {
-          "call": "submit_analysis",
-          "args": {
-            "recipe": "growth",
-            "spec_id": "spec_22222222222222222222222222222222",
-            "start_year": 2015,
-            "end_year": 2022,
-            "change": "relative"
-          }
-        },
-        {
-          "call": "plan",
-          "args": {
-            "brief": "Growth of life expectancy in Kenya from 2015 to 2022",
-            "asks": [
-              "growth of life expectancy from 2015 to 2022"
-            ]
-          }
-        },
-        {
-          "text": "Handed to the planner."
-        },
-        {
-          "text": "Life expectancy in Kenya grew between 2015 and 2022."
-        }
-      ]
     }
   },
   "cases": [
@@ -962,6 +856,33 @@
             ],
             "message_contains": [
               "rose"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-growth-between-two-years-reaches-the-plan-card",
+      "modes": [
+        "scripted"
+      ],
+      "scenario": "growth-between-two-years",
+      "turns": [
+        {
+          "message": "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 1,
+              "max_version": 1
+            },
+            "step_tools": [
+              "get_data",
+              "aggregate"
+            ],
+            "message_contains": [
+              "grew"
             ]
           }
         }
@@ -1203,60 +1124,13 @@
       ]
     },
     {
-      "id": "orchestrator-a-direct-growth-completes-without-a-plan",
+      "id": "orchestrator-live-growth-between-two-years-reaches-the-plan-card",
       "modes": [
-        "scripted"
-      ],
-      "scenario": "direct-growth",
-      "checks": [
-        "direct_run_completed"
+        "live"
       ],
       "turns": [
         {
           "message": "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
-          "expect": {
-            "terminal": "done",
-            "no_plan": true,
-            "step_tools": [
-              "get_data",
-              "growth"
-            ],
-            "message_contains": [
-              "grew"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-a-direct-growth-on-an-unsearched-source-is-refused",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "direct-growth-unverified-source",
-      "checks": [
-        "unverified_source_refused"
-      ],
-      "turns": [
-        {
-          "message": "How much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
-          "expect": {
-            "terminal": "done",
-            "no_plan": true
-          }
-        }
-      ]
-    },
-    {
-      "id": "orchestrator-a-planning-request-still-runs-a-direct-growth",
-      "modes": [
-        "scripted"
-      ],
-      "scenario": "direct-growth-after-a-planning-request",
-      "xfail": "Known gap: a user's request for a plan has no structural signal, so its precedence over submit_analysis rests on the orchestrator's instruction alone. The harness runs the direct growth, which spends the turn's plan call, so no plan card follows.",
-      "turns": [
-        {
-          "message": "Please plan this: how much did life expectancy in Kenya grow from 2015 to 2022, in per cent?",
           "plan_decision": "approve",
           "expect": {
             "terminal": "done",
@@ -1794,6 +1668,518 @@
         {
           "id": "the-answer-names-the-world-bank-code-of-its-series",
           "property": "The answer names DT.TDS.DEGG.CD as the World Bank code of the series it shows. An answer that does not name the code, or names it without tying it to the World Bank series shown, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-implicit-latest-answers-with-a-dated-value",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show Kenya's life expectancy at birth.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "implicit-latest-is-stated-with-its-period",
+          "property": "The closing message states Kenya's latest available life-expectancy value and that value's observed period. It does not add a first, historical, or extra endpoint because the user asked for neither a span nor a change; the dataset's coverage range does not count as a requested period. The returned component facts cover the requested Kenya series. A chart without the dated latest value in the closing message is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-two-country-comparison-states-needed-values",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Compare life expectancy in Kenya and Uganda.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "last"
+                },
+                {
+                  "series": "country/UGA",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "two-country-comparison-has-dated-supporting-values",
+          "property": "The closing message gives both Kenya's and Uganda's requested or latest available life-expectancy values, with each value dated by its own observed period. The returned component facts cover both requested series. A response that gives only one country's value or period is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-large-ranking-keeps-full-results-in-the-card",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Rank Nigeria, Ethiopia, Kenya, Tanzania, Uganda, Ghana, Rwanda, Senegal, Zambia, Malawi, Mali, and Niger by life expectancy at birth in 2023, highest to lowest. Show a bar chart and give a brief conclusion.",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "plan": {
+              "min_steps": 2,
+              "max_version": 1
+            },
+            "step_tools": [
+              "get_data",
+              "rank",
+              "make_charts"
+            ],
+            "reply": {
+              "states": []
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "large-ranking-has-a-brief-supported-conclusion",
+          "property": "The returned component facts collectively cover Nigeria, Ethiopia, Kenya, Tanzania, Uganda, Ghana, Rwanda, Senegal, Zambia, Malawi, Mali, and Niger at 2023, and a completed rank step shows that their ordering was computed. The closing message gives a brief conclusion supported by only the figures needed for that conclusion and does not repeat the full twelve-country ranking. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "ranking-does-not-introduce-unstated-arithmetic",
+          "property": "Every numerical difference, total, percentage, or count in the closing message is already stated in a completed step detail or component fact summary. A calculation inferred from chart values alone is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-multi-series-trend-keeps-endpoints-in-the-card",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show life expectancy in Kenya, Uganda, and Tanzania since 2000.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": []
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "multi-series-trend-has-a-brief-supported-conclusion",
+          "property": "The successful component shows all three requested series. The closing message gives a brief conclusion and does not list the first and last values for every series unless the user asked for those endpoints. It may compare only observed endpoints or relationships that a completed analysis result explicitly states. It must not call a series steady, lowest throughout, or the largest change, or describe any intermediate period, unless a tool result explicitly establishes that claim. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-redraw-confirms-the-action-without-a-data-recap",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show life expectancy in Kenya as a line chart.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ]
+          }
+        },
+        {
+          "message": "Replace that line chart with a table.",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "remove_cards",
+              "make_charts"
+            ],
+            "reply": {
+              "states": []
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "redraw-replaces-the-card-and-confirms-only-the-action",
+          "property": "The line-chart component id on the first turn is absent from the final canvas. The final canvas includes a table for the requested Kenya life-expectancy view; other companion cards may remain. The second turn completed both removal and chart-making, and its closing message confirms the replacement without a data recap. Adding a table without removing the original line chart is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-gappy-series-date-values-by-their-own-periods",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show life expectancy at birth in Kenya and South Sudan from 2000 to the latest available year. Give each series' first and latest values in the reply.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "first"
+                },
+                {
+                  "series": "country/KEN",
+                  "which": "last"
+                },
+                {
+                  "series": "country/SSD",
+                  "which": "first"
+                },
+                {
+                  "series": "country/SSD",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "gappy-series-values-use-their-own-periods",
+          "property": "The closing message gives Kenya's first and latest values and South Sudan's first and latest values, each dated by its own observed period in the returned component facts. The component facts cover both series for the requested 2000-to-latest view. If the returned facts show different start periods, the reply preserves that difference. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-explicit-figures-take-precedence-over-large-ranking-summary",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Rank Nigeria, Ethiopia, Kenya, Tanzania, Uganda, Ghana, Rwanda, Senegal, Zambia, Malawi, Mali, and Niger by life expectancy at birth in 2023, highest to lowest. Show a bar chart, give a brief conclusion, and state Kenya, Uganda, Ghana, and Nigeria's values in the reply.",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "plan": {
+              "min_steps": 2,
+              "max_version": 1
+            },
+            "step_tools": [
+              "get_data",
+              "rank",
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "last"
+                },
+                {
+                  "series": "country/UGA",
+                  "which": "last"
+                },
+                {
+                  "series": "country/GHA",
+                  "which": "last"
+                },
+                {
+                  "series": "country/NGA",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "explicit-values-are-stated-with-own-periods-without-a-full-recap",
+          "property": "The returned component facts collectively cover Nigeria, Ethiopia, Kenya, Tanzania, Uganda, Ghana, Rwanda, Senegal, Zambia, Malawi, Mali, and Niger at 2023. The closing message states Kenya's, Uganda's, Ghana's, and Nigeria's values, each with its own observed period. It does not repeat the full twelve-country ranking, though it may state other figures needed for its brief conclusion. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-named-past-year-is-stated-from-a-longer-series",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show life expectancy at birth in Kenya since 1980 as a line chart, and tell me what it was in 1990.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "at",
+                  "period": "1990"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-change-question-without-a-period-states-both-ends",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How has life expectancy at birth in Kenya changed?",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "first"
+                },
+                {
+                  "series": "country/KEN",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "change-without-a-period-says-which-way-it-moved",
+          "property": "The closing message says whether Kenya's life expectancy rose or fell between the two periods it states, and says nothing about how it moved in the years between them. A message that gives the two values without saying which way the figure moved is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-computed-share-is-stated-with-its-period",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "France's aid to Africa",
+          "expect": {
+            "terminal": "done"
+          }
+        },
+        {
+          "message": "How about as a share of France's total aid",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "reply": {
+              "states": [
+                {
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "computed-share-says-what-it-is-a-share-of",
+          "property": "The second turn's closing message gives the share as a percentage and says it is France's aid to Africa as a share of France's total aid. A percentage with no statement of what it is a share of is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-cut-card-states-its-smallest-and-a-series-past-the-twelfth",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show aid to Malawi by donor as a bar chart. In the reply, give the value of the smallest donor on the chart and Iceland's value.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "card_title_contains": [
+              "largest of"
+            ],
+            "max_card_series": 24,
+            "reply": {
+              "states": [
+                {
+                  "which": "smallest"
+                },
+                {
+                  "series": "Iceland",
+                  "which": "last"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-five-named-values-are-all-stated",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show life expectancy at birth in 2023 for Nigeria, Ethiopia, Kenya, Tanzania, Uganda, Ghana, Rwanda, Senegal, Zambia, Malawi, Mali, and Niger as a bar chart, and state the values for Kenya, Uganda, Ghana, Rwanda, and Zambia in the reply.",
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "reply": {
+              "states": [
+                {
+                  "series": "country/KEN",
+                  "which": "at",
+                  "period": "2023"
+                },
+                {
+                  "series": "country/UGA",
+                  "which": "at",
+                  "period": "2023"
+                },
+                {
+                  "series": "country/GHA",
+                  "which": "at",
+                  "period": "2023"
+                },
+                {
+                  "series": "country/RWA",
+                  "which": "at",
+                  "period": "2023"
+                },
+                {
+                  "series": "country/ZMB",
+                  "which": "at",
+                  "period": "2023"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-aid-by-donor-draws-one-cut-card-without-a-plan",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Show aid to Malawi by donor",
+          "expect": {
+            "terminal": "done",
+            "no_plan": true,
+            "min_components": 1,
+            "max_components": 1,
+            "step_tools": [
+              "make_charts"
+            ],
+            "card_title_contains": [
+              "largest of"
+            ],
+            "max_card_series": 24
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-which-donors-give-the-most-runs-a-rank-step",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Which donors give the most to Malawi?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "plan": {
+              "min_steps": 2
+            },
+            "step_tools": [
+              "rank"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-no-period-ranking-states-its-year-and-a-nearby-years-count",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Which donors give the most aid to Malawi?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done"
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "reply-names-the-year-served-and-its-donor-count",
+          "property": "The closing message names the single year its ranking of donors to Malawi is for, and says how many donors have data for that year or that the ranking is among the donors with data for that year. The message may call them donors, providers or members; the count and the year are what is scored, whatever the noun. A message that ranks donors without naming the year, or that names only a span of years, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "reply-states-what-a-nearby-year-holds",
+          "property": "The closing message names a second year, different from the year its ranking is for, and states how many donors that second year covers: a newer year with the number of donors it has so far, or an earlier year with the larger number of donors it had. The message may call them donors, providers or members; the count and the year are what is scored, whatever the noun. A message that names no second year, names one without a count, or says only that newer data is incomplete without a count, is a no. This property always applies and is never inapplicable."
         }
       ]
     }

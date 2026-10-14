@@ -196,8 +196,13 @@ def chart(
     title: str = "Life expectancy in Kenya, 1960 to 2023",
     select: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One `make_charts` chart on `frame`, its `select` sent as `select_json`."""
-    return {"frame": frame, "type": type_, "title": title, "select_json": json.dumps(select or {})}
+    """One `make_charts` chart on `frame`, its `select` sent as `select_json`.
+    Left unset, the select names the one series of a scripted frame
+    (`harness.scripted.ScriptedExecutor`), whose rows no store holds for an
+    empty select to be checked against."""
+    if select is None:
+        select = {"stat_var": "dcid:LifeExpectancy_Person"}
+    return {"frame": frame, "type": type_, "title": title, "select_json": json.dumps(select)}
 
 
 def make_charts_call(*charts: Mapping[str, Any]) -> types.Part:

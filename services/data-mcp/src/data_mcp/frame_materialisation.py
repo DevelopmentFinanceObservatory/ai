@@ -11,7 +11,9 @@ snapshot route lists, and the frame is registered only when
 `mint_content_version(frame_sha256=frame_sha256(frame))` is that
 `content_version`. Every other mint registers the artifact of its own rendering
 under a pair `frame_ref_for` derives from its columns and groupby, unchecked
-against the token, since a selection or a sum is a different frame.
+against the token, since a selection or a sum is a different frame. A mint with
+`options.without_party_totals` names dfo-apis' version of the frame without group
+totals, so the pair it registers under holds the rows dfo-apis serves for it.
 
 Each mint that reads or parses the frame also writes its mint record
 (`common.materialisation.MintRecord`) to the store: the dfo-apis pair, the
@@ -96,6 +98,7 @@ __all__ = [
     "KIND_COLUMNS",
     "TYPE_COLUMNS",
     "TYPE_COLUMN_SELECTIONS",
+    "WITHOUT_PARTY_TOTALS",
     "DegradedReason",
     "MaterialisationOutcome",
     "frame_ref_for",
@@ -168,6 +171,12 @@ KIND_COLUMNS: tuple[str, ...] = ("party_kind",)
 # `KIND_COLUMNS`: a flow party's type column, and `kind`, the earlier token for the
 # party kind that old recorded selections carry.
 _REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind"))
+
+# The mint option that asks dfo-apis for a flow frame without the group totals of the
+# party roles its identity leaves open (dfo-apis' `MintOptions.without_party_totals`). A
+# mint sends it only when true, and dfo-apis records it in the artifact's `rendering` only
+# then. A cut that leaves rows out is a version of its own, which the manifest's pair names.
+WITHOUT_PARTY_TOTALS = "without_party_totals"
 
 
 def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -821,6 +830,10 @@ def frame_ref_for(
     is still named by its groupby, since data-mcp cannot tell it from a sum that
     keeps the version: the versions route that says so needs a first-party
     principal this service does not hold.
+
+    `options.without_party_totals` takes no part: dfo-apis mints a frame without
+    party totals a version of its own, so `content_version` already names it, and a
+    cut that leaves nothing out serves its base's frame under its base's version.
 
     Raises:
         pydantic.ValidationError: When `spec_id` and `content_version` do not fit

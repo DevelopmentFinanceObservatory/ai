@@ -534,8 +534,9 @@ def _place_axis(
     covers, as IDS holds its debtors on `destination`. That axis keeps its
     flow role, and every member it holds stays in, organisations included.
     A CRS donor axis covered by "country" holds the agencies beside the
-    donor countries. Party kinds keep its totals and residuals out of a sum
-    or a rank. Two such flow axes leave the word naming neither, and the
+    donor countries. The retrieval serves the axis without its group totals
+    (`get_data`'s `without_party_totals`), and the data's residuals stay in.
+    Two such flow axes leave the word naming neither, and the
     reason asks for each party to be stated.
     """
     if not open_entity_axes:

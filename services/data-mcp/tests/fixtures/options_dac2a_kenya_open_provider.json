@@ -1,0 +1,482 @@
+{
+  "content_version": "cv_923858e35f90caf47f99c55a9f8b9d38",
+  "coverage": {
+    "dimensions": [
+      {
+        "axis": "origin",
+        "count": 133,
+        "label": "financingProvider"
+      },
+      {
+        "axis": "destination",
+        "count": 1,
+        "label": "financingRecipient"
+      },
+      {
+        "count": 8,
+        "label": "years"
+      }
+    ],
+    "rows": 775,
+    "window": {
+      "end_year": 2022,
+      "kind": "range",
+      "origin": "query",
+      "start_year": 2015
+    }
+  },
+  "definition": {
+    "identity": {
+      "entities": {
+        "destination": [
+          "country/KEN"
+        ]
+      },
+      "identity_version": "spec1",
+      "open_roles": [
+        "origin"
+      ],
+      "requested_window": {
+        "end_year": 2022,
+        "kind": "range",
+        "start_year": 2015
+      },
+      "shape": {
+        "kind": "statvar_schema",
+        "measured_property": "amount",
+        "measurement_qualifier": "Nominal",
+        "population_type": "FinancialFlow",
+        "stat_type": "measuredValue"
+      },
+      "slots": [
+        {
+          "binding": {
+            "ref": "DAC2aAidType206",
+            "state": "value"
+          },
+          "property": "dac2aAidType"
+        },
+        {
+          "binding": {
+            "state": "unbound"
+          },
+          "property": "dacTypeOfFinance"
+        },
+        {
+          "binding": {
+            "ref": "Disbursement",
+            "state": "value"
+          },
+          "property": "financialFlowType"
+        },
+        {
+          "binding": {
+            "ref": "Gross",
+            "state": "value"
+          },
+          "property": "nettingBasis"
+        }
+      ]
+    },
+    "schema_version": 1,
+    "spec_id": "spec_4dda5aa0fa09ecbd4bfed052abe51e75"
+  },
+  "output_options": {
+    "bundle": {
+      "state": "available"
+    },
+    "capability_version": "dset_5c3f5b0bf4cd9569",
+    "columns": [
+      {
+        "distinct": 1,
+        "droppable": false,
+        "kind": "grain",
+        "name": "stat_var"
+      },
+      {
+        "distinct": 133,
+        "droppable": false,
+        "kind": "role",
+        "name": "financingProvider"
+      },
+      {
+        "distinct": 1,
+        "droppable": false,
+        "kind": "role",
+        "name": "financingRecipient"
+      },
+      {
+        "distinct": 8,
+        "droppable": false,
+        "kind": "grain",
+        "name": "time_period"
+      },
+      {
+        "droppable": true,
+        "kind": "value",
+        "name": "value"
+      },
+      {
+        "distinct": 1,
+        "droppable": false,
+        "kind": "unit",
+        "name": "unit"
+      },
+      {
+        "distinct": 1,
+        "droppable": true,
+        "kind": "facet",
+        "name": "measurementMethod"
+      },
+      {
+        "distinct": 1,
+        "droppable": false,
+        "kind": "facet",
+        "name": "provenance"
+      },
+      {
+        "droppable": true,
+        "kind": "status",
+        "name": "status"
+      }
+    ],
+    "enrichments": [
+      {
+        "column": "financingProvider",
+        "coverage": {
+          "covered": 42,
+          "entities": 133
+        },
+        "field": "iso3",
+        "missing": [
+          {
+            "label": "Adaptation Fund",
+            "ref": "AdaptationFund"
+          },
+          {
+            "label": "African Development Bank",
+            "ref": "AfricanDevelopmentBank"
+          },
+          {
+            "label": "African Development Bank Group",
+            "ref": "AfricanDevelopmentBankGroup"
+          },
+          {
+            "label": "African Development Fund",
+            "ref": "AfricanDevelopmentFund"
+          },
+          {
+            "label": "Arab Bank for Economic Development in Africa",
+            "ref": "ArabBankForEconomicDevelopmentInAfrica"
+          },
+          {
+            "label": "Arcus Foundation",
+            "ref": "ArcusFoundation"
+          },
+          {
+            "label": "Bezos Earth Fund",
+            "ref": "BezosEarthFund"
+          },
+          {
+            "label": "Bloomberg Philanthropies",
+            "ref": "BloombergPhilanthropies"
+          },
+          {
+            "label": "Central Emergency Response Fund",
+            "ref": "CentralEmergencyResponseFund"
+          },
+          {
+            "label": "Children's Investment Fund Foundation",
+            "ref": "ChildrensInvestmentFundFoundation"
+          }
+        ],
+        "reason": "enrichment_unavailable",
+        "state": "partial",
+        "token": "financingProvider_iso3",
+        "truncated": true
+      },
+      {
+        "column": "financingProvider",
+        "coverage": {
+          "covered": 42,
+          "entities": 133
+        },
+        "field": "iso2",
+        "missing": [
+          {
+            "label": "Adaptation Fund",
+            "ref": "AdaptationFund"
+          },
+          {
+            "label": "African Development Bank",
+            "ref": "AfricanDevelopmentBank"
+          },
+          {
+            "label": "African Development Bank Group",
+            "ref": "AfricanDevelopmentBankGroup"
+          },
+          {
+            "label": "African Development Fund",
+            "ref": "AfricanDevelopmentFund"
+          },
+          {
+            "label": "Arab Bank for Economic Development in Africa",
+            "ref": "ArabBankForEconomicDevelopmentInAfrica"
+          },
+          {
+            "label": "Arcus Foundation",
+            "ref": "ArcusFoundation"
+          },
+          {
+            "label": "Bezos Earth Fund",
+            "ref": "BezosEarthFund"
+          },
+          {
+            "label": "Bloomberg Philanthropies",
+            "ref": "BloombergPhilanthropies"
+          },
+          {
+            "label": "Central Emergency Response Fund",
+            "ref": "CentralEmergencyResponseFund"
+          },
+          {
+            "label": "Children's Investment Fund Foundation",
+            "ref": "ChildrensInvestmentFundFoundation"
+          }
+        ],
+        "reason": "enrichment_unavailable",
+        "state": "partial",
+        "token": "financingProvider_iso2",
+        "truncated": true
+      },
+      {
+        "column": "financingProvider",
+        "coverage": {
+          "covered": 133,
+          "entities": 133
+        },
+        "field": "label",
+        "missing": [],
+        "state": "available",
+        "token": "financingProvider_label",
+        "truncated": false
+      },
+      {
+        "column": "financingProvider",
+        "coverage": {
+          "covered": 133,
+          "entities": 133
+        },
+        "field": "type",
+        "missing": [],
+        "state": "available",
+        "token": "financingProvider_type",
+        "truncated": false
+      },
+      {
+        "column": "financingProvider",
+        "coverage": {
+          "covered": 133,
+          "entities": 133
+        },
+        "field": "party_kind",
+        "missing": [],
+        "state": "available",
+        "token": "financingProvider_party_kind",
+        "truncated": false
+      },
+      {
+        "column": "financingRecipient",
+        "coverage": {
+          "covered": 1,
+          "entities": 1
+        },
+        "field": "iso3",
+        "missing": [],
+        "state": "available",
+        "token": "financingRecipient_iso3",
+        "truncated": false
+      },
+      {
+        "column": "financingRecipient",
+        "coverage": {
+          "covered": 1,
+          "entities": 1
+        },
+        "field": "iso2",
+        "missing": [],
+        "state": "available",
+        "token": "financingRecipient_iso2",
+        "truncated": false
+      },
+      {
+        "column": "financingRecipient",
+        "coverage": {
+          "covered": 1,
+          "entities": 1
+        },
+        "field": "label",
+        "missing": [],
+        "state": "available",
+        "token": "financingRecipient_label",
+        "truncated": false
+      },
+      {
+        "column": "financingRecipient",
+        "coverage": {
+          "covered": 1,
+          "entities": 1
+        },
+        "field": "type",
+        "missing": [],
+        "state": "available",
+        "token": "financingRecipient_type",
+        "truncated": false
+      },
+      {
+        "column": "financingRecipient",
+        "coverage": {
+          "covered": 1,
+          "entities": 1
+        },
+        "field": "party_kind",
+        "missing": [],
+        "state": "available",
+        "token": "financingRecipient_party_kind",
+        "truncated": false
+      }
+    ],
+    "formats": [
+      {
+        "name": "csv",
+        "state": "available"
+      },
+      {
+        "name": "xlsx",
+        "state": "available"
+      },
+      {
+        "name": "parquet",
+        "state": "available"
+      }
+    ],
+    "groupby": {
+      "axes": [
+        {
+          "name": "crsCooperationModality"
+        },
+        {
+          "name": "crsPurpose"
+        },
+        {
+          "name": "crsTypeOfFinance"
+        },
+        {
+          "name": "crsTypeOfFlow"
+        }
+      ],
+      "state": "available"
+    },
+    "long_layout_defaults": [
+      "financingProvider_label",
+      "financingProvider_party_kind",
+      "financingRecipient_label",
+      "financingRecipient_party_kind"
+    ],
+    "long_layout_totals": [
+      "financingProvider"
+    ],
+    "pivots": [
+      {
+        "cells": 1197,
+        "columns": "time_period",
+        "index": "financingProvider",
+        "state": "available",
+        "width": 9
+      },
+      {
+        "cells": 1072,
+        "columns": "financingProvider",
+        "index": "time_period",
+        "state": "available",
+        "width": 134
+      }
+    ]
+  },
+  "schema_version": 1,
+  "trace": {
+    "applied_window": {
+      "end_year": 2022,
+      "kind": "range",
+      "origin": "query",
+      "start_year": 2015
+    },
+    "capability_version": "dset_937113f49b257c85",
+    "code_index_stamp": {
+      "content_hash": "6650f0e76fc1f91e6e056b29495dc17dc0182d091d67496926a1710ce1999c50",
+      "exported_at": "2026-10-10T10:52:17Z",
+      "graph_endpoint": "https://dfo-dev-dc-datacommons-service-zms5lj4zhq-nn.a.run.app"
+    },
+    "confirmed_at": "2026-10-12T21:57:23.877477+00:00",
+    "facets": [
+      {
+        "axis": "provenance",
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "dispatch_facet_id": "1962969911839422253",
+        "ref": "provenance/OECDDAC2A",
+        "selection_reason": "sole_candidate"
+      },
+      {
+        "axis": "measurementMethod",
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "dispatch_facet_id": "1962969911839422253",
+        "ref": null,
+        "selection_reason": "absent_on_selected_facet"
+      },
+      {
+        "axis": "unit",
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "dispatch_facet_id": "1962969911839422253",
+        "ref": "CurrencyUSD",
+        "selection_reason": "sole_candidate"
+      }
+    ],
+    "family_member_count": 1,
+    "family_member_digest": "1a36e1a7292b1bfff95a5415de0be74cac7bb033217ed50e79faa8ce51a224c0",
+    "frame_grammar_version": "1.1.0",
+    "graph_revision": "dfo-dev-dc-datacommons-service-00242-zfr",
+    "materialiser_build": "9fab1d07ccedbb4a970a0104a8b73e12475921cc",
+    "normalisations": [],
+    "origin_catalogue_build_id": "20261012T163104Z-67f98b87",
+    "resolved_stat_vars": [
+      {
+        "observation_count": 775,
+        "ref": "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal",
+        "roles": [
+          "financingProvider",
+          "financingRecipient"
+        ]
+      }
+    ],
+    "served_from": "head",
+    "source_revisions": [
+      {
+        "revision": "2026-10-12",
+        "source": "provenance/OECDDAC2A"
+      }
+    ]
+  },
+  "warnings": [
+    {
+      "code": "processing_level_undeclared",
+      "message": "A source StatVar lacks a processing-level declaration; the citation credits the source and omits the processing qualifier.",
+      "severity": "info"
+    }
+  ]
+}

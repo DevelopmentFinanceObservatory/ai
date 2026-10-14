@@ -66,7 +66,7 @@ Depending on the app, results appear as an interactive chart or table (Claude de
 - **The assistant answers without using the DFO.** Check that the DFO connector is turned on for this chat. In ChatGPT, type @ and select it.
 - **The assistant says it can't reach the server.** Check that the address ends in `/mcp` with no slash after it.
 - **The request takes too long or fails.** Try a narrower question, such as fewer countries or a shorter time period.
-- **You see an error with a "trace id".** Send that id to the DFO team so they can look into it.
+- **An assistant reports that a tool failed on the server.** Send the DFO team the time of the call and the tool's name so they can find the error in the server logs.
 
 For error codes and other technical problems, see [Troubleshooting for developers](#troubleshooting-for-developers).
 
@@ -252,13 +252,13 @@ Each developer tool takes the header in its own field:
 
 ## Troubleshooting for developers
 
-| Problem                                                                             | Cause                                                                                                          | Fix                                                                                            |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Redirect on connect, or "server unreachable" with a 308 or 307 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp` (no slash) on the website endpoint and `/mcp/` (with slash) on the direct endpoint  |
-| HTTP 401 on the direct endpoint                                                     | Token missing or wrong                                                                                         | Check the header reads `Authorization: Bearer <token>`                                         |
-| `rate_limited` refusal                                                              | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                                             |
-| HTTP 429 from the site                                                              | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                                         |
-| `internal_error` refusal                                                            | A tool failed in a way with no specific refusal, and the response carries only a trace id                      | Send the trace id to whoever runs the deployment so they can find the error in the server logs |
+| Problem                                                                             | Cause                                                                                                          | Fix                                                                                           |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Redirect on connect, or "server unreachable" with a 308 or 307 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp` (no slash) on the website endpoint and `/mcp/` (with slash) on the direct endpoint |
+| HTTP 401 on the direct endpoint                                                     | Token missing or wrong                                                                                         | Check the header reads `Authorization: Bearer <token>`                                        |
+| `rate_limited` refusal                                                              | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                                            |
+| HTTP 429 from the site                                                              | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                                        |
+| `internal_error` refusal                                                            | A tool failed in a way with no specific refusal, and the response says only that it failed on the server       | Send the time of the call and the tool's name to whoever runs the deployment                  |
 
 ## Next
 

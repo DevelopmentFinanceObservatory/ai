@@ -15,7 +15,7 @@ graph's typed refusal (`code`, `retry_mode`, `fix`), and that is what
 reaches the model.
 
 Scope for this module: the acknowledgement line, the coverage line, any
-warnings that qualify that coverage, the frame reference, the citation
+warnings that qualify that coverage, the period note, the frame reference, the citation
 line, the version description's steps, caveats and unknowns, per-series statistics, any dropped-role,
 remint-persistence, operation-poll, or degraded-frame notes, and any
 remaining manifest warnings.
@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from common.materialisation import FrameRef
+from common.period_note import period_note
 from common.price_basis import price_basis_reading
 
 from data_mcp.frame_materialisation import MaterialisationOutcome
@@ -46,8 +47,10 @@ from data_mcp.manifest import (
     CoverageModel,
     DefinitionModel,
     Manifest,
+    PartyTotalsLeftOut,
     SeriesStatisticsModel,
     WarningModel,
+    party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
 from data_mcp.version_description import VersionDescription
@@ -78,6 +81,10 @@ _MANIFEST_WARNING_CAP = 5
 # of member dcids (e.g. "Africa" resolves to roughly 54 countries), and
 # naming all of them would let one role's breadth dominate the sentence.
 _ACKNOWLEDGEMENT_ENTITY_CAP = 8
+
+# At most this many group totals are named per role in the line that says which dfo-apis
+# left out of the frame; the rest are only counted.
+_LEFT_OUT_TOTALS_CAP = 10
 
 # At most this many source labels are named in the citation line; the rest
 # are only counted. A frame merged across several providers carries one
@@ -290,7 +297,9 @@ def render_get_data_digest(
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
-        coverage, any warnings that qualify that coverage, the frame
+        coverage, the group totals dfo-apis left out of the frame
+        (`trace.party_totals_left_out`), any warnings that qualify that coverage, the period note
+        of a one-year frame (`common.period_note.period_note`), the frame
         reference for downstream tools, then the citation, per-series statistics, any
         dropped-role, remint-persistence, or operation-poll
         notes, any degraded-fetch note, the `stat_vars_summed` warning, and
@@ -317,7 +326,13 @@ def render_get_data_digest(
     ]
     if breakdown is not None:
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
+    sections.extend(
+        _left_out_totals_line(left_out, entity_labels)
+        for left_out in party_totals_left_out(manifest.trace)
+    )
     sections.extend(_warning_lines(shown_coverage))
+    if note := period_note(manifest.coverage.model_dump(mode="json")):
+        sections.append(note)
     sections.append(_frame_reference_line(frame_ref))
     if description is not None:
         sections.extend(_description_lines(description))
@@ -564,6 +579,18 @@ def _gap_words(path: str) -> str:
     segments = path.split(".")
     named = [segment for segment in segments[1:] or segments if not segment.isdigit()]
     return " ".join(named).replace("_", " ")
+
+
+def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[str, str]) -> str:
+    """The line naming the group totals dfo-apis left out of the frame on one party role
+    (`options.without_party_totals`), each by its label when this call resolved it."""
+    totals = [entity_labels.get(ref, ref) for ref in left_out.entities]
+    noun = "group total" if len(totals) == 1 else "group totals"
+    names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
+    return (
+        f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
+        "frame holds that side's other parties."
+    )
 
 
 def _dropped_role_line(role: str) -> str:

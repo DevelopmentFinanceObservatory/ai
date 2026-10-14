@@ -330,12 +330,12 @@ class _RequestLog(Middleware):
     whole, and any other URI as its scheme and host alone.
 
     fastmcp opens a SERVER span per request around this whole chain, and an
-    `internal_error`'s trace id (`common.refusal.log_unexpected_error`) is that
-    span's trace. `common.telemetry.use_request_span` covers the two cases where
+    `internal_error`'s logged trace id (`common.refusal.log_unexpected_error`) is
+    that span's trace. `common.telemetry.use_request_span` covers the two cases where
     that trace would not open in the backend: under Langfuse, which exports
     only its own spans, it adds a Langfuse observation in the same trace; with
-    no tracer provider it makes one random id current, so the log line and the
-    refusal still agree. A tool call's observation is named for the tool as
+    no tracer provider it makes one random id current, so the log lines of one
+    call still agree. A tool call's observation is named for the tool as
     the log line writes it; a resource read's has a fixed name, since a
     `dfo://artifact` URI is a bearer credential.
 
@@ -667,7 +667,7 @@ def _guard_extension_method(
     Over the in-flight cap it fails at once with `-32603`, as does a call the
     limit stops. An exception that is not an `MCPError`, which the handler
     raises with text written for the caller, fails with fixed `internal_error`
-    text naming the trace id it is logged under.
+    text, and the exception is logged under a trace id.
     """
 
     async def guarded(ctx: ServerRequestContext[Any, Any], params: Any) -> Any:
@@ -684,11 +684,10 @@ def _guard_extension_method(
                 except Exception as exc:
                     if isinstance(exc, TimeoutError) and limit.expired():
                         raise _extension_method_stopped(method) from None
-                    trace_id = log_unexpected_error(logger, f"combined mcp: {method}")
+                    log_unexpected_error(logger, f"combined mcp: {method}")
                     raise MCPError(
                         code=INTERNAL_ERROR,
-                        message="internal_error: "
-                        + internal_error_message(subject=method, trace_id=trace_id),
+                        message="internal_error: " + internal_error_message(subject=method),
                     ) from None
 
     return guarded
@@ -919,14 +918,14 @@ class _RefuseRaisedErrors(Middleware):
       for an exception the tool raised: `internal_error`, which repeating the
       call will not clear. Its text can hold a bucket path or a service
       account, so the exception is logged under a trace id and the refusal
-      names only that id.
+      carries fixed text.
 
     A resource read that raised gets the same split. fastmcp raises an error
     written for the caller (an unknown URI, and every failure of data-mcp's
     artifact resource, which logs its own) as is, and wraps any other
     exception in a `ResourceError` raised from it. An error with a `__cause__`
     is therefore one fastmcp wrapped, and fails with fixed `internal_error`
-    text naming a trace id.
+    text.
     Log lines leave out the URI, since a `dfo://artifact` URI is a bearer
     credential.
 
@@ -967,12 +966,12 @@ class _RefuseRaisedErrors(Middleware):
                 fix={"tool": name, "detail": str(exc)},
             )
         except Exception:
-            trace_id = log_unexpected_error(logger, f"combined mcp: tool {name}")
+            log_unexpected_error(logger, f"combined mcp: tool {name}")
             return _refusal(
                 code="internal_error",
                 retry_mode="do_not_retry",
-                message=internal_error_message(subject=name, trace_id=trace_id),
-                fix={"tool": name, "trace_id": trace_id},
+                message=internal_error_message(subject=name),
+                fix={"tool": name},
             )
 
     @override
@@ -986,10 +985,9 @@ class _RefuseRaisedErrors(Middleware):
         except Exception as exc:
             if isinstance(exc, FastMCPError) and exc.__cause__ is None:
                 raise
-            trace_id = log_unexpected_error(logger, "combined mcp: resource read")
+            log_unexpected_error(logger, "combined mcp: resource read")
             raise ResourceError(
-                "internal_error: "
-                + internal_error_message(subject="Reading this resource", trace_id=trace_id)
+                "internal_error: " + internal_error_message(subject="Reading this resource")
             ) from None
 
 

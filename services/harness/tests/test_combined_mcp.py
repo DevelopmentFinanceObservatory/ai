@@ -30,10 +30,11 @@ from analysis_mcp import server as analysis_server
 from analysis_mcp import tool_errors as analysis_tool_errors
 from analysis_mcp.fixtures import seed_fixture_store
 from common import auth as mcp_auth
+from common import refusal as refusal_module
 from common import telemetry
 from common.logging import configure_logging
 from common.materialisation import get_store as get_frame_store
-from common.refusal import refusal_meta
+from common.refusal import internal_error_message, refusal_meta
 from common.uri_redaction import UriRedactingExporter
 from data_mcp import artifact_resource, client_holder, get_data_tool, skills_resources
 from data_mcp import server as data_server
@@ -800,51 +801,7 @@ async def test_arguments_that_fail_the_input_schema_refuse_in_the_envelope(
     assert "aggregation" in envelope["fix"]["detail"]
 
 
-async def test_a_tool_that_raises_refuses_with_a_trace_id_and_none_of_its_text(
-    logging_configured: None,
-    caplog: pytest.LogCaptureFixture,
-    running_lifespan: Callable[..., Any],
-    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
-) -> None:
-    """The exception's text can name a bucket or a service account, so the
-    refusal carries only a trace id and the log line under that id carries the
-    exception. The direct mount, which answers loopback clients alone, keeps
-    fastmcp's own text."""
-
-    def explode() -> str:
-        raise RuntimeError(_SECRET_FAILURE)
-
-    data_server.mcp.tool(explode)
-    try:
-        app = create_app(settings=Settings(mcp_api_token=TOKEN))
-        async with running_lifespan(app):
-            results = []
-            with caplog.at_level(logging.ERROR, logger="harness.combined_mcp"):
-                for path in (DIRECT[0], COMBINED):
-                    async with Client(mounted_mcp_transport(app, path, token=TOKEN)) as client:
-                        results.append(await client.call_tool("explode", {}, raise_on_error=False))
-    finally:
-        data_server.mcp.local_provider.remove_tool("explode")
-    direct, combined = results
-
-    assert direct.is_error is True
-    assert direct.content[0].text == f"Error calling tool 'explode': {_SECRET_FAILURE}"
-    assert combined.is_error is True
-    envelope = _envelope(combined)
-    trace_id = envelope["fix"]["trace_id"]
-    assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
-    assert envelope == {
-        "code": "internal_error",
-        "retry_mode": "do_not_retry",
-        "fix": {"tool": "explode", "trace_id": trace_id},
-    }
-    assert combined.content[0].text.startswith(
-        f"explode failed with an unexpected error. Repeating the same call is unlikely to "
-        f"help. Quote trace id {trace_id} when reporting it."
-    )
-    _assert_no_secret(combined.content[0].text + json.dumps(combined.structured_content))
-    _assert_logged_under(caplog, trace_id)
-
+_KNOWN_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 
 # An exception text naming what an outside caller must never see.
 _SECRET_FAILURE = (
@@ -872,7 +829,55 @@ def _assert_logged_under(
     assert any(_SECRET_FAILURE in str(exc) for exc in chain if exc is not None)
 
 
-async def test_a_resource_read_that_raises_fails_with_a_trace_id_and_none_of_its_text(
+async def test_a_tool_that_raises_refuses_with_no_trace_id_and_none_of_its_text(
+    logging_configured: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., StreamableHttpTransport],
+) -> None:
+    """The exception's text can name a bucket or a service account, so the
+    refusal carries neither, and the log line carries the trace id and the
+    exception. The direct mount, which answers loopback clients alone, keeps
+    fastmcp's own text."""
+
+    def explode() -> str:
+        raise RuntimeError(_SECRET_FAILURE)
+
+    data_server.mcp.tool(explode)
+    monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
+    try:
+        app = create_app(settings=Settings(mcp_api_token=TOKEN))
+        async with running_lifespan(app):
+            results = []
+            with caplog.at_level(logging.ERROR, logger="harness.combined_mcp"):
+                for path in (DIRECT[0], COMBINED):
+                    async with Client(mounted_mcp_transport(app, path, token=TOKEN)) as client:
+                        results.append(await client.call_tool("explode", {}, raise_on_error=False))
+    finally:
+        data_server.mcp.local_provider.remove_tool("explode")
+    direct, combined = results
+
+    assert direct.is_error is True
+    assert direct.content[0].text == f"Error calling tool 'explode': {_SECRET_FAILURE}"
+    assert combined.is_error is True
+    envelope = _envelope(combined)
+    assert envelope == {
+        "code": "internal_error",
+        "retry_mode": "do_not_retry",
+        "fix": {"tool": "explode"},
+    }
+    message = internal_error_message(subject="explode")
+    assert combined.content[0].text.startswith(f"{message}\n\n")
+    assert combined.structured_content is not None
+    assert combined.structured_content["message"] == message
+    replied = combined.content[0].text + json.dumps(combined.structured_content)
+    assert _KNOWN_TRACE_ID not in replied
+    _assert_no_secret(replied)
+    _assert_logged_under(caplog, _KNOWN_TRACE_ID)
+
+
+async def test_a_resource_read_that_raises_fails_with_no_trace_id_and_none_of_its_text(
     logging_configured: None,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -880,13 +885,14 @@ async def test_a_resource_read_that_raises_fails_with_a_trace_id_and_none_of_its
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
     """An unexpected exception inside the artifact resource fails with fixed
-    text, logged by data-mcp under the trace id it names, while the resource's
+    text, logged by data-mcp with its trace id, while the resource's
     own refusals, written for the caller, pass through unchanged."""
 
     def unreachable() -> UpstreamClient:
         raise RuntimeError(_SECRET_FAILURE)
 
     monkeypatch.setattr(artifact_resource, "get_client", unreachable)
+    monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
     app = create_app(settings=Settings(mcp_api_token=TOKEN))
 
     async with (
@@ -902,14 +908,10 @@ async def test_a_resource_read_that_raises_fails_with_a_trace_id_and_none_of_its
             await client.read_resource(_ARTIFACT_URI.replace("/cv_1/", "/not-a-content-version/"))
 
     message = str(raised.value)
-    trace_id = re.search(r"trace id ([0-9a-f]{32})", message)
-    assert trace_id is not None
-    assert message == "internal_error: " + (
-        f"Reading this resource failed with an unexpected error. Repeating the same call is "
-        f"unlikely to help. Quote trace id {trace_id[1]} when reporting it."
-    )
+    assert message == "internal_error: " + internal_error_message(subject="Reading this resource")
+    assert _KNOWN_TRACE_ID not in message
     _assert_no_secret(message)
-    _assert_logged_under(caplog, trace_id[1], logger="data_mcp.artifact_resource")
+    _assert_logged_under(caplog, _KNOWN_TRACE_ID, logger="data_mcp.artifact_resource")
     assert str(refused.value).startswith(
         "request_invalid: content_version 'not-a-content-version' does not look like a cv_ id"
     )
@@ -1500,22 +1502,36 @@ async def test_a_timeout_error_a_tool_raises_itself_is_an_internal_error(
     assert _envelope(result)["fix"]["tool"] == "times_out"
 
 
-async def test_an_internal_errors_trace_id_is_the_calls_recorded_trace(
+def _logged_trace_id(caplog: pytest.LogCaptureFixture) -> str:
+    """The trace id on the one ERROR record `harness.combined_mcp` logged."""
+    [record] = [
+        r for r in caplog.records if r.name == "harness.combined_mcp" and r.levelno >= logging.ERROR
+    ]
+    match = re.search(r"trace_id=([0-9a-f]{32})", record.getMessage())
+    assert match is not None
+    return match[1]
+
+
+async def test_an_internal_errors_logged_trace_id_is_the_calls_recorded_trace(
     exported_spans: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
-    """With a tracer provider set, the refusal names the trace of fastmcp's one
-    SERVER span for the call, and the combined server adds no second one."""
+    """With a tracer provider set, the logged exception names the trace of
+    fastmcp's one SERVER span for the call, and the combined server adds no
+    second one."""
     app, _ = _probe_app()
 
     async with (
         running_lifespan(app),
         Client(mounted_mcp_transport(app, "/", token=TOKEN)) as client,
     ):
-        result = await client.call_tool("explode", {}, raise_on_error=False)
+        with caplog.at_level(logging.ERROR, logger="harness.combined_mcp"):
+            result = await client.call_tool("explode", {}, raise_on_error=False)
 
-    trace_id = _envelope(result)["fix"]["trace_id"]
+    assert "trace_id" not in _envelope(result)["fix"]
+    trace_id = _logged_trace_id(caplog)
     [server_span] = [
         span
         for span in exported_spans.get_finished_spans()
@@ -1542,7 +1558,7 @@ def no_tracer_provider() -> Iterator[None]:
         otel_trace._TRACER_PROVIDER_SET_ONCE = saved_once
 
 
-async def test_without_a_tracer_provider_the_refusal_and_the_log_line_share_one_trace_id(
+async def test_without_a_tracer_provider_the_logged_exception_and_the_request_line_share_one_trace_id(
     no_tracer_provider: None,
     caplog: pytest.LogCaptureFixture,
     running_lifespan: Callable[..., Any],
@@ -1557,7 +1573,8 @@ async def test_without_a_tracer_provider_the_refusal_and_the_log_line_share_one_
         with caplog.at_level(logging.INFO, logger="harness.combined_mcp"):
             result = await client.call_tool("explode", {}, raise_on_error=False)
 
-    trace_id = _envelope(result)["fix"]["trace_id"]
+    assert "trace_id" not in _envelope(result)["fix"]
+    trace_id = _logged_trace_id(caplog)
     assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
     [request_line] = [
         r.getMessage()
@@ -1568,7 +1585,6 @@ async def test_without_a_tracer_provider_the_refusal_and_the_log_line_share_one_
     ]
     assert "tool=explode outcome=internal_error " in request_line
     assert f" trace_id={trace_id} " in request_line
-    _assert_logged_under(caplog, trace_id)
 
 
 @pytest.fixture

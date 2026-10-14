@@ -69,6 +69,7 @@ from harness.graph.state import (
 )
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
+from harness.sentences import failure_sentence
 from harness.settings import Settings
 from harness.studio_edit import edit_frames
 from harness.studio_state import (
@@ -87,7 +88,9 @@ from harness.studio_translate import (
     _RecordingSurface,
     _stream_fatal,
     _Translator,
+    failure_detail,
 )
+from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
@@ -327,13 +330,12 @@ async def _sse_stream(
                                 await _unwind(next_frame)
                                 assert conversation is not None
                                 if conversation.cancel_reason == "segment_lost":
-                                    for closing in open_steps.close(
-                                        conversation,
-                                        detail=(
-                                            "the connection to the turn was lost; the "
-                                            "step may not have finished"
-                                        ),
-                                    ):
+                                    # Another instance took the segment over.
+                                    lost = failure_sentence(
+                                        ErrorCode.TRANSIENT_UNAVAILABLE,
+                                        RetryMode.RETRY_AFTER_DELAY,
+                                    )
+                                    for closing in open_steps.close(conversation, detail=lost):
                                         yield _sse_data(closing)
                                     yield _sse_data(
                                         ErrorFrame(
@@ -342,10 +344,7 @@ async def _sse_stream(
                                             error=ToolError(
                                                 error=ErrorCode.TRANSIENT_UNAVAILABLE,
                                                 retry=RetryMode.RETRY_AFTER_DELAY,
-                                                detail=(
-                                                    "this conversation's segment was taken "
-                                                    "over by another instance"
-                                                ),
+                                                detail=lost,
                                                 retry_after_seconds=30,
                                             ),
                                         )
@@ -355,9 +354,10 @@ async def _sse_stream(
                                     final_text=conversation.turn_final_text,
                                     error=ErrorCode.CANCELLED.value,
                                 )
-                                for closing in open_steps.close(
-                                    conversation, detail="Stopped before this step finished"
-                                ):
+                                stopped = failure_sentence(
+                                    ErrorCode.CANCELLED, RetryMode.DO_NOT_RETRY
+                                )
+                                for closing in open_steps.close(conversation, detail=stopped):
                                     yield _sse_data(closing)
                                 yield _sse_data(
                                     ErrorFrame(
@@ -366,7 +366,7 @@ async def _sse_stream(
                                         error=ToolError(
                                             error=ErrorCode.CANCELLED,
                                             retry=RetryMode.DO_NOT_RETRY,
-                                            detail="the turn was cancelled by the client",
+                                            detail=stopped,
                                         ),
                                     )
                                 )
@@ -396,9 +396,7 @@ async def _sse_stream(
                     except StopAsyncIteration:
                         return
                     if conversation is not None and isinstance(frame, ErrorFrame):
-                        closed = open_steps.close(
-                            conversation, detail="The turn failed before this step finished"
-                        )
+                        closed = open_steps.close(conversation, detail=frame.error.detail)
                         for closing in closed:
                             yield _sse_data(closing)
                         if closed:
@@ -472,14 +470,15 @@ def _checkpoint_failed_frame(conversation: ConversationState, exc: Exception) ->
     claim has already outlived this one's TTL and now owns the
     conversation, so the turn is left open for it rather than closed here;
     anything else (an exhausted retry, a DB error) closes the turn, since
-    nothing else will finish it."""
-    detail = (
-        f"the turn's state could not be saved; the team can trace it as {conversation.trace_id}"
+    nothing else will finish it. The turn's record names `state_not_saved`,
+    and the frame, whose grammar has no such member, the transient code."""
+    refusal = harness_refusal(
+        code=HarnessCode.STATE_NOT_SAVED, message=f"the turn's state could not be saved: {exc}"
     )
+    detail = failure_detail(refusal)
     if not isinstance(exc, SegmentLost):
         conversation.close_turn(
-            final_text=conversation.turn_final_text or detail,
-            error=ErrorCode.TRANSIENT_UNAVAILABLE.value,
+            final_text=conversation.turn_final_text or detail, error=refusal["code"]
         )
     return ErrorFrame(
         event="error",

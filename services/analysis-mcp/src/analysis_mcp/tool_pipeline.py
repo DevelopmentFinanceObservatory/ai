@@ -137,6 +137,7 @@ async def store_result_and_render(
     digest: Callable[[], str],
     step: Step | None = None,
     dropped_key_count: int = 0,
+    ranked_before_limit: int | None = None,
 ) -> ToolResult:
     """Store `frame`/`trace` under the pair identity `trace` already carries
     (`trace.op_spec_hash`, `trace.content_version`), and render `digest` --
@@ -165,6 +166,8 @@ async def store_result_and_render(
     the schema `server._register` declares at each verb's registration site.
     `dropped_key_count` is the number of keys the verb left out of `frame`,
     which `frame` cannot state; only a keyed `quotient_of` passes one.
+    `ranked_before_limit` is how many entries a limited `rank` ranked before
+    its limit cut them, which `frame` cannot state. Only `rank` passes one.
     """
     trace = trace.model_copy(update={"steps": () if step is None else (step,)})
     ref = FrameRef(spec_id=trace.op_spec_hash, content_version=trace.content_version)
@@ -185,6 +188,7 @@ async def store_result_and_render(
         role_keys=role_keys,
         stat_var_count=stat_var_count,
         dropped_key_count=dropped_key_count,
+        ranked_before_limit=ranked_before_limit,
         exclusions=trace.exclusions,
         time=trace.time,
     )

@@ -32,7 +32,12 @@ from typing import Any, Protocol
 
 from common.materialisation import FrameRef
 
-from executor.classify import MAX_RETRY_AFTER_SECONDS, Jitter, jittered_retry_delay
+from executor.classify import (
+    MAX_RETRY_AFTER_SECONDS,
+    ExecutorCode,
+    Jitter,
+    jittered_retry_delay,
+)
 from executor.ledger import (
     Complete,
     Fail,
@@ -43,6 +48,7 @@ from executor.ledger import (
     RunRecord,
     record_change,
 )
+from executor.outcomes import RefusalKind
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +153,15 @@ async def _answer(frame: FrameRef, *, publisher: ResultPublisher) -> FramePublis
     try:
         return await publisher(frame)
     except OSError as exc:
-        return PublishFault(code="transport_failed", reason=str(exc), retryable=True)
+        return PublishFault(
+            code=RefusalKind.TRANSPORT_FAILED.value, reason=str(exc), retryable=True
+        )
     except Exception as exc:
         logger.exception("completion: publishing %s raised", frame.spec_id)
         return PublishFault(
-            code="publication_error", reason=f"{type(exc).__name__}: {exc}", retryable=False
+            code=ExecutorCode.PUBLICATION_ERROR.value,
+            reason=f"{type(exc).__name__}: {exc}",
+            retryable=False,
         )
 
 
@@ -177,5 +187,9 @@ def unrecorded_hand_back(run_id: str | None) -> dict[str, Any]:
     to carry on. With no `run_id` the store could not admit the run, so
     nothing was run and nothing carries on: `not_started`."""
     if run_id is None:
-        return {"status": "not_started", "code": "run_not_started"}
-    return {"run_id": run_id, "status": "unfinished", "code": "ledger_unavailable"}
+        return {"status": "not_started", "code": ExecutorCode.RUN_NOT_STARTED.value}
+    return {
+        "run_id": run_id,
+        "status": "unfinished",
+        "code": ExecutorCode.LEDGER_UNAVAILABLE.value,
+    }

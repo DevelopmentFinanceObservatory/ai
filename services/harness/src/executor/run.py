@@ -1,21 +1,21 @@
 """Run an authorised workflow, step by step, and check what comes back.
 
-`execute_authorised` is the shared execution path: it admits a run to the
-run ledger (`executor.ledger`) under a typed authorisation before anything is
-dispatched, records each tool attempt before it goes out, seals the retrieved
-inputs and checks them against the authorisation before the first derived
-step, and after an accepted run publishes each derived terminal frame with
-its replay recipe (`executor.completion`). `execute_approved_plan` is the
-planned route's adapter: it moves a plan `APPROVED` to `EXECUTING`, runs it
-under a `PlanApproval` of its approved revision, and leaves it `COMPLETED`
-once the run completed, `EXECUTING` while the run's publication is
-unfinished, and `FAILED` when the run stopped or its publication failed. A
-plan that is not `APPROVED` is refused (`NOT_APPROVED`) without
-being touched; one whose content no longer hashes to what was approved is
-refused (`STALE_REVISION`) by `start_execution`. `resume_run` carries on a
-run a restart left unfinished, from the submission stored with it
-(`load_submission`). `_run_workflow` is the step loop underneath them,
-private because a workflow runs only as an admitted run.
+`execute_authorised` admits a run to the run ledger (`executor.ledger`)
+under a plan's approval (`PlanApproval`) before anything is dispatched,
+records each tool attempt before it goes out, seals the retrieved inputs and
+checks them against the approval before the first derived step, and after an
+accepted run publishes each derived terminal frame with its replay recipe
+(`executor.completion`). `execute_approved_plan` runs a plan through it: it
+moves a plan `APPROVED` to `EXECUTING`, runs it under a `PlanApproval` of
+its approved revision, and leaves it `COMPLETED` once the run completed,
+`EXECUTING` while the run's publication is unfinished, and `FAILED` when the
+run stopped or its publication failed. A plan that is not `APPROVED` is
+refused (`NOT_APPROVED`) without being touched; one whose content no longer
+hashes to what was approved is refused (`STALE_REVISION`) by
+`start_execution`. `resume_run` carries on a run a restart left unfinished,
+from the submission stored with it (`load_submission`). `_run_workflow` is
+the step loop underneath them, private because a workflow runs only as an
+admitted run.
 
 `_run_workflow` runs the plan's compiled `Workflow` as the dependency graph
 its own bindings state, not as a plain list: every step with no unmet frame
@@ -115,7 +115,7 @@ tool is part of the surface check. A plan with no rolling step never calls it.
 The outcome carries each group's answer in `anchors`.
 
 A rolled start before the first year its dataset holds is refused
-`ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
+`ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
 read off the retrieval's own evidence. `resolve_anchor` finding no qualifying
 year, or periods that are no calendar years, stops the run with the tool's
 code and a message for the user. A `rolling_anchor_unresolved` of any other
@@ -143,7 +143,7 @@ load-bearing:
   `aggregate` grouping by `stat_var`. A retrieval's role keys and StatVar
   count are the frame's, so only a retrieval asked to sum its family is
   checked there: it must declare one StatVar, and one that declares more
-  stops with a `FAMILY_NOT_SUMMED` payload, which ends the turn.
+  stops with an `ExecutorCode.FAMILY_NOT_SUMMED` payload, which ends the turn.
 - `declared_shape` refuses `STEP_RESULT_UNUSABLE` when a result's declared
   `role_keys` are not valid role columns, so every role key a later step
   binds to has passed `normalize_role_keys`.
@@ -235,6 +235,7 @@ from pydantic import JsonValue, ValidationError
 from executor.artifacts import (
     ArtifactError,
     declared_dropped_key_count,
+    declared_ranked_before_limit,
     declared_shape,
     extract_frame_ref,
     manifest_frame_ref,
@@ -243,14 +244,11 @@ from executor.artifacts import (
 )
 from executor.classify import (
     BACKOFF_SECONDS,
-    FAMILY_NOT_SUMMED,
-    INTERNAL_ERROR,
-    MALFORMED_REFUSAL,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
     ROLLING_ANCHOR_UNRESOLVED,
-    ROLLING_WINDOW_OUTSIDE_DATASET,
     Disposition,
+    ExecutorCode,
     Jitter,
     ToolFailure,
     candidates_of,
@@ -264,7 +262,6 @@ from executor.completion import ResultPublisher, publish_results
 from executor.ledger import (
     TERMINAL_STATUSES,
     Attempt,
-    Authorisation,
     AuthorisationExpiredError,
     Fail,
     InMemoryRunLedger,
@@ -273,7 +270,6 @@ from executor.ledger import (
     ManifestOutsideAuthorisationError,
     PlanApproval,
     Publishing,
-    RequestAuthorisation,
     ResultFrame,
     Resume,
     RunChange,
@@ -582,9 +578,10 @@ class Submission(StrictModel):
     """What a run executes, stored with it at admission so a run a restart
     left unfinished can be carried on from it.
 
-    `revision` names the work in every outcome: a plan's revision, or a direct
-    request's graph digest. `requirements` are the dataset requirements the
-    workflow's retrievals are checked against as evidence.
+    `revision` names the work in every outcome: a plan's revision, or, for a
+    stored run admitted under a `RequestAuthorisation`, its workflow's digest.
+    `requirements` are the dataset requirements the workflow's retrievals are
+    checked against as evidence.
     """
 
     revision: str
@@ -614,7 +611,7 @@ class _Runtime:
 async def execute_authorised(
     submission: Submission,
     *,
-    authorisation: Authorisation,
+    authorisation: PlanApproval,
     idempotency_key: str,
     ledger: RunLedger,
     surface: ToolSurface,
@@ -626,29 +623,27 @@ async def execute_authorised(
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
     on_progress: StepProgressCallback | None = None,
 ) -> RunOutcome:
-    """Run `submission` under `authorisation` as one run of `ledger`.
+    """Run `submission` under `authorisation`, a plan's approval, as one run of `ledger`.
 
-    The shared execution path of planned and direct work. The run is admitted
-    before anything is dispatched, under `idempotency_key` and the digest of
-    `submission` and the authorisation's source policy (`executor.ledger`).
-    A key that already names a run of the same submission carries that run on:
-    one whose computation finished returns the outcome it recorded and only
-    resumes publication, and one that was still computing runs its workflow
-    again, the tools answering what the store already holds. A key whose run
-    failed admits a new run of the work. Every tool call is recorded as an
-    attempt before it goes out, and the retrieved inputs are sealed, and
-    checked against the authorisation's sources, before the first derived
-    step. An accepted run then publishes each derived terminal frame with its
-    replay recipe through `publisher` (`executor.completion.publish_results`);
-    a stopped one is recorded failed.
+    The run is admitted before anything is dispatched, under `idempotency_key`
+    and the digest of `submission` and the approval's source policy
+    (`executor.ledger`). A key that already names a run of the same submission
+    carries that run on: one whose computation finished returns the outcome it
+    recorded and only resumes publication, and one that was still computing
+    runs its workflow again, the tools answering what the store already
+    holds. A key whose run failed admits a new run of the work. Every tool call
+    is recorded as an attempt before it goes out, and the retrieved inputs are
+    sealed, and checked against the authorisation's sources, before the first
+    derived step. An accepted run then publishes each derived terminal frame
+    with its replay recipe through `publisher`
+    (`executor.completion.publish_results`); a stopped one is recorded failed.
 
     `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats` and
     `on_progress` are `execute_approved_plan`'s own. With no `publisher`, a run
     with a derived result stays `publishing`.
 
-    `authorisation` must name the work `submission` is: a `PlanApproval` its
-    `revision` as the approved revision, a `RequestAuthorisation` its
-    `revision` as the graph digest. One that names other work admits no run.
+    `authorisation` must approve the work `submission` is: its approved
+    revision is `submission.revision`. One that names other work admits no run.
 
     Returns:
         The run's outcome, carrying its `run_id`, or a `Refused` with none:
@@ -676,7 +671,7 @@ async def execute_authorised(
         on_progress=on_progress,
         publisher=publisher,
     )
-    if (authorised := _authorised_work(authorisation)) != submission.revision:
+    if (authorised := authorisation.approved_revision) != submission.revision:
         return Refused(
             revision=submission.revision,
             refusal=RefusalKind.AUTHORISATION_MISMATCH,
@@ -700,15 +695,6 @@ async def execute_authorised(
     return await _carry_out(
         admission.run, submission, ledger=ledger, runtime=runtime, resumed=admission.resumed
     )
-
-
-def _authorised_work(authorisation: Authorisation) -> str:
-    """The revision of the work `authorisation` lets run."""
-    match authorisation:
-        case PlanApproval(approved_revision=revision):
-            return revision
-        case RequestAuthorisation(graph_digest=digest):
-            return digest
 
 
 class UnreadableRunError(Exception):
@@ -933,7 +919,7 @@ async def _abandoned(run_id: str, exc: BaseException, *, ledger: RunLedger) -> N
     never carried on, and submitting its work again admits a new run. A
     write that fails here is logged, so `exc` still propagates."""
     cancelled = isinstance(exc, asyncio.CancelledError)
-    code = "cancelled" if cancelled else INTERNAL_ERROR
+    code = ExecutorCode.CANCELLED if cancelled else ExecutorCode.INTERNAL_ERROR
     reason = "the turn running it was cancelled" if cancelled else f"{type(exc).__name__}: {exc}"
     try:
         await ledger.record(run_id, Fail(code, reason))
@@ -973,10 +959,10 @@ async def execute_approved_plan(
 ) -> tuple[Plan, RunOutcome]:
     """Run an approved plan through `execute_authorised` and record the run in its status.
 
-    The planned route's adapter, and the only public way to run a plan: a
-    plan that is not `APPROVED` is refused (`NOT_APPROVED`) without being
-    touched, and one whose content no longer hashes to `approved_revision` is
-    refused (`STALE_REVISION`) by `Plan.start_execution`. Its authorisation is
+    The only public way to run a plan: a plan that is not `APPROVED` is
+    refused (`NOT_APPROVED`) without being touched, and one whose content no
+    longer hashes to `approved_revision` is refused (`STALE_REVISION`) by
+    `Plan.start_execution`. Its authorisation is
     a `PlanApproval` of the approved revision by `approver`, over every source
     the workflow retrieves, in force for `PLAN_APPROVAL_TTL` from the plan's
     `approved_at`, so admitting a new run of it, a retry included, needs an
@@ -1144,6 +1130,7 @@ class _Run:
         self.row_counts: dict[str, int | None] = {}
         self.stat_var_counts: dict[str, int | None] = {}
         self.dropped_key_counts: dict[str, int] = {}
+        self.ranked_before_limit: dict[str, int | None] = {}
         # Per step that produced a frame: the role keys its result declared,
         # and the columns of the retrieval it rests on, which the plan's role
         # columns bind to (`compiler.frame_columns`). `None` where the result
@@ -1555,7 +1542,7 @@ class _Run:
 
         The populations, root frames, key and periods a rolling call carries
         are all the run's own, so the user is told of an internal error and
-        the refusal is logged under the trace id the message quotes.
+        the refusal is logged with its trace id.
         """
         trace_id = current_trace_id()
         logger.error(
@@ -1572,17 +1559,15 @@ class _Run:
             f"resolved: {failure.fix.get('detail')!r}",
             step_id=step.id,
             payload=ToolFailure(
-                code=INTERNAL_ERROR,
-                message=internal_error_message(
-                    subject="Working out the latest period", trace_id=trace_id
-                ),
+                code=ExecutorCode.INTERNAL_ERROR,
+                message=internal_error_message(subject="Working out the latest period"),
                 retry_mode="do_not_retry",
                 fix={"refusal": failure.model_dump(mode="json")},
             ),
         )
 
     def _check_rolled_start(self, step: WorkflowStep, bounds: Sequence[RollingBound]) -> None:
-        """Refuse `ROLLING_WINDOW_OUTSIDE_DATASET` when `step`'s rolled start is before its data.
+        """Refuse `ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET` for a rolled start before the data.
 
         The start is the earliest year a rolled bound keeps (`_first_year_kept`).
         A dataset's first year is the start of the window its retrieval's
@@ -1616,7 +1601,7 @@ class _Run:
                 step_id=step.id,
                 requirement_id=requirement.id,
                 payload=ToolFailure(
-                    code=ROLLING_WINDOW_OUTSIDE_DATASET,
+                    code=ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET,
                     message=(
                         f"The data for {name} starts in {first}. The period asked for would "
                         f"start in {start}, counted back from {anchor.period}, the latest "
@@ -1653,7 +1638,7 @@ class _Run:
 
         Writes `self.frames[step.id]`, `self.row_counts[step.id]`,
         `self.stat_var_counts[step.id]`, `self.dropped_key_counts[step.id]`,
-        `self.role_keys[step.id]` and
+        `self.ranked_before_limit[step.id]`, `self.role_keys[step.id]` and
         `self.columns[step.id]`. These dicts are keyed by step id, so a step
         running concurrently with its siblings can write them safely. It
         leaves filling `self.records` and `self.evidence_by_step`'s own slots
@@ -1707,6 +1692,7 @@ class _Run:
                         role_keys=self.role_keys[step.id],
                         stat_var_count=self.stat_var_counts[step.id],
                         dropped_key_count=self.dropped_key_counts[step.id],
+                        ranked_before_limit=self.ranked_before_limit[step.id],
                     )
                     evidence = (
                         await self._check_evidence(step, result)
@@ -1768,6 +1754,7 @@ class _Run:
         self.row_counts[step.id] = row_count
         self.stat_var_counts[step.id] = stat_var_count
         self.dropped_key_counts[step.id] = declared_dropped_key_count(result.structured_content)
+        self.ranked_before_limit[step.id] = declared_ranked_before_limit(result.structured_content)
         self.role_keys[step.id] = role_keys
         binding = step.bindings.get(FRAME_PARAMETER)
         if binding is None:
@@ -1814,7 +1801,7 @@ class _Run:
         retrieval that declares none goes on the way a separate one does. A
         retrieval that does not sum has no bound (`bound_stat_var_count`).
 
-        The refusal carries a `FAMILY_NOT_SUMMED` payload, which
+        The refusal carries an `ExecutorCode.FAMILY_NOT_SUMMED` payload, which
         `classify_refusal` reads as a stop: the same plan draws the same
         unsummed frame, so a replan would ask the user to approve it twice.
         The payload's message and `fix.remedy` are written for the user, who
@@ -1830,7 +1817,7 @@ class _Run:
                 f"but declared {stat_var_count!r} distinct stat_vars",
                 step_id=step.id,
                 payload=ToolFailure(
-                    code=FAMILY_NOT_SUMMED,
+                    code=ExecutorCode.FAMILY_NOT_SUMMED,
                     message=_FAMILY_NOT_SUMMED_MESSAGE,
                     retry_mode="do_not_retry",
                     fix={"remedy": _FAMILY_NOT_SUMMED_REMEDY},
@@ -2087,7 +2074,7 @@ class _Run:
         such as a tool that raised, has only its text, which carries no
         envelope.
         """
-        reason = result.text if failure.code == MALFORMED_REFUSAL else failure.message
+        reason = result.text if failure.code == ExecutorCode.MALFORMED_REFUSAL else failure.message
         return self._refused(
             RefusalKind.STEP_REFUSED,
             f"{tool.name!r} refused: {reason or failure.code}",

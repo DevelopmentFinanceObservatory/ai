@@ -12,57 +12,28 @@ from typing import Any
 
 import pytest
 from compiler.surface import FixtureSurface
-from executor.ledger import InMemoryRunLedger
 from google.adk.agents import LlmAgent
 from google.adk.tools.base_tool import BaseTool
-from harness.direct_recipes import DirectRecipes
 from harness.orchestrator_tools import build_orchestrator_tools
-from harness.planner_seam import PlannerSeam
 from harness.settings import Settings
 from harness.wiring import build_planner
 from orchestrator.agent import create_orchestrator_agent
 from planner.agent import create_planner_agent
 from planner.declaration import _referred
-from planner.settings import AgentSettings, SchemaDelivery
 
 from .orchestrator_fakes import no_executor, no_resolver
 
 # Every LLM agent the harness builds, by the builder that builds it: the
-# planner as the server builds it, under each `SchemaDelivery`, the planner its
-# own eval set scores, eager and compact, and the orchestrator, with and
-# without its direct recipes.
+# planner as the server builds it, the planner its own eval set scores, and the
+# orchestrator.
 _AGENTS: dict[str, Callable[[], LlmAgent]] = {
     "served_planner": lambda: (
         build_planner(settings=Settings(), surface=FixtureSurface(schemas=[]))._agent
     ),
-    "served_compact_planner": lambda: (
-        PlannerSeam(
-            settings=Settings(),
-            surface=FixtureSurface(schemas=[]),
-            agent_settings=AgentSettings(planner_schema_delivery=SchemaDelivery.COMPACT),
-        )._agent
-    ),
     "standalone_planner": lambda: create_planner_agent(model_name="gemini-test"),
-    "standalone_compact_planner": lambda: create_planner_agent(
-        model_name="gemini-test", schema_delivery=SchemaDelivery.COMPACT
-    ),
     "orchestrator": lambda: create_orchestrator_agent(
         model_name="gemini-test",
         tools=build_orchestrator_tools(resolver=no_resolver, executor=no_executor),
-    ),
-    "orchestrator_with_direct_recipes": lambda: create_orchestrator_agent(
-        model_name="gemini-test",
-        tools=build_orchestrator_tools(
-            resolver=no_resolver,
-            executor=no_executor,
-            direct=DirectRecipes(
-                recipes=("growth",),
-                run_ledger=InMemoryRunLedger(),
-                publisher=None,
-                tool_surface=FixtureSurface(schemas=[]),
-                translation_surface=FixtureSurface(schemas=[]),
-            ),
-        ),
     ),
 }
 

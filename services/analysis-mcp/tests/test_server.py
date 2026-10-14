@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 import httpx2
 import jsonschema
@@ -27,6 +26,7 @@ from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
 from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
 from analysis_mcp.server import _build_store, _lifespan, _with_internal_error_backstop, mcp
 from analysis_mcp.settings import Settings
+from common import refusal as refusal_module
 from common.materialisation import InMemoryMaterialisationStore, get_store, set_store
 from fastmcp import Client, FastMCP
 
@@ -432,6 +432,7 @@ def _filter_args(handles):
     return {"frame_ref": handles.plain_single_unit}
 
 
+_KNOWN_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 _SECRET_FAILURE = (
     "403 on gs://dfo-prod-frames/private/frame.parquet for "
     "serviceAccount:runtime@dfo-prod.iam.gserviceaccount.com"
@@ -466,8 +467,8 @@ async def test_registration_site_backstop_converts_an_unanticipated_exception(
     by making the verb's own engine call raise a plain `RuntimeError` --
     never escapes the registered tool as a raw traceback. `server.py`'s
     registration-site wrapper converts it to an `internal_error` refusal,
-    per verb, that names a trace id and none of the exception's text; the
-    log line under that id carries the exception.
+    per verb, that carries no trace id and none of the exception's text; the
+    log line carries the trace id and the exception.
     """
     store = InMemoryMaterialisationStore()
     handles = await seed_fixture_store(store)
@@ -481,6 +482,7 @@ async def test_registration_site_backstop_converts_an_unanticipated_exception(
         raise RuntimeError(_SECRET_FAILURE)
 
     monkeypatch.setattr(module, engine_attr, _raise)
+    monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
 
     with caplog.at_level(logging.ERROR, logger=server_module.__name__):
         async with Client(server_module.mcp) as client:
@@ -489,15 +491,13 @@ async def test_registration_site_backstop_converts_an_unanticipated_exception(
     assert result.is_error is True
     assert result.structured_content["code"] == "internal_error"
     assert result.structured_content["retry_mode"] == "do_not_retry"
-    trace_id = result.structured_content["fix"]["trace_id"]
-    assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
-    assert result.structured_content["fix"] == {"tool": tool_name, "trace_id": trace_id}
+    assert result.structured_content["fix"] == {"tool": tool_name}
     replied = result.content[0].text + json.dumps(result.structured_content)
-    assert trace_id in result.content[0].text
+    assert _KNOWN_TRACE_ID not in replied
     assert "gs://" not in replied
     assert "iam.gserviceaccount.com" not in replied
     [record] = [r for r in caplog.records if r.name == server_module.__name__]
-    assert trace_id in record.getMessage()
+    assert _KNOWN_TRACE_ID in record.getMessage()
     assert record.exc_info is not None
     assert str(record.exc_info[1]) == _SECRET_FAILURE
 

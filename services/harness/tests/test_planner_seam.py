@@ -1306,7 +1306,6 @@ async def test_the_orchestrator_planner_first_request_carries_every_search_readi
     for shown in (
         f'"aid" definite {SPEC}',
         "window 2020-2024 (coverage)",
-        "recent years 2024: 734 obs, 2023: 1,210 obs",
         "warnings: role_scope_defaulted",
         '"aid to Atlantis" no data: role_not_resolved',
         f"candidate {SPEC_B}",
@@ -1314,6 +1313,8 @@ async def test_the_orchestrator_planner_first_request_carries_every_search_readi
         "fetched: 14 observations, 2010-2023",
     ):
         assert shown in text
+    # The request omits the stored reading's year counts.
+    assert "734" not in text
     assert list(pin_sources(state)) == [SPEC, SPEC_B, SPEC_C]
 
 

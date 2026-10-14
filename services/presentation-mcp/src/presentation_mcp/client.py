@@ -25,12 +25,14 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, Self
 
 import httpx2
+from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
+from pydantic import ValidationError
 
 from presentation_mcp.errors import PlatformError, PlatformTransportError
 from presentation_mcp.frame_publish import PublishBody, PublishBodyNotBuildable, publish_body_for
@@ -126,17 +128,6 @@ DEFAULT_ACCEPT_HEADER = "application/json"
 
 AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
 SleepFn = Callable[[float], Awaitable[None]]
-
-
-@dataclass(frozen=True, kw_only=True)
-class _PlatformRefusal(Refusal):
-    """A `Refusal` built from a platform problem body, carrying the body's own
-    `trace_id` as `platform_trace_id` so an operator can match a refused call
-    to the platform's log line. `None` when the body has no non-empty string
-    `trace_id`; the wire drops a `None` field.
-    """
-
-    platform_trace_id: str | None = None
 
 
 async def _default_sleep(seconds: float) -> None:
@@ -475,13 +466,14 @@ class PlatformAssembler:
         """
         write_token = _new_write_token()
         # Publish before create: `create_component` never validates
-        # `intent["frame_ref"]` locally at all (see `_ensure_published`'s own
+        # `intent["frame_ref"]` locally at all (see `_presentable`'s own
         # docstring), so this is the only chance to publish an analysis-mcp
         # result before the platform's own `ops_unsupported` refusal would
         # otherwise answer for it.
-        publish_refusal = await self._ensure_published(intent.get("frame_ref"))
-        if publish_refusal is not None:
-            return publish_refusal
+        presentable = await self._presentable(intent)
+        if isinstance(presentable, Refusal):
+            return presentable
+        intent = presentable
         try:
             response = await self.request(
                 "POST",
@@ -512,9 +504,10 @@ class PlatformAssembler:
         # Same reasoning as `create_component`'s own publish hook: a patch
         # naming a new `frame_ref` is never locally validated either, so
         # publish it before it reaches the platform.
-        publish_refusal = await self._ensure_published(patch.get("frame_ref"))
-        if publish_refusal is not None:
-            return publish_refusal
+        presentable = await self._presentable(patch)
+        if isinstance(presentable, Refusal):
+            return presentable
+        patch = presentable
         path = _COMPONENT_ROUTE.format(component_id=component_id)
         try:
             response = await self.request(
@@ -538,7 +531,7 @@ class PlatformAssembler:
         frame_ref_or_refusal = _frame_ref_or_refusal(frame_ref)
         if isinstance(frame_ref_or_refusal, Refusal):
             return frame_ref_or_refusal
-        spec_id, content_version = frame_ref_or_refusal
+        spec_id, content_version = await self._platform_pair(*frame_ref_or_refusal)
         publish_refusal = await self._ensure_published_pair(spec_id, content_version)
         if publish_refusal is not None:
             return publish_refusal
@@ -651,16 +644,14 @@ class PlatformAssembler:
             detail, fix = _WRITE_REFUSED_DETAIL, _WRITE_REFUSED_FIX
         else:
             detail, fix = exc.detail or "The platform refused this call.", _render_fix(exc)
-        return _PlatformRefusal(
-            error=exc.code,
-            retry=retry,
-            detail=detail,
-            fix=fix,
-            pointer=exc.pointer,
-            platform_trace_id=exc.trace_id
-            if isinstance(exc.trace_id, str) and exc.trace_id
-            else None,
-        )
+        if isinstance(exc.trace_id, str) and exc.trace_id:
+            logger.warning(
+                "platform refused a call code=%s status=%s platform_trace_id=%s",
+                exc.code,
+                exc.status,
+                exc.trace_id,
+            )
+        return Refusal(error=exc.code, retry=retry, detail=detail, fix=fix, pointer=exc.pointer)
 
     def _retry_mode_for(self, code: str) -> RetryMode:
         """The retry mode for a retryable `code`, from the cached `release()` table.
@@ -670,25 +661,88 @@ class PlatformAssembler:
         """
         return self._retry_modes.get(code, RetryMode.RETRY_AFTER_DELAY)
 
-    async def _ensure_published(self, frame_ref: object) -> Refusal | None:
-        """Publish `frame_ref`'s pair first, when it needs publishing --
-        `create_component`/`revise_component`'s own hook, called on
-        whatever `intent`/`patch` carries under `"frame_ref"`, which unlike
-        `get_frame_view`'s own `frame_ref` argument is never locally
-        validated at all (`platform_contract.py`'s own docstring: intents
-        and patches stay opaque to this client, `frame_ref` being the one
-        exception `get_frame_view` reads). Reads only the two fields it
-        needs to decide whether to act -- `None` for anything that isn't a
-        mapping carrying both as strings, deferring entirely to whatever
-        the platform's own intent validation makes of it.
+    async def _presentable(self, body: Mapping[str, Any]) -> Mapping[str, Any] | Refusal:
+        """`body` (an intent or a patch) with its `frame_ref` turned into the
+        pair the platform holds and published when it needs publishing --
+        `create_component`/`revise_component`'s own hook. Unlike
+        `get_frame_view`'s own `frame_ref` argument, the one under `body` is
+        never locally validated at all (`platform_contract.py`'s own
+        docstring: intents and patches stay opaque to this client, `frame_ref`
+        being the one exception `get_frame_view` reads). Reads only the two
+        fields it needs to decide whether to act -- `body` itself for anything
+        that isn't a mapping carrying both as strings, deferring entirely to
+        whatever the platform's own intent validation makes of it.
         """
+        frame_ref = body.get("frame_ref")
         if not isinstance(frame_ref, Mapping):
-            return None
+            return body
         spec_id = frame_ref.get("spec_id")
         content_version = frame_ref.get("content_version")
         if not isinstance(spec_id, str) or not isinstance(content_version, str):
-            return None
-        return await self._ensure_published_pair(spec_id, content_version)
+            return body
+        platform_spec_id, platform_content_version = await self._platform_pair(
+            spec_id, content_version
+        )
+        publish_refusal = await self._ensure_published_pair(
+            platform_spec_id, platform_content_version
+        )
+        if publish_refusal is not None:
+            return publish_refusal
+        if (platform_spec_id, platform_content_version) == (spec_id, content_version):
+            return body
+        return {
+            **body,
+            "frame_ref": {
+                **frame_ref,
+                "spec_id": platform_spec_id,
+                "content_version": platform_content_version,
+            },
+        }
+
+    async def _platform_pair(self, spec_id: str, content_version: str) -> tuple[str, str]:
+        """The pair dfo-apis holds for the frame `{spec_id, content_version}`.
+
+        `get_data` reports the pair its frame is held under in the shared
+        store. A fetch with `place_types`, other `columns`, a `stat_vars` sum or
+        a `breakdown` is held under a pair of its own, which dfo-apis never
+        stored, so the platform refuses it as `frame_unavailable`. The mint
+        record the store keeps beside that frame names the pair dfo-apis does
+        hold (`MintRecord.dataset`): the rendering's own dataset version, or
+        the summed version dfo-apis mints for a collapse. That pair is
+        returned when it differs from the one given, and the platform draws
+        the dataset version's canonical frame.
+
+        Any other pair is returned as given: an `ops_` pair, a `spec_` pair
+        equal to its dataset pair, a `spec_` pair with no mint record, and a
+        value that is not a pair the store could hold. The record is written
+        best effort, so a derived pair whose write was given up still refuses
+        `frame_unavailable` until `get_data` is called for it again. A lookup
+        that fails for any reason is logged and the pair returned as given, so
+        a derived pair then refuses `frame_unavailable` as it does with no
+        record.
+        """
+        if not spec_id.startswith("spec_"):
+            return spec_id, content_version
+        try:
+            ref = FrameRef(spec_id=spec_id, content_version=content_version)
+        except ValidationError:
+            return spec_id, content_version
+        try:
+            record = await get_store().get_mint_record(ref)
+        except Exception:
+            # Broad on purpose: the store's failure modes belong to its backend
+            # (the storage client, its auth and its transport), which this module
+            # does not name, and the lookup only ever improves a call.
+            logger.warning(
+                "mint record of %s/%s unreadable; sending the pair as given",
+                spec_id,
+                content_version,
+                exc_info=True,
+            )
+            return spec_id, content_version
+        if record is None or record.frame == record.dataset:
+            return spec_id, content_version
+        return record.dataset.spec_id, record.dataset.content_version
 
     async def _ensure_published_pair(self, spec_id: str, content_version: str) -> Refusal | None:
         """Ensure `{spec_id, content_version}` is published to dfo-apis'

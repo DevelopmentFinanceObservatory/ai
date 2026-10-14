@@ -14,7 +14,6 @@ from data_mcp.tool_errors import ToolErrorCode as DataCode
 from executor.classify import (
     BACKOFF_SECONDS,
     COMPILER_PROVABLE_CODES,
-    MALFORMED_REFUSAL,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
     METHOD_CHOICE_CODES,
@@ -23,6 +22,7 @@ from executor.classify import (
     STOP_CODES,
     TRANSIENT_CODES,
     Disposition,
+    ExecutorCode,
     ToolFailure,
     candidates_of,
     classify_refusal,
@@ -61,7 +61,7 @@ def test_a_refusal_missing_its_code_parses_into_a_failure_naming_the_defect() ->
     # run on a malformed `structured_content`.
     failure = parse_tool_failure({"retry_mode": "correct_and_retry", "message": "oops"})
 
-    assert failure.code == MALFORMED_REFUSAL
+    assert failure.code == ExecutorCode.MALFORMED_REFUSAL
     assert "ToolFailure" in failure.message
 
 
@@ -71,7 +71,7 @@ def test_a_well_formed_refusal_does_not_parse_as_malformed() -> None:
     failure = parse_tool_failure({"code": "internal_error", "retry_mode": "do_not_retry"})
 
     assert failure.code == "internal_error"
-    assert failure.code != MALFORMED_REFUSAL
+    assert failure.code != ExecutorCode.MALFORMED_REFUSAL
 
 
 @pytest.mark.parametrize(

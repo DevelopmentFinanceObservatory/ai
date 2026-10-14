@@ -13,12 +13,13 @@ from collections.abc import (
     Mapping,
 )
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from analysis_mcp import digest as analysis_digest
 from data_mcp import get_data_digest
 from data_mcp.tool_errors import ToolErrorCode
 from executor.ledger import RunLedger
+from executor.outcomes import StepRecord
 from google.adk import Context
 from planner.plan import (
     Plan,
@@ -28,6 +29,7 @@ from planner.plan import (
 from planner.workflow import Workflow as PlanWorkflow
 
 from harness import plan_display
+from harness.chart_binding import MAX_SERIES_PER_COMPONENT
 from harness.graph.delivery import Delivery, deliver, frame_read
 from harness.graph.seams import (
     Executor,
@@ -56,6 +58,13 @@ from harness.turn_records import PlanAsk, PlanRecord
 # characters. A larger plan folds steps first and loses decisions last
 # (`PlanRecord.render`).
 _HAND_BACK_CAP = 800
+# Characters of a step summary that hands back a limited ranking whole
+# (`_lists_kept_rows`): the digest's header, up to `_LIST_CAP` rank lines of
+# at most about 120 characters each (a key of two role columns, a value and
+# the `[n=, coverage=]` tail), and its unit and coverage lines. A summary
+# that still passes it is trimmed to the first and last row instead of cut
+# mid-list.
+_WHOLE_RANKING_CHARS = 3_000
 _PLAN_RECORD_CHARS = 2_000
 
 
@@ -76,6 +85,156 @@ def _without_noise(summary: str) -> str:
     """`summary` without its `_SUMMARY_NOISE` lines and the blank lines they leave."""
     kept = "\n".join(line for line in summary.split("\n") if not line.startswith(_SUMMARY_NOISE))
     return re.sub(r"\n{3,}", "\n\n", kept).strip()
+
+
+class StepSummary(NamedTuple):
+    """A step's digest, the tool that produced it, the row count of the
+    frame it produced and, for a `rank` with a `limit`, how many entries it
+    ranked before the limit cut them. `tool`, `rows` and `ranked_before_limit`
+    are None for a summary stored without them. Its digest is handed back
+    whole."""
+
+    digest: str
+    tool: str | None = None
+    rows: int | None = None
+    ranked_before_limit: int | None = None
+
+    @classmethod
+    def of_record(cls, record: StepRecord) -> StepSummary:
+        """The summary of a step that ran. `_asdict` is the shape `of` reads."""
+        return cls(record.digest, record.tool.name, record.row_count, record.ranked_before_limit)
+
+    @classmethod
+    def of(cls, stored: str | Mapping[str, Any]) -> StepSummary:
+        """The summary `execute` hands over as `{"tool", "digest", "rows",
+        "ranked_before_limit"}`, or a plain digest string."""
+        if isinstance(stored, str):
+            return cls(stored)
+        return cls(
+            str(stored["digest"]),
+            stored.get("tool"),
+            stored.get("rows"),
+            stored.get("ranked_before_limit"),
+        )
+
+
+# The analysis tools whose digest (`analysis_mcp.digest`) prints one line per
+# entity. A rank block keeps its first and last row, and the others keep the
+# count.
+_RANKING_TOOL = "rank"
+_COUNT_ONLY_TOOLS = ("aggregate", "growth", "filter", "join", "quotient_of", "share_of")
+# A block of lines opens with a heading that states its count, either leading
+# ("12 ranked entit(y/ies):") or in brackets (a keyed share's "[3 period(s)]").
+_COUNTED_HEADING = re.compile(r"^(\s*)(?:\d+ .*|.* \[\d+ period\(s\)\].*):$")
+# A block of more lines than this is trimmed.
+_LINES_KEPT_WHOLE = 4
+
+
+def _is_entry(line: str, *, under: int) -> bool:
+    """Whether `line` is a block line: indented deeper than its heading at
+    `under`, and other than the `... more entries not shown` note."""
+    text = line.lstrip()
+    return bool(text) and len(line) - len(text) > under and not text.startswith("...")
+
+
+def _counted_blocks(lines: list[str]) -> list[tuple[int, int, int]]:
+    """`(depth, start, end)` of each block of `lines` that opens with a
+    `_COUNTED_HEADING`: the heading's indent, and the slice of lines under it."""
+    blocks: list[tuple[int, int, int]] = []
+    index = 0
+    while index < len(lines):
+        heading = _COUNTED_HEADING.match(lines[index])
+        index += 1
+        if heading is None:
+            continue
+        depth = len(heading[1])
+        end = index
+        while end < len(lines) and _is_entry(lines[end], under=depth):
+            end += 1
+        blocks.append((depth, index, end))
+        index = end
+    return blocks
+
+
+def _lists_kept_rows(summary: StepSummary, blocks: list[tuple[int, int, int]]) -> bool:
+    """Whether `summary` is a ranking that ran with a `limit`, keeps no more
+    rows than a card draws, and whose one block of rank lines holds every row
+    the frame keeps. The digest lists at most `_LIST_CAP` rows of the whole
+    ranking, so a frame that keeps more is not listed whole."""
+    if summary.tool != _RANKING_TOOL or summary.ranked_before_limit is None:
+        return False
+    if summary.rows is None or len(blocks) != 1:
+        return False
+    _, start, end = blocks[0]
+    return summary.rows <= MAX_SERIES_PER_COMPONENT and end - start >= summary.rows
+
+
+def _without_entity_lines(summary: StepSummary, *, whole_ranking: bool = True) -> str:
+    """`summary`'s digest with, when its tool prints one line per entity, each
+    block of more than `_LINES_KEPT_WHOLE` lines cut to its heading, which
+    states the count, and a line saying how many lines were left out. The
+    digest of any other tool is returned as it is.
+
+    A rank digest lists the first rows of the whole ranking, past the
+    `limit` its frame keeps. Its one block of rows in rank order starts with
+    the frame's `summary.rows` rows, which are the rows kept. The block is cut
+    to them, and where the ranking ran with a limit, keeps no more rows than
+    a card draws and the block lists every one (`_lists_kept_rows`), they are
+    all handed back, if `whole_ranking`. Otherwise the block is cut to its
+    first and last of those rows. A digest prints at most
+    `analysis_mcp.digest._LIST_CAP` rows, so a frame that keeps more rows than
+    the block holds keeps the first row and the count, and the marker says the
+    last row is not listed. A rank digest with a block for each period, or of
+    a frame whose row count is unknown, keeps the count only."""
+    if summary.tool != _RANKING_TOOL and summary.tool not in _COUNT_ONLY_TOOLS:
+        return summary.digest
+    lines = summary.digest.split("\n")
+    blocks = _counted_blocks(lines)
+    ranking = summary.tool == _RANKING_TOOL and summary.rows is not None and len(blocks) == 1
+    whole = whole_ranking and _lists_kept_rows(summary, blocks)
+    kept: list[str] = []
+    cursor = 0
+    for depth, start, end in blocks:
+        kept += lines[cursor:start]
+        cursor = end
+        block = lines[start:end]
+        listed = len(block)
+        unlisted_rows = ranking and (summary.rows or 0) > listed
+        if ranking:
+            block = block[: summary.rows]
+        if (len(block) <= _LINES_KEPT_WHOLE and not unlisted_rows) or whole:
+            kept += block
+            continue
+        if not ranking:
+            edges = []
+        elif unlisted_rows:
+            edges = block[:1]
+        else:
+            edges = [block[0], block[-1]]
+        indent = " " * (depth + 2)
+        marker = f"{indent}({len(block) - len(edges)} lines left out)"
+        if unlisted_rows:
+            marker = (
+                f"{indent}({len(block) - len(edges)} lines left out; the digest lists "
+                f"{listed} of the frame's {summary.rows} rows, so its last row is not listed)"
+            )
+        kept += [*edges[:1], marker, *edges[1:]]
+    kept += lines[cursor:]
+    return "\n".join(kept)
+
+
+def _hand_back_text(summary: StepSummary) -> str:
+    """`summary` as the orchestrator reads it: without its noise lines and
+    entity lines, and within `_HAND_BACK_CAP` characters. A ranking handed back
+    whole has `_WHOLE_RANKING_CHARS` instead, and falls back to the first and
+    last row where it passes them."""
+    summary = summary._replace(digest=_without_noise(summary.digest))
+    text = _without_entity_lines(summary)
+    if _lists_kept_rows(summary, _counted_blocks(summary.digest.split("\n"))):
+        if len(text) <= _WHOLE_RANKING_CHARS:
+            return text
+        text = _without_entity_lines(summary, whole_ranking=False)
+    return text[:_HAND_BACK_CAP]
 
 
 def _give_plan_back(ctx: Context) -> bool:
@@ -262,8 +421,8 @@ def _unfinished_run_lead(run: Mapping[str, Any]) -> str:
 
 @dataclass
 class HandBack:
-    """The final frames a run hands the orchestrator, as `plan_done` and the
-    direct `submit_analysis` (`harness.direct_recipes`) both list them.
+    """The final frames a run hands the orchestrator, as `plan_done` and
+    `harness.graph.resume` both list them.
 
     `describe` describes one frame through `executor`. `listing` registers
     the described frames under ids the orchestrator charts by, each with the
@@ -276,7 +435,7 @@ class HandBack:
     """
 
     executor: Executor
-    summaries: list[str] = field(default_factory=list)
+    summaries: list[StepSummary] = field(default_factory=list)
     totals: list[str] = field(default_factory=list)
     described: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = field(
         default_factory=list
@@ -322,9 +481,7 @@ class HandBack:
         frames = dict(state.get(ORCHESTRATOR_FRAMES_KEY) or {})
         result: dict[str, Any] = {
             "frames": register_frames(frames, self.described),
-            "step_summaries": [
-                _without_noise(str(summary))[:_HAND_BACK_CAP] for summary in self.summaries
-            ],
+            "step_summaries": [_hand_back_text(summary) for summary in self.summaries],
             "totals": self.totals,
         }
         if self.not_chartable:
@@ -433,7 +590,7 @@ def plan_done_node(
         ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None
         hand_back = HandBack(
             executor,
-            summaries=list(node_input.get("step_summaries", [])),
+            summaries=[StepSummary.of(stored) for stored in node_input.get("step_summaries", [])],
             totals=list(node_input.get("stat_var_totals", [])),
         )
 
@@ -441,7 +598,9 @@ def plan_done_node(
             """Ask `number` as an earlier run of this plan call computed it,
             from its kept frames, adding their summaries and notes."""
             entry = kept[str(number)]
-            hand_back.summaries.extend(step["digest"] for step in entry["steps"] if step["digest"])
+            hand_back.summaries.extend(
+                StepSummary.of(step) for step in entry["steps"] if step["digest"]
+            )
             hand_back.totals.extend(
                 total for total in entry["totals"] if total not in hand_back.totals
             )
@@ -485,6 +644,8 @@ def plan_done_node(
                 listed = f"\n{json.dumps(result)}"
             yield {
                 "status": ORCHESTRATOR_PLAN_FAILED_STATUS,
+                # The refusal's code, which words the failed step the user sees.
+                "failure": {"code": node_input.get("code")},
                 "text": "The planner could not make a plan: "
                 f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
                 "and fetch where you can, and say plainly what could not be calculated."

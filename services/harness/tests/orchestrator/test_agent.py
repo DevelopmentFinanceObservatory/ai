@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from google.adk.apps import App
+from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -16,7 +17,15 @@ from harness.turn_budget import BoundedGemini
 from orchestrator.agent import AGENT_NAME, INSTRUCTION, create_orchestrator_agent
 
 from ..data_mcp_definitions import DataMcpDefinitions
-from ..orchestrator_fakes import RefusingPlanner, ScriptLlm, no_executor, no_resolver
+from ..orchestrator_fakes import (
+    RefusingPlanner,
+    ScriptLlm,
+    no_executor,
+    no_resolver,
+    open_session,
+    orchestrator_runner,
+    run_turn,
+)
 
 
 @pytest.mark.parametrize("model_name", ["gemini-test", "Gemini:gemini-test"])
@@ -133,26 +142,17 @@ def test_the_instruction_lets_a_reply_about_dfo_state_the_figures_explain_dfo_gi
     assert "Do not state a figure in a reply to a greeting or small talk" in text
 
 
-def test_the_instruction_states_of_each_series_what_the_user_asked_of_it():
-    """A value question gets the value, a change or named-span question the
-    first and last values, a show request what the series covers, and an
-    answer over more than three series points to the chart with no values."""
+def test_the_instruction_has_a_reply_state_only_the_figures_a_drawn_card_returns():
+    """The reply states a drawn card's `reply_figures` and nothing else of
+    it, the chart names the series the user asked a value of, an empty list
+    gets what the card holds, and the conclusion comes from `holds`."""
     text = " ".join(INSTRUCTION.split())
-    assert "What the reply states of a series follows what the user asked of it" in text
-    assert (
-        "asked for a value, give that value with its period and no other value of the series"
-        in text
-    )
-    assert "asked how it changed, grew or fell, or to show or see it over a named span" in text
-    assert "give its first and last values with their periods, which are the answer" in text
-    assert "asked only to show it, with no span named, say what it covers" in text
-    assert "give at most its latest value" in text
-    assert (
-        "more than three series, say what the chart holds and state no series' value, "
-        "range or highlight" in text
-    )
-    assert "never pick series to name by comparing their values" in text
-    assert "leave its values to the card" not in text
+    assert "state only the values its reply_figures list, each with its period" in text
+    assert "Name in state_values_for only a series whose value the user asked to be told" in text
+    assert "say what the card holds, its measure, places and years, and state no value" in text
+    assert "Close with one conclusion drawn from holds" in text
+    assert "compute nothing yourself" in text
+    assert "state its last value and period from the card's facts" not in text
 
 
 def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_reads_as():
@@ -212,3 +212,61 @@ async def test_every_run_of_the_agent_in_the_workflow_reads_the_clocks_utc_date(
     assert not [e for e in events if e.error_code]
     assert model.requests[0].contents[0].parts[0].text.startswith("Today's date (UTC): 2026-10-05")
     assert "2026-10-05" not in model.requests[0].config.system_instruction
+
+
+async def test_a_stored_submit_analysis_call_replays_to_a_model_that_is_not_offered_the_tool():
+    """A stored conversation can hold calls and answers of `submit_analysis`, a tool
+    the orchestrator does not declare. ADK replays them into the request, and the
+    turn runs on."""
+    runner, model = orchestrator_runner(types.Part.from_text(text="Kenya's figure stands."))
+    await open_session(runner)
+    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
+    stored_call = types.Part(
+        function_call=types.FunctionCall(
+            id="adk-stored-call",
+            name="submit_analysis",
+            args={"recipe": "growth", "spec_id": "spec_" + "2" * 32, "start_year": 2015},
+        )
+    )
+    stored_answer = types.Part(
+        function_response=types.FunctionResponse(
+            id="adk-stored-call",
+            name="submit_analysis",
+            response={"outcome": "completed", "run": {"run_id": "run_01stored"}},
+        )
+    )
+    stored = [
+        ("user", "user", types.Part.from_text(text="Growth of life expectancy, 2015 to 2022")),
+        (AGENT_NAME, "model", stored_call),
+        (AGENT_NAME, "user", stored_answer),
+        (AGENT_NAME, "model", types.Part.from_text(text="It grew by 3 per cent.")),
+    ]
+    for author, role, part in stored:
+        await runner.session_service.append_event(
+            session,
+            Event(
+                author=author,
+                invocation_id="e-stored",
+                branch=None if author == "user" else AGENT_NAME,
+                content=types.Content(role=role, parts=[part]),
+            ),
+        )
+
+    events = await run_turn(runner, types.UserContent("And Ghana?"))
+
+    assert not [e for e in events if e.error_code]
+    (request,) = model.requests
+    replayed = [part for content in request.contents for part in content.parts or []]
+    assert [p.function_call.name for p in replayed if p.function_call] == ["submit_analysis"]
+    assert [p.function_response.name for p in replayed if p.function_response] == [
+        "submit_analysis"
+    ]
+    declared = {
+        declaration.name
+        for tool in request.config.tools or []
+        for declaration in tool.function_declarations or []
+    }
+    assert "plan" in declared
+    assert "submit_analysis" not in declared
+    answers = [e.content.parts[0].text for e in events if e.author == AGENT_NAME and e.content]
+    assert answers[-1] == "Kenya's figure stands."
